@@ -1,0 +1,8 @@
+fastmcp
+matplotlib
+cartopy
+numpy
+pandas
+scipy
+meteva
+xarray

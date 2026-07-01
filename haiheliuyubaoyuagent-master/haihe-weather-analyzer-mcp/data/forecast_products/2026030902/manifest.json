@@ -1,0 +1,36 @@
+{
+  "start_time": "2026-03-09 02:00:00",
+  "start_time_compact": "2026030902",
+  "ec_output_path": "C:/Users/gaozr/Desktop/fsdownload/output",
+  "generated_at": "2026-04-02 18:38:34",
+  "job_id": "55061eaf72cc4e1bac8006c431d23d6a",
+  "items": [
+    {
+      "lead_hours": 6,
+      "tiff_path": "C:/Users/gaozr/Desktop/fsdownload/output\\ec_2026030902_rain_total_6h.tif",
+      "png_path": null,
+      "png_relative": "2026030902/haihe_precip_6h.png",
+      "url_hint": "/emergency/forecast/products/png?start_time_compact=2026030902&lead_hours=6",
+      "ok": false,
+      "message": "缺少 GDAL（osgeo）依赖，无法读取/裁剪栅格和矢量。"
+    },
+    {
+      "lead_hours": 12,
+      "tiff_path": "C:/Users/gaozr/Desktop/fsdownload/output\\ec_2026030902_rain_total_12h.tif",
+      "png_path": null,
+      "png_relative": "2026030902/haihe_precip_12h.png",
+      "url_hint": "/emergency/forecast/products/png?start_time_compact=2026030902&lead_hours=12",
+      "ok": false,
+      "message": "缺少 GDAL（osgeo）依赖，无法读取/裁剪栅格和矢量。"
+    },
+    {
+      "lead_hours": 24,
+      "tiff_path": "C:/Users/gaozr/Desktop/fsdownload/output\\ec_2026030902_rain_total_24h.tif",
+      "png_path": null,
+      "png_relative": "2026030902/haihe_precip_24h.png",
+      "url_hint": "/emergency/forecast/products/png?start_time_compact=2026030902&lead_hours=24",
+      "ok": false,
+      "message": "缺少 GDAL（osgeo）依赖，无法读取/裁剪栅格和矢量。"
+    }
+  ]
+}

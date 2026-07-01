@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover">
+    <link rel="icon" href="<%= BASE_URL %>favicon.ico">
+    <title>demo</title>
+    <style>
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        .bodyStyle {
+            width: 100%;
+            height: 100%;
+            background: url("bgm.png") no-repeat;
+            background-size: 100% 100%;
+        }
+
+        .btn{
+            position: absolute;
+            top: 70px;
+            right: 394px;
+            width: 84px;
+            height: 104px;
+            cursor: pointer;
+        }
+
+        .stylesheet {
+            position: absolute;
+            top: 80px;
+            right: 500px;
+            width: 300px;
+            height: 450px;
+        }
+    </style>
+</head>
+<body>
+<div class="bodyStyle">
+    <div class="btn"></div>
+    <div class="stylesheet">
+        <iframe src="http://localhost:8000/" width="100%" height="100%" style="border: 1px solid transparent;border-radius: 10px"></iframe>
+    </div>
+</div>
+</body>
+</html>

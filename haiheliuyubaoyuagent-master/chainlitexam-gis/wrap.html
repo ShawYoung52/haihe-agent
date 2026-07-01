@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chainlit GIS Wrap</title>
+</head>
+<body>
+  <p style="font-family: sans-serif; font-size: 14px;">
+    <button type="button" id="btnDemoAlert">测试：向 Chainlit 发「演示预警」JSON</button>
+    <span style="color:#666;margin-left:8px;">先在本机终端运行 <code>chainlit run chain_gzt.py --host 0.0.0.0 --port 8003</code>，登录进聊天页后再点</span>
+  </p>
+  <iframe
+    id="clFrame"
+    src="http://localhost:8003"
+    width="900"
+    height="760"
+    style="border: 1px solid #ddd;"
+  ></iframe>
+
+  <script>
+    var CHAINLIT_ORIGIN = "http://localhost:8003";
+
+    var DEMO_ALERT = {
+      id: 19,
+      event_code: "DEMO-TIMELINE-NOW-001",
+      title: "【演示·现在】天津武清刚进入暴雨高风险关注时段",
+      event_type: "rainstorm",
+      status: "active",
+      status_display: "持续中",
+      start_time: "2026-05-04 13:55:39",
+      end_time: null,
+      event_level: "II",
+      level_display: "二级",
+      latest_cycle_id: null,
+      ext: {
+        demo: true,
+        response_ui: {
+          hint: "对应时间轴「现在」刻度左右的高亮节点。",
+          dialog_body:
+            "监测显示武清区降水强度快速增强，刚进入预案关注的暴雨高风险窗口，请加密会商。",
+          dialog_title: "武清·当前态势",
+          list_summary: "武清区·高风险窗口起始",
+        },
+      },
+      created_at: "2026-05-04 14:55:39",
+      updated_at: "2026-05-04 14:55:39",
+      effective_start_time: "2026-05-04 13:55:39",
+      effective_end_time: null,
+      clip_start_time: "2026-05-04 13:55:39",
+      clip_end_time: "2026-05-07 17:00:00",
+      timeline_phase: "ongoing",
+      timeline_phase_display: "正在发生",
+      ui_dialog: {
+        title: "武清·当前态势",
+        body: "监测显示武清区降水强度快速增强，刚进入预案关注的暴雨高风险窗口，请加密会商。",
+        list_summary: "武清区·高风险窗口起始",
+        hint: "对应时间轴「现在」刻度左右的高亮节点。",
+      },
+    };
+
+    document.getElementById("btnDemoAlert").addEventListener("click", function () {
+      var frame = document.getElementById("clFrame");
+      if (!frame || !frame.contentWindow) return;
+      frame.contentWindow.postMessage(DEMO_ALERT, CHAINLIT_ORIGIN);
+      console.log("[WRAP] 已 postMessage 演示预警 → iframe", DEMO_ALERT);
+    });
+
+    window.addEventListener("message", function (e) {
+      if (e.origin !== CHAINLIT_ORIGIN) return;
+      if (e.data && e.data.type === "gis_chainlit_bridge" && e.data.stage === "emitted_to_socket") {
+        console.log("[WRAP] 联调回执：iframe 已交给 socket，聊天区应出现「预警推送」", e.data);
+        return;
+      }
+      console.log("[WRAP] 收到消息 origin=", e.origin, "data=", e.data);
+    });
+  </script>
+</body>
+</html>

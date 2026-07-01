@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "weather-analyzer-mcp"
+version = "1.0.0"
+description = "气象分析 MCP 工具服务 - 支持 500/700/850hPa 位势高度场、风羽图、露点温度图"
+requires-python = ">=3.8"
+dependencies = [
+    "fastmcp",
+    "matplotlib",
+    "cartopy",
+    "numpy",
+    "pandas",
+    "scipy",
+    "meteva",
+]
+
+[tool.setuptools.packages.find]
+include = ["Util*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.ini", "*.txt"]
