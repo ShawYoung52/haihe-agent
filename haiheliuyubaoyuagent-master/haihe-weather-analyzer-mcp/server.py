@@ -1,5 +1,7 @@
 """海河流域降雨分析MCP服务器"""
 
+import os
+
 from fastmcp import FastMCP
 
 from tools import register_tools
@@ -113,13 +115,23 @@ class HaiheWeatherAnalyzerMCP:
         self.mcp.run(transport="sse", host=host, port=port)
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"环境变量 {name} 必须是整数，当前值: {value!r}") from exc
+
+
 def main():
     """主函数 - 命令行入口点"""
     import argparse
 
     parser = argparse.ArgumentParser(description="海河流域降雨分析MCP服务")
-    parser.add_argument("--host", default="localhost", help="服务器主机地址")
-    parser.add_argument("--port", type=int, default=3333, help="服务器端口")
+    parser.add_argument("--host", default=os.getenv("MCP_HOST", "localhost"), help="服务器主机地址，可用 MCP_HOST 配置")
+    parser.add_argument("--port", type=int, default=_env_int("MCP_PORT", 3333), help="服务器端口，可用 MCP_PORT 配置")
     parser.add_argument("--isAsync", action="store_true", help="使用异步模式运行")
 
     args = parser.parse_args()
