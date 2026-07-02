@@ -36,6 +36,7 @@ FORBIDDEN_PROJECT_DIRS = {
     "chainlit-gis",
     "chainlitgis",
     "chainlit_gis",
+    "chainlitexam-gis",
     "mcpexam",
     "weather-analyzer-mcp-20260206",
 }
@@ -66,14 +67,6 @@ def run_git_ls_files() -> list[Path]:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git ls-files failed")
     return [ROOT / line.strip() for line in result.stdout.splitlines() if line.strip()]
-
-
-def _is_under(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
 
 
 def _is_forbidden_project_dir(rel: Path) -> bool:
