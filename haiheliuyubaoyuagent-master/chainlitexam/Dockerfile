@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 8003
 
-CMD ["chainlit", "run", "chain_gzt.py", "--host", "0.0.0.0", "--port", "8003"]
+CMD ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "8003"]
