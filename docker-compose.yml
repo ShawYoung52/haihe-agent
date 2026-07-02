@@ -1,0 +1,25 @@
+services:
+  mcp-backend:
+    build:
+      context: ./haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp
+    container_name: haihe-mcp-backend
+    ports:
+      - "3333:3333"
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 3333
+    command: ["python", "main.py", "--host", "0.0.0.0", "--port", "3333"]
+
+  chainlit-frontend:
+    build:
+      context: ./haiheliuyubaoyuagent-master/chainlitexam
+    container_name: haihe-chainlit-frontend
+    ports:
+      - "8003:8003"
+    environment:
+      MCP_WEATHER_URL: http://mcp-backend:3333/sse
+      CHAINLIT_HOST: 0.0.0.0
+      CHAINLIT_PORT: 8003
+    depends_on:
+      - mcp-backend
+    command: ["chainlit", "run", "chain_gzt.py", "--host", "0.0.0.0", "--port", "8003"]
