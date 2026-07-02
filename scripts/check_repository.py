@@ -29,6 +29,22 @@ FORBIDDEN_PATH_PARTS = {
     "node_modules",
 }
 
+# These are historical / duplicate project folders that should not return to
+# the repository. Keep only the current frontend and backend listed in
+# ALLOWED_PROJECT_ROOTS.
+FORBIDDEN_PROJECT_DIRS = {
+    "chainlit-gis",
+    "chainlitgis",
+    "chainlit_gis",
+    "mcpexam",
+    "weather-analyzer-mcp-20260206",
+}
+
+ALLOWED_PROJECT_ROOTS = {
+    Path("haiheliuyubaoyuagent-master/chainlitexam"),
+    Path("haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp"),
+}
+
 FORBIDDEN_SUFFIXES = {
     ".pyc",
     ".pyo",
@@ -52,6 +68,27 @@ def run_git_ls_files() -> list[Path]:
     return [ROOT / line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def _is_under(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_forbidden_project_dir(rel: Path) -> bool:
+    parts = set(rel.parts)
+    if parts & FORBIDDEN_PROJECT_DIRS:
+        return True
+
+    project_root = Path("haiheliuyubaoyuagent-master")
+    if len(rel.parts) >= 2 and rel.parts[0] == str(project_root):
+        candidate_root = Path(rel.parts[0]) / rel.parts[1]
+        if candidate_root not in ALLOWED_PROJECT_ROOTS:
+            return True
+    return False
+
+
 def check_forbidden_tracked_files(files: list[Path]) -> list[str]:
     errors: list[str] = []
     for file_path in files:
@@ -59,6 +96,9 @@ def check_forbidden_tracked_files(files: list[Path]) -> list[str]:
         parts = set(rel.parts)
         if parts & FORBIDDEN_PATH_PARTS:
             errors.append(f"forbidden tracked path: {rel}")
+            continue
+        if _is_forbidden_project_dir(rel):
+            errors.append(f"legacy or unrelated project folder must not be tracked: {rel}")
             continue
         if file_path.suffix in FORBIDDEN_SUFFIXES:
             errors.append(f"forbidden tracked file suffix: {rel}")
@@ -73,6 +113,7 @@ def check_python_syntax() -> bool:
         ROOT / "haiheliuyubaoyuagent-master" / "chainlitexam",
         ROOT / "haiheliuyubaoyuagent-master" / "haihe-weather-analyzer-mcp",
         ROOT / "scripts",
+        ROOT / "tests",
     ]
     ok = True
     for target in targets:
