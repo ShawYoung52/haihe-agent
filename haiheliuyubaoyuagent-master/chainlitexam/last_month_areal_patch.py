@@ -73,14 +73,12 @@ def _format_last_month_payload(mo, data: Any, fallback_label: str, fallback_mont
         month = data.get("month") or fallback_month
         time_label = data.get("time_range_readable") or fallback_label
         zone_label = data.get("zone_label") or "海河9分区"
-        data_source = data.get("data_source") or "天擎面雨量实况"
         summary = data.get("summary") or {}
     elif isinstance(data, list):
         records = data
         month = fallback_month
         time_label = fallback_label
         zone_label = "海河9分区"
-        data_source = "天擎面雨量实况"
         summary = {}
     else:
         return f"{fallback_month}海河流域面雨量查询结果格式异常，请稍后重试。"
@@ -92,8 +90,7 @@ def _format_last_month_payload(mo, data: Any, fallback_label: str, fallback_mont
     lines = [
         f"## 海河流域上月面雨量对比（{month}）\n\n",
         f"**统计时段**：{_safe_cell(mo, time_label)}（北京时）  \n",
-        f"**分区体系**：{_safe_cell(mo, zone_label)}  \n",
-        f"**数据来源**：{_safe_cell(mo, data_source)}\n\n",
+        f"**分区体系**：{_safe_cell(mo, zone_label)}\n\n",
         "| 排名 | 分区 | 累计面雨量(mm) | 最大面雨量(mm) |\n",
         "| :--- | :--- | :--- | :--- |\n",
     ]
@@ -115,12 +112,10 @@ def _format_last_month_payload(mo, data: Any, fallback_label: str, fallback_mont
     if isinstance(max_zone, dict):
         max_zone_rain = _pick_number(max_zone, "avg_rainfall_mm", "avg", "average_rainfall_mm", "mean")
         lines.append(
-            f"\n**最大分区**：{_safe_cell(mo, max_zone.get('zone_name') or max_zone.get('zone_id') or '未知')}，"
+            f"\n**上月累计面雨量最大的分区**："
+            f"{_safe_cell(mo, max_zone.get('zone_name') or max_zone.get('zone_id') or '未知')}，"
             f"累计面雨量 {max_zone_rain} mm。\n"
         )
-    note = summary.get("note") if isinstance(summary, dict) else ""
-    if note:
-        lines.append(f"\n**说明**：{_safe_cell(mo, note)}")
     return "".join(lines)
 
 
