@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 import unittest
 from pathlib import Path
 
@@ -11,9 +12,12 @@ SETTINGS_PATH = ROOT / "haiheliuyubaoyuagent-master" / "chainlitexam" / "setting
 
 
 def load_settings_module():
-    spec = importlib.util.spec_from_file_location("chainlit_gateway_settings", SETTINGS_PATH)
-    module = importlib.util.module_from_spec(spec)
+    module_name = "chainlit_gateway_settings_test"
+    sys.modules.pop(module_name, None)
+    spec = importlib.util.spec_from_file_location(module_name, SETTINGS_PATH)
     assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
