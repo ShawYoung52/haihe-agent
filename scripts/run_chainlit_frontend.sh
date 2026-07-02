@@ -20,4 +20,4 @@ fi
 : "${CHAINLIT_HOST:=0.0.0.0}"
 : "${CHAINLIT_PORT:=8003}"
 
-chainlit run chain_gzt.py --host "$CHAINLIT_HOST" --port "$CHAINLIT_PORT"
+chainlit run chainlit_app.py --host "$CHAINLIT_HOST" --port "$CHAINLIT_PORT"
