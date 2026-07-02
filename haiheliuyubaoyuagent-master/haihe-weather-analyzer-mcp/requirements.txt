@@ -1,0 +1,9 @@
+fastmcp
+pydantic
+python-dotenv
+psycopg2-binary
+pandas
+numpy
+networkx
+requests
+httpx
