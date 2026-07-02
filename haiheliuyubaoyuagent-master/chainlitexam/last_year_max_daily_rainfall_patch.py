@@ -132,13 +132,16 @@ def install_last_year_max_daily_rainfall_patch() -> bool:
 
         thinking_msg = await mo._show_thinking("🔍 正在查询去年最大日降雨量，请稍候...")
         try:
-            result = await asyncio.wait_for(tool.ainvoke({"top_n": 10}), timeout=600)
+            result = await asyncio.wait_for(
+                tool.ainvoke({"top_n": 10, "allow_slow_fallback": False}),
+                timeout=75,
+            )
             data = _unwrap_tool_result(result)
             text = _format_last_year_max_daily_payload(mo, data)
             await mo._emit_fast_path_result(text, thinking_msg, messages, user_text)
             return True
         except asyncio.TimeoutError:
-            await mo._emit_fast_path_result("⏱️ 去年最大日降雨量查询超时，请稍后重试。", thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result("⏱️ 去年最大日降雨量统计接口响应超时，请稍后重试。", thinking_msg, messages, user_text)
             return True
         except Exception as exc:
             print(f"[last_year_max_daily_rainfall_patch] 去年最大日降雨量快速路径失败：{exc}")
