@@ -2,6 +2,9 @@
 
 用于回答“去年最大日降雨量是多少”这类明确历史统计问题。
 默认统计上一个自然年内海河流域站点日降雨量，并返回最大站点日雨量。
+
+注意：该工具默认只走天擎全年统计接口，不再自动逐日逐小时遍历全年。
+逐小时兜底会触发最多 365 次接口调用，线上问答会卡住，因此仅保留为显式调试选项。
 """
 from __future__ import annotations
 
@@ -124,8 +127,8 @@ def _update_top_records(top_records: list[dict], candidate: dict, top_n: int) ->
     return top_records[: max(1, int(top_n or 10))]
 
 
-def _query_fast_stat(client, music_range: str, top_n: int) -> list[dict]:
-    """优先使用天擎统计接口直接取全年最大日降雨量，失败时返回空列表。"""
+def _query_fast_stat(client, music_range: str, top_n: int) -> tuple[list[dict], str]:
+    """优先使用天擎统计接口直接取全年最大日降雨量，失败时返回错误说明。"""
     try:
         records = client.stat_surf_pre_in_basin_new(
             basin_codes=DEFAULT_BASIN_CODES,
@@ -138,8 +141,9 @@ def _query_fast_stat(client, music_range: str, top_n: int) -> list[dict]:
             data_code="SURF_CHN_MUL_DAY",
         )
     except Exception as exc:
-        print(f"[last_year_max_daily_rainfall] 统计接口失败，回退逐日小时累加：{exc}")
-        return []
+        err = str(exc)[:300]
+        print(f"[last_year_max_daily_rainfall] 统计接口失败：{err}")
+        return [], err
 
     candidates: list[dict] = []
     for record in records or []:
@@ -149,10 +153,11 @@ def _query_fast_stat(client, music_range: str, top_n: int) -> list[dict]:
         if candidate:
             candidates.append(candidate)
     candidates.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
-    return candidates[: max(1, int(top_n or 10))]
+    return candidates[: max(1, int(top_n or 10))], ""
 
 
 def _query_by_daily_hourly_sum(client, start: datetime, end: datetime, top_n: int) -> tuple[list[dict], dict]:
+    """慢速调试兜底：逐日拉小时站点雨量并累加。线上问答默认不调用。"""
     top_records: list[dict] = []
     processed_days = 0
     days_with_data = 0
@@ -230,38 +235,44 @@ def _query_by_daily_hourly_sum(client, start: datetime, end: datetime, top_n: in
 
 def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
     @mcp.tool()
-    def query_last_year_max_daily_rainfall(top_n: int = 10) -> dict:
+    def query_last_year_max_daily_rainfall(top_n: int = 10, allow_slow_fallback: bool = False) -> dict:
         """
         查询上一个自然年海河流域最大日降雨量。
 
         适用于：“去年最大日降雨量是多少”“去年哪个站日降雨最大”“去年最大单日降雨”。
-        统计口径：优先使用天擎日资料 PRE_Time_0808 最大值；统计接口不可用时，用逐小时 PRE_1h 累加成自然日降雨量兜底。
+        统计口径：默认使用天擎日资料 PRE_Time_0808 全年最大值。
+        allow_slow_fallback=True 时，统计接口无结果才逐小时累加全年；线上问答不建议开启。
         """
         start, end, readable, music_range, year_label = _previous_calendar_year_range()
         top_n = max(1, min(int(top_n or 10), 50))
         client = _get_music_client()
 
-        records = _query_fast_stat(client, music_range, top_n)
+        records, stat_error = _query_fast_stat(client, music_range, top_n)
         summary_extra = {
             "processed_days": 0,
             "days_with_data": 0,
             "station_day_count": 0,
             "method": "stat_daily_pre_0808",
+            "stat_error": stat_error,
+            "slow_fallback_enabled": bool(allow_slow_fallback),
         }
 
-        if not records:
+        if not records and allow_slow_fallback:
             records, fallback_summary = _query_by_daily_hourly_sum(client, start, end, top_n)
             summary_extra.update(fallback_summary)
             summary_extra["method"] = "hourly_pre_1h_sum"
 
         max_record = records[0] if records else None
         if not max_record:
+            msg = f"{year_label}年海河流域暂无有效日降雨量数据。"
+            if stat_error and not allow_slow_fallback:
+                msg = f"{year_label}年最大日降雨量统计接口暂未返回有效结果，请稍后重试。"
             return {
                 "status": "no_data",
                 "query_type": "last_year_max_daily_rainfall",
                 "year": year_label,
                 "time_range_readable": readable,
-                "message": f"{year_label}年海河流域暂无有效日降雨量数据。",
+                "message": msg,
                 "records": [],
                 "summary": {
                     **summary_extra,
