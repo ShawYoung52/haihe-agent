@@ -3,6 +3,7 @@
 from fastmcp import FastMCP
 
 from tools import register_tools
+from last_month_areal_rainfall_tool import register_last_month_areal_rainfall_tool
 
 
 class HaiheWeatherAnalyzerMCP:
@@ -15,6 +16,7 @@ class HaiheWeatherAnalyzerMCP:
     def _register_tools(self):
         """注册所有工具"""
         register_tools(self.mcp)
+        register_last_month_areal_rainfall_tool(self.mcp)
 
         # 添加一些额外的实用工具
         @self.mcp.tool()
@@ -54,10 +56,11 @@ class HaiheWeatherAnalyzerMCP:
                     "get_river_network_for_plot - 获取河网绘图线段",
                     "get_river_network_leader_view - 获取领导可读卡片+表格+地图数据",
                     "reload_river_graph - 重新加载河网缓存",
-                    "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）"
+                    "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）",
+                    "query_last_month_areal_rainfall - 查询上一个自然月的分区累计面雨量",
                     "search_poi - 按名称查询 POI 地点/设施/单位",
                     "search_poi_by_distance - 按名称和经纬度范围查询附近 POI",
-                    "query_rolling_forecast - 天津滚动预报综合天气查询"
+                    "query_rolling_forecast - 天津滚动预报综合天气查询",
                 ],
                 "compatibility_note": "已保留 analyze_rainstorm_impact 等原有调用方式；新增拆分工具用于分阶段调用，前端可按需渐进迁移。",
                 "deprecated_aggregated_tools": [
