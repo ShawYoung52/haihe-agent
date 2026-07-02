@@ -1,7 +1,10 @@
-.PHONY: check install-frontend install-backend run-backend run-frontend
+.PHONY: check test install-frontend install-backend run-backend run-frontend
 
 check:
 	python scripts/check_repository.py
+
+test:
+	python -m unittest discover -s tests
 
 install-frontend:
 	cd haiheliuyubaoyuagent-master/chainlitexam && python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
