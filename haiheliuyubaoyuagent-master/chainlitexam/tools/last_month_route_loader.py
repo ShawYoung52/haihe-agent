@@ -1,0 +1,1 @@
+from last_month_areal_patch import install_last_month_areal_patch as load_last_month_areal_route
