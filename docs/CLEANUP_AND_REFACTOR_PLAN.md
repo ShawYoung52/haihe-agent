@@ -3,11 +3,17 @@
 ## 已完成
 
 - 新增 `.gitignore`，阻止继续提交虚拟环境、缓存、日志、密钥和生成产物。
+- 新增 `.dockerignore`，减少容器构建上下文中的无关文件。
 - 新增前端与后端 `.env.example`，把关键运行配置显式化。
 - 删除 `haiheliuyubaoyuagent-master/chainlitexam/.venv_new` 已跟踪的虚拟环境文件。
 - 修复 MCP 后端 `server.py` 中工具列表少逗号导致字符串拼接的问题。
-- 补充 README 和架构说明。
+- MCP 后端支持通过 `MCP_HOST`、`MCP_PORT` 控制启动地址和端口。
+- 补充 README、架构说明和部署说明。
 - 补充前端、后端 `requirements.txt`，方便本地重新安装依赖。
+- 新增 `scripts/check_repository.py` 仓库健康检查脚本。
+- 新增 `.github/workflows/python-check.yml`，PR 和 push 会自动执行基础检查。
+- 新增 `Makefile`，提供 `make check`、`make run-backend`、`make run-frontend` 等常用命令。
+- 新增前后端 `Dockerfile` 和根目录 `docker-compose.yml`，提供容器化联调骨架。
 
 ## 下一步 P0：安全整改
 
@@ -67,7 +73,18 @@ chainlitexam/
 
 ## 下一步 P2：测试与 CI
 
-建议先补最小测试：
+已补充基础 CI：
+
+```text
+.github/workflows/python-check.yml
+```
+
+当前检查内容：
+
+- 禁止跟踪虚拟环境、缓存、本地配置、日志等文件；
+- Python 语法编译检查。
+
+后续建议继续补充：
 
 ```text
 tests/
@@ -77,18 +94,13 @@ tests/
   test_rainstorm_prompt_rules.py
 ```
 
-再增加 GitHub Actions：
+以及：
 
-```text
-.github/workflows/python-check.yml
-```
-
-检查内容：
-
-- Python 语法检查；
 - import smoke test；
 - 单元测试；
-- secret scan。
+- 依赖锁定；
+- 容器构建检查；
+- 更严格的配置校验。
 
 ## 本地清理建议
 
@@ -113,4 +125,18 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python main.py --host 0.0.0.0 --port 3333
+```
+
+也可以在仓库根目录执行：
+
+```bash
+make check
+make run-backend
+make run-frontend
+```
+
+或使用 Docker Compose：
+
+```bash
+docker compose up --build
 ```
