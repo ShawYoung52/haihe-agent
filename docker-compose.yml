@@ -18,8 +18,11 @@ services:
       - "8003:8003"
     environment:
       MCP_WEATHER_URL: http://mcp-backend:3333/sse
+      MCP_SERVER_URL: http://mcp-backend:3333/sse
       CHAINLIT_HOST: 0.0.0.0
       CHAINLIT_PORT: 8003
+      OPENAI_MODEL: Qwen3.6-27B
+      OPENAI_API_BASE: http://127.0.0.1:8000/v1/
     depends_on:
       - mcp-backend
-    command: ["chainlit", "run", "chain_gzt.py", "--host", "0.0.0.0", "--port", "8003"]
+    command: ["chainlit", "run", "chainlit_app.py", "--host", "0.0.0.0", "--port", "8003"]
