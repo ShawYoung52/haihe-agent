@@ -32,6 +32,13 @@ _ZONE_LABELS = {
     "9": "海河9分区",
 }
 
+_FINE_ZONE_TABLES_FOR_9 = [
+    "haihe_246_zone",
+    "haihe_zone_77",
+    "haihe_zone_32",
+    "haihe_zone_11",
+]
+
 
 def _previous_calendar_month_range(now: datetime | None = None) -> tuple[str, str, str, str]:
     """返回上一个自然月的起止时间。"""
@@ -236,6 +243,135 @@ def _query_station_aggregated_rows_by_day(start_s: str, end_s: str, zone_type: s
     return _merge_daily_zone_rows(all_day_rows)
 
 
+def _area_id_aliases(area_ids: list[str]) -> list[str]:
+    aliases: set[str] = set()
+    for raw in area_ids:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        aliases.add(s)
+        last = s.split("_")[-1]
+        if last:
+            aliases.add(last)
+        if last.isdigit():
+            aliases.add(str(int(last)))
+    return sorted(aliases)
+
+
+def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
+    """把天擎细分区 V_AREA_ID 通过分区几何映射到海河9分区。"""
+    pg_conf = config.get("postgres")
+    if not pg_conf:
+        return {}
+    ids = _area_id_aliases(area_ids)
+    if not ids:
+        return {}
+
+    schema = pg_conf.get("schema", "public")
+    timeout = int(pg_conf.get("connect_timeout", "5")) if str(pg_conf.get("connect_timeout", "5")).isdigit() else 5
+    mapping: dict[str, dict] = {}
+
+    try:
+        with psycopg2.connect(
+            host=pg_conf["host"],
+            port=pg_conf["port"],
+            dbname=pg_conf["dbname"],
+            user=pg_conf["user"],
+            password=pg_conf["password"],
+            sslmode=pg_conf.get("sslmode", "prefer"),
+            connect_timeout=timeout,
+        ) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                for table_name in _FINE_ZONE_TABLES_FOR_9:
+                    if len(mapping) >= len(set(str(x) for x in area_ids)):
+                        break
+                    sql = f"""
+                        SELECT
+                            f.zone_code::text AS fine_code,
+                            regexp_replace(f.zone_code::text, '^.*_', '') AS fine_short_code,
+                            z9.zone_code::text AS zone9_code,
+                            z9.zone_name AS zone9_name,
+                            NULLIF(ST_Area(f.geom), 0) AS fine_area
+                        FROM {schema}.{table_name} f
+                        JOIN {schema}.haihe_zone_9 z9
+                          ON ST_Within(ST_PointOnSurface(f.geom), z9.geom)
+                        WHERE f.zone_code::text = ANY(%(ids)s)
+                           OR regexp_replace(f.zone_code::text, '^.*_', '') = ANY(%(ids)s)
+                           OR ltrim(regexp_replace(f.zone_code::text, '^.*_', ''), '0') = ANY(%(ids)s)
+                    """
+                    try:
+                        cur.execute(sql, {"ids": ids})
+                    except Exception:
+                        continue
+                    for row in cur.fetchall():
+                        fine_code = str(row.get("fine_code") or "").strip()
+                        fine_short = str(row.get("fine_short_code") or "").strip()
+                        item = {
+                            "zone9_code": str(row.get("zone9_code") or "").strip(),
+                            "zone9_name": str(row.get("zone9_name") or "").strip(),
+                            "weight": float(row.get("fine_area") or 1.0),
+                        }
+                        for key in {fine_code, fine_short, str(int(fine_short)) if fine_short.isdigit() else fine_short}:
+                            if key and key not in mapping:
+                                mapping[key] = item
+    except Exception:
+        return {}
+    return mapping
+
+
+def _aggregate_fine_rows_to_zone9(fine_rows: list[dict]) -> list[dict]:
+    """将细分区面雨量按其所在海河9分区汇总。"""
+    area_ids = [str(r.get("zone_id") or "").strip() for r in fine_rows if isinstance(r, dict)]
+    fine_to_9 = _map_fine_area_ids_to_zone9(area_ids)
+    if not fine_to_9:
+        return []
+
+    grouped: dict[str, dict] = {}
+    for row in fine_rows:
+        if not isinstance(row, dict):
+            continue
+        fine_id = str(row.get("zone_id") or "").strip()
+        key = fine_id
+        if key not in fine_to_9 and fine_id.isdigit():
+            key = str(int(fine_id))
+        map_item = fine_to_9.get(key)
+        if not map_item:
+            continue
+        zone9_code = map_item.get("zone9_code") or map_item.get("zone9_name")
+        zone9_name = map_item.get("zone9_name") or f"分区{zone9_code}"
+        rain = _safe_float(row.get("avg_rainfall_mm"))
+        mx = _safe_float(row.get("max_rainfall_mm"))
+        if rain is None:
+            continue
+        weight = float(map_item.get("weight") or 1.0)
+        if zone9_code not in grouped:
+            grouped[zone9_code] = {
+                "zone_id": zone9_code,
+                "zone_name": zone9_name,
+                "weighted_sum": 0.0,
+                "weight_sum": 0.0,
+                "max_rainfall_mm": 0.0,
+                "record_count": 0,
+            }
+        grouped[zone9_code]["weighted_sum"] += rain * weight
+        grouped[zone9_code]["weight_sum"] += weight
+        if mx is not None:
+            grouped[zone9_code]["max_rainfall_mm"] = max(float(grouped[zone9_code]["max_rainfall_mm"]), float(mx))
+        grouped[zone9_code]["record_count"] += int(row.get("record_count") or 1)
+
+    out: list[dict] = []
+    for item in grouped.values():
+        weight_sum = float(item.pop("weight_sum") or 0.0)
+        weighted_sum = float(item.pop("weighted_sum") or 0.0)
+        if weight_sum <= 0:
+            continue
+        item["avg_rainfall_mm"] = round(weighted_sum / weight_sum, 2)
+        item["max_rainfall_mm"] = round(float(item.get("max_rainfall_mm") or 0.0), 2)
+        out.append(item)
+    out.sort(key=lambda x: x["avg_rainfall_mm"], reverse=True)
+    return out
+
+
 def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
     @mcp.tool()
     def query_last_month_areal_rainfall(zone_type: str = "9") -> dict:
@@ -259,7 +395,7 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
         rain_field = None
         data_source = "实况降雨数据"
 
-        # 业务默认口径是海河9分区。月尺度一次查询可能为空，因此按天查询再累加。
+        # 业务默认口径是海河9分区。先尝试站点逐日聚合。
         if zone_type == "9":
             try:
                 rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
@@ -268,7 +404,7 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
             except Exception:
                 rows = []
 
-        # 非默认细分区，或 9 分区逐日聚合无数据时，再尝试天擎面雨量原始数据。
+        # 无站点聚合时，使用天擎面雨量细分区，并通过分区几何汇总到9分区。
         if not rows:
             raw = None
             try:
@@ -299,10 +435,14 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
 
             if raw and rain_field:
                 candidate_rows = _aggregate_raw_areal_rows(raw, rain_field, zone_type)
-                if _looks_like_requested_zone_rows(candidate_rows, zone_type):
+                if zone_type == "9" and not _looks_like_requested_zone_rows(candidate_rows, zone_type):
+                    rows = _aggregate_fine_rows_to_zone9(candidate_rows)
+                    if rows:
+                        rain_field = "fine_zone_to_9_agg"
+                elif _looks_like_requested_zone_rows(candidate_rows, zone_type):
                     rows = candidate_rows
 
-        # 兜底：仍按天拆分站点聚合，避免整月窗口过大。
+        # 最后兜底：仍按天拆分站点聚合，避免整月窗口过大。
         if not rows:
             try:
                 rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
