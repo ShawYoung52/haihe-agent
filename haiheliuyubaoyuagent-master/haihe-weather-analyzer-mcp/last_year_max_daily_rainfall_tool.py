@@ -1,7 +1,7 @@
 """去年最大日降雨量 MCP 工具。
 
 用于回答“去年最大日降雨量是多少”这类明确历史统计问题。
-默认统计上一个自然年内海河流域站点逐日累计降雨，并返回最大站点日雨量。
+默认统计上一个自然年内海河流域站点日降雨量，并返回最大站点日雨量。
 """
 from __future__ import annotations
 
@@ -14,13 +14,14 @@ from constants import DEFAULT_BASIN_CODES
 from tools import _get_music_client
 
 
-def _previous_calendar_year_range(now: datetime | None = None) -> tuple[datetime, datetime, str, str]:
+def _previous_calendar_year_range(now: datetime | None = None) -> tuple[datetime, datetime, str, str, str]:
     now = now or datetime.now()
     year = now.year - 1
     start = datetime(year, 1, 1, 0, 0, 0)
     end = datetime(year, 12, 31, 23, 59, 59)
     readable = f"{start:%Y-%m-%d %H:%M:%S} ~ {end:%Y-%m-%d %H:%M:%S}"
-    return start, end, readable, str(year)
+    music_range = f"[{start:%Y%m%d%H%M%S},{end:%Y%m%d%H%M%S}]"
+    return start, end, readable, music_range, str(year)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -84,10 +85,147 @@ def _station_location(record: dict) -> dict:
     }
 
 
+def _date_from_record(record: dict, fallback: str = "") -> str:
+    raw = _safe_text(record.get("Datetime") or record.get("datetime") or fallback)
+    if not raw:
+        return ""
+    raw = raw.replace("/", "-")
+    if len(raw) >= 10 and raw[4] == "-":
+        return raw[:10]
+    if len(raw) >= 8 and raw[:8].isdigit():
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    return raw
+
+
+def _daily_rain_from_record(record: dict) -> float | None:
+    for key in ("MAX_PRE_Time_0808", "PRE_Time_0808", "SUM_PRE_1H", "SUM_PRE_1h", "daily_rainfall_mm"):
+        value = _safe_float(record.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _candidate_from_record(record: dict, fallback_date: str = "") -> dict | None:
+    rain = _daily_rain_from_record(record)
+    if rain is None or rain <= 0:
+        return None
+    return {
+        "date": _date_from_record(record, fallback=fallback_date),
+        "daily_rainfall_mm": round(float(rain), 2),
+        "station_id": _station_id(record),
+        "station_name": _station_name(record),
+        **_station_location(record),
+    }
+
+
 def _update_top_records(top_records: list[dict], candidate: dict, top_n: int) -> list[dict]:
     top_records.append(candidate)
     top_records.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
     return top_records[: max(1, int(top_n or 10))]
+
+
+def _query_fast_stat(client, music_range: str, top_n: int) -> list[dict]:
+    """优先使用天擎统计接口直接取全年最大日降雨量，失败时返回空列表。"""
+    try:
+        records = client.stat_surf_pre_in_basin_new(
+            basin_codes=DEFAULT_BASIN_CODES,
+            timeRange=music_range,
+            elements="Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime",
+            statEles="MAX_PRE_Time_0808",
+            ele_value_ranges="PRE_Time_0808:(,9999)",
+            order_by="MAX_PRE_Time_0808:desc",
+            limit_cnt=max(1, int(top_n or 10)),
+            data_code="SURF_CHN_MUL_DAY",
+        )
+    except Exception as exc:
+        print(f"[last_year_max_daily_rainfall] 统计接口失败，回退逐日小时累加：{exc}")
+        return []
+
+    candidates: list[dict] = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        candidate = _candidate_from_record(record)
+        if candidate:
+            candidates.append(candidate)
+    candidates.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
+    return candidates[: max(1, int(top_n or 10))]
+
+
+def _query_by_daily_hourly_sum(client, start: datetime, end: datetime, top_n: int) -> tuple[list[dict], dict]:
+    top_records: list[dict] = []
+    processed_days = 0
+    days_with_data = 0
+    total_station_day_count = 0
+
+    for day_start, day_end in _iter_daily_ranges(start, end):
+        processed_days += 1
+        times = _hour_times_for_day(day_start, day_end)
+        if not times:
+            continue
+        try:
+            records = client.get_surf_ele_in_basin_by_time(
+                basin_codes=DEFAULT_BASIN_CODES,
+                times=times,
+                elements="Station_Id_C,Lat,Lon,City,Station_Name,Cnty,Province,Town,PRE_1h",
+            )
+        except Exception as exc:
+            print(f"[last_year_max_daily_rainfall] {day_start:%Y-%m-%d} 站点降雨查询失败：{exc}")
+            continue
+        if not records:
+            continue
+
+        station_map: dict[str, dict] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            sid = _station_id(record)
+            if not sid:
+                continue
+            rain = _safe_float(record.get("PRE_1h"))
+            if rain is None:
+                continue
+            if sid not in station_map:
+                station_map[sid] = {
+                    "station_id": sid,
+                    "station_name": _station_name(record),
+                    **_station_location(record),
+                    "daily_rainfall_mm": 0.0,
+                }
+            station_map[sid]["daily_rainfall_mm"] += float(rain)
+
+        day_candidates = []
+        for item in station_map.values():
+            daily = round(float(item.get("daily_rainfall_mm") or 0.0), 2)
+            if daily <= 0:
+                continue
+            candidate = {
+                "date": f"{day_start:%Y-%m-%d}",
+                "daily_rainfall_mm": daily,
+                "station_id": item.get("station_id"),
+                "station_name": item.get("station_name"),
+                "province": item.get("province"),
+                "city": item.get("city"),
+                "county": item.get("county"),
+                "town": item.get("town"),
+                "lon": item.get("lon"),
+                "lat": item.get("lat"),
+            }
+            day_candidates.append(candidate)
+
+        if not day_candidates:
+            continue
+        days_with_data += 1
+        total_station_day_count += len(day_candidates)
+        day_candidates.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
+        for candidate in day_candidates[:top_n]:
+            top_records = _update_top_records(top_records, candidate, top_n)
+
+    return top_records, {
+        "processed_days": processed_days,
+        "days_with_data": days_with_data,
+        "station_day_count": total_station_day_count,
+    }
 
 
 def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
@@ -97,84 +235,26 @@ def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
         查询上一个自然年海河流域最大日降雨量。
 
         适用于：“去年最大日降雨量是多少”“去年哪个站日降雨最大”“去年最大单日降雨”。
-        统计口径：海河流域站点逐小时 PRE_1h 累加成自然日降雨量，取站点-日期最大值。
+        统计口径：优先使用天擎日资料 PRE_Time_0808 最大值；统计接口不可用时，用逐小时 PRE_1h 累加成自然日降雨量兜底。
         """
-        start, end, readable, year_label = _previous_calendar_year_range()
+        start, end, readable, music_range, year_label = _previous_calendar_year_range()
         top_n = max(1, min(int(top_n or 10), 50))
         client = _get_music_client()
 
-        max_record: dict | None = None
-        top_records: list[dict] = []
-        processed_days = 0
-        days_with_data = 0
-        total_station_day_count = 0
+        records = _query_fast_stat(client, music_range, top_n)
+        summary_extra = {
+            "processed_days": 0,
+            "days_with_data": 0,
+            "station_day_count": 0,
+            "method": "stat_daily_pre_0808",
+        }
 
-        for day_start, day_end in _iter_daily_ranges(start, end):
-            processed_days += 1
-            times = _hour_times_for_day(day_start, day_end)
-            if not times:
-                continue
-            try:
-                records = client.get_surf_ele_in_basin_by_time(
-                    basin_codes=DEFAULT_BASIN_CODES,
-                    times=times,
-                    elements="Station_Id_C,Lat,Lon,City,Station_Name,Cnty,Province,Town,PRE_1h",
-                )
-            except Exception as exc:
-                print(f"[last_year_max_daily_rainfall] {day_start:%Y-%m-%d} 站点降雨查询失败：{exc}")
-                continue
-            if not records:
-                continue
+        if not records:
+            records, fallback_summary = _query_by_daily_hourly_sum(client, start, end, top_n)
+            summary_extra.update(fallback_summary)
+            summary_extra["method"] = "hourly_pre_1h_sum"
 
-            station_map: dict[str, dict] = {}
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                sid = _station_id(record)
-                if not sid:
-                    continue
-                rain = _safe_float(record.get("PRE_1h"))
-                if rain is None:
-                    continue
-                if sid not in station_map:
-                    station_map[sid] = {
-                        "station_id": sid,
-                        "station_name": _station_name(record),
-                        **_station_location(record),
-                        "daily_rainfall_mm": 0.0,
-                    }
-                station_map[sid]["daily_rainfall_mm"] += float(rain)
-
-            day_candidates = []
-            for item in station_map.values():
-                daily = round(float(item.get("daily_rainfall_mm") or 0.0), 2)
-                if daily <= 0:
-                    continue
-                candidate = {
-                    "date": f"{day_start:%Y-%m-%d}",
-                    "daily_rainfall_mm": daily,
-                    "station_id": item.get("station_id"),
-                    "station_name": item.get("station_name"),
-                    "province": item.get("province"),
-                    "city": item.get("city"),
-                    "county": item.get("county"),
-                    "town": item.get("town"),
-                    "lon": item.get("lon"),
-                    "lat": item.get("lat"),
-                }
-                day_candidates.append(candidate)
-
-            if not day_candidates:
-                continue
-            days_with_data += 1
-            total_station_day_count += len(day_candidates)
-            day_candidates.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
-            day_max = day_candidates[0]
-            if max_record is None or float(day_max["daily_rainfall_mm"]) > float(max_record.get("daily_rainfall_mm") or 0.0):
-                max_record = day_max
-            for candidate in day_candidates[:top_n]:
-                top_records = _update_top_records(top_records, candidate, top_n)
-
+        max_record = records[0] if records else None
         if not max_record:
             return {
                 "status": "no_data",
@@ -184,9 +264,7 @@ def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
                 "message": f"{year_label}年海河流域暂无有效日降雨量数据。",
                 "records": [],
                 "summary": {
-                    "processed_days": processed_days,
-                    "days_with_data": days_with_data,
-                    "station_day_count": total_station_day_count,
+                    **summary_extra,
                     "max_record": None,
                 },
             }
@@ -198,11 +276,9 @@ def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
             "time_range_readable": readable,
             "statistic_label": "最大日降雨量",
             "max_record": max_record,
-            "records": top_records,
+            "records": records,
             "summary": {
-                "processed_days": processed_days,
-                "days_with_data": days_with_data,
-                "station_day_count": total_station_day_count,
+                **summary_extra,
                 "max_record": max_record,
             },
         }
