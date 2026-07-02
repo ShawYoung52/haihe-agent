@@ -21,3 +21,6 @@ jobs:
 
       - name: Run repository health checks
         run: python scripts/check_repository.py
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
