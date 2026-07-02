@@ -30,7 +30,17 @@ haihe-weather-analyzer-mcp
 
 ## 快速启动
 
-### 1. 启动 MCP 后端
+### 方式一：使用脚本启动
+
+```bash
+# 先启动 MCP 后端
+bash scripts/run_mcp_backend.sh
+
+# 再启动 Chainlit 前端 / 智能体交互层
+bash scripts/run_chainlit_frontend.sh
+```
+
+### 方式二：手动启动 MCP 后端
 
 ```bash
 cd haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp
@@ -46,7 +56,7 @@ python main.py --host 0.0.0.0 --port 3333
 http://127.0.0.1:3333/sse
 ```
 
-### 2. 启动 Chainlit 前端 / 智能体交互层
+### 方式三：手动启动 Chainlit 前端 / 智能体交互层
 
 ```bash
 cd haiheliuyubaoyuagent-master/chainlitexam
@@ -77,6 +87,7 @@ http://127.0.0.1:8003
 
 - `docs/ARCHITECTURE.md`：前端 / 后端职责边界与短临智能体接入建议。
 - `docs/CLEANUP_AND_REFACTOR_PLAN.md`：清理记录、下一步安全整改、重构计划、GIS 安全和测试建议。
+- `docs/DEPLOYMENT.md`：本地运行、脚本启动、部署顺序和生产环境注意事项。
 
 ## 当前已知工程化建议
 
@@ -88,13 +99,16 @@ http://127.0.0.1:8003
 
 ## 本分支改动说明
 
-`chore/web-cleanup-20260702` 分支完成了网页端整理和第二版优化：
+`chore/web-cleanup-20260702` 分支完成了网页端整理、无关文件清理和第三版优化：
 
 - 新增根目录 `.gitignore`，防止继续提交虚拟环境、密钥、缓存和生成产物；
 - 删除已跟踪的 `haiheliuyubaoyuagent-master/chainlitexam/.venv_new` 虚拟环境目录；
 - 新增前后端 `.env.example`；
 - 新增前后端 `requirements.txt`；
 - 修复 MCP 后端 `server.py` 中 `available_tools` 工具列表少逗号导致字符串拼接的问题；
+- MCP 后端启动参数支持 `MCP_HOST`、`MCP_PORT` 环境变量；
+- 新增 `scripts/run_mcp_backend.sh` 和 `scripts/run_chainlit_frontend.sh`；
 - 新增 `docs/ARCHITECTURE.md`；
 - 新增 `docs/CLEANUP_AND_REFACTOR_PLAN.md`；
+- 新增 `docs/DEPLOYMENT.md`；
 - 扩展 README，补充前后端职责、启动方式和安全注意事项。
