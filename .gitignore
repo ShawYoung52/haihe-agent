@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.env.*
+!.env.example
+.venv/
+.venv_new/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.sqlite
+*.sqlite3
+.chainlit/
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Frontend build artifacts
+node_modules/
+.npm/
+.yarn/
+
+# Secrets / certificates
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Generated images / temporary map products
+output/
+outputs/
+tmp/
+temp/
