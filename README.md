@@ -34,6 +34,9 @@ haihe-weather-analyzer-mcp
 
 ```bash
 cd haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp
+python -m venv .venv
+source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
+pip install -r requirements.txt
 python main.py --host 0.0.0.0 --port 3333
 ```
 
@@ -47,6 +50,9 @@ http://127.0.0.1:3333/sse
 
 ```bash
 cd haiheliuyubaoyuagent-master/chainlitexam
+python -m venv .venv
+source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
+pip install -r requirements.txt
 cp .env.example .env
 # 修改 .env 中的模型、数据库、MCP 地址等配置
 chainlit run chain_gzt.py --host 0.0.0.0 --port 8003
@@ -67,6 +73,11 @@ http://127.0.0.1:8003
 
 生产环境不要把真实 `.env`、数据库密码、模型 API Key、证书等提交到 GitHub。
 
+## 文档
+
+- `docs/ARCHITECTURE.md`：前端 / 后端职责边界与短临智能体接入建议。
+- `docs/CLEANUP_AND_REFACTOR_PLAN.md`：清理记录、下一步安全整改、重构计划、GIS 安全和测试建议。
+
 ## 当前已知工程化建议
 
 1. 不要提交 `.venv`、`.venv_new`、`.env`、IDE 配置、缓存文件和生成产物。
@@ -77,9 +88,13 @@ http://127.0.0.1:8003
 
 ## 本分支改动说明
 
-`chore/web-cleanup-20260702` 分支完成了第一版网页端整理：
+`chore/web-cleanup-20260702` 分支完成了网页端整理和第二版优化：
 
 - 新增根目录 `.gitignore`，防止继续提交虚拟环境、密钥、缓存和生成产物；
+- 删除已跟踪的 `haiheliuyubaoyuagent-master/chainlitexam/.venv_new` 虚拟环境目录；
 - 新增前后端 `.env.example`；
+- 新增前后端 `requirements.txt`；
 - 修复 MCP 后端 `server.py` 中 `available_tools` 工具列表少逗号导致字符串拼接的问题；
+- 新增 `docs/ARCHITECTURE.md`；
+- 新增 `docs/CLEANUP_AND_REFACTOR_PLAN.md`；
 - 扩展 README，补充前后端职责、启动方式和安全注意事项。
