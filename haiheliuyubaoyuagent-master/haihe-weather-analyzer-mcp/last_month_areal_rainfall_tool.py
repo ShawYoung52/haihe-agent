@@ -40,6 +40,13 @@ _FINE_ZONE_TABLES_FOR_9 = [
 ]
 
 
+def _get_postgres_conf():
+    """从 ConfigParser 中安全读取 postgres 配置段。"""
+    if "postgres" not in config:
+        return None
+    return config["postgres"]
+
+
 def _previous_calendar_month_range(now: datetime | None = None) -> tuple[str, str, str, str]:
     """返回上一个自然月的起止时间。"""
     now = now or datetime.now()
@@ -68,10 +75,10 @@ def _safe_float(value: Any) -> float | None:
 def _load_zone_name_map(zone_type: str) -> dict[str, str]:
     """加载指定分区表的 zone_code -> zone_name 映射。"""
     table_name = _ZONE_TABLES.get(zone_type)
-    if not table_name or "postgres" not in config:
+    pg_conf = _get_postgres_conf()
+    if not table_name or not pg_conf:
         return {}
 
-    pg_conf = config["postgres"]
     timeout = int(pg_conf.get("connect_timeout", "5")) if str(pg_conf.get("connect_timeout", "5")).isdigit() else 5
     zone_map: dict[str, str] = {}
     try:
@@ -175,7 +182,7 @@ def _summarize_rows(rows: list[dict]) -> dict:
 
 
 def _query_station_aggregated_rows(time_range: str, zone_type: str) -> list[dict]:
-    pg_conf = config.get("postgres")
+    pg_conf = _get_postgres_conf()
     if not pg_conf:
         return []
     return _aggregate_areal_rainfall_from_stations(time_range, zone_type, pg_conf) or []
@@ -260,7 +267,7 @@ def _area_id_aliases(area_ids: list[str]) -> list[str]:
 
 def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
     """把天擎细分区 V_AREA_ID 通过分区几何映射到海河9分区。"""
-    pg_conf = config.get("postgres")
+    pg_conf = _get_postgres_conf()
     if not pg_conf:
         return {}
     ids = _area_id_aliases(area_ids)
@@ -283,8 +290,6 @@ def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
         ) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 for table_name in _FINE_ZONE_TABLES_FOR_9:
-                    if len(mapping) >= len(set(str(x) for x in area_ids)):
-                        break
                     sql = f"""
                         SELECT
                             f.zone_code::text AS fine_code,
@@ -294,7 +299,7 @@ def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
                             NULLIF(ST_Area(f.geom), 0) AS fine_area
                         FROM {schema}.{table_name} f
                         JOIN {schema}.haihe_zone_9 z9
-                          ON ST_Within(ST_PointOnSurface(f.geom), z9.geom)
+                          ON ST_Intersects(ST_PointOnSurface(f.geom), z9.geom)
                         WHERE f.zone_code::text = ANY(%(ids)s)
                            OR regexp_replace(f.zone_code::text, '^.*_', '') = ANY(%(ids)s)
                            OR ltrim(regexp_replace(f.zone_code::text, '^.*_', ''), '0') = ANY(%(ids)s)
@@ -372,6 +377,26 @@ def _aggregate_fine_rows_to_zone9(fine_rows: list[dict]) -> list[dict]:
     return out
 
 
+def _no_data_payload(month_label: str, time_range: str, readable: str, zone_type: str, reason: str = "") -> dict:
+    message = "上一个自然月面雨量暂无有效数据。"
+    if reason:
+        message = f"上一个自然月面雨量暂无有效数据（{reason}）。"
+    return {
+        "status": "no_data",
+        "query_type": "last_month_areal_rainfall",
+        "month": month_label,
+        "time_range": time_range,
+        "time_range_readable": readable,
+        "zone_type": zone_type,
+        "zone_label": _ZONE_LABELS.get(zone_type, zone_type),
+        "data_source": "实况降雨数据",
+        "rain_field": None,
+        "records": [],
+        "summary": _summarize_rows([]),
+        "message": message,
+    }
+
+
 def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
     @mcp.tool()
     def query_last_month_areal_rainfall(zone_type: str = "9") -> dict:
@@ -391,79 +416,82 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
         start_s, end_s, readable, month_label = _previous_calendar_month_range()
         time_range = f"[{start_s},{end_s}]"
 
-        rows: list[dict] = []
-        rain_field = None
-        data_source = "实况降雨数据"
+        try:
+            rows: list[dict] = []
+            rain_field = None
+            data_source = "实况降雨数据"
 
-        # 业务默认口径是海河9分区。先尝试站点逐日聚合。
-        if zone_type == "9":
-            try:
-                rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
-                if rows:
-                    rain_field = "station_daily_agg"
-            except Exception:
-                rows = []
-
-        # 无站点聚合时，使用天擎面雨量细分区，并通过分区几何汇总到9分区。
-        if not rows:
-            raw = None
-            try:
-                from utils.TQ_utils import getSevpEleByTimeRangeHistory, statSevpEleByTimeRangeHistory
-
+            # 业务默认口径是海河9分区。先尝试站点逐日聚合。
+            if zone_type == "9":
                 try:
-                    raw = getSevpEleByTimeRangeHistory(
-                        time_range=time_range,
-                        elements="Datetime,V_AREA_ID,V_RAIN_1H",
-                    )
-                    if raw:
-                        rain_field = "V_RAIN_1H"
+                    rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
+                    if rows:
+                        rain_field = "station_daily_agg"
+                except Exception:
+                    rows = []
+
+            # 无站点聚合时，使用天擎面雨量细分区，并通过分区几何汇总到9分区。
+            if not rows:
+                raw = None
+                try:
+                    from utils.TQ_utils import getSevpEleByTimeRangeHistory, statSevpEleByTimeRangeHistory
+
+                    try:
+                        raw = getSevpEleByTimeRangeHistory(
+                            time_range=time_range,
+                            elements="Datetime,V_AREA_ID,V_RAIN_1H",
+                        )
+                        if raw:
+                            rain_field = "V_RAIN_1H"
+                    except Exception:
+                        raw = None
+
+                    if not raw:
+                        try:
+                            raw = statSevpEleByTimeRangeHistory(
+                                time_range=time_range,
+                                elements="V_AREA_ID,Datetime",
+                            )
+                            if raw:
+                                rain_field = "SUM_V_RAIN_1H"
+                        except Exception:
+                            raw = None
                 except Exception:
                     raw = None
 
-                if not raw:
-                    try:
-                        raw = statSevpEleByTimeRangeHistory(
-                            time_range=time_range,
-                            elements="V_AREA_ID,Datetime",
-                        )
-                        if raw:
-                            rain_field = "SUM_V_RAIN_1H"
-                    except Exception:
-                        raw = None
-            except Exception:
-                raw = None
+                if raw and rain_field:
+                    candidate_rows = _aggregate_raw_areal_rows(raw, rain_field, zone_type)
+                    if zone_type == "9" and not _looks_like_requested_zone_rows(candidate_rows, zone_type):
+                        rows = _aggregate_fine_rows_to_zone9(candidate_rows)
+                        if rows:
+                            rain_field = "fine_zone_to_9_agg"
+                    elif _looks_like_requested_zone_rows(candidate_rows, zone_type):
+                        rows = candidate_rows
 
-            if raw and rain_field:
-                candidate_rows = _aggregate_raw_areal_rows(raw, rain_field, zone_type)
-                if zone_type == "9" and not _looks_like_requested_zone_rows(candidate_rows, zone_type):
-                    rows = _aggregate_fine_rows_to_zone9(candidate_rows)
+            # 最后兜底：仍按天拆分站点聚合，避免整月窗口过大。
+            if not rows:
+                try:
+                    rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
                     if rows:
-                        rain_field = "fine_zone_to_9_agg"
-                elif _looks_like_requested_zone_rows(candidate_rows, zone_type):
-                    rows = candidate_rows
+                        rain_field = "station_daily_agg"
+                except Exception:
+                    rows = []
 
-        # 最后兜底：仍按天拆分站点聚合，避免整月窗口过大。
-        if not rows:
-            try:
-                rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
-                if rows:
-                    rain_field = "station_daily_agg"
-            except Exception:
-                rows = []
+            if not rows:
+                return _no_data_payload(month_label, time_range, readable, zone_type)
 
-        payload = {
-            "status": "ok" if rows else "no_data",
-            "query_type": "last_month_areal_rainfall",
-            "month": month_label,
-            "time_range": time_range,
-            "time_range_readable": readable,
-            "zone_type": zone_type,
-            "zone_label": _ZONE_LABELS.get(zone_type, zone_type),
-            "data_source": data_source,
-            "rain_field": rain_field,
-            "records": rows,
-            "summary": _summarize_rows(rows),
-        }
-        if not rows:
-            payload["message"] = "上一个自然月面雨量暂无有效数据。"
-        return payload
+            return {
+                "status": "ok",
+                "query_type": "last_month_areal_rainfall",
+                "month": month_label,
+                "time_range": time_range,
+                "time_range_readable": readable,
+                "zone_type": zone_type,
+                "zone_label": _ZONE_LABELS.get(zone_type, zone_type),
+                "data_source": data_source,
+                "rain_field": rain_field,
+                "records": rows,
+                "summary": _summarize_rows(rows),
+            }
+        except Exception as exc:
+            return _no_data_payload(month_label, time_range, readable, zone_type, reason=str(exc)[:120])
