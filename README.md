@@ -40,7 +40,20 @@ bash scripts/run_mcp_backend.sh
 bash scripts/run_chainlit_frontend.sh
 ```
 
-### 方式二：手动启动 MCP 后端
+### 方式二：使用 Docker Compose 启动
+
+```bash
+docker compose up --build
+```
+
+默认服务地址：
+
+```text
+MCP 后端: http://127.0.0.1:3333/sse
+Chainlit 前端: http://127.0.0.1:8003
+```
+
+### 方式三：手动启动 MCP 后端
 
 ```bash
 cd haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp
@@ -56,7 +69,7 @@ python main.py --host 0.0.0.0 --port 3333
 http://127.0.0.1:3333/sse
 ```
 
-### 方式三：手动启动 Chainlit 前端 / 智能体交互层
+### 方式四：手动启动 Chainlit 前端 / 智能体交互层
 
 ```bash
 cd haiheliuyubaoyuagent-master/chainlitexam
@@ -73,6 +86,19 @@ chainlit run chain_gzt.py --host 0.0.0.0 --port 8003
 ```text
 http://127.0.0.1:8003
 ```
+
+## 检查命令
+
+```bash
+make check
+# 或
+python scripts/check_repository.py
+```
+
+检查内容包括：
+
+- 是否误提交虚拟环境、缓存、本地配置、日志等文件；
+- Python 文件是否能通过基础语法编译。
 
 ## 环境变量
 
@@ -99,12 +125,16 @@ http://127.0.0.1:8003
 
 ## 本分支改动说明
 
-`chore/web-cleanup-20260702` 分支完成了网页端整理、无关文件清理和第三版优化：
+`chore/web-cleanup-20260702` 分支完成了网页端整理、无关文件清理和第四版工程化优化：
 
 - 新增根目录 `.gitignore`，防止继续提交虚拟环境、密钥、缓存和生成产物；
 - 删除已跟踪的 `haiheliuyubaoyuagent-master/chainlitexam/.venv_new` 虚拟环境目录；
 - 新增前后端 `.env.example`；
 - 新增前后端 `requirements.txt`；
+- 新增 `scripts/check_repository.py` 仓库健康检查脚本；
+- 新增 `.github/workflows/python-check.yml`，让 PR 自动执行基础检查；
+- 新增 `Makefile`；
+- 新增 `.dockerignore`、前后端 `Dockerfile` 和 `docker-compose.yml`；
 - 修复 MCP 后端 `server.py` 中 `available_tools` 工具列表少逗号导致字符串拼接的问题；
 - MCP 后端启动参数支持 `MCP_HOST`、`MCP_PORT` 环境变量；
 - 新增 `scripts/run_mcp_backend.sh` 和 `scripts/run_chainlit_frontend.sh`；
