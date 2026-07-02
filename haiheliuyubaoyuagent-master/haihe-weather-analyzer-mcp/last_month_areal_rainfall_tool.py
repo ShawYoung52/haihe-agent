@@ -111,6 +111,15 @@ def _zone_name(zone_map: dict[str, str], zone_id: str) -> str:
     return f"分区{zone_id}"
 
 
+def _looks_like_requested_zone_rows(rows: list[dict], zone_type: str) -> bool:
+    """粗略判断结果是否符合请求的分区体系，防止把细分区误标成 9 分区。"""
+    if not rows:
+        return False
+    if zone_type == "9":
+        return len(rows) <= 12
+    return True
+
+
 def _aggregate_raw_areal_rows(raw: list[dict], rain_field: str, zone_type: str) -> list[dict]:
     """将天擎面雨量原始行聚合为分区累计面雨量。"""
     zone_map = _load_zone_name_map(zone_type)
@@ -155,8 +164,14 @@ def _summarize_rows(rows: list[dict]) -> dict:
         "zone_count": len(rows),
         "max_zone": rows[0],
         "simple_mean_of_zone_rainfall_mm": round(sum(vals) / len(vals), 2),
-        "note": "simple_mean_of_zone_rainfall_mm 为各分区累计面雨量的算术平均，不等同于面积加权全流域面雨量。",
     }
+
+
+def _query_station_aggregated_rows(time_range: str, zone_type: str) -> list[dict]:
+    pg_conf = config.get("postgres")
+    if not pg_conf:
+        return []
+    return _aggregate_areal_rainfall_from_stations(time_range, zone_type, pg_conf) or []
 
 
 def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
@@ -178,48 +193,60 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
         start_s, end_s, readable, month_label = _previous_calendar_month_range()
         time_range = f"[{start_s},{end_s}]"
 
-        raw = None
+        rows: list[dict] = []
         rain_field = None
-        data_source = "天擎面雨量实况"
+        data_source = "实况降雨数据"
 
-        try:
-            from utils.TQ_utils import getSevpEleByTimeRangeHistory, statSevpEleByTimeRangeHistory
-
+        # 业务默认口径是海河9分区。天擎原始 V_AREA_ID 可能是更细分区编号，
+        # 不能直接把 303/302 等细分区结果标成“9分区”。默认 9 分区优先走站点-空间聚合。
+        if zone_type == "9":
             try:
-                raw = getSevpEleByTimeRangeHistory(
-                    time_range=time_range,
-                    elements="Datetime,V_AREA_ID,V_RAIN_1H",
-                )
-                if raw:
-                    rain_field = "V_RAIN_1H"
+                rows = _query_station_aggregated_rows(time_range, zone_type)
+                if rows:
+                    rain_field = "station_agg"
+            except Exception:
+                rows = []
+
+        # 非默认细分区，或 9 分区站点聚合无数据时，再尝试天擎面雨量原始数据。
+        if not rows:
+            raw = None
+            try:
+                from utils.TQ_utils import getSevpEleByTimeRangeHistory, statSevpEleByTimeRangeHistory
+
+                try:
+                    raw = getSevpEleByTimeRangeHistory(
+                        time_range=time_range,
+                        elements="Datetime,V_AREA_ID,V_RAIN_1H",
+                    )
+                    if raw:
+                        rain_field = "V_RAIN_1H"
+                except Exception:
+                    raw = None
+
+                if not raw:
+                    try:
+                        raw = statSevpEleByTimeRangeHistory(
+                            time_range=time_range,
+                            elements="V_AREA_ID,Datetime",
+                        )
+                        if raw:
+                            rain_field = "SUM_V_RAIN_1H"
+                    except Exception:
+                        raw = None
             except Exception:
                 raw = None
 
-            if not raw:
-                try:
-                    raw = statSevpEleByTimeRangeHistory(
-                        time_range=time_range,
-                        elements="V_AREA_ID,Datetime",
-                    )
-                    if raw:
-                        rain_field = "SUM_V_RAIN_1H"
-                except Exception:
-                    raw = None
-        except Exception:
-            raw = None
+            if raw and rain_field:
+                candidate_rows = _aggregate_raw_areal_rows(raw, rain_field, zone_type)
+                if _looks_like_requested_zone_rows(candidate_rows, zone_type):
+                    rows = candidate_rows
 
-        if raw and rain_field:
-            rows = _aggregate_raw_areal_rows(raw, rain_field, zone_type)
-        else:
-            rows = []
-
+        # 兜底：任何分区体系都可以通过站点叠加到对应分区表。
         if not rows:
             try:
-                pg_conf = config["postgres"]
-                rows = _aggregate_areal_rainfall_from_stations(time_range, zone_type, pg_conf) or []
+                rows = _query_station_aggregated_rows(time_range, zone_type)
                 if rows:
-                    data_source = "天擎自动站降雨聚合面雨量"
-                    rain_field = "PRE_1h_station_agg"
+                    rain_field = "station_agg"
             except Exception:
                 rows = []
 
@@ -237,5 +264,5 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
             "summary": _summarize_rows(rows),
         }
         if not rows:
-            payload["message"] = "上一个自然月面雨量无数据或数据源暂不可用。"
+            payload["message"] = "上一个自然月面雨量暂无有效数据。"
         return payload
