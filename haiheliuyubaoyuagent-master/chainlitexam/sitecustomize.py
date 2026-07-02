@@ -39,12 +39,20 @@ def _previous_month_range() -> tuple[str, str, str, str]:
 
 
 def _should_use_last_month_areal_path(text: str) -> bool:
+    """只拦截明确的“上月面雨量/分区雨量”问题，避免误伤子流域天气、预报等其它快路径。"""
     if not text:
         return False
     t = text.strip()
     month_words = ("上个月", "上月", "上一个月", "上一月", "上自然月", "上个自然月")
-    rain_words = ("面雨量", "子流域", "分区雨量", "流域雨量", "河系雨量")
-    return any(k in t for k in month_words) and any(k in t for k in rain_words)
+    # 必须明确问“面雨量/雨量”，不能仅因出现“子流域”就拦截。
+    rain_words = ("面雨量", "分区雨量", "流域雨量", "河系雨量", "累计雨量", "降雨量", "雨量")
+    # 未来/预报类问题不走上月实况面雨量路径。
+    forecast_words = ("未来", "明天", "后天", "预报", "预计", "会不会", "会有")
+    return (
+        any(k in t for k in month_words)
+        and any(k in t for k in rain_words)
+        and not any(k in t for k in forecast_words)
+    )
 
 
 def _safe_cell(mo, value: Any) -> str:
