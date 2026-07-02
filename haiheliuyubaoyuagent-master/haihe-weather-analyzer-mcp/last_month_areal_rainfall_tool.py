@@ -174,6 +174,68 @@ def _query_station_aggregated_rows(time_range: str, zone_type: str) -> list[dict
     return _aggregate_areal_rainfall_from_stations(time_range, zone_type, pg_conf) or []
 
 
+def _day_ranges(start_s: str, end_s: str) -> list[str]:
+    """把自然月拆成逐日时间段，避免一次查询整月导致数据源返回空。"""
+    start_dt = datetime.strptime(start_s, "%Y%m%d%H%M%S")
+    end_dt = datetime.strptime(end_s, "%Y%m%d%H%M%S")
+    ranges: list[str] = []
+    cur = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    while cur <= end_dt:
+        day_start = max(cur, start_dt)
+        day_end = min(cur.replace(hour=23, minute=59, second=59), end_dt)
+        ranges.append(f"[{day_start:%Y%m%d%H%M%S},{day_end:%Y%m%d%H%M%S}]")
+        cur = cur + timedelta(days=1)
+    return ranges
+
+
+def _merge_daily_zone_rows(day_rows: list[list[dict]]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for rows in day_rows:
+        for row in rows or []:
+            if not isinstance(row, dict) or "error" in row:
+                continue
+            zone_id = str(row.get("zone_id") or row.get("zone_name") or "").strip()
+            zone_name = str(row.get("zone_name") or zone_id or "未知分区").strip()
+            if not zone_id:
+                zone_id = zone_name
+            cumulative = _safe_float(row.get("avg_rainfall_mm") or row.get("avg") or row.get("average_rainfall_mm"))
+            max_rain = _safe_float(row.get("max_rainfall_mm") or row.get("max") or row.get("maximum_rainfall_mm"))
+            if cumulative is None:
+                continue
+            if zone_id not in grouped:
+                grouped[zone_id] = {
+                    "zone_id": zone_id,
+                    "zone_name": zone_name,
+                    "avg_rainfall_mm": 0.0,
+                    "max_rainfall_mm": 0.0,
+                    "record_count": 0,
+                }
+            grouped[zone_id]["zone_name"] = zone_name or grouped[zone_id]["zone_name"]
+            grouped[zone_id]["avg_rainfall_mm"] += float(cumulative)
+            if max_rain is not None:
+                grouped[zone_id]["max_rainfall_mm"] = max(float(grouped[zone_id]["max_rainfall_mm"]), float(max_rain))
+            grouped[zone_id]["record_count"] += int(row.get("record_count") or 1)
+
+    merged = list(grouped.values())
+    for row in merged:
+        row["avg_rainfall_mm"] = round(float(row["avg_rainfall_mm"]), 2)
+        row["max_rainfall_mm"] = round(float(row.get("max_rainfall_mm") or 0.0), 2)
+    merged.sort(key=lambda x: x["avg_rainfall_mm"], reverse=True)
+    return merged
+
+
+def _query_station_aggregated_rows_by_day(start_s: str, end_s: str, zone_type: str) -> list[dict]:
+    all_day_rows: list[list[dict]] = []
+    for tr in _day_ranges(start_s, end_s):
+        try:
+            rows = _query_station_aggregated_rows(tr, zone_type)
+        except Exception:
+            rows = []
+        if rows:
+            all_day_rows.append(rows)
+    return _merge_daily_zone_rows(all_day_rows)
+
+
 def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
     @mcp.tool()
     def query_last_month_areal_rainfall(zone_type: str = "9") -> dict:
@@ -197,17 +259,16 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
         rain_field = None
         data_source = "实况降雨数据"
 
-        # 业务默认口径是海河9分区。天擎原始 V_AREA_ID 可能是更细分区编号，
-        # 不能直接把 303/302 等细分区结果标成“9分区”。默认 9 分区优先走站点-空间聚合。
+        # 业务默认口径是海河9分区。月尺度一次查询可能为空，因此按天查询再累加。
         if zone_type == "9":
             try:
-                rows = _query_station_aggregated_rows(time_range, zone_type)
+                rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
                 if rows:
-                    rain_field = "station_agg"
+                    rain_field = "station_daily_agg"
             except Exception:
                 rows = []
 
-        # 非默认细分区，或 9 分区站点聚合无数据时，再尝试天擎面雨量原始数据。
+        # 非默认细分区，或 9 分区逐日聚合无数据时，再尝试天擎面雨量原始数据。
         if not rows:
             raw = None
             try:
@@ -241,12 +302,12 @@ def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
                 if _looks_like_requested_zone_rows(candidate_rows, zone_type):
                     rows = candidate_rows
 
-        # 兜底：任何分区体系都可以通过站点叠加到对应分区表。
+        # 兜底：仍按天拆分站点聚合，避免整月窗口过大。
         if not rows:
             try:
-                rows = _query_station_aggregated_rows(time_range, zone_type)
+                rows = _query_station_aggregated_rows_by_day(start_s, end_s, zone_type)
                 if rows:
-                    rain_field = "station_agg"
+                    rain_field = "station_daily_agg"
             except Exception:
                 rows = []
 
