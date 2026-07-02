@@ -54,10 +54,10 @@ class HaiheWeatherAnalyzerMCP:
                     "get_river_network_for_plot - 获取河网绘图线段",
                     "get_river_network_leader_view - 获取领导可读卡片+表格+地图数据",
                     "reload_river_graph - 重新加载河网缓存",
-                    "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）"
+                    "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）",
                     "search_poi - 按名称查询 POI 地点/设施/单位",
                     "search_poi_by_distance - 按名称和经纬度范围查询附近 POI",
-                    "query_rolling_forecast - 天津滚动预报综合天气查询"
+                    "query_rolling_forecast - 天津滚动预报综合天气查询",
                 ],
                 "compatibility_note": "已保留 analyze_rainstorm_impact 等原有调用方式；新增拆分工具用于分阶段调用，前端可按需渐进迁移。",
                 "deprecated_aggregated_tools": [
@@ -81,14 +81,14 @@ class HaiheWeatherAnalyzerMCP:
                 },
                 "supported_regions": ["天津市", "塘沽区", "武清区", "静海区", "宝坻区", "蓟州区", "宁河区"],
                 "data_update_frequency": "实时更新",
-                "contact": "haihe-weather-support@example.com"
+                "contact": "haihe-weather-support@example.com",
             }
 
         @self.mcp.tool()
         def search_stations_by_name(name_pattern: str) -> list:
             """
             根据名称模式搜索站点
-            
+
             Args:
                 name_pattern: 站点名称匹配模式
             """
