@@ -54,6 +54,14 @@ def _safe_cell(mo, value: Any) -> str:
     return "" if value is None else str(value).replace("|", "｜").strip()
 
 
+def _pick_number(item: dict, *keys: str) -> Any:
+    """取数值字段；0/0.0 是有效值，不能被 or '-' 吃掉。"""
+    for key in keys:
+        if key in item and item[key] not in (None, "", "None"):
+            return item[key]
+    return "-"
+
+
 def _format_last_month_payload(mo, data: Any, fallback_label: str, fallback_month: str) -> str:
     if isinstance(data, dict):
         if data.get("status") == "no_data":
@@ -96,15 +104,16 @@ def _format_last_month_payload(mo, data: Any, fallback_label: str, fallback_mont
             or item.get("分区")
             or "未知",
         )
-        avg = item.get("avg_rainfall_mm") or item.get("avg") or item.get("average_rainfall_mm") or item.get("mean") or "-"
-        mx = item.get("max_rainfall_mm") or item.get("max") or item.get("maximum_rainfall_mm") or "-"
+        avg = _pick_number(item, "avg_rainfall_mm", "avg", "average_rainfall_mm", "mean")
+        mx = _pick_number(item, "max_rainfall_mm", "max", "maximum_rainfall_mm", "maximum")
         lines.append(f"| {idx} | {zone_name} | {avg} | {mx} |\n")
 
     max_zone = summary.get("max_zone") if isinstance(summary, dict) else None
     if isinstance(max_zone, dict):
+        max_zone_rain = _pick_number(max_zone, "avg_rainfall_mm", "avg", "average_rainfall_mm", "mean")
         lines.append(
             f"\n**最大分区**：{_safe_cell(mo, max_zone.get('zone_name') or max_zone.get('zone_id') or '未知')}，"
-            f"累计面雨量 {max_zone.get('avg_rainfall_mm', '-')} mm。\n"
+            f"累计面雨量 {max_zone_rain} mm。\n"
         )
     note = summary.get("note") if isinstance(summary, dict) else ""
     if note:
