@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 _MARKER = "_poi_weather_fast_path_installed"
@@ -52,32 +53,40 @@ def _val(v: Any) -> str:
     return str(v)
 
 
+def _display_time(data: dict) -> str:
+    # 后端优先返回北京时间；若旧后端未返回，则前端兜成北京时间展示。
+    bjt = data.get("observation_time_beijing")
+    if bjt:
+        return str(bjt)
+    raw = str(data.get("observation_time") or data.get("query_time") or "").strip()
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
+        try:
+            return (datetime.strptime(raw, pattern) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    return raw or "-"
+
+
 def _format(mo, data: Any) -> str:
     if not isinstance(data, dict):
         return "POI 最近观测站实况查询结果格式异常。"
     if data.get("status") != "ok":
-        msg = data.get("message") or "未查询到该点最近观测站实况。"
-        debug = data.get("debug_reason")
-        if debug:
-            return f"{msg}\n\n**调试原因**：{_clean(mo, debug)}"
-        return msg
+        # 正常用户界面不暴露后端调试信息；详细原因看 MCP 后端日志。
+        return data.get("message") or "未查询到该点最近观测站实况。"
 
     poi = data.get("poi") if isinstance(data.get("poi"), dict) else {}
     sta = data.get("nearest_station") if isinstance(data.get("nearest_station"), dict) else {}
     obs = data.get("observation") if isinstance(data.get("observation"), dict) else {}
-    title = poi.get("name") or data.get("keyword") or "该点"
+    title = data.get("keyword") or "该点"
 
-    lines = [f"## {_clean(mo, title)}最近观测站实况\n\n"]
-    lines.append(f"**POI经纬度**：{_val(poi.get('longitude'))}，{_val(poi.get('latitude'))}  \n")
-    if poi.get("address"):
-        lines.append(f"**POI地址**：{_clean(mo, poi.get('address'))}  \n")
-    lines.append(f"**最近观测站**：{_clean(mo, sta.get('station_name') or '-')}（站号：{_clean(mo, sta.get('station_id') or '-')}，距离约 {_val(sta.get('distance_km'))} km）  \n")
-    lines.append(f"**观测时间**：{_clean(mo, data.get('observation_time') or data.get('query_time') or '-')}  \n")
-    if data.get("interface_id") or data.get("data_code"):
-        lines.append(f"**数据接口**：{_clean(mo, data.get('interface_id') or '-')}，{_clean(mo, data.get('data_code') or '-')}  \n")
-    if data.get("observation_source"):
-        lines.append(f"**数据来源路径**：{_clean(mo, data.get('observation_source'))}\n")
-    lines.append("\n")
+    lines = [f"## {_clean(mo, title)}天气实况\n\n"]
+    if poi.get("longitude") is not None and poi.get("latitude") is not None:
+        lines.append(f"**定位点经纬度**：{_val(poi.get('longitude'))}，{_val(poi.get('latitude'))}  \n")
+    lines.append(
+        f"**最近观测站**：{_clean(mo, sta.get('station_name') or '-')}"
+        f"（站号：{_clean(mo, sta.get('station_id') or '-')}，距离约 {_val(sta.get('distance_km'))} km）  \n"
+    )
+    lines.append(f"**观测时间**：{_clean(mo, _display_time(data))}（北京时间）\n\n")
 
     if obs:
         lines.append("| 要素 | 最近观测站实况值 |\n| :--- | :--- |\n")
@@ -85,7 +94,7 @@ def _format(mo, data: Any) -> str:
             lines.append(f"| {_clean(mo, key)} | {_clean(mo, _val(value))} |\n")
     else:
         lines.append("当前最近观测站未返回可展示的实况要素值。\n")
-    lines.append("\n**说明**：这是 POI 附近最近观测站的实况值，不是 POI 点本身的格点值。")
+    lines.append("\n**说明**：以上为该点附近最近观测站实况，可代表该位置附近天气情况。")
     return "".join(lines)
 
 
