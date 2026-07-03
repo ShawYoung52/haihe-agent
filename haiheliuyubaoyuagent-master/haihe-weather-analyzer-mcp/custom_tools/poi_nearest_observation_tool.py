@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 HOURLY_DATA_CODE = "SURF_CHN_MUL_HOR"
 TIANJIN_ADMIN_CODE = "120000"
+# 天津大致范围，用于避免“天津市气象局”模糊命中到外省的“气象局”。
+TIANJIN_LON_MIN = 116.55
+TIANJIN_LON_MAX = 118.15
+TIANJIN_LAT_MIN = 38.55
+TIANJIN_LAT_MAX = 40.35
 FULL_OBS_ELEMENTS = (
     "Station_Id_C,Station_levl,Lat,Lon,Alti,City,Station_Name,Cnty,Province,Town,"
     "Datetime,UPDATE_TIME,PRE_1h,PRE_3h,PRE_6h,PRE_12h,PRE_24h,PRE,"
@@ -42,6 +47,12 @@ def _safe_float(value: Any) -> float | None:
     return number
 
 
+def _is_tianjin_coord(lon: float | None, lat: float | None) -> bool:
+    if lon is None or lat is None:
+        return False
+    return TIANJIN_LON_MIN <= lon <= TIANJIN_LON_MAX and TIANJIN_LAT_MIN <= lat <= TIANJIN_LAT_MAX
+
+
 def _distance_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     radius = 6371.0088
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -52,29 +63,69 @@ def _distance_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
 
 
 def _latest_hour_candidates(hours_back: int = 6) -> list[str]:
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    """生成最近逐小时实况候选时次。
+
+    项目原降雨核心链路按“北京时间 - 8小时”查询天擎，因此这里也按 UTC 时次倒查。
+    例如北京时间 14:52，优先查接口时次 06:00，其次 05:00、04:00。
+    """
+    now_bjt = datetime.now().replace(minute=0, second=0, microsecond=0)
+    now_api = now_bjt - timedelta(hours=8)
     count = max(int(hours_back or 6), 1)
-    return [(now - timedelta(hours=i)).strftime("%Y%m%d%H%M%S") for i in range(count)]
+    return [(now_api - timedelta(hours=i)).strftime("%Y%m%d%H%M%S") for i in range(count)]
+
+
+def _poi_to_normalized(keyword: str, poi_result: dict, poi: dict) -> dict | None:
+    lon = _safe_float(poi.get("longitude"))
+    lat = _safe_float(poi.get("latitude"))
+    if lon is None or lat is None:
+        return None
+    return {
+        "name": poi.get("name") or keyword,
+        "address": poi.get("address"),
+        "category_1": poi.get("category_1"),
+        "category_2": poi.get("category_2"),
+        "longitude": lon,
+        "latitude": lat,
+        "match_type": poi_result.get("match_type"),
+        "total": poi_result.get("total"),
+    }
 
 
 def _pick_first_poi(keyword: str) -> dict | None:
-    poi_result = _search_poi_core(keyword=keyword, size=5)
+    poi_result = _search_poi_core(keyword=keyword, size=20)
     pois = poi_result.get("pois") or []
+    candidates: list[dict] = []
     for poi in pois:
-        lon = _safe_float(poi.get("longitude"))
-        lat = _safe_float(poi.get("latitude"))
-        if lon is not None and lat is not None:
-            return {
-                "name": poi.get("name") or keyword,
-                "address": poi.get("address"),
-                "category_1": poi.get("category_1"),
-                "category_2": poi.get("category_2"),
-                "longitude": lon,
-                "latitude": lat,
-                "match_type": poi_result.get("match_type"),
-                "total": poi_result.get("total"),
-            }
-    return None
+        item = _poi_to_normalized(keyword, poi_result, poi)
+        if item:
+            candidates.append(item)
+    if not candidates:
+        return None
+
+    keyword_has_tianjin = "天津" in keyword
+    if keyword_has_tianjin:
+        tj_candidates = []
+        for item in candidates:
+            text = f"{item.get('name') or ''} {item.get('address') or ''}"
+            if _is_tianjin_coord(item.get("longitude"), item.get("latitude")) or "天津" in text:
+                tj_candidates.append(item)
+        if tj_candidates:
+            candidates = tj_candidates
+        else:
+            # 用户明确问天津，不能返回外省同名“气象局”。
+            logger.warning("[poi_nearest_observation] no Tianjin POI candidate for keyword=%s", keyword)
+            return None
+
+    def score(item: dict) -> tuple[int, int, int]:
+        name = str(item.get("name") or "")
+        address = str(item.get("address") or "")
+        exact = 1 if name == keyword else 0
+        contains = 1 if keyword in name or name in keyword else 0
+        tj = 1 if (_is_tianjin_coord(item.get("longitude"), item.get("latitude")) or "天津" in address or "天津" in name) else 0
+        return exact, contains, tj
+
+    candidates.sort(key=score, reverse=True)
+    return candidates[0]
 
 
 def _station_id(record: dict) -> str:
@@ -241,7 +292,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
         except Exception as exc:
             return _error_payload(keyword, "POI 查询失败。", str(exc))
         if not poi:
-            return _error_payload(keyword, f"未查询到“{keyword}”的有效经纬度。")
+            return _error_payload(keyword, f"未查询到“{keyword}”的天津范围内有效经纬度。")
 
         try:
             client = MusicClient(MusicConfig())
