@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timedelta
 from typing import Any
@@ -14,6 +15,8 @@ from fastmcp import FastMCP
 from constants import DEFAULT_BASIN_CODES, DEFAULT_OBS_ELEMENTS
 from haihe_mcp_tools import MusicClient, MusicConfig, _search_poi_core
 
+
+logger = logging.getLogger(__name__)
 
 HOURLY_DATA_CODE = "SURF_CHN_MUL_HOR"
 TIANJIN_ADMIN_CODE = "120000"
@@ -161,13 +164,24 @@ def _query_station_records(
                 tried.append(f"{source}@{time_s}")
                 try:
                     rows = query_func(time_s, elements)
+                    logger.warning(
+                        "[poi_nearest_observation] %s@%s returned rows=%s",
+                        source,
+                        time_s,
+                        len(rows or []),
+                    )
                 except Exception as exc:
                     last_error = f"{source}@{time_s}: {str(exc)[:180]}"
-                    print(f"[poi_nearest_observation] {last_error}")
+                    logger.warning("[poi_nearest_observation] %s", last_error)
                     rows = []
                 valid = _valid_station_rows(rows)
                 if valid:
-                    print(f"[poi_nearest_observation] hit {source}@{time_s}, rows={len(valid)}")
+                    logger.warning(
+                        "[poi_nearest_observation] hit %s@%s valid_rows=%s",
+                        source,
+                        time_s,
+                        len(valid),
+                    )
                     return time_s, valid, source
     tried_text = ";".join(tried)[:260]
     raise RuntimeError(last_error or f"逐小时站点实况无有效经纬度数据，tried={tried_text}")
@@ -217,6 +231,13 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
 
         try:
             poi = _pick_first_poi(keyword)
+            logger.warning(
+                "[poi_nearest_observation] poi keyword=%s name=%s lon=%s lat=%s",
+                keyword,
+                poi.get("name") if poi else None,
+                poi.get("longitude") if poi else None,
+                poi.get("latitude") if poi else None,
+            )
         except Exception as exc:
             return _error_payload(keyword, "POI 查询失败。", str(exc))
         if not poi:
@@ -227,6 +248,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
             query_time, records, obs_source = _query_station_records(client, basin_codes, hours_back, admin_code)
             nearest = _nearest_station(poi, records)
         except Exception as exc:
+            logger.warning("[poi_nearest_observation] failed keyword=%s error=%s", keyword, exc)
             return _error_payload(keyword, "最近观测站实况查询失败。", str(exc))
 
         if not nearest:
