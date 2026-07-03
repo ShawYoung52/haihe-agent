@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 
+_MODULE_MARKER = "_max_auto_station_rainfall_patch_installed"
+
+
 def _unwrap_tool_result(result: Any) -> Any:
     data = result
     if hasattr(data, "content"):
@@ -175,13 +178,14 @@ def install_max_auto_station_rainfall_patch() -> bool:
         print(f"[max_auto_station_rainfall_patch] message_orchestrator 导入失败，跳过补丁：{exc}")
         return False
 
+    if getattr(mo, _MODULE_MARKER, False):
+        print("[max_auto_station_rainfall_patch] 已安装过，无需重复安装")
+        return True
+
     original = getattr(mo, "_try_rainfall_analysis_fast_path", None)
     if not callable(original):
         print("[max_auto_station_rainfall_patch] 未找到降雨分析快速路径，跳过补丁")
         return False
-    if getattr(original, "_max_auto_station_rainfall_patch_installed", False):
-        print("[max_auto_station_rainfall_patch] 已安装过，无需重复安装")
-        return True
 
     async def patched_rainfall_analysis_fast_path(user_text: str, tools, messages, callbacks) -> bool:
         if not _should_use_max_auto_station_rainfall_path(user_text):
@@ -215,6 +219,8 @@ def install_max_auto_station_rainfall_patch() -> bool:
             return True
 
     patched_rainfall_analysis_fast_path._max_auto_station_rainfall_patch_installed = True
+    patched_rainfall_analysis_fast_path._max_auto_station_rainfall_original = original
     mo._try_rainfall_analysis_fast_path = patched_rainfall_analysis_fast_path
+    setattr(mo, _MODULE_MARKER, True)
     print("[max_auto_station_rainfall_patch] 已安装：自动站最大雨量快速路径")
     return True
