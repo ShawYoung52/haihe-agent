@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 
 from fastmcp import FastMCP
 
@@ -18,7 +18,7 @@ HOURLY_DATA_CODE = "SURF_CHN_MUL_HOR"
 HOURLY_RAIN_FIELD = "PRE_1h"
 
 
-def _safe_float(value: Any) -> float | None:
+def _safe_float(value: Any) -> Optional[float]:
     try:
         if value in (None, "", "None"):
             return None
@@ -37,7 +37,7 @@ def _safe_text(value: Any) -> str:
     return str(value).replace("<br>", "").replace("<br/>", "").replace("</br>", "").strip()
 
 
-def _parse_time(value: str | None) -> datetime | None:
+def _parse_time(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     text = str(value).strip()
@@ -53,6 +53,31 @@ def _default_reference_window() -> tuple[datetime, datetime]:
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
     start = now.replace(hour=0)
     return start, now
+
+
+def _no_data_response(
+    ref_start: datetime,
+    ref_end: datetime,
+    years: int,
+    message: str = "历史同期暂无有效自动站降雨量数据。",
+    debug_reason: str = "",
+) -> dict:
+    return {
+        "status": "no_data",
+        "query_type": "historical_same_period_avg_rainfall",
+        "reference_time_range_readable": f"{ref_start:%Y-%m-%d %H:%M:%S} ~ {ref_end:%Y-%m-%d %H:%M:%S}",
+        "years": years,
+        "valid_year_count": 0,
+        "message": message,
+        "yearly_records": [],
+        "summary": {
+            "historical_average_rainfall_mm": None,
+            "max_year": None,
+            "min_year": None,
+            "debug_reason": debug_reason[:300] if debug_reason else "",
+            "errors": [],
+        },
+    }
 
 
 def _safe_replace_year(dt: datetime, year: int) -> datetime:
@@ -103,7 +128,9 @@ def _station_location(record: dict) -> dict:
     }
 
 
-def _summarize_year(records: list[dict], year: int) -> dict | None:
+def _summarize_year(records: Any, year: int) -> Optional[dict]:
+    if not isinstance(records, list):
+        return None
     station_map: dict[str, dict] = {}
     for record in records or []:
         if not isinstance(record, dict):
@@ -144,11 +171,90 @@ def _historical_years(reference_end: datetime, years: int) -> list[int]:
     return [reference_end.year - i for i in range(1, years + 1)]
 
 
+def _query_impl(reference_start_time: Optional[str], reference_end_time: Optional[str], years: int) -> dict:
+    ref_start = _parse_time(reference_start_time)
+    ref_end = _parse_time(reference_end_time)
+    if not ref_start or not ref_end:
+        ref_start, ref_end = _default_reference_window()
+    if ref_end < ref_start:
+        ref_start, ref_end = ref_end, ref_start
+
+    years = max(1, min(int(years or 10), 30))
+    year_rows: list[dict] = []
+    errors: list[str] = []
+
+    try:
+        client = _get_music_client()
+    except Exception as exc:
+        reason = f"MUSIC客户端初始化失败：{exc}"
+        print(f"[historical_same_period_rainfall] {reason}")
+        return _no_data_response(ref_start, ref_end, years, debug_reason=reason)
+
+    for year in _historical_years(ref_end, years):
+        hist_start = _safe_replace_year(ref_start, year)
+        hist_end = _safe_replace_year(ref_end, year)
+        times = _hour_times(hist_start, hist_end)
+        if not times:
+            continue
+        try:
+            records = client.get_surf_ele_in_basin_by_time(
+                basin_codes=DEFAULT_BASIN_CODES,
+                times=times,
+                elements="Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime,PRE_1h",
+                data_code=HOURLY_DATA_CODE,
+                ele_value_ranges="PRE_1h:(,9999)",
+                order_by="PRE_1h:desc",
+            )
+        except Exception as exc:
+            msg = f"{year}: {str(exc)[:160]}"
+            print(f"[historical_same_period_rainfall] getSurfEleInBasinByTime 查询失败：{msg}")
+            errors.append(msg)
+            continue
+
+        try:
+            summary = _summarize_year(records, year)
+        except Exception as exc:
+            msg = f"{year}: 年度统计失败：{str(exc)[:160]}"
+            print(f"[historical_same_period_rainfall] {msg}")
+            errors.append(msg)
+            continue
+        if summary:
+            summary["time_range_readable"] = f"{hist_start:%Y-%m-%d %H:%M:%S} ~ {hist_end:%Y-%m-%d %H:%M:%S}"
+            year_rows.append(summary)
+
+    if not year_rows:
+        resp = _no_data_response(ref_start, ref_end, years)
+        resp["summary"]["errors"] = errors[:5]
+        return resp
+
+    avg = round(sum(float(r["average_rainfall_mm"]) for r in year_rows) / len(year_rows), 2)
+    max_year = max(year_rows, key=lambda r: float(r.get("average_rainfall_mm") or 0.0))
+    min_year = min(year_rows, key=lambda r: float(r.get("average_rainfall_mm") or 0.0))
+    years_sorted = sorted(int(r["year"]) for r in year_rows)
+
+    return {
+        "status": "ok",
+        "query_type": "historical_same_period_avg_rainfall",
+        "reference_time_range_readable": f"{ref_start:%Y-%m-%d %H:%M:%S} ~ {ref_end:%Y-%m-%d %H:%M:%S}",
+        "historical_year_range": f"{years_sorted[0]}—{years_sorted[-1]}",
+        "years": years,
+        "valid_year_count": len(year_rows),
+        "historical_average_rainfall_mm": avg,
+        "yearly_records": sorted(year_rows, key=lambda r: int(r["year"]), reverse=True),
+        "summary": {
+            "historical_average_rainfall_mm": avg,
+            "max_year": max_year,
+            "min_year": min_year,
+            "errors": errors[:5],
+        },
+    }
+
+
 def register_historical_same_period_rainfall_tool(mcp: FastMCP) -> None:
     @mcp.tool()
     def query_historical_same_period_avg_rainfall(
-        reference_start_time: str | None = None,
-        reference_end_time: str | None = None,
+        reference_start_time: Optional[str] = None,
+        reference_end_time: Optional[str] = None,
         years: int = 10,
     ) -> dict:
         """
@@ -158,79 +264,19 @@ def register_historical_same_period_rainfall_tool(mcp: FastMCP) -> None:
         默认参考时段：今天 00:00 到当前整点。
         统计口径：近 years 年同月日同小时段，海河流域自动站逐小时降雨量累加；每年先求自动站平均累计雨量，再对多年取平均。
         """
-        ref_start = _parse_time(reference_start_time)
-        ref_end = _parse_time(reference_end_time)
-        if not ref_start or not ref_end:
-            ref_start, ref_end = _default_reference_window()
-        if ref_end < ref_start:
-            ref_start, ref_end = ref_end, ref_start
-
-        years = max(1, min(int(years or 10), 30))
-        client = _get_music_client()
-        year_rows: list[dict] = []
-        errors: list[str] = []
-
-        for year in _historical_years(ref_end, years):
-            hist_start = _safe_replace_year(ref_start, year)
-            hist_end = _safe_replace_year(ref_end, year)
-            times = _hour_times(hist_start, hist_end)
-            if not times:
-                continue
+        ref_start, ref_end = _default_reference_window()
+        safe_years = 10
+        try:
+            safe_years = max(1, min(int(years or 10), 30))
+            return _query_impl(reference_start_time, reference_end_time, safe_years)
+        except Exception as exc:
+            reason = str(exc)[:300]
+            print(f"[historical_same_period_rainfall] 顶层兜底捕获异常：{reason}")
             try:
-                records = client.get_surf_ele_in_basin_by_time(
-                    basin_codes=DEFAULT_BASIN_CODES,
-                    times=times,
-                    elements="Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime,PRE_1h",
-                    data_code=HOURLY_DATA_CODE,
-                    ele_value_ranges="PRE_1h:(,9999)",
-                    order_by="PRE_1h:desc",
-                )
-            except Exception as exc:
-                msg = f"{year}: {str(exc)[:160]}"
-                print(f"[historical_same_period_rainfall] getSurfEleInBasinByTime 查询失败：{msg}")
-                errors.append(msg)
-                continue
-
-            summary = _summarize_year(records, year)
-            if summary:
-                summary["time_range_readable"] = f"{hist_start:%Y-%m-%d %H:%M:%S} ~ {hist_end:%Y-%m-%d %H:%M:%S}"
-                year_rows.append(summary)
-
-        if not year_rows:
-            return {
-                "status": "no_data",
-                "query_type": "historical_same_period_avg_rainfall",
-                "reference_time_range_readable": f"{ref_start:%Y-%m-%d %H:%M:%S} ~ {ref_end:%Y-%m-%d %H:%M:%S}",
-                "years": years,
-                "valid_year_count": 0,
-                "message": "历史同期暂无有效自动站降雨量数据。",
-                "yearly_records": [],
-                "summary": {
-                    "historical_average_rainfall_mm": None,
-                    "max_year": None,
-                    "min_year": None,
-                    "errors": errors[:5],
-                },
-            }
-
-        avg = round(sum(float(r["average_rainfall_mm"]) for r in year_rows) / len(year_rows), 2)
-        max_year = max(year_rows, key=lambda r: float(r.get("average_rainfall_mm") or 0.0))
-        min_year = min(year_rows, key=lambda r: float(r.get("average_rainfall_mm") or 0.0))
-        years_sorted = sorted(int(r["year"]) for r in year_rows)
-
-        return {
-            "status": "ok",
-            "query_type": "historical_same_period_avg_rainfall",
-            "reference_time_range_readable": f"{ref_start:%Y-%m-%d %H:%M:%S} ~ {ref_end:%Y-%m-%d %H:%M:%S}",
-            "historical_year_range": f"{years_sorted[0]}—{years_sorted[-1]}",
-            "years": years,
-            "valid_year_count": len(year_rows),
-            "historical_average_rainfall_mm": avg,
-            "yearly_records": sorted(year_rows, key=lambda r: int(r["year"]), reverse=True),
-            "summary": {
-                "historical_average_rainfall_mm": avg,
-                "max_year": max_year,
-                "min_year": min_year,
-                "errors": errors[:5],
-            },
-        }
+                parsed_start = _parse_time(reference_start_time)
+                parsed_end = _parse_time(reference_end_time)
+                if parsed_start and parsed_end:
+                    ref_start, ref_end = parsed_start, parsed_end
+            except Exception:
+                pass
+            return _no_data_response(ref_start, ref_end, safe_years, debug_reason=reason)
