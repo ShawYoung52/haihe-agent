@@ -11,15 +11,18 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from constants import DEFAULT_BASIN_CODES
+from constants import DEFAULT_BASIN_CODES, DEFAULT_OBS_ELEMENTS
 from haihe_mcp_tools import MusicClient, MusicConfig, _search_poi_core
 
 
-OBS_ELEMENTS = (
+# 优先查询完整天气要素；如果某些要素在当前资料中不支持，再降级到项目已有 DEFAULT_OBS_ELEMENTS。
+FULL_OBS_ELEMENTS = (
     "Station_Id_C,Station_levl,Lat,Lon,Alti,City,Station_Name,Cnty,Province,Town,"
     "Datetime,UPDATE_TIME,PRE_1h,PRE_3h,PRE_6h,PRE_12h,PRE_24h,PRE,"
     "TEM,RHU,PRS,WIN_D_Avg_2mi,WIN_S_Avg_2mi,WIN_D_INST,WIN_S_INST,VIS_HOR_1MI"
 )
+OBS_ELEMENT_CANDIDATES = [FULL_OBS_ELEMENTS, DEFAULT_OBS_ELEMENTS]
+SYNOPTIC_HOURS = (20, 14, 8, 2)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -45,9 +48,34 @@ def _distance_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _latest_hour_candidates(hours_back: int = 4) -> list[str]:
+def _latest_observation_candidates(hours_back: int = 24) -> list[str]:
+    """生成最近可用定时观测候选时次。
+
+    海河站点实况工具已有说明：主要使用 02/08/14/20 时定时观测。
+    例如 14:29 时，14 时资料可能尚未入库，因此要继续尝试 08、02、前一日20。
+    """
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
-    return [(now - timedelta(hours=i)).strftime("%Y%m%d%H%M%S") for i in range(max(int(hours_back), 1))]
+    start = now - timedelta(hours=max(int(hours_back or 24), 6))
+    candidates: list[datetime] = []
+    day = now.date()
+    while datetime.combine(day, datetime.min.time()) >= datetime.combine(start.date(), datetime.min.time()) - timedelta(days=1):
+        for hour in SYNOPTIC_HOURS:
+            dt = datetime.combine(day, datetime.min.time()).replace(hour=hour)
+            if start <= dt <= now:
+                candidates.append(dt)
+        day = day - timedelta(days=1)
+    candidates.sort(reverse=True)
+    # 再加当前整点兜一下，防止未来接口支持逐小时资料。
+    if now not in candidates:
+        candidates.insert(0, now)
+    out: list[str] = []
+    seen: set[str] = set()
+    for dt in candidates:
+        s = dt.strftime("%Y%m%d%H%M%S")
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:12]
 
 
 def _pick_first_poi(keyword: str) -> dict | None:
@@ -84,15 +112,15 @@ def _observation_time(record: dict, fallback_time: str) -> str:
 
 def _clean_observation(record: dict) -> dict:
     field_map = {
+        "TEM": "气温(℃)",
+        "RHU": "相对湿度(%)",
+        "PRS": "气压(hPa)",
         "PRE_1h": "1小时降水量(mm)",
         "PRE_3h": "3小时降水量(mm)",
         "PRE_6h": "6小时降水量(mm)",
         "PRE_12h": "12小时降水量(mm)",
         "PRE_24h": "24小时降水量(mm)",
-        "PRE": "分钟/当前降水量(mm)",
-        "TEM": "气温(℃)",
-        "RHU": "相对湿度(%)",
-        "PRS": "气压(hPa)",
+        "PRE": "当前降水量(mm)",
         "WIN_D_Avg_2mi": "2分钟平均风向(°)",
         "WIN_S_Avg_2mi": "2分钟平均风速(m/s)",
         "WIN_D_INST": "瞬时风向(°)",
@@ -110,23 +138,37 @@ def _clean_observation(record: dict) -> dict:
     return obs
 
 
-def _query_station_records(client: MusicClient, basin_codes: str, hours_back: int) -> tuple[str, list[dict]]:
+def _valid_station_rows(rows: Any) -> list[dict]:
+    return [
+        r for r in (rows or [])
+        if isinstance(r, dict)
+        and _safe_float(r.get("Lon")) is not None
+        and _safe_float(r.get("Lat")) is not None
+    ]
+
+
+def _query_station_records(client: MusicClient, basin_codes: str, hours_back: int) -> tuple[str, list[dict], str]:
     last_error = ""
-    for time_s in _latest_hour_candidates(hours_back):
-        try:
-            rows = client.get_surf_ele_in_basin_by_time(
-                basin_codes=basin_codes,
-                times=time_s,
-                elements=OBS_ELEMENTS,
-                data_code="SURF_CHN_MUL_HOR",
-            )
-        except Exception as exc:
-            last_error = str(exc)[:200]
-            rows = []
-        valid = [r for r in rows or [] if isinstance(r, dict) and _safe_float(r.get("Lon")) is not None and _safe_float(r.get("Lat")) is not None]
-        if valid:
-            return time_s, valid
-    raise RuntimeError(last_error or "未查询到含经纬度的站点实况数据")
+    tried: list[str] = []
+    for time_s in _latest_observation_candidates(hours_back):
+        for elements in OBS_ELEMENT_CANDIDATES:
+            tried.append(time_s)
+            try:
+                rows = client.get_surf_ele_in_basin_by_time(
+                    basin_codes=basin_codes,
+                    times=time_s,
+                    elements=elements,
+                    data_code="SURF_CHN_MUL_HOR",
+                )
+            except Exception as exc:
+                last_error = str(exc)[:200]
+                rows = []
+            valid = _valid_station_rows(rows)
+            if valid:
+                source = "full" if elements == FULL_OBS_ELEMENTS else "basic"
+                return time_s, valid, source
+    tried_text = ",".join(dict.fromkeys(tried))[:160]
+    raise RuntimeError(last_error or f"未查询到含经纬度的站点实况数据，tried={tried_text}")
 
 
 def _nearest_station(poi: dict, records: list[dict]) -> dict | None:
@@ -162,7 +204,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
     def query_poi_nearest_observation(
         keyword: str,
         basin_codes: str = DEFAULT_BASIN_CODES,
-        hours_back: int = 4,
+        hours_back: int = 24,
         max_distance_km: float = 80.0,
     ) -> dict:
         """查询某个 POI 的经纬度，并返回最近观测站的实况值。"""
@@ -179,7 +221,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
 
         try:
             client = MusicClient(MusicConfig())
-            query_time, records = _query_station_records(client, basin_codes, hours_back)
+            query_time, records, obs_source = _query_station_records(client, basin_codes, hours_back)
             nearest = _nearest_station(poi, records)
         except Exception as exc:
             return _error_payload(keyword, "最近观测站实况查询失败。", str(exc))
@@ -201,6 +243,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
             "poi": poi,
             "query_time": query_time,
             "observation_time": _observation_time(record, query_time),
+            "observation_source": obs_source,
             "nearest_station": {
                 "station_id": _station_id(record),
                 "station_name": _station_name(record),
