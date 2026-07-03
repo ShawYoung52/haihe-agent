@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 
+_MODULE_MARKER = "_last_month_areal_patch_installed"
+
+
 def _unwrap_tool_result(result: Any) -> Any:
     data = result
     if hasattr(data, "content"):
@@ -203,13 +206,14 @@ def install_last_month_areal_patch() -> bool:
         print(f"[last_month_areal_patch] message_orchestrator 导入失败，跳过补丁：{exc}")
         return False
 
+    if getattr(mo, _MODULE_MARKER, False):
+        print("[last_month_areal_patch] 已安装过，无需重复安装")
+        return True
+
     original = getattr(mo, "_try_basin_areal_rainfall_fast_path", None)
     if not callable(original):
         print("[last_month_areal_patch] 未找到面雨量快速路径，跳过补丁")
         return False
-    if getattr(original, "_last_month_patch_installed", False):
-        print("[last_month_areal_patch] 已安装过，无需重复安装")
-        return True
 
     async def patched_basin_areal_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
         if not _should_use_last_month_areal_path(user_text):
@@ -249,6 +253,8 @@ def install_last_month_areal_patch() -> bool:
             return True
 
     patched_basin_areal_rainfall_fast_path._last_month_patch_installed = True
+    patched_basin_areal_rainfall_fast_path._last_month_original = original
     mo._try_basin_areal_rainfall_fast_path = patched_basin_areal_rainfall_fast_path
+    setattr(mo, _MODULE_MARKER, True)
     print("[last_month_areal_patch] 已安装：上个月面雨量快速路径")
     return True
