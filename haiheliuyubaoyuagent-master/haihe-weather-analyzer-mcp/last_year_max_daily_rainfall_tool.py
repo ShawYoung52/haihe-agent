@@ -1,10 +1,7 @@
 """去年最大日降雨量 MCP 工具。
 
 用于回答“去年最大日降雨量是多少”这类明确历史统计问题。
-默认统计上一个自然年内海河流域站点日降雨量，并返回最大站点日雨量。
-
-注意：该工具默认只走天擎全年统计接口，不再自动逐日逐小时遍历全年。
-逐小时兜底会触发最多 365 次接口调用，线上问答会卡住，因此仅保留为显式调试选项。
+按用户指定接口 getSurfEleInBasinByTime 查询海河流域日资料，统计上一个自然年最大日降雨量。
 """
 from __future__ import annotations
 
@@ -17,14 +14,17 @@ from constants import DEFAULT_BASIN_CODES
 from tools import _get_music_client
 
 
-def _previous_calendar_year_range(now: datetime | None = None) -> tuple[datetime, datetime, str, str, str]:
+DAILY_DATA_CODE = "SURF_CHN_MUL_DAY"
+DAILY_RAIN_FIELD = "PRE_Time_0808"
+
+
+def _previous_calendar_year_range(now: datetime | None = None) -> tuple[datetime, datetime, str, str]:
     now = now or datetime.now()
     year = now.year - 1
     start = datetime(year, 1, 1, 0, 0, 0)
     end = datetime(year, 12, 31, 23, 59, 59)
     readable = f"{start:%Y-%m-%d %H:%M:%S} ~ {end:%Y-%m-%d %H:%M:%S}"
-    music_range = f"[{start:%Y%m%d%H%M%S},{end:%Y%m%d%H%M%S}]"
-    return start, end, readable, music_range, str(year)
+    return start, end, readable, str(year)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -43,24 +43,6 @@ def _safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).replace("<br>", "").replace("<br/>", "").replace("</br>", "").strip()
-
-
-def _iter_daily_ranges(start: datetime, end: datetime):
-    cur = start.replace(hour=0, minute=0, second=0, microsecond=0)
-    while cur <= end:
-        day_start = max(cur, start)
-        day_end = min(cur.replace(hour=23, minute=59, second=59), end)
-        yield day_start, day_end
-        cur += timedelta(days=1)
-
-
-def _hour_times_for_day(day_start: datetime, day_end: datetime) -> str:
-    times: list[str] = []
-    cur = day_start.replace(minute=0, second=0, microsecond=0)
-    while cur <= day_end:
-        times.append(cur.strftime("%Y%m%d%H%M%S"))
-        cur += timedelta(hours=1)
-    return ",".join(times)
 
 
 def _station_name(record: dict) -> str:
@@ -101,7 +83,7 @@ def _date_from_record(record: dict, fallback: str = "") -> str:
 
 
 def _daily_rain_from_record(record: dict) -> float | None:
-    for key in ("MAX_PRE_Time_0808", "PRE_Time_0808", "SUM_PRE_1H", "SUM_PRE_1h", "daily_rainfall_mm"):
+    for key in (DAILY_RAIN_FIELD, "PRE_Time_2020", "PRE_Time_0808", "daily_rainfall_mm"):
         value = _safe_float(record.get(key))
         if value is not None:
             return value
@@ -127,109 +109,71 @@ def _update_top_records(top_records: list[dict], candidate: dict, top_n: int) ->
     return top_records[: max(1, int(top_n or 10))]
 
 
-def _query_fast_stat(client, music_range: str, top_n: int) -> tuple[list[dict], str]:
-    """优先使用天擎统计接口直接取全年最大日降雨量，失败时返回错误说明。"""
-    try:
-        records = client.stat_surf_pre_in_basin_new(
-            basin_codes=DEFAULT_BASIN_CODES,
-            timeRange=music_range,
-            elements="Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime",
-            statEles="MAX_PRE_Time_0808",
-            ele_value_ranges="PRE_Time_0808:(,9999)",
-            order_by="MAX_PRE_Time_0808:desc",
-            limit_cnt=max(1, int(top_n or 10)),
-            data_code="SURF_CHN_MUL_DAY",
-        )
-    except Exception as exc:
-        err = str(exc)[:300]
-        print(f"[last_year_max_daily_rainfall] 统计接口失败：{err}")
-        return [], err
-
-    candidates: list[dict] = []
-    for record in records or []:
-        if not isinstance(record, dict):
-            continue
-        candidate = _candidate_from_record(record)
-        if candidate:
-            candidates.append(candidate)
-    candidates.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
-    return candidates[: max(1, int(top_n or 10))], ""
+def _month_time_groups(start: datetime, end: datetime) -> list[tuple[str, str]]:
+    """按月生成 getSurfEleInBasinByTime 的 times，避免一次请求 URL 过长。"""
+    groups: list[tuple[str, str]] = []
+    cur = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while cur <= end:
+        next_month = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+        month_end = min(next_month - timedelta(days=1), end)
+        times: list[str] = []
+        day = cur
+        while day <= month_end:
+            # 日资料的 Datetime 通常为每日 00:00:00。
+            times.append(day.strftime("%Y%m%d000000"))
+            day += timedelta(days=1)
+        if times:
+            groups.append((cur.strftime("%Y-%m"), ",".join(times)))
+        cur = next_month
+    return groups
 
 
-def _query_by_daily_hourly_sum(client, start: datetime, end: datetime, top_n: int) -> tuple[list[dict], dict]:
-    """慢速调试兜底：逐日拉小时站点雨量并累加。线上问答默认不调用。"""
+def _query_daily_by_basin_time(client, start: datetime, end: datetime, top_n: int) -> tuple[list[dict], dict]:
+    """使用用户指定的 getSurfEleInBasinByTime 查询日资料并统计最大日降雨量。"""
     top_records: list[dict] = []
-    processed_days = 0
-    days_with_data = 0
-    total_station_day_count = 0
+    queried_months = 0
+    months_with_data = 0
+    source_record_count = 0
+    error_messages: list[str] = []
 
-    for day_start, day_end in _iter_daily_ranges(start, end):
-        processed_days += 1
-        times = _hour_times_for_day(day_start, day_end)
-        if not times:
-            continue
+    for month_label, times in _month_time_groups(start, end):
+        queried_months += 1
         try:
             records = client.get_surf_ele_in_basin_by_time(
                 basin_codes=DEFAULT_BASIN_CODES,
                 times=times,
-                elements="Station_Id_C,Lat,Lon,City,Station_Name,Cnty,Province,Town,PRE_1h",
+                elements="Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime,PRE_Time_0808",
+                data_code=DAILY_DATA_CODE,
+                ele_value_ranges="PRE_Time_0808:(,9999)",
+                order_by="PRE_Time_0808:desc",
+                limit_cnt=max(20, int(top_n or 10)),
             )
         except Exception as exc:
-            print(f"[last_year_max_daily_rainfall] {day_start:%Y-%m-%d} 站点降雨查询失败：{exc}")
-            continue
-        if not records:
+            msg = f"{month_label}: {str(exc)[:120]}"
+            print(f"[last_year_max_daily_rainfall] getSurfEleInBasinByTime 查询失败：{msg}")
+            error_messages.append(msg)
             continue
 
-        station_map: dict[str, dict] = {}
+        if not records:
+            continue
+        months_with_data += 1
+        source_record_count += len(records)
+
         for record in records:
             if not isinstance(record, dict):
                 continue
-            sid = _station_id(record)
-            if not sid:
-                continue
-            rain = _safe_float(record.get("PRE_1h"))
-            if rain is None:
-                continue
-            if sid not in station_map:
-                station_map[sid] = {
-                    "station_id": sid,
-                    "station_name": _station_name(record),
-                    **_station_location(record),
-                    "daily_rainfall_mm": 0.0,
-                }
-            station_map[sid]["daily_rainfall_mm"] += float(rain)
-
-        day_candidates = []
-        for item in station_map.values():
-            daily = round(float(item.get("daily_rainfall_mm") or 0.0), 2)
-            if daily <= 0:
-                continue
-            candidate = {
-                "date": f"{day_start:%Y-%m-%d}",
-                "daily_rainfall_mm": daily,
-                "station_id": item.get("station_id"),
-                "station_name": item.get("station_name"),
-                "province": item.get("province"),
-                "city": item.get("city"),
-                "county": item.get("county"),
-                "town": item.get("town"),
-                "lon": item.get("lon"),
-                "lat": item.get("lat"),
-            }
-            day_candidates.append(candidate)
-
-        if not day_candidates:
-            continue
-        days_with_data += 1
-        total_station_day_count += len(day_candidates)
-        day_candidates.sort(key=lambda x: float(x.get("daily_rainfall_mm") or 0.0), reverse=True)
-        for candidate in day_candidates[:top_n]:
-            top_records = _update_top_records(top_records, candidate, top_n)
+            candidate = _candidate_from_record(record)
+            if candidate:
+                top_records = _update_top_records(top_records, candidate, top_n)
 
     return top_records, {
-        "processed_days": processed_days,
-        "days_with_data": days_with_data,
-        "station_day_count": total_station_day_count,
+        "method": "getSurfEleInBasinByTime_daily",
+        "data_code": DAILY_DATA_CODE,
+        "rain_field": DAILY_RAIN_FIELD,
+        "queried_months": queried_months,
+        "months_with_data": months_with_data,
+        "source_record_count": source_record_count,
+        "errors": error_messages[:5],
     }
 
 
@@ -240,39 +184,23 @@ def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
         查询上一个自然年海河流域最大日降雨量。
 
         适用于：“去年最大日降雨量是多少”“去年哪个站日降雨最大”“去年最大单日降雨”。
-        统计口径：默认使用天擎日资料 PRE_Time_0808 全年最大值。
-        allow_slow_fallback=True 时，统计接口无结果才逐小时累加全年；线上问答不建议开启。
+        统计口径：使用 getSurfEleInBasinByTime + SURF_CHN_MUL_DAY + PRE_Time_0808 查询日资料。
+        allow_slow_fallback 参数为兼容旧前端保留，当前不再执行逐小时慢查询。
         """
-        start, end, readable, music_range, year_label = _previous_calendar_year_range()
+        start, end, readable, year_label = _previous_calendar_year_range()
         top_n = max(1, min(int(top_n or 10), 50))
         client = _get_music_client()
 
-        records, stat_error = _query_fast_stat(client, music_range, top_n)
-        summary_extra = {
-            "processed_days": 0,
-            "days_with_data": 0,
-            "station_day_count": 0,
-            "method": "stat_daily_pre_0808",
-            "stat_error": stat_error,
-            "slow_fallback_enabled": bool(allow_slow_fallback),
-        }
-
-        if not records and allow_slow_fallback:
-            records, fallback_summary = _query_by_daily_hourly_sum(client, start, end, top_n)
-            summary_extra.update(fallback_summary)
-            summary_extra["method"] = "hourly_pre_1h_sum"
-
+        records, summary_extra = _query_daily_by_basin_time(client, start, end, top_n)
         max_record = records[0] if records else None
+
         if not max_record:
-            msg = f"{year_label}年海河流域暂无有效日降雨量数据。"
-            if stat_error and not allow_slow_fallback:
-                msg = f"{year_label}年最大日降雨量统计接口暂未返回有效结果，请稍后重试。"
             return {
                 "status": "no_data",
                 "query_type": "last_year_max_daily_rainfall",
                 "year": year_label,
                 "time_range_readable": readable,
-                "message": msg,
+                "message": f"{year_label}年海河流域暂无有效日降雨量数据。",
                 "records": [],
                 "summary": {
                     **summary_extra,
