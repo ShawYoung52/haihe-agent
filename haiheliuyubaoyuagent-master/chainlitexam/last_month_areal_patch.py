@@ -14,6 +14,16 @@ from typing import Any
 _MODULE_MARKER = "_last_month_areal_patch_installed"
 
 
+def _install_related_routes() -> None:
+    """安装同属面雨量/子流域入口的后续专用路由。"""
+    try:
+        from subbasin_max_rainfall_patch import install_subbasin_max_rainfall_patch
+
+        install_subbasin_max_rainfall_patch()
+    except Exception as exc:
+        print(f"[last_month_areal_patch] subbasin max rainfall route init failed: {exc}")
+
+
 def _unwrap_tool_result(result: Any) -> Any:
     data = result
     if hasattr(data, "content"):
@@ -208,11 +218,13 @@ def install_last_month_areal_patch() -> bool:
 
     if getattr(mo, _MODULE_MARKER, False):
         print("[last_month_areal_patch] 已安装过，无需重复安装")
+        _install_related_routes()
         return True
 
     original = getattr(mo, "_try_basin_areal_rainfall_fast_path", None)
     if not callable(original):
         print("[last_month_areal_patch] 未找到面雨量快速路径，跳过补丁")
+        _install_related_routes()
         return False
 
     async def patched_basin_areal_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -257,4 +269,5 @@ def install_last_month_areal_patch() -> bool:
     mo._try_basin_areal_rainfall_fast_path = patched_basin_areal_rainfall_fast_path
     setattr(mo, _MODULE_MARKER, True)
     print("[last_month_areal_patch] 已安装：上个月面雨量快速路径")
+    _install_related_routes()
     return True
