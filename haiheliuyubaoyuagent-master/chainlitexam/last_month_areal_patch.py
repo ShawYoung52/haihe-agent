@@ -23,6 +23,13 @@ def _install_related_routes() -> None:
     except Exception as exc:
         print(f"[last_month_areal_patch] subbasin max rainfall route init failed: {exc}")
 
+    try:
+        from year_to_date_rainfall_patch import install_year_to_date_rainfall_patch
+
+        install_year_to_date_rainfall_patch()
+    except Exception as exc:
+        print(f"[last_month_areal_patch] year-to-date rainfall route init failed: {exc}")
+
 
 def _unwrap_tool_result(result: Any) -> Any:
     data = result
