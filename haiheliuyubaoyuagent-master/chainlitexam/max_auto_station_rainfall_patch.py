@@ -13,6 +13,16 @@ from typing import Any
 _MODULE_MARKER = "_max_auto_station_rainfall_patch_installed"
 
 
+def _install_related_routes() -> None:
+    """安装依赖同一降雨分析入口的后续专用路由，避免继续改 utils/db.py。"""
+    try:
+        from historical_same_period_rainfall_patch import install_historical_same_period_rainfall_patch
+
+        install_historical_same_period_rainfall_patch()
+    except Exception as exc:
+        print(f"[max_auto_station_rainfall_patch] historical same period route init failed: {exc}")
+
+
 def _unwrap_tool_result(result: Any) -> Any:
     data = result
     if hasattr(data, "content"):
@@ -185,11 +195,13 @@ def install_max_auto_station_rainfall_patch() -> bool:
 
     if getattr(mo, _MODULE_MARKER, False):
         print("[max_auto_station_rainfall_patch] 已安装过，无需重复安装")
+        _install_related_routes()
         return True
 
     original = getattr(mo, "_try_rainfall_analysis_fast_path", None)
     if not callable(original):
         print("[max_auto_station_rainfall_patch] 未找到降雨分析快速路径，跳过补丁")
+        _install_related_routes()
         return False
 
     async def patched_rainfall_analysis_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -228,4 +240,5 @@ def install_max_auto_station_rainfall_patch() -> bool:
     mo._try_rainfall_analysis_fast_path = patched_rainfall_analysis_fast_path
     setattr(mo, _MODULE_MARKER, True)
     print("[max_auto_station_rainfall_patch] 已安装：自动站最大雨量快速路径")
+    _install_related_routes()
     return True
