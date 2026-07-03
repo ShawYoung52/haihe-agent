@@ -193,7 +193,7 @@ async def _query_last_month_with_fallback(mo, last_month_tool, fallback_tool, ti
         legacy = _unwrap_tool_result(
             await _ainvoke_with_timeout(
                 fallback_tool,
-                {"zone_type": "9", "time_range": time_range},
+                {"zone_type": "9", "time_range": time_range, "hours": 24},
             )
         )
         return _normalize_legacy_payload(legacy, time_label, month)
