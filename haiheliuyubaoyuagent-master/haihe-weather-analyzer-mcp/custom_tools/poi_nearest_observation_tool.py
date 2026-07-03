@@ -26,6 +26,9 @@ FULL_OBS_ELEMENTS = (
     "TEM,RHU,PRS,WIN_D_Avg_2mi,WIN_S_Avg_2mi,WIN_D_INST,WIN_S_INST,VIS_HOR_1MI"
 )
 OBS_ELEMENT_CANDIDATES = [FULL_OBS_ELEMENTS, DEFAULT_OBS_ELEMENTS]
+NON_TIANJIN_REGION_WORDS = (
+    "河北", "唐山", "丰润", "北京", "保定", "廊坊", "沧州", "秦皇岛", "山东", "山西", "河南", "辽宁"
+)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -42,12 +45,20 @@ def _safe_float(value: Any) -> float | None:
     return number
 
 
-def _is_tianjin_text(item: dict) -> bool:
-    text = " ".join(
+def _poi_text(item: dict) -> str:
+    return " ".join(
         str(item.get(k) or "")
         for k in ("name", "address", "category_1", "category_2")
     )
-    return "天津" in text
+
+
+def _is_tianjin_text(item: dict) -> bool:
+    return "天津" in _poi_text(item)
+
+
+def _has_non_tianjin_region_text(item: dict) -> bool:
+    text = _poi_text(item)
+    return any(w in text for w in NON_TIANJIN_REGION_WORDS)
 
 
 def _distance_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -116,11 +127,14 @@ def _pick_first_poi(keyword: str) -> dict | None:
         return None
 
     if "天津" in keyword:
-        # 用户明确指定天津时，必须在 POI 名称/地址/类别文本中出现“天津”。
-        # 不能只靠经纬度粗框，否则会把唐山、河北同名“气象局”误认为天津。
-        candidates = [item for item in candidates if _is_tianjin_text(item)]
+        # 用户明确指定天津时，POI 文本必须出现“天津”，且不能出现明确外省地名。
+        # 这样宁可查不到，也不能把河北/唐山同名点当成天津点。
+        candidates = [
+            item for item in candidates
+            if _is_tianjin_text(item) and not _has_non_tianjin_region_text(item)
+        ]
         if not candidates:
-            logger.warning("[poi_nearest_observation] no textual Tianjin POI candidate for keyword=%s", keyword)
+            logger.warning("[poi_nearest_observation] no strict Tianjin POI candidate for keyword=%s", keyword)
             return None
 
     def score(item: dict) -> tuple[int, int, int]:
@@ -203,11 +217,31 @@ def _query_basin_rows(client: MusicClient, time_s: str, elements: str, basin_cod
     )
 
 
+def _nearest_station(poi: dict, records: list[dict]) -> dict | None:
+    lon, lat = float(poi["longitude"]), float(poi["latitude"])
+    nearest = None
+    best = None
+    for row in records:
+        slon = _safe_float(row.get("Lon"))
+        slat = _safe_float(row.get("Lat"))
+        if slon is None or slat is None:
+            continue
+        d = _distance_km(lon, lat, slon, slat)
+        if best is None or d < best:
+            best = d
+            nearest = row
+    if nearest is None or best is None:
+        return None
+    return {"record": nearest, "distance_km": round(best, 2)}
+
+
 def _query_station_records(
     client: MusicClient,
     basin_codes: str,
     hours_back: int,
-    admin_code: str = TIANJIN_ADMIN_CODE,
+    admin_code: str,
+    poi: dict,
+    max_distance_km: float,
 ) -> tuple[str, list[dict], str]:
     last_error = ""
     tried: list[str] = []
@@ -233,34 +267,28 @@ def _query_station_records(
                     logger.warning("[poi_nearest_observation] %s", last_error)
                     rows = []
                 valid = _valid_station_rows(rows)
-                if valid:
+                if not valid:
+                    continue
+                nearest = _nearest_station(poi, valid)
+                if nearest and float(nearest["distance_km"]) <= float(max_distance_km):
                     logger.warning(
-                        "[poi_nearest_observation] hit %s@%s valid_rows=%s",
+                        "[poi_nearest_observation] hit %s@%s valid_rows=%s nearest_distance_km=%s",
                         source,
                         time_s,
                         len(valid),
+                        nearest["distance_km"],
                     )
                     return time_s, valid, source
-    tried_text = ";".join(tried)[:260]
+                if nearest:
+                    record = nearest.get("record") or {}
+                    last_error = (
+                        f"{source}@{time_s}: nearest_distance_km={nearest['distance_km']}; "
+                        f"poi={poi.get('name')}({poi.get('longitude')},{poi.get('latitude')}); "
+                        f"station={_station_name(record)}({_safe_float(record.get('Lon'))},{_safe_float(record.get('Lat'))})"
+                    )
+                    logger.warning("[poi_nearest_observation] %s", last_error)
+    tried_text = ";".join(tried)[:220]
     raise RuntimeError(last_error or f"逐小时站点实况无有效经纬度数据，tried={tried_text}")
-
-
-def _nearest_station(poi: dict, records: list[dict]) -> dict | None:
-    lon, lat = float(poi["longitude"]), float(poi["latitude"])
-    nearest = None
-    best = None
-    for row in records:
-        slon = _safe_float(row.get("Lon"))
-        slat = _safe_float(row.get("Lat"))
-        if slon is None or slat is None:
-            continue
-        d = _distance_km(lon, lat, slon, slat)
-        if best is None or d < best:
-            best = d
-            nearest = row
-    if nearest is None or best is None:
-        return None
-    return {"record": nearest, "distance_km": round(best, 2)}
 
 
 def _error_payload(keyword: str, message: str, debug_reason: str = "") -> dict:
@@ -269,7 +297,7 @@ def _error_payload(keyword: str, message: str, debug_reason: str = "") -> dict:
         "query_type": "poi_nearest_observation",
         "keyword": keyword,
         "message": message,
-        "debug_reason": debug_reason[:300] if debug_reason else "",
+        "debug_reason": debug_reason[:500] if debug_reason else "",
     }
 
 
@@ -304,7 +332,14 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
 
         try:
             client = MusicClient(MusicConfig())
-            query_time, records, obs_source = _query_station_records(client, basin_codes, hours_back, admin_code)
+            query_time, records, obs_source = _query_station_records(
+                client,
+                basin_codes,
+                hours_back,
+                admin_code,
+                poi,
+                max_distance_km,
+            )
             nearest = _nearest_station(poi, records)
         except Exception as exc:
             logger.warning("[poi_nearest_observation] failed keyword=%s error=%s", keyword, exc)
@@ -313,10 +348,15 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
         if not nearest:
             return _error_payload(keyword, "未找到可用于匹配的最近观测站。")
         if float(nearest["distance_km"]) > float(max_distance_km):
+            record = nearest.get("record") or {}
             return _error_payload(
                 keyword,
                 f"已定位到 POI，但 {max_distance_km:g} 公里内未找到可用观测站。",
-                f"nearest_distance_km={nearest['distance_km']}",
+                (
+                    f"nearest_distance_km={nearest['distance_km']}; "
+                    f"poi={poi.get('name')}({poi.get('address')},{poi.get('longitude')},{poi.get('latitude')}); "
+                    f"station={_station_name(record)}({_safe_float(record.get('Lon'))},{_safe_float(record.get('Lat'))})"
+                ),
             )
 
         record = nearest["record"]
