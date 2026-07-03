@@ -1,6 +1,6 @@
 """降雨类自然语言快速路径。
 
-集中安装前端 fast path，避免继续在 chainlitexam 根目录堆多个 *_patch.py 文件。
+面雨量/分区/子流域类问题统一强制海河9分区口径；拿不到9分区时不展示细分区。
 """
 from __future__ import annotations
 
@@ -72,24 +72,24 @@ def _rain_value(row: dict) -> float:
     return _to_float(_pick_number(row, "avg_rainfall_mm", "avg", "average_rainfall_mm", "mean"))
 
 
-def _normalize_areal_records(data: Any, default_zone_label: str = "海河9分区", require_zone9: bool = False) -> tuple[list[dict], str]:
+def _normalize_zone9(data: Any) -> tuple[list[dict], str, dict]:
+    """只接受海河9分区结果；超过12条视为细分区，直接拒绝展示。"""
     if isinstance(data, dict):
+        if data.get("status") == "no_data":
+            return [], "海河9分区", data.get("summary") if isinstance(data.get("summary"), dict) else {}
         records = _valid_records(data.get("records") or data.get("data") or [])
-        if not records and isinstance(data.get("summary"), dict) and isinstance(data["summary"].get("records"), list):
-            records = _valid_records(data["summary"].get("records"))
-        zone_label = data.get("zone_label") or data.get("zone_type_label") or default_zone_label
+        zone_label = data.get("zone_label") or data.get("zone_type_label") or "海河9分区"
+        summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     elif isinstance(data, list):
         records = _valid_records(data)
-        zone_label = default_zone_label if len(records) <= 12 else "海河流域面雨量分区"
+        zone_label = "海河9分区" if len(records) <= 12 else "海河流域面雨量分区"
+        summary = {}
     else:
-        records = []
-        zone_label = default_zone_label
-
+        records, zone_label, summary = [], "海河9分区", {}
     records.sort(key=_rain_value, reverse=True)
-    if require_zone9 and len(records) > 12:
-        # 业务明确要求海河9分区时，不能把细分区直接展示给用户。
-        return [], "海河9分区"
-    return records, zone_label
+    if len(records) > 12:
+        return [], "海河9分区", summary
+    return records, "海河9分区", summary
 
 
 def _today_like_window(user_text: str) -> tuple[str, str]:
@@ -176,18 +176,23 @@ def _is_year_to_date(text: str) -> bool:
 
 def _format_last_month(mo, data: Any, time_label: str, month: str) -> str:
     if isinstance(data, dict) and data.get("status") == "no_data":
-        return data.get("message") or f"{month}海河流域面雨量暂无有效数据。"
-    records, zone_label = _normalize_areal_records(data, "海河9分区")
+        return data.get("message") or f"{month}暂无有效海河9分区面雨量数据。"
+    records, zone_label, summary = _normalize_zone9(data)
     if not records:
-        return f"{month}海河流域面雨量暂无有效数据。"
+        return f"{month}暂无有效海河9分区面雨量数据。"
+    basin_avg = _pick_number(summary, "simple_mean_of_zone_rainfall_mm") if summary else "-"
+    zone_total = _pick_number(summary, "total_of_zone_rainfall_mm") if summary else "-"
     lines = [
         f"## 海河流域上月面雨量对比（{month}）\n\n",
         f"**统计时段**：{_safe_cell(mo, time_label)}（北京时）  \n",
-        f"**分区体系**：{_safe_cell(mo, zone_label)}\n\n",
-        "| 排名 | 分区 | 累计面雨量(mm) | 最大面雨量(mm) |\n",
-        "| :--- | :--- | :--- | :--- |\n",
+        f"**分区体系**：{_safe_cell(mo, zone_label)}  \n",
     ]
-    for idx, item in enumerate(records[:20], 1):
+    if basin_avg != "-":
+        lines.append(f"**上月流域累计面雨量**：{basin_avg} mm  \n")
+    if zone_total != "-":
+        lines.append(f"**9分区累计值合计**：{zone_total} mm\n")
+    lines.append("\n| 排名 | 分区 | 累计面雨量(mm) | 最大面雨量(mm) |\n| :--- | :--- | :--- | :--- |\n")
+    for idx, item in enumerate(records[:9], 1):
         lines.append(f"| {idx} | {_safe_cell(mo, _zone_name(item))} | {_pick_number(item, 'avg_rainfall_mm', 'avg', 'average_rainfall_mm', 'mean')} | {_pick_number(item, 'max_rainfall_mm', 'max', 'maximum_rainfall_mm', 'maximum')} |\n")
     max_zone = records[0]
     lines.append(f"\n**上月累计面雨量最大的分区**：{_safe_cell(mo, _zone_name(max_zone))}，累计面雨量 {_pick_number(max_zone, 'avg_rainfall_mm', 'avg', 'average_rainfall_mm', 'mean')} mm。\n")
@@ -195,13 +200,15 @@ def _format_last_month(mo, data: Any, time_label: str, month: str) -> str:
 
 
 def _format_subbasin_max(mo, data: Any, time_label: str) -> str:
-    records, zone_label = _normalize_areal_records(data, "海河9分区/子流域")
+    if isinstance(data, dict) and data.get("status") == "no_data":
+        return data.get("message") or "当前时段暂无有效海河9分区面雨量数据。"
+    records, zone_label, _ = _normalize_zone9(data)
     if not records:
-        return "当前时段暂未查询到有效子流域降雨数据。"
+        return "当前时段暂无有效海河9分区面雨量数据。"
     top = records[0]
     lines = [
         "## 子流域降雨最多结果\n\n",
-        f"**统计时段**：{_safe_cell(mo, time_label)}（北京时）  \n",
+        f"**统计时段**：{_safe_cell(mo, (data.get('time_range_readable') if isinstance(data, dict) else None) or time_label)}（北京时）  \n",
         f"**分区体系**：{_safe_cell(mo, zone_label)}  \n",
         f"**降雨最多的子流域**：{_safe_cell(mo, _zone_name(top, '未知子流域'))}  \n",
         f"**累计面雨量**：{_pick_number(top, 'avg_rainfall_mm', 'avg', 'average_rainfall_mm', 'mean')} mm  \n",
@@ -209,8 +216,8 @@ def _format_subbasin_max(mo, data: Any, time_label: str) -> str:
     max_point = _pick_number(top, "max_rainfall_mm", "max", "maximum_rainfall_mm", "maximum")
     if max_point != "-":
         lines.append(f"**该子流域内最大雨量**：{max_point} mm\n")
-    lines.append("\n### 子流域降雨排名\n\n| 排名 | 子流域/分区 | 累计面雨量(mm) | 最大雨量(mm) |\n| :--- | :--- | :--- | :--- |\n")
-    for idx, item in enumerate(records[:20], 1):
+    lines.append("\n### 海河9分区降雨排名\n\n| 排名 | 子流域/分区 | 累计面雨量(mm) | 最大雨量(mm) |\n| :--- | :--- | :--- | :--- |\n")
+    for idx, item in enumerate(records[:9], 1):
         lines.append(f"| {idx} | {_safe_cell(mo, _zone_name(item, '未知子流域'))} | {_pick_number(item, 'avg_rainfall_mm', 'avg', 'average_rainfall_mm', 'mean')} | {_pick_number(item, 'max_rainfall_mm', 'max', 'maximum_rainfall_mm', 'maximum')} |\n")
     return "".join(lines)
 
@@ -218,12 +225,9 @@ def _format_subbasin_max(mo, data: Any, time_label: str) -> str:
 def _format_year_to_date(mo, data: Any, time_label: str) -> str:
     if isinstance(data, dict) and data.get("status") == "no_data":
         return data.get("message") or "今年以来暂未查询到有效海河9分区累计降雨量数据。"
-
-    records, zone_label = _normalize_areal_records(data, "海河9分区", require_zone9=True)
+    records, zone_label, summary = _normalize_zone9(data)
     if not records:
         return "今年以来暂未查询到有效海河9分区累计降雨量数据。"
-
-    summary = data.get("summary") if isinstance(data, dict) and isinstance(data.get("summary"), dict) else {}
     values = [_rain_value(r) for r in records if _rain_value(r) >= 0]
     basin_avg = _pick_number(summary, "simple_mean_of_zone_rainfall_mm") if summary else "-"
     if basin_avg == "-":
@@ -231,7 +235,6 @@ def _format_year_to_date(mo, data: Any, time_label: str) -> str:
     zone_total = _pick_number(summary, "total_of_zone_rainfall_mm") if summary else "-"
     if zone_total == "-":
         zone_total = round(sum(values), 2) if values else "-"
-
     top, low = records[0], records[-1]
     lines = [
         "## 今年累计降雨量\n\n",
@@ -253,23 +256,28 @@ async def _call_areal_tool(mo, tools, time_range: str, use_last_month: bool = Fa
     if use_last_month:
         tool = mo._find_tool(tools, "query_last_month_areal_rainfall")
         if tool:
-            data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"zone_type": "9"}), timeout=120))
-            if isinstance(data, dict) and data.get("status") == "ok" and _valid_records(data.get("records")):
-                return data
-    tool = mo._find_tool(tools, "query_basin_areal_rainfall")
-    if not tool:
-        return None
-    return _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"zone_type": "9", "time_range": time_range, "hours": 24}), timeout=120))
+            return _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"zone_type": "9"}), timeout=180))
+    tool = mo._find_tool(tools, "query_period_areal_rainfall_9")
+    if tool:
+        return _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"zone_type": "9", "time_range": time_range}), timeout=120))
+    return {
+        "status": "no_data",
+        "zone_label": "海河9分区",
+        "records": [],
+        "message": "当前时段暂无有效海河9分区面雨量数据。",
+    }
 
 
 async def _call_year_to_date_tool(mo, tools, time_range: str) -> Any:
     tool = mo._find_tool(tools, "query_year_to_date_areal_rainfall")
     if tool:
-        data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"zone_type": "9"}), timeout=180))
-        if isinstance(data, dict) and data.get("status") == "ok" and _valid_records(data.get("records")):
-            return data
-        return data
-    return await _call_areal_tool(mo, tools, time_range)
+        return _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"zone_type": "9"}), timeout=180))
+    return {
+        "status": "no_data",
+        "zone_label": "海河9分区",
+        "records": [],
+        "message": "今年以来暂未查询到有效海河9分区累计降雨量数据。",
+    }
 
 
 def _is_last_year_max_daily(text: str) -> bool:
@@ -422,13 +430,13 @@ def install_all_fast_paths() -> None:
                 try:
                     if _is_last_month_areal(user_text):
                         time_range, label, month = _previous_month_range()
-                        msg = await mo._show_thinking("🔍 正在查询上个月各子流域面雨量数据，请稍候...")
+                        msg = await mo._show_thinking("🔍 正在查询上个月海河9分区面雨量数据，请稍候...")
                         data = await _call_areal_tool(mo, tools, time_range, use_last_month=True)
                         await mo._emit_fast_path_result(_format_last_month(mo, data, label, month), msg, messages, user_text)
                         return True
                     if _is_subbasin_max(user_text):
                         time_range, label = _today_like_window(user_text)
-                        msg = await mo._show_thinking("🔍 正在查询各子流域降雨量，请稍候...")
+                        msg = await mo._show_thinking("🔍 正在查询海河9分区降雨量，请稍候...")
                         data = await _call_areal_tool(mo, tools, time_range)
                         await mo._emit_fast_path_result(_format_subbasin_max(mo, data, label), msg, messages, user_text)
                         return True
