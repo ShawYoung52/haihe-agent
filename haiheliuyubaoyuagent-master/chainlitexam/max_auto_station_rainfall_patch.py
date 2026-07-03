@@ -34,7 +34,12 @@ def _should_use_max_auto_station_rainfall_path(text: str) -> bool:
     station_words = ("自动站", "站点", "气象站", "监测站", "雨量站")
     rain_words = ("雨量", "降雨", "降水")
     max_words = ("最大", "最多", "最高", "第一", "排第一", "最大的是", "哪个")
-    exclude_words = ("面雨量", "分区", "子流域", "流域平均", "去年最大日降雨", "最大日降雨量")
+    # 只抢短时段/默认今日问题。长历史问题先交给专用路由，避免把“去年哪个自动站雨量最大”误按今天回答。
+    unsupported_history_words = ("去年", "前年", "上年", "上一年", "上个月", "上月", "上周", "历史", "全年", "整年")
+    exclude_words = (
+        "面雨量", "分区", "子流域", "流域平均",
+        "去年最大日降雨", "最大日降雨量", *unsupported_history_words,
+    )
     return (
         any(k in t for k in station_words)
         and any(k in t for k in rain_words)
