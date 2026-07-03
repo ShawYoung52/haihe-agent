@@ -6,6 +6,9 @@ import json
 from typing import Any
 
 
+_MODULE_MARKER = "_last_year_max_daily_rainfall_patch_installed"
+
+
 def _unwrap_tool_result(result: Any) -> Any:
     data = result
     if hasattr(data, "content"):
@@ -114,13 +117,14 @@ def install_last_year_max_daily_rainfall_patch() -> bool:
         print(f"[last_year_max_daily_rainfall_patch] message_orchestrator 导入失败，跳过补丁：{exc}")
         return False
 
+    if getattr(mo, _MODULE_MARKER, False):
+        print("[last_year_max_daily_rainfall_patch] 已安装过，无需重复安装")
+        return True
+
     original = getattr(mo, "_try_rainfall_analysis_fast_path", None)
     if not callable(original):
         print("[last_year_max_daily_rainfall_patch] 未找到降雨分析快速路径，跳过补丁")
         return False
-    if getattr(original, "_last_year_max_daily_rainfall_patch_installed", False):
-        print("[last_year_max_daily_rainfall_patch] 已安装过，无需重复安装")
-        return True
 
     async def patched_rainfall_analysis_fast_path(user_text: str, tools, messages, callbacks) -> bool:
         if not _should_use_last_year_max_daily_rainfall_path(user_text):
@@ -149,6 +153,8 @@ def install_last_year_max_daily_rainfall_patch() -> bool:
             return True
 
     patched_rainfall_analysis_fast_path._last_year_max_daily_rainfall_patch_installed = True
+    patched_rainfall_analysis_fast_path._last_year_max_daily_rainfall_original = original
     mo._try_rainfall_analysis_fast_path = patched_rainfall_analysis_fast_path
+    setattr(mo, _MODULE_MARKER, True)
     print("[last_year_max_daily_rainfall_patch] 已安装：去年最大日降雨量快速路径")
     return True
