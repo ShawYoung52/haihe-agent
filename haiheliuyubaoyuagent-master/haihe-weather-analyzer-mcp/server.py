@@ -5,6 +5,7 @@ from fastmcp import FastMCP
 from tools import register_tools
 from last_month_areal_rainfall_tool import register_last_month_areal_rainfall_tool
 from last_year_max_daily_rainfall_tool import register_last_year_max_daily_rainfall_tool
+from historical_same_period_rainfall_tool import register_historical_same_period_rainfall_tool
 
 
 class HaiheWeatherAnalyzerMCP:
@@ -19,6 +20,7 @@ class HaiheWeatherAnalyzerMCP:
         register_tools(self.mcp)
         register_last_month_areal_rainfall_tool(self.mcp)
         register_last_year_max_daily_rainfall_tool(self.mcp)
+        register_historical_same_period_rainfall_tool(self.mcp)
 
         # 添加一些额外的实用工具
         @self.mcp.tool()
@@ -61,6 +63,7 @@ class HaiheWeatherAnalyzerMCP:
                     "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）",
                     "query_last_month_areal_rainfall - 查询上一个自然月的分区累计面雨量",
                     "query_last_year_max_daily_rainfall - 查询上一个自然年最大日降雨量",
+                    "query_historical_same_period_avg_rainfall - 查询历史同期平均降雨量",
                     "search_poi - 按名称查询 POI 地点/设施/单位",
                     "search_poi_by_distance - 按名称和经纬度范围查询附近 POI",
                     "query_rolling_forecast - 天津滚动预报综合天气查询",
