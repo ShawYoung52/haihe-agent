@@ -15,8 +15,8 @@ from constants import DEFAULT_BASIN_CODES, DEFAULT_OBS_ELEMENTS
 from haihe_mcp_tools import MusicClient, MusicConfig, _search_poi_core
 
 
-# 逐小时地面多要素实况。
 HOURLY_DATA_CODE = "SURF_CHN_MUL_HOR"
+TIANJIN_ADMIN_CODE = "120000"
 FULL_OBS_ELEMENTS = (
     "Station_Id_C,Station_levl,Lat,Lon,Alti,City,Station_Name,Cnty,Province,Town,"
     "Datetime,UPDATE_TIME,PRE_1h,PRE_3h,PRE_6h,PRE_12h,PRE_24h,PRE,"
@@ -49,11 +49,6 @@ def _distance_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
 
 
 def _latest_hour_candidates(hours_back: int = 6) -> list[str]:
-    """生成最近逐小时实况候选时次。
-
-    使用逐小时接口 getSurfEleInBasinByTime + SURF_CHN_MUL_HOR。
-    当前整点资料可能尚未入库，所以从当前整点一路往前倒查。
-    """
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
     count = max(int(hours_back or 6), 1)
     return [(now - timedelta(hours=i)).strftime("%Y%m%d%H%M%S") for i in range(count)]
@@ -128,27 +123,53 @@ def _valid_station_rows(rows: Any) -> list[dict]:
     ]
 
 
-def _query_station_records(client: MusicClient, basin_codes: str, hours_back: int) -> tuple[str, list[dict], str]:
+def _query_region_rows(client: MusicClient, time_s: str, elements: str, admin_code: str) -> list[dict]:
+    return client.call_api(
+        "getSurfEleInRegionByTime",
+        dataCode=HOURLY_DATA_CODE,
+        elements=elements,
+        times=time_s,
+        adminCodes=admin_code,
+    )
+
+
+def _query_basin_rows(client: MusicClient, time_s: str, elements: str, basin_codes: str) -> list[dict]:
+    return client.get_surf_ele_in_basin_by_time(
+        basin_codes=basin_codes,
+        times=time_s,
+        elements=elements,
+        data_code=HOURLY_DATA_CODE,
+    )
+
+
+def _query_station_records(
+    client: MusicClient,
+    basin_codes: str,
+    hours_back: int,
+    admin_code: str = TIANJIN_ADMIN_CODE,
+) -> tuple[str, list[dict], str]:
     last_error = ""
     tried: list[str] = []
+    query_modes = (
+        ("region", lambda t, e: _query_region_rows(client, t, e, admin_code)),
+        ("basin", lambda t, e: _query_basin_rows(client, t, e, basin_codes)),
+    )
     for time_s in _latest_hour_candidates(hours_back):
-        for elements in OBS_ELEMENT_CANDIDATES:
-            tried.append(time_s)
-            try:
-                rows = client.get_surf_ele_in_basin_by_time(
-                    basin_codes=basin_codes,
-                    times=time_s,
-                    elements=elements,
-                    data_code=HOURLY_DATA_CODE,
-                )
-            except Exception as exc:
-                last_error = str(exc)[:200]
-                rows = []
-            valid = _valid_station_rows(rows)
-            if valid:
-                source = "hourly_full" if elements == FULL_OBS_ELEMENTS else "hourly_basic"
-                return time_s, valid, source
-    tried_text = ",".join(dict.fromkeys(tried))[:200]
+        for mode, query_func in query_modes:
+            for elements in OBS_ELEMENT_CANDIDATES:
+                source = f"hourly_{mode}_{'full' if elements == FULL_OBS_ELEMENTS else 'basic'}"
+                tried.append(f"{source}@{time_s}")
+                try:
+                    rows = query_func(time_s, elements)
+                except Exception as exc:
+                    last_error = f"{source}@{time_s}: {str(exc)[:180]}"
+                    print(f"[poi_nearest_observation] {last_error}")
+                    rows = []
+                valid = _valid_station_rows(rows)
+                if valid:
+                    print(f"[poi_nearest_observation] hit {source}@{time_s}, rows={len(valid)}")
+                    return time_s, valid, source
+    tried_text = ";".join(tried)[:260]
     raise RuntimeError(last_error or f"逐小时站点实况无有效经纬度数据，tried={tried_text}")
 
 
@@ -187,6 +208,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
         basin_codes: str = DEFAULT_BASIN_CODES,
         hours_back: int = 6,
         max_distance_km: float = 80.0,
+        admin_code: str = TIANJIN_ADMIN_CODE,
     ) -> dict:
         """查询某个 POI 的经纬度，并返回最近观测站逐小时实况值。"""
         keyword = str(keyword or "").strip()
@@ -202,7 +224,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
 
         try:
             client = MusicClient(MusicConfig())
-            query_time, records, obs_source = _query_station_records(client, basin_codes, hours_back)
+            query_time, records, obs_source = _query_station_records(client, basin_codes, hours_back, admin_code)
             nearest = _nearest_station(poi, records)
         except Exception as exc:
             return _error_payload(keyword, "最近观测站实况查询失败。", str(exc))
@@ -226,7 +248,7 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
             "observation_time": _observation_time(record, query_time),
             "observation_source": obs_source,
             "data_code": HOURLY_DATA_CODE,
-            "interface_id": "getSurfEleInBasinByTime",
+            "interface_id": "getSurfEleInRegionByTime/getSurfEleInBasinByTime",
             "nearest_station": {
                 "station_id": _station_id(record),
                 "station_name": _station_name(record),
