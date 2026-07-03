@@ -20,11 +20,6 @@ logger = logging.getLogger(__name__)
 
 HOURLY_DATA_CODE = "SURF_CHN_MUL_HOR"
 TIANJIN_ADMIN_CODE = "120000"
-# 天津大致范围，用于避免“天津市气象局”模糊命中到外省的“气象局”。
-TIANJIN_LON_MIN = 116.55
-TIANJIN_LON_MAX = 118.15
-TIANJIN_LAT_MIN = 38.55
-TIANJIN_LAT_MAX = 40.35
 FULL_OBS_ELEMENTS = (
     "Station_Id_C,Station_levl,Lat,Lon,Alti,City,Station_Name,Cnty,Province,Town,"
     "Datetime,UPDATE_TIME,PRE_1h,PRE_3h,PRE_6h,PRE_12h,PRE_24h,PRE,"
@@ -47,10 +42,12 @@ def _safe_float(value: Any) -> float | None:
     return number
 
 
-def _is_tianjin_coord(lon: float | None, lat: float | None) -> bool:
-    if lon is None or lat is None:
-        return False
-    return TIANJIN_LON_MIN <= lon <= TIANJIN_LON_MAX and TIANJIN_LAT_MIN <= lat <= TIANJIN_LAT_MAX
+def _is_tianjin_text(item: dict) -> bool:
+    text = " ".join(
+        str(item.get(k) or "")
+        for k in ("name", "address", "category_1", "category_2")
+    )
+    return "天津" in text
 
 
 def _distance_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -91,29 +88,39 @@ def _poi_to_normalized(keyword: str, poi_result: dict, poi: dict) -> dict | None
     }
 
 
-def _pick_first_poi(keyword: str) -> dict | None:
-    poi_result = _search_poi_core(keyword=keyword, size=20)
-    pois = poi_result.get("pois") or []
+def _search_poi_candidates(keyword: str) -> list[dict]:
     candidates: list[dict] = []
-    for poi in pois:
-        item = _poi_to_normalized(keyword, poi_result, poi)
-        if item:
+    seen: set[tuple] = set()
+    search_terms = [keyword]
+    if "天津" in keyword:
+        compact = keyword.replace("天津市", "").replace("天津", "").strip()
+        if compact and compact != keyword:
+            search_terms.append(compact)
+    for term in search_terms:
+        poi_result = _search_poi_core(keyword=term, size=30)
+        for poi in poi_result.get("pois") or []:
+            item = _poi_to_normalized(keyword, poi_result, poi)
+            if not item:
+                continue
+            key = (item.get("name"), item.get("address"), item.get("longitude"), item.get("latitude"))
+            if key in seen:
+                continue
+            seen.add(key)
             candidates.append(item)
+    return candidates
+
+
+def _pick_first_poi(keyword: str) -> dict | None:
+    candidates = _search_poi_candidates(keyword)
     if not candidates:
         return None
 
-    keyword_has_tianjin = "天津" in keyword
-    if keyword_has_tianjin:
-        tj_candidates = []
-        for item in candidates:
-            text = f"{item.get('name') or ''} {item.get('address') or ''}"
-            if _is_tianjin_coord(item.get("longitude"), item.get("latitude")) or "天津" in text:
-                tj_candidates.append(item)
-        if tj_candidates:
-            candidates = tj_candidates
-        else:
-            # 用户明确问天津，不能返回外省同名“气象局”。
-            logger.warning("[poi_nearest_observation] no Tianjin POI candidate for keyword=%s", keyword)
+    if "天津" in keyword:
+        # 用户明确指定天津时，必须在 POI 名称/地址/类别文本中出现“天津”。
+        # 不能只靠经纬度粗框，否则会把唐山、河北同名“气象局”误认为天津。
+        candidates = [item for item in candidates if _is_tianjin_text(item)]
+        if not candidates:
+            logger.warning("[poi_nearest_observation] no textual Tianjin POI candidate for keyword=%s", keyword)
             return None
 
     def score(item: dict) -> tuple[int, int, int]:
@@ -121,7 +128,7 @@ def _pick_first_poi(keyword: str) -> dict | None:
         address = str(item.get("address") or "")
         exact = 1 if name == keyword else 0
         contains = 1 if keyword in name or name in keyword else 0
-        tj = 1 if (_is_tianjin_coord(item.get("longitude"), item.get("latitude")) or "天津" in address or "天津" in name) else 0
+        tj = 1 if ("天津" in address or "天津" in name) else 0
         return exact, contains, tj
 
     candidates.sort(key=score, reverse=True)
@@ -283,9 +290,10 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
         try:
             poi = _pick_first_poi(keyword)
             logger.warning(
-                "[poi_nearest_observation] poi keyword=%s name=%s lon=%s lat=%s",
+                "[poi_nearest_observation] poi keyword=%s name=%s address=%s lon=%s lat=%s",
                 keyword,
                 poi.get("name") if poi else None,
+                poi.get("address") if poi else None,
                 poi.get("longitude") if poi else None,
                 poi.get("latitude") if poi else None,
             )
