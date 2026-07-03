@@ -29,6 +29,7 @@ OBS_ELEMENT_CANDIDATES = [FULL_OBS_ELEMENTS, DEFAULT_OBS_ELEMENTS]
 NON_TIANJIN_REGION_WORDS = (
     "河北", "唐山", "丰润", "北京", "保定", "廊坊", "沧州", "秦皇岛", "山东", "山西", "河南", "辽宁"
 )
+MISSING_NUMERIC_ABS_MIN = 9999
 
 
 def _safe_float(value: Any) -> float | None:
@@ -43,6 +44,16 @@ def _safe_float(value: Any) -> float | None:
     if abs(number) >= 99999:
         return None
     return number
+
+
+def _is_missing_value(value: Any) -> bool:
+    if value in (None, "", "None", "-", "--"):
+        return True
+    try:
+        number = float(value)
+    except Exception:
+        return False
+    return (not math.isfinite(number)) or abs(number) >= MISSING_NUMERIC_ABS_MIN
 
 
 def _poi_text(item: dict) -> str:
@@ -80,6 +91,20 @@ def _latest_hour_candidates(hours_back: int = 6) -> list[str]:
     now_api = now_bjt - timedelta(hours=8)
     count = max(int(hours_back or 6), 1)
     return [(now_api - timedelta(hours=i)).strftime("%Y%m%d%H%M%S") for i in range(count)]
+
+
+def _to_beijing_time_text(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    patterns = ["%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"]
+    for pattern in patterns:
+        try:
+            dt = datetime.strptime(raw, pattern)
+            return (dt + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    return ""
 
 
 def _poi_to_normalized(keyword: str, poi_result: dict, poi: dict) -> dict | None:
@@ -137,13 +162,14 @@ def _pick_first_poi(keyword: str) -> dict | None:
             logger.warning("[poi_nearest_observation] no strict Tianjin POI candidate for keyword=%s", keyword)
             return None
 
-    def score(item: dict) -> tuple[int, int, int]:
+    def score(item: dict) -> tuple[int, int, int, int]:
         name = str(item.get("name") or "")
         address = str(item.get("address") or "")
         exact = 1 if name == keyword else 0
         contains = 1 if keyword in name or name in keyword else 0
+        not_parking = 0 if "停车" in name else 1
         tj = 1 if ("天津" in address or "天津" in name) else 0
-        return exact, contains, tj
+        return exact, contains, not_parking, tj
 
     candidates.sort(key=score, reverse=True)
     return candidates[0]
@@ -181,10 +207,12 @@ def _clean_observation(record: dict) -> dict:
     obs: dict[str, Any] = {}
     for key, label in field_map.items():
         value = record.get(key)
+        if _is_missing_value(value):
+            continue
         number = _safe_float(value)
         if number is not None:
             obs[label] = round(number, 2)
-        elif value not in (None, "", "None", "-", "--"):
+        else:
             obs[label] = value
     return obs
 
@@ -360,13 +388,16 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
             )
 
         record = nearest["record"]
+        obs_utc = _observation_time(record, query_time)
+        obs_bjt = _to_beijing_time_text(obs_utc)
         return {
             "status": "ok",
             "query_type": "poi_nearest_observation",
             "keyword": keyword,
             "poi": poi,
             "query_time": query_time,
-            "observation_time": _observation_time(record, query_time),
+            "observation_time": obs_utc,
+            "observation_time_beijing": obs_bjt,
             "observation_source": obs_source,
             "data_code": HOURLY_DATA_CODE,
             "interface_id": "getSurfEleInRegionByTime/getSurfEleInBasinByTime",
