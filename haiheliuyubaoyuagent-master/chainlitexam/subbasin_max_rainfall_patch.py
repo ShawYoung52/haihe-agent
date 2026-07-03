@@ -207,10 +207,8 @@ def install_subbasin_max_rainfall_patch() -> bool:
         time_range, time_label, _ = _build_time_window(user_text)
         thinking_msg = await mo._show_thinking("🔍 正在查询各子流域降雨量，请稍候...")
         try:
-            result = await asyncio.wait_for(
-                tool.ainvoke({"zone_type": "9", "time_range": time_range, "hours": None}),
-                timeout=90,
-            )
+            payload = {"zone_type": "9", "time_range": time_range}
+            result = await asyncio.wait_for(tool.ainvoke(payload), timeout=90)
             data = _unwrap_tool_result(result)
             text = _format_payload(mo, data, time_label)
             await mo._emit_fast_path_result(text, thinking_msg, messages, user_text)
