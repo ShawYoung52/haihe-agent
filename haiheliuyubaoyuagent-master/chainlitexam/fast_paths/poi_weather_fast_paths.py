@@ -56,7 +56,11 @@ def _format(mo, data: Any) -> str:
     if not isinstance(data, dict):
         return "POI 最近观测站实况查询结果格式异常。"
     if data.get("status") != "ok":
-        return data.get("message") or "未查询到该点最近观测站实况。"
+        msg = data.get("message") or "未查询到该点最近观测站实况。"
+        debug = data.get("debug_reason")
+        if debug:
+            return f"{msg}\n\n**调试原因**：{_clean(mo, debug)}"
+        return msg
 
     poi = data.get("poi") if isinstance(data.get("poi"), dict) else {}
     sta = data.get("nearest_station") if isinstance(data.get("nearest_station"), dict) else {}
@@ -68,7 +72,12 @@ def _format(mo, data: Any) -> str:
     if poi.get("address"):
         lines.append(f"**POI地址**：{_clean(mo, poi.get('address'))}  \n")
     lines.append(f"**最近观测站**：{_clean(mo, sta.get('station_name') or '-')}（站号：{_clean(mo, sta.get('station_id') or '-')}，距离约 {_val(sta.get('distance_km'))} km）  \n")
-    lines.append(f"**观测时间**：{_clean(mo, data.get('observation_time') or data.get('query_time') or '-')}\n\n")
+    lines.append(f"**观测时间**：{_clean(mo, data.get('observation_time') or data.get('query_time') or '-')}  \n")
+    if data.get("interface_id") or data.get("data_code"):
+        lines.append(f"**数据接口**：{_clean(mo, data.get('interface_id') or '-')}，{_clean(mo, data.get('data_code') or '-')}  \n")
+    if data.get("observation_source"):
+        lines.append(f"**数据来源路径**：{_clean(mo, data.get('observation_source'))}\n")
+    lines.append("\n")
 
     if obs:
         lines.append("| 要素 | 最近观测站实况值 |\n| :--- | :--- |\n")
