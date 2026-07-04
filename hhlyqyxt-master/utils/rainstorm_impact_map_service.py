@@ -1,0 +1,334 @@
+"""暴雨影响河流专题图服务。
+
+公开给同事的入口只有两个：
+- create_rainstorm_impact_map：按时间段自动查询海河流域实况降雨并生成专题图数据；
+- get_rainstorm_impact_map_style：返回当前制图样式。
+
+内部仍复用牵引智能体既有河网算法 build_rain24h_impact_river_geojson。
+CSV 只是适配该算法的内部临时文件，不要求调用方传 CSV。
+"""
+from __future__ import annotations
+
+import copy
+import csv
+import hashlib
+import json
+import math
+import os
+import tempfile
+import time
+import uuid
+from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
+
+import requests
+
+try:
+    from utils.rainfall_impact_geojson import build_rain24h_impact_river_geojson
+except Exception:  # pragma: no cover
+    from .rainfall_impact_geojson import build_rain24h_impact_river_geojson
+
+BASIN_CODE_HAIHE = "HHLY"
+MUSIC_DATA_CODE_HOURLY = "SURF_CHN_MUL_HOR"
+MUSIC_RAIN_ELEMENTS = "Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime,PRE_1h,PRE"
+CSV_FIELDS = ["Station_Id_C", "Datetime", "PRE", "Lon", "Lat", "Station_Name", "City", "Cnty", "Province", "Town"]
+
+RAINSTORM_IMPACT_STYLE = {
+    "style_name": "rainstorm_impact_map_v1",
+    "title": "暴雨影响河流专题图",
+    "crs": "EPSG:4326",
+    "layer_order": ["base_map", "administrative_boundary", "river_background", "downstream_50km", "direct_buffer", "impact_stations", "labels"],
+    "layers": {
+        "river_background": {"name": "河流底图", "color": "#90A4AE", "width": 1, "opacity": 0.45, "zIndex": 10},
+        "downstream_50km": {"name": "下游影响河段", "color": "#FB8C00", "width": 3, "opacity": 0.9, "zIndex": 20, "filter": {"property": "impact_type", "equals": "downstream_50km"}},
+        "direct_buffer": {"name": "直接影响河段", "color": "#E53935", "width": 4, "opacity": 0.95, "zIndex": 30, "filter": {"property": "impact_type", "equals": "direct_buffer"}},
+        "impact_stations": {"name": "暴雨触发站", "color": "#1E88E5", "strokeColor": "#FFFFFF", "strokeWidth": 2, "radius": 6, "opacity": 0.95, "zIndex": 40},
+        "labels": {"fontSize": 12, "fontColor": "#263238", "haloColor": "#FFFFFF", "haloWidth": 2, "zIndex": 50},
+    },
+    "legend": [
+        {"label": "直接影响河段", "type": "line", "color": "#E53935", "width": 4},
+        {"label": "下游影响河段", "type": "line", "color": "#FB8C00", "width": 3},
+        {"label": "暴雨触发站", "type": "circle", "color": "#1E88E5", "strokeColor": "#FFFFFF", "radius": 6},
+    ],
+    "field_mapping": {
+        "river_name": "properties.river_name",
+        "impact_type": "properties.impact_type",
+        "station_name": "properties.station_name",
+        "rain_24h": "properties.rain_24h",
+    },
+}
+
+
+def get_rainstorm_impact_map_style() -> dict:
+    """返回暴雨影响河流专题图样式。"""
+    return copy.deepcopy(RAINSTORM_IMPACT_STYLE)
+
+
+def create_rainstorm_impact_map(
+    *,
+    start_time: str | datetime | None = None,
+    end_time: str | datetime | None = None,
+    hours: int = 24,
+    rain_threshold_mm: float = 50.0,
+    basin_codes: str = BASIN_CODE_HAIHE,
+    output_dir: str | Path | None = None,
+    api_time_shift_hours: int | None = None,
+    station_buffer_km: float = 30.0,
+    downstream_km: float = 50.0,
+    direct_match_km: float = 3.0,
+    river_table: str = "haihe_river_directed_full_v5",
+    schema: str = "public",
+    graph_path: str | Path | None = None,
+) -> dict:
+    """自动查询海河流域实况降雨并生成暴雨影响河流专题图数据。"""
+    start_dt, end_dt = _resolve_time_window(start_time, end_time, hours)
+    rows = _query_haihe_rainfall_rows(start_dt, end_dt, basin_codes, api_time_shift_hours)
+    stations = _aggregate_station_rainfall(rows)
+    csv_path = _write_station_rows_to_temp_csv(rows)
+    try:
+        core = build_rain24h_impact_river_geojson(
+            csv_path=str(csv_path),
+            rain_threshold_mm=rain_threshold_mm,
+            station_buffer_km=station_buffer_km,
+            downstream_km=downstream_km,
+            river_table=river_table,
+            schema=schema,
+            graph_path=graph_path,
+            direct_match_km=direct_match_km,
+        )
+    finally:
+        csv_path.unlink(missing_ok=True)
+
+    heavy_stations = [s for s in stations if s["rain_24h"] >= float(rain_threshold_mm)]
+    result = _pack_map_result(core, output_dir)
+    result["rainfall_source"] = {
+        "interface_id": "getSurfEleInBasinByTimeRange",
+        "data_code": MUSIC_DATA_CODE_HOURLY,
+        "basin_codes": basin_codes,
+        "time_range_bjt": _format_time_range(start_dt, end_dt),
+        "station_count": len(stations),
+        "heavy_rain_station_count": len(heavy_stations),
+        "heavy_rain_stations": heavy_stations,
+    }
+    result["summary"].update({
+        "time_range": _format_time_range(start_dt, end_dt),
+        "heavy_rain_station_count": len(heavy_stations),
+    })
+    return result
+
+
+def _query_haihe_rainfall_rows(
+    start_dt: datetime,
+    end_dt: datetime,
+    basin_codes: str,
+    api_time_shift_hours: int | None,
+) -> list[dict[str, Any]]:
+    shift = int(os.getenv("MUSIC_API_TIME_SHIFT_HOURS", "-8")) if api_time_shift_hours is None else int(api_time_shift_hours)
+    return _music_call(
+        "getSurfEleInBasinByTimeRange",
+        dataCode=MUSIC_DATA_CODE_HOURLY,
+        elements=MUSIC_RAIN_ELEMENTS,
+        timeRange=_music_time_range(start_dt, end_dt, shift),
+        basinCodes=basin_codes,
+    )
+
+
+def _music_call(interface_id: str, **params: Any) -> list[dict[str, Any]]:
+    cfg = _music_config()
+    query = {
+        "serviceNodeId": cfg["service_node_id"],
+        "userId": cfg["user_id"],
+        "dataFormat": "json",
+        "interfaceId": interface_id,
+        "timestamp": str(int(time.time() * 1000)),
+        "nonce": str(uuid.uuid4()),
+        **{k: v for k, v in params.items() if v not in (None, "")},
+    }
+    query["sign"] = _music_sign(query, cfg["password"])
+    url = f"http://{cfg['service_ip']}/music-ws/api?{urlencode(query, safe=':,[]()')}"
+    try:
+        response = requests.get(url, timeout=(cfg["connect_timeout"], cfg["read_timeout"]))
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"MUSIC接口请求失败：{interface_id}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"MUSIC接口返回非JSON：{interface_id}") from exc
+
+    data = payload.get("DS") if isinstance(payload, dict) else None
+    if isinstance(data, list):
+        return data
+    if isinstance(payload, dict) and str(payload.get("returnCode")) == "-1" and "no record" in str(payload.get("returnMessage", "")).lower():
+        return []
+    raise RuntimeError(f"MUSIC接口返回结构异常：{json.dumps(payload, ensure_ascii=False)[:500]}")
+
+
+def _music_config() -> dict[str, Any]:
+    return {
+        "service_ip": os.getenv("MUSIC_SERVICE_IP", "10.226.90.120"),
+        "service_node_id": os.getenv("MUSIC_SERVICE_NODE_ID", "NMIC_MUSIC_CMADAAS"),
+        "user_id": os.getenv("MUSIC_USER_ID", "BETJ_QXT_LYGXPT"),
+        "password": os.getenv("MUSIC_PASSWORD", "Qxtly@2022ww"),
+        "connect_timeout": float(os.getenv("MUSIC_CONNECT_TIMEOUT", "5")),
+        "read_timeout": float(os.getenv("MUSIC_READ_TIMEOUT", os.getenv("MUSIC_TIMEOUT", "120"))),
+    }
+
+
+def _music_sign(query: dict[str, Any], password: str) -> str:
+    values = {k: str(v) for k, v in query.items() if v not in (None, "")}
+    values["pwd"] = password
+    raw = "&".join(f"{k}={values[k]}" for k in sorted(values))
+    return hashlib.md5(raw.encode("utf-8")).hexdigest().upper()
+
+
+def _resolve_time_window(start_time: str | datetime | None, end_time: str | datetime | None, hours: int) -> tuple[datetime, datetime]:
+    end_dt = _parse_time(end_time) or datetime.now().replace(minute=0, second=0, microsecond=0)
+    start_dt = _parse_time(start_time) or end_dt - timedelta(hours=max(int(hours or 24), 1))
+    if end_dt <= start_dt:
+        raise ValueError("end_time 必须晚于 start_time")
+    return start_dt, end_dt
+
+
+def _parse_time(value: str | datetime | None) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(second=0, microsecond=0)
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y%m%d%H%M%S", "%Y%m%d%H%M"):
+        try:
+            return datetime.strptime(text, fmt).replace(second=0, microsecond=0)
+        except ValueError:
+            continue
+    raise ValueError(f"时间格式无法识别：{value!r}")
+
+
+def _music_time_range(start_dt: datetime, end_dt: datetime, shift_hours: int) -> str:
+    start = (start_dt + timedelta(hours=shift_hours)).strftime("%Y%m%d%H%M%S")
+    end = (end_dt + timedelta(hours=shift_hours)).strftime("%Y%m%d%H%M%S")
+    return f"[{start},{end}]"
+
+
+def _format_time_range(start_dt: datetime, end_dt: datetime) -> dict[str, str]:
+    return {
+        "start_time": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _aggregate_station_rainfall(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    totals: dict[str, float] = defaultdict(float)
+    stations: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        station_id = str(_first(row, "Station_Id_C", "station_id") or "").strip()
+        lon, lat = _to_float(_first(row, "Lon", "lon")), _to_float(_first(row, "Lat", "lat"))
+        rain = _to_float(_first(row, "PRE_1h", "PRE", "rainfall"))
+        if not station_id or lon is None or lat is None or rain is None:
+            continue
+        totals[station_id] += max(rain, 0.0)
+        stations.setdefault(station_id, {
+            "station_id": station_id,
+            "station_name": _first(row, "Station_Name", "station_name") or station_id,
+            "lon": lon,
+            "lat": lat,
+            "city": _first(row, "City", "city"),
+            "cnty": _first(row, "Cnty", "cnty"),
+        })
+    for station_id, station in stations.items():
+        station["rain_24h"] = round(totals[station_id], 3)
+    return sorted(stations.values(), key=lambda item: item["rain_24h"], reverse=True)
+
+
+def _write_station_rows_to_temp_csv(rows: list[dict[str, Any]]) -> Path:
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".csv", encoding="utf-8", newline="", delete=False)
+    path = Path(tmp.name)
+    with tmp:
+        writer = csv.DictWriter(tmp, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(_to_csv_row(row))
+    return path
+
+
+def _to_csv_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "Station_Id_C": _first(row, "Station_Id_C", "station_id"),
+        "Datetime": _first(row, "Datetime", "datetime", "time"),
+        "PRE": _to_float(_first(row, "PRE_1h", "PRE", "rainfall")) or 0.0,
+        "Lon": _first(row, "Lon", "lon"),
+        "Lat": _first(row, "Lat", "lat"),
+        "Station_Name": _first(row, "Station_Name", "station_name"),
+        "City": _first(row, "City", "city"),
+        "Cnty": _first(row, "Cnty", "cnty"),
+        "Province": _first(row, "Province", "province"),
+        "Town": _first(row, "Town", "town"),
+    }
+
+
+def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None) -> dict[str, Any]:
+    rivers = core.get("river_geojson") or {"type": "FeatureCollection", "features": []}
+    stations = core.get("station_geojson") or {"type": "FeatureCollection", "features": []}
+    result = {
+        "status": core.get("status", "ok"),
+        "summary": _build_summary(core, rivers, stations),
+        "map_layers": {"rivers": rivers, "stations": stations, "style": get_rainstorm_impact_map_style()},
+        "raw": core,
+        "output_files": {},
+    }
+    if output_dir:
+        out = Path(output_dir)
+        result["output_files"] = {
+            "river_impact_geojson": _write_json(out / "river_impact.geojson", rivers),
+            "impact_stations_geojson": _write_json(out / "impact_stations.geojson", stations),
+            "summary_json": _write_json(out / "summary.json", result["summary"]),
+            "style_json": _write_json(out / "style.json", result["map_layers"]["style"]),
+        }
+    return result
+
+
+def _build_summary(core: dict[str, Any], rivers: dict[str, Any], stations: dict[str, Any]) -> dict[str, Any]:
+    names = sorted({
+        str((feature.get("properties") or {}).get("river_name") or "").strip()
+        for feature in rivers.get("features", [])
+        if isinstance(feature, dict) and str((feature.get("properties") or {}).get("river_name") or "").strip()
+    })
+    station_summary = core.get("station_summary") or {}
+    return {
+        "affected_river_count": len(names),
+        "affected_rivers": names,
+        "impact_station_count": station_summary.get("impact_station_count", 0),
+        "max_rain_24h": station_summary.get("max_rain_24h", 0),
+        "river_feature_count": len(rivers.get("features", [])),
+        "station_feature_count": len(stations.get("features", [])),
+    }
+
+
+def _write_json(path: Path, data: Any) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def _first(row: dict[str, Any], *keys: str) -> Any:
+    lower = {str(k).lower(): v for k, v in row.items()}
+    for key in keys:
+        value = row.get(key, lower.get(key.lower()))
+        if value not in (None, "", "None", "null"):
+            return value
+    return None
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or abs(number) >= 99999 or number < -9990:
+        return None
+    return number
+
+
+__all__ = ["create_rainstorm_impact_map", "get_rainstorm_impact_map_style"]
