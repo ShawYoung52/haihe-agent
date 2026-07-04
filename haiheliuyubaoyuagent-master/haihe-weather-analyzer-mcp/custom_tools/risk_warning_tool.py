@@ -13,12 +13,11 @@ import json
 import logging
 import os
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from fastmcp import FastMCP
-
-from emergency_scenario_client import emergency_http_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +61,15 @@ RISK_ALIASES = {
     "滑坡": "geologic",
 }
 
+BASE_ENV_KEYS = (
+    "RISK_WARN_BASE",
+    "RISK_WARN_BASE_URL",
+    "HHFW_API_BASE",
+    "HHFW_BASE",
+    "HAIHE_RISK_BASE",
+    "HAIHE_RISK_WARN_BASE",
+)
+
 
 def _normalize_risk_kind(risk_kind: str) -> str:
     raw = str(risk_kind or "").strip()
@@ -71,28 +79,82 @@ def _normalize_risk_kind(risk_kind: str) -> str:
     return kind
 
 
-def _risk_api_base_url() -> str:
-    return (
-        os.environ.get("RISK_WARN_BASE")
-        or os.environ.get("RISK_WARN_BASE_URL")
-        or emergency_http_base_url()
-    ).strip().rstrip("/")
+def _is_absolute_http_url(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("http://") or text.startswith("https://")
 
 
-def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
-    cfg = RISK_CONFIGS[kind]
-    params: dict[str, Any] = {k: v for k, v in (extra_params or {}).items() if v not in (None, "")}
-    params.update({"model": cfg["model"], "type": cfg["type"]})
-    url = f"{_risk_api_base_url()}{RISK_ROUTE}?{urlencode(params, doseq=False)}"
-    logger.warning("[risk_warning] request kind=%s url=%s", kind, url)
+def _risk_api_base_urls() -> list[str]:
+    """返回风险预警服务候选根地址。
+
+    注意：这里不再默认使用 EMERGENCY_HTTP_BASE。日志已经证明 8080 的应急服务下没有
+    /hhfw/riskWarnNew/findDataListByConfig，继续默认打过去只会产生误导性的 404。
+    """
+    values: list[str] = []
+    multi = os.environ.get("RISK_WARN_BASES") or ""
+    for item in multi.split(","):
+        item = item.strip()
+        if item:
+            values.append(item)
+    for key in BASE_ENV_KEYS:
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            values.append(val)
+
+    bases: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not _is_absolute_http_url(value):
+            logger.warning("[risk_warning] ignore non-http base value=%s", value)
+            continue
+        base = value.rstrip("/")
+        if base and base not in seen:
+            seen.add(base)
+            bases.append(base)
+    return bases
+
+
+def _load_json_response(url: str, timeout_sec: int) -> dict[str, Any]:
     req = Request(url, headers={"Accept": "application/json"})
     with urlopen(req, timeout=timeout_sec) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
     try:
         return json.loads(raw)
     except Exception:
-        logger.warning("[risk_warning] non-json response kind=%s raw=%s", kind, raw[:500])
+        logger.warning("[risk_warning] non-json response url=%s raw=%s", url, raw[:500])
         return {"raw": raw}
+
+
+def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
+    cfg = RISK_CONFIGS[kind]
+    bases = _risk_api_base_urls()
+    if not bases:
+        raise RuntimeError("风险预警服务地址未配置，请配置 RISK_WARN_BASE 或 HHFW_API_BASE。")
+
+    params: dict[str, Any] = {k: v for k, v in (extra_params or {}).items() if v not in (None, "")}
+    params.update({"model": cfg["model"], "type": cfg["type"]})
+    query = urlencode(params, doseq=False)
+
+    errors: list[str] = []
+    for base in bases:
+        url = f"{base}{RISK_ROUTE}?{query}"
+        logger.warning("[risk_warning] request kind=%s url=%s", kind, url)
+        try:
+            return _load_json_response(url, timeout_sec)
+        except HTTPError as exc:
+            msg = f"{base}: HTTP {exc.code}"
+            errors.append(msg)
+            logger.warning("[risk_warning] %s", msg)
+        except URLError as exc:
+            msg = f"{base}: {exc.reason}"
+            errors.append(msg)
+            logger.warning("[risk_warning] %s", msg)
+        except Exception as exc:
+            msg = f"{base}: {str(exc)[:180]}"
+            errors.append(msg)
+            logger.warning("[risk_warning] %s", msg)
+
+    raise RuntimeError("; ".join(errors) or "风险预警接口调用失败")
 
 
 def _extract_items(payload: Any) -> list[Any]:
@@ -236,7 +298,6 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
             except Exception as exc:
                 logger.warning("[risk_warning] extra_params_json parse failed: %s", exc)
         if region:
-            # 不假设接口固定字段名，只透传一个常见 region 参数；若服务端不用会忽略。
             extra.setdefault("region", region)
         if start_time:
             extra.setdefault("startTime", start_time)
@@ -250,4 +311,7 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
             return result
         except Exception as exc:
             logger.warning("[risk_warning] failed kind=%s error=%s", kind, exc)
-            return _error_payload(kind, f"{RISK_CONFIGS[kind]['label']}查询失败。", str(exc))
+            text = str(exc)
+            if "服务地址未配置" in text:
+                return _error_payload(kind, "风险预警服务地址未配置。", text)
+            return _error_payload(kind, f"{RISK_CONFIGS[kind]['label']}查询失败。", text)
