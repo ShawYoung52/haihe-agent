@@ -5,6 +5,7 @@ from .rainfall_fast_paths import install_all_fast_paths as _install_rainfall_fas
 from .water_level_fast_paths import install_water_level_fast_paths
 from .poi_weather_fast_paths import install_poi_weather_fast_paths
 from .risk_warning_fast_paths import install_risk_warning_fast_paths
+from .rainstorm_impact_time_fast_path import install_rainstorm_impact_time_fast_path
 
 
 def install_all_fast_paths() -> None:
@@ -12,6 +13,7 @@ def install_all_fast_paths() -> None:
     install_water_level_fast_paths()
     install_poi_weather_fast_paths()
     install_risk_warning_fast_paths()
+    install_rainstorm_impact_time_fast_path()
 
 
 __all__ = ["install_all_fast_paths"]
