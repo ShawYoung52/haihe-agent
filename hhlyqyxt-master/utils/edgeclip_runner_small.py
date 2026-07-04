@@ -45,6 +45,9 @@ def run_edgeclip(*, conn, csv_path: str, graph_path: str, output_dir: str, db_sc
         feature = build_feature(row, kind, downstream_map if kind == "downstream_50km" else None)
         if not feature:
             continue
+        if kind == "direct_buffer":
+            feature["properties"]["geometry_source"] = "edge_table_full_direct_30km_hit"
+            feature["properties"]["remaining_after_buffer_km"] = 0.0
         key = (feature["properties"].get("objectid"), feature["properties"].get("river_name"), kind)
         if key not in seen:
             seen.add(key)
