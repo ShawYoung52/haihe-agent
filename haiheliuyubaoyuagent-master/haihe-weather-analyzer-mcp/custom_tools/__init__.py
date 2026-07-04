@@ -6,6 +6,7 @@ from .last_year_max_daily_rainfall_tool import register_last_year_max_daily_rain
 from .historical_same_period_rainfall_tool import register_historical_same_period_rainfall_tool
 from .year_to_date_areal_rainfall_tool import register_year_to_date_areal_rainfall_tool
 from .poi_nearest_observation_tool import register_poi_nearest_observation_tool
+from .risk_warning_tool import register_risk_warning_tool
 
 __all__ = [
     "register_last_month_areal_rainfall_tool",
@@ -13,4 +14,5 @@ __all__ = [
     "register_historical_same_period_rainfall_tool",
     "register_year_to_date_areal_rainfall_tool",
     "register_poi_nearest_observation_tool",
+    "register_risk_warning_tool",
 ]
