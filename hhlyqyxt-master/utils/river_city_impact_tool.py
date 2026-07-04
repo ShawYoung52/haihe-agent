@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -49,7 +50,24 @@ def _default_engine():
     return engine
 
 
-def _extract_river_geojson(impact_result: dict | None = None, river_geojson: dict | None = None) -> dict:
+def _load_geojson_file(geojson_path: str | Path) -> dict:
+    path = Path(geojson_path)
+    if not path.exists():
+        raise FileNotFoundError(f"影响河流 GeoJSON 文件不存在：{path}")
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or data.get("type") != "FeatureCollection":
+        raise ValueError(f"不是合法的 FeatureCollection GeoJSON：{path}")
+    return data
+
+
+def _extract_river_geojson(
+    impact_result: dict | None = None,
+    river_geojson: dict | None = None,
+    geojson_path: str | Path | None = None,
+) -> dict:
+    if geojson_path:
+        return _load_geojson_file(geojson_path)
     if river_geojson:
         return river_geojson
     if not impact_result:
@@ -126,6 +144,7 @@ def _city_item(row: dict) -> dict:
 
 def get_direct_indirect_river_impact_cities(
     *,
+    geojson_path: str | Path | None = None,
     impact_result: dict | None = None,
     river_geojson: dict | None = None,
     engine: Any = None,
@@ -136,8 +155,9 @@ def get_direct_indirect_river_impact_cities(
     """统计直接河流、间接河流分别影响哪些市。
 
     Args:
+        geojson_path: 已生成的影响河流 GeoJSON 文件路径，例如 impact_rivers_postgis.geojson。
         impact_result: build_rain24h_impact_river_geojson 或本地测试脚本得到的完整结果。
-        river_geojson: 影响河流 FeatureCollection。若同时传 impact_result，优先用 river_geojson。
+        river_geojson: 影响河流 FeatureCollection。优先级：geojson_path > river_geojson > impact_result。
         engine: 可选 SQLAlchemy engine；不传时使用 utils.db.engine。
         admin_table: 行政区划面表，默认 haihe_admin_division。
         admin_schema: admin_table 不带 schema 时使用的默认 schema。
@@ -146,7 +166,11 @@ def get_direct_indirect_river_impact_cities(
     Returns:
         dict，包含 direct / indirect 两组城市清单。
     """
-    fc = _extract_river_geojson(impact_result=impact_result, river_geojson=river_geojson)
+    fc = _extract_river_geojson(
+        impact_result=impact_result,
+        river_geojson=river_geojson,
+        geojson_path=geojson_path,
+    )
     feature_rows = _feature_rows_from_geojson(fc)
     if not feature_rows:
         return {
