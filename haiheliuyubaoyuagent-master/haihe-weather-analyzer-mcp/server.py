@@ -2,8 +2,8 @@
 
 from fastmcp import FastMCP
 
+import fixed_rainfall_impact_tool as rainfall_impact_tool
 from tools import register_tools
-from fixed_rainfall_impact_tool import register_fixed_rainfall_impact_tool
 from custom_tools import (
     register_historical_same_period_rainfall_tool,
     register_last_month_areal_rainfall_tool,
@@ -24,7 +24,10 @@ class HaiheWeatherAnalyzerMCP:
     def _register_tools(self):
         """注册所有工具"""
         register_tools(self.mcp)
-        register_fixed_rainfall_impact_tool(self.mcp)
+        # 对齐牵引智能体 hhlyqyxt-master/utils/rainfall_impact_geojson.py：
+        # build_rain24h_impact_river_geojson(..., direct_match_km=3.0)。
+        rainfall_impact_tool.DEFAULT_DIRECT_GRAPH_MATCH_KM = 3.0
+        rainfall_impact_tool.register_fixed_rainfall_impact_tool(self.mcp)
         register_last_month_areal_rainfall_tool(self.mcp)
         register_last_year_max_daily_rainfall_tool(self.mcp)
         register_historical_same_period_rainfall_tool(self.mcp)
@@ -68,7 +71,7 @@ class HaiheWeatherAnalyzerMCP:
                     "get_river_network_leader_view - 获取领导可读卡片+表格+地图数据",
                     "reload_river_graph - 重新加载河网缓存",
                     "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）",
-                    "get_affected_river_network_by_rainfall - 暴雨影响河流专题图（30km直接不截断，下游50km截断）",
+                    "get_affected_river_network_by_rainfall - 暴雨影响河流专题图（30km直接不截断，下游50km截断；直接河段匹配3km口径对齐牵引智能体）",
                     "query_last_month_areal_rainfall - 查询上一个自然月的海河9分区累计面雨量",
                     "query_year_to_date_areal_rainfall - 查询今年以来海河9分区累计面雨量",
                     "query_last_year_max_daily_rainfall - 查询上一个自然年最大日降雨量",
@@ -82,6 +85,7 @@ class HaiheWeatherAnalyzerMCP:
                 "rainfall_impact_rule": {
                     "direct": "30km缓冲区只用于判断直接影响，直接河流完整输出",
                     "downstream": "从直接河流下游端点追踪50km，最后一段截断",
+                    "direct_match": "直接命中真实河段与pkl边匹配采用3km阈值，对齐牵引智能体",
                     "geometry": "使用 haihe_river_directed_full_v5 真实河流几何",
                 },
                 "compatibility_note": "已保留 analyze_rainstorm_impact 等原有调用方式；新增拆分工具用于分阶段调用，前端可按需渐进迁移。",
