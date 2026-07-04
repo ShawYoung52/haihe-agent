@@ -31,7 +31,6 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
-
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
 if str(CURRENT_DIR) not in sys.path:
@@ -45,7 +44,6 @@ from rainfall_impact_geojson import (  # noqa: E402
     _station_record,
     aggregate_5min_station_pre_to_24h,
 )
-
 
 DEFAULT_CSV_PATH = r"C:\Users\gaozr\Downloads\24hourmindata.csv"
 DEFAULT_GRAPH_PATH = r"E:\tj\line\result\river_directed_v5.pkl"
@@ -79,7 +77,6 @@ def _json_default(value: Any) -> Any:
 
 
 def _quote_ident(identifier: str) -> str:
-    """安全引用 SQL 标识符，避免 schema/table/column 注入。"""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(identifier or "")):
         raise ValueError(f"非法 SQL 标识符：{identifier!r}")
     return f'"{identifier}"'
@@ -163,29 +160,18 @@ def _station_values_template(srid: int) -> str:
 
 def _station_cte_columns() -> str:
     return """
-        station_id,
-        station_name,
-        province,
-        city,
-        cnty,
-        town,
-        lon,
-        lat,
-        rain_24h,
-        obs_count,
-        start_time,
-        end_time,
-        geom
+        station_id, station_name, province, city, cnty, town,
+        lon, lat, rain_24h, obs_count, start_time, end_time, geom
     """
 
 
 def _validate_geometry_column(columns: set[str], geom_column: str) -> str:
-    if geom_column not in columns:
-        fallback = _pick_first_existing(columns, ("geom", "geometry", "wkb_geometry", "the_geom"))
-        if fallback:
-            return fallback
-        raise ValueError(f"河流表未找到几何字段：{geom_column}")
-    return geom_column
+    if geom_column in columns:
+        return geom_column
+    fallback = _pick_first_existing(columns, ("geom", "geometry", "wkb_geometry", "the_geom"))
+    if fallback:
+        return fallback
+    raise ValueError(f"河流表未找到几何字段：{geom_column}")
 
 
 def _query_direct_rows(
@@ -199,7 +185,6 @@ def _query_direct_rows(
     stations: list[dict],
     buffer_km: float,
 ) -> list[dict]:
-    """查询暴雨站点 30km 缓冲区内的真实河段。"""
     if not stations:
         return []
 
@@ -247,16 +232,6 @@ def _query_direct_rows(
         ORDER BY min_station_distance_km, river_name, objectid
     """
     rows = _station_sql_rows(stations)
-    execute_values(
-        cur,
-        sql,
-        rows,
-        template=_station_values_template(srid),
-        page_size=max(len(rows), 1),
-        fetch=False,
-    )
-    cur.execute("SELECT 1")  # 保持游标状态清晰，实际结果由下一条 execute_values 返回不可用，所以上面不能用 fetch=False。
-    # psycopg2.extras.execute_values 在 fetch=True 时才返回结果；为了兼容旧版本，重新执行 fetch=True。
     result = execute_values(
         cur,
         sql,
@@ -388,6 +363,35 @@ def _build_downstream_feature(row: dict, downstream_map: dict[str, dict], *, mat
     }
 
 
+def _write_empty_result(
+    *,
+    station_24h_df: pd.DataFrame,
+    river_geojson_path: Path,
+    station_geojson_path: Path,
+    top_csv_path: Path,
+    summary_path: Path,
+) -> dict:
+    river_geojson = {"type": "FeatureCollection", "features": []}
+    river_geojson_path.write_text(json.dumps(river_geojson, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = {
+        "status": "ok",
+        "message": "没有站点达到降雨阈值，未生成影响河流。",
+        "station_summary": {
+            "total_station_count": int(len(station_24h_df)),
+            "impact_station_count": 0,
+            "max_rain_24h": float(station_24h_df["rain_24h"].max() or 0.0),
+        },
+        "outputs": {
+            "river_geojson": str(river_geojson_path),
+            "station_geojson": str(station_geojson_path),
+            "top_stations_csv": str(top_csv_path),
+            "summary_json": str(summary_path),
+        },
+    }
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
 def build_db_test_outputs(args: argparse.Namespace) -> dict:
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -398,7 +402,6 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
         & station_24h_df["lon"].notna()
         & station_24h_df["lat"].notna()
     ].copy()
-
     impact_stations = [_station_record(row) for _, row in impact_df.iterrows()]
 
     river_geojson_path = output / "impact_rivers_postgis.geojson"
@@ -417,25 +420,13 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
     )
 
     if not impact_stations:
-        river_geojson = {"type": "FeatureCollection", "features": []}
-        river_geojson_path.write_text(json.dumps(river_geojson, ensure_ascii=False, indent=2), encoding="utf-8")
-        summary = {
-            "status": "ok",
-            "message": "没有站点达到降雨阈值，未生成影响河流。",
-            "station_summary": {
-                "total_station_count": int(len(station_24h_df)),
-                "impact_station_count": 0,
-                "max_rain_24h": float(station_24h_df["rain_24h"].max() or 0.0),
-            },
-            "outputs": {
-                "river_geojson": str(river_geojson_path),
-                "station_geojson": str(station_geojson_path),
-                "top_stations_csv": str(top_csv_path),
-                "summary_json": str(summary_path),
-            },
-        }
-        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        return summary
+        return _write_empty_result(
+            station_24h_df=station_24h_df,
+            river_geojson_path=river_geojson_path,
+            station_geojson_path=station_geojson_path,
+            top_csv_path=top_csv_path,
+            summary_path=summary_path,
+        )
 
     conn = _connect_db(args)
     try:
@@ -454,7 +445,6 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
                 stations=impact_stations,
                 buffer_km=args.station_buffer_km,
             )
-
             direct_rivers = sorted({str(r.get("river_name") or "").strip() for r in direct_rows if r.get("river_name")})
             direct_objectids = {str(r.get("objectid") or "").strip() for r in direct_rows if r.get("objectid")}
 
@@ -480,16 +470,14 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
 
     features = []
     seen = set()
-
     for row in direct_rows:
         feature = _build_direct_feature(row)
         if not feature:
             continue
         key = (feature["properties"].get("objectid"), feature["properties"].get("river_name"), "direct")
-        if key in seen:
-            continue
-        seen.add(key)
-        features.append(feature)
+        if key not in seen:
+            seen.add(key)
+            features.append(feature)
 
     for row in downstream_rows:
         objectid = str(row.get("objectid") or "").strip()
@@ -499,10 +487,9 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
         if not feature:
             continue
         key = (feature["properties"].get("objectid"), feature["properties"].get("river_name"), "downstream")
-        if key in seen:
-            continue
-        seen.add(key)
-        features.append(feature)
+        if key not in seen:
+            seen.add(key)
+            features.append(feature)
 
     features.sort(
         key=lambda f: (
@@ -511,9 +498,8 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
             f["properties"].get("objectid") or "",
         )
     )
-    river_geojson = {"type": "FeatureCollection", "features": features}
     river_geojson_path.write_text(
-        json.dumps(river_geojson, ensure_ascii=False, indent=2, default=_json_default),
+        json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False, indent=2, default=_json_default),
         encoding="utf-8",
     )
 
@@ -569,10 +555,7 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
             "summary_json": str(summary_path),
         },
     }
-    summary_path.write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default),
-        encoding="utf-8",
-    )
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
     return summary
 
 
@@ -585,12 +568,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--station-buffer-km", type=float, default=30.0, help="站点缓冲半径，默认 30km")
     parser.add_argument("--downstream-km", type=float, default=50.0, help="下游追踪距离，默认 50km")
     parser.add_argument("--top-station-limit", type=int, default=100, help="累计雨量 TOP N 输出")
-    parser.add_argument(
-        "--allow-name-fallback",
-        action="store_true",
-        help="当 pkl 边 objectid 与数据库不匹配时，允许按河名回查下游几何；可能多返回同名河段。",
-    )
-
+    parser.add_argument("--allow-name-fallback", action="store_true", help="objectid 不匹配时，允许按河名回查下游几何。")
     parser.add_argument("--db-host", default=_env("HHLY_DB_HOST", DEFAULT_DB_HOST))
     parser.add_argument("--db-port", type=int, default=int(_env("HHLY_DB_PORT", DEFAULT_DB_PORT)))
     parser.add_argument("--db-name", default=_env("HHLY_DB_NAME", DEFAULT_DB_NAME))
@@ -599,21 +577,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-schema", default=_env("HHLY_DB_SCHEMA", DEFAULT_DB_SCHEMA))
     parser.add_argument("--db-srid", type=int, default=int(_env("HHLY_DB_SRID", DEFAULT_DB_SRID)))
     parser.add_argument("--db-sslmode", default=_env("HHLY_DB_SSLMODE", DEFAULT_DB_SSLMODE))
-    parser.add_argument(
-        "--db-connect-timeout",
-        type=int,
-        default=int(_env("HHLY_DB_CONNECT_TIMEOUT", DEFAULT_DB_CONNECT_TIMEOUT)),
-    )
-    parser.add_argument(
-        "--river-table-full",
-        default=_env("HHLY_RIVER_TABLE_FULL", DEFAULT_RIVER_TABLE_FULL),
-        help="完整真实河流表，默认 haihe_river_directed_full_v5",
-    )
-    parser.add_argument(
-        "--river-geom-column",
-        default=_env("HHLY_RIVER_GEOM_COLUMN", DEFAULT_RIVER_GEOM_COLUMN),
-        help="河流表几何字段，默认 geom",
-    )
+    parser.add_argument("--db-connect-timeout", type=int, default=int(_env("HHLY_DB_CONNECT_TIMEOUT", DEFAULT_DB_CONNECT_TIMEOUT)))
+    parser.add_argument("--river-table-full", default=_env("HHLY_RIVER_TABLE_FULL", DEFAULT_RIVER_TABLE_FULL))
+    parser.add_argument("--river-geom-column", default=_env("HHLY_RIVER_GEOM_COLUMN", DEFAULT_RIVER_GEOM_COLUMN))
     return parser.parse_args()
 
 
