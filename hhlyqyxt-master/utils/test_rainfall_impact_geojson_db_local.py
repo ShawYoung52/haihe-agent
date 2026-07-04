@@ -1,17 +1,16 @@
 r"""本地 DB 版测试：5 分钟 CSV -> 24 小时降水 -> PostGIS 真实河流 GeoJSON。
 
-用途：
-- 用本地 CSV 聚合 24 小时站点降水；
-- 用 PostGIS 完整河流表查询站点 30km 缓冲区内的真实河段；
+保留用途：
+- 本地读取 5 分钟站点降水 CSV；
+- 聚合为站点 24 小时累计雨量；
+- 筛选达到暴雨阈值的站点；
+- 用 PostGIS 完整河流表做 30km 直接影响河段查询；
 - 用 river_directed_v5.pkl 做下游 50km 拓扑追踪；
-- 再从 PostGIS 完整河流表返回真实河流 GeoJSON，给前端渲染。
-
-注意：
-- 脚本不在仓库中硬编码数据库密码；请通过环境变量或命令行参数传入。
-- 推荐在 Windows PowerShell 中设置 HHLY_DB_* 环境变量后运行。
+- 回表输出真实河流 GeoJSON，给前端渲染。
 
 运行：
     cd hhlyqyxt-master
+    $env:HHLY_DB_PASSWORD="你的数据库密码"
     python utils/test_rainfall_impact_geojson_db_local.py
 
 输出目录默认：
@@ -22,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
 import sys
@@ -53,7 +51,6 @@ DEFAULT_CSV_PATH = r"C:\Users\gaozr\Downloads\24hourmindata.csv"
 DEFAULT_GRAPH_PATH = r"E:\tj\line\result\river_directed_v5.pkl"
 DEFAULT_OUTPUT_DIR = r"C:\Users\gaozr\Downloads\24hourmindata_db_impact_output"
 
-
 DEFAULT_DB_HOST = "211.157.132.19"
 DEFAULT_DB_PORT = 48091
 DEFAULT_DB_NAME = "hhly"
@@ -61,6 +58,7 @@ DEFAULT_DB_USER = "postgres"
 DEFAULT_DB_SCHEMA = "public"
 DEFAULT_DB_SRID = 4326
 DEFAULT_RIVER_TABLE_FULL = "haihe_river_directed_full_v5"
+DEFAULT_RIVER_GEOM_COLUMN = "geom"
 DEFAULT_DB_SSLMODE = "disable"
 DEFAULT_DB_CONNECT_TIMEOUT = 5
 
@@ -81,7 +79,7 @@ def _json_default(value: Any) -> Any:
 
 
 def _quote_ident(identifier: str) -> str:
-    """安全引用 SQL 标识符。"""
+    """安全引用 SQL 标识符，避免 schema/table/column 注入。"""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(identifier or "")):
         raise ValueError(f"非法 SQL 标识符：{identifier!r}")
     return f'"{identifier}"'
@@ -94,14 +92,11 @@ def _pick_first_existing(columns: set[str], candidates: Iterable[str]) -> str | 
     return None
 
 
-def _river_name_sql_expr(columns: set[str], alias: str | None = None) -> str:
-    fields = [
-        c for c in ("river_name", "rivername", "src_name", "name")
-        if c in columns
-    ]
+def _river_name_sql_expr(columns: set[str], alias: str = "r") -> str:
+    fields = [c for c in ("river_name", "rivername", "src_name", "name") if c in columns]
     if not fields:
-        raise ValueError("河流表未找到河名字段：river_name/rivername/src_name/name")
-    prefix = f"{_quote_ident(alias)}." if alias else ""
+        return "'未知'"
+    prefix = f"{_quote_ident(alias)}."
     parts = [f"NULLIF(TRIM({prefix}{_quote_ident(c)}::text), '')" for c in fields]
     return f"COALESCE({', '.join(parts)}, '未知')"
 
@@ -133,27 +128,7 @@ def _connect_db(args: argparse.Namespace):
     )
 
 
-def _create_temp_station_table(cur, stations: list[dict], *, srid: int) -> None:
-    cur.execute(
-        f"""
-        CREATE TEMP TABLE tmp_rain24h_impact_stations (
-            station_id TEXT,
-            station_name TEXT,
-            province TEXT,
-            city TEXT,
-            cnty TEXT,
-            town TEXT,
-            lon DOUBLE PRECISION,
-            lat DOUBLE PRECISION,
-            rain_24h DOUBLE PRECISION,
-            obs_count INTEGER,
-            start_time TEXT,
-            end_time TEXT,
-            geom geometry(Point, {int(srid)})
-        ) ON COMMIT DROP
-        """
-    )
-
+def _station_sql_rows(stations: list[dict]) -> list[tuple]:
     rows = []
     for station in stations:
         lon = float(station["lon"])
@@ -176,21 +151,41 @@ def _create_temp_station_table(cur, stations: list[dict], *, srid: int) -> None:
                 lat,
             )
         )
+    return rows
 
-    execute_values(
-        cur,
-        """
-        INSERT INTO tmp_rain24h_impact_stations (
-            station_id, station_name, province, city, cnty, town,
-            lon, lat, rain_24h, obs_count, start_time, end_time, geom
-        ) VALUES %s
-        """,
-        rows,
-        template=(
-            "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-            f"ST_SetSRID(ST_MakePoint(%s,%s),{int(srid)}))"
-        ),
+
+def _station_values_template(srid: int) -> str:
+    return (
+        "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+        f"ST_SetSRID(ST_MakePoint(%s,%s),{int(srid)}))"
     )
+
+
+def _station_cte_columns() -> str:
+    return """
+        station_id,
+        station_name,
+        province,
+        city,
+        cnty,
+        town,
+        lon,
+        lat,
+        rain_24h,
+        obs_count,
+        start_time,
+        end_time,
+        geom
+    """
+
+
+def _validate_geometry_column(columns: set[str], geom_column: str) -> str:
+    if geom_column not in columns:
+        fallback = _pick_first_existing(columns, ("geom", "geometry", "wkb_geometry", "the_geom"))
+        if fallback:
+            return fallback
+        raise ValueError(f"河流表未找到几何字段：{geom_column}")
+    return geom_column
 
 
 def _query_direct_rows(
@@ -199,30 +194,35 @@ def _query_direct_rows(
     schema: str,
     table: str,
     columns: set[str],
+    geom_column: str,
+    srid: int,
+    stations: list[dict],
     buffer_km: float,
 ) -> list[dict]:
-    geom_col = _pick_first_existing(columns, ("geom", "geometry"))
-    if not geom_col:
-        raise ValueError(f"{schema}.{table} 未找到 geom/geometry 字段")
+    """查询暴雨站点 30km 缓冲区内的真实河段。"""
+    if not stations:
+        return []
 
-    id_col = _pick_first_existing(columns, ("id", "gid"))
+    geom_col = _validate_geometry_column(columns, geom_column)
     objectid_col = _pick_first_existing(columns, ("objectid", "OBJECTID", "id", "gid"))
+    id_col = _pick_first_existing(columns, ("id", "gid"))
     river_expr = _river_name_sql_expr(columns, alias="r")
 
     q_schema = _quote_ident(schema)
     q_table = _quote_ident(table)
     q_geom = _quote_ident(geom_col)
-    id_expr = f"r.{_quote_ident(id_col)}::text" if id_col else "NULL::text"
-    objectid_expr = f"r.{_quote_ident(objectid_col)}::text" if objectid_col else id_expr
+    objectid_expr = f"r.{_quote_ident(objectid_col)}::text" if objectid_col else "NULL::text"
+    id_expr = f"r.{_quote_ident(id_col)}::text" if id_col else objectid_expr
 
-    cur.execute(
-        f"""
+    sql = f"""
+        WITH stations ({_station_cte_columns()}) AS (VALUES %s)
         SELECT
             {id_expr} AS id,
             {objectid_expr} AS objectid,
             {river_expr} AS river_name,
             ST_AsGeoJSON(r.{q_geom}) AS geom_json,
             ST_Length(r.{q_geom}::geography) / 1000.0 AS length_km,
+            MIN(ST_Distance(r.{q_geom}::geography, s.geom::geography) / 1000.0) AS min_station_distance_km,
             COUNT(DISTINCT s.station_id) AS trigger_station_count,
             jsonb_agg(
                 DISTINCT jsonb_build_object(
@@ -234,26 +234,47 @@ def _query_direct_rows(
                     'town', s.town,
                     'lon', s.lon,
                     'lat', s.lat,
-                    'rain_24h', s.rain_24h
+                    'rain_24h', s.rain_24h,
+                    'distance_to_river_km', ROUND((ST_Distance(r.{q_geom}::geography, s.geom::geography) / 1000.0)::numeric, 3)
                 )
             ) AS trigger_stations
         FROM {q_schema}.{q_table} r
-        JOIN tmp_rain24h_impact_stations s
+        JOIN stations s
           ON ST_DWithin(r.{q_geom}::geography, s.geom::geography, %s)
         WHERE r.{q_geom} IS NOT NULL
+          AND NOT ST_IsEmpty(r.{q_geom})
         GROUP BY r.{q_geom}, {id_expr}, {objectid_expr}, {river_expr}
-        """,
-        (float(buffer_km) * 1000.0,),
+        ORDER BY min_station_distance_km, river_name, objectid
+    """
+    rows = _station_sql_rows(stations)
+    execute_values(
+        cur,
+        sql,
+        rows,
+        template=_station_values_template(srid),
+        page_size=max(len(rows), 1),
+        fetch=False,
     )
-    return list(cur.fetchall())
+    cur.execute("SELECT 1")  # 保持游标状态清晰，实际结果由下一条 execute_values 返回不可用，所以上面不能用 fetch=False。
+    # psycopg2.extras.execute_values 在 fetch=True 时才返回结果；为了兼容旧版本，重新执行 fetch=True。
+    result = execute_values(
+        cur,
+        sql,
+        rows,
+        template=_station_values_template(srid),
+        page_size=max(len(rows), 1),
+        fetch=True,
+    )
+    return list(result or [])
 
 
-def _query_rows_by_objectids_or_names(
+def _query_downstream_rows(
     cur,
     *,
     schema: str,
     table: str,
     columns: set[str],
+    geom_column: str,
     objectids: Iterable[str],
     river_names: Iterable[str],
     allow_name_fallback: bool,
@@ -261,23 +282,20 @@ def _query_rows_by_objectids_or_names(
     objectid_values = sorted({str(x).strip() for x in objectids if str(x).strip()})
     name_values = sorted({str(x).strip() for x in river_names if str(x).strip()})
 
-    geom_col = _pick_first_existing(columns, ("geom", "geometry"))
-    if not geom_col:
-        raise ValueError(f"{schema}.{table} 未找到 geom/geometry 字段")
-
-    id_col = _pick_first_existing(columns, ("id", "gid"))
+    geom_col = _validate_geometry_column(columns, geom_column)
     objectid_col = _pick_first_existing(columns, ("objectid", "OBJECTID", "id", "gid"))
-    river_expr = _river_name_sql_expr(columns)
+    id_col = _pick_first_existing(columns, ("id", "gid"))
+    river_expr = _river_name_sql_expr(columns, alias="r")
 
     where_parts = []
     params: dict[str, Any] = {}
     match_mode = "objectid"
 
     if objectid_values and objectid_col:
-        where_parts.append(f"{_quote_ident(objectid_col)}::text = ANY(%(objectids)s)")
+        where_parts.append(f"r.{_quote_ident(objectid_col)}::text = ANY(%(objectids)s)")
         params["objectids"] = objectid_values
     if objectid_values and id_col and id_col != objectid_col:
-        where_parts.append(f"{_quote_ident(id_col)}::text = ANY(%(objectids)s)")
+        where_parts.append(f"r.{_quote_ident(id_col)}::text = ANY(%(objectids)s)")
         params["objectids"] = objectid_values
 
     if allow_name_fallback and name_values:
@@ -291,8 +309,8 @@ def _query_rows_by_objectids_or_names(
     q_schema = _quote_ident(schema)
     q_table = _quote_ident(table)
     q_geom = _quote_ident(geom_col)
-    id_expr = f"{_quote_ident(id_col)}::text" if id_col else "NULL::text"
-    objectid_expr = f"{_quote_ident(objectid_col)}::text" if objectid_col else id_expr
+    objectid_expr = f"r.{_quote_ident(objectid_col)}::text" if objectid_col else "NULL::text"
+    id_expr = f"r.{_quote_ident(id_col)}::text" if id_col else objectid_expr
     where_sql = " OR ".join(f"({part})" for part in where_parts)
 
     cur.execute(
@@ -301,11 +319,13 @@ def _query_rows_by_objectids_or_names(
             {id_expr} AS id,
             {objectid_expr} AS objectid,
             {river_expr} AS river_name,
-            ST_AsGeoJSON({q_geom}) AS geom_json,
-            ST_Length({q_geom}::geography) / 1000.0 AS length_km
-        FROM {q_schema}.{q_table}
-        WHERE {q_geom} IS NOT NULL
+            ST_AsGeoJSON(r.{q_geom}) AS geom_json,
+            ST_Length(r.{q_geom}::geography) / 1000.0 AS length_km
+        FROM {q_schema}.{q_table} r
+        WHERE r.{q_geom} IS NOT NULL
+          AND NOT ST_IsEmpty(r.{q_geom})
           AND ({where_sql})
+        ORDER BY river_name, objectid
         """,
         params,
     )
@@ -327,6 +347,7 @@ def _build_direct_feature(row: dict) -> dict | None:
     if not geometry:
         return None
     trigger_stations = row.get("trigger_stations") or []
+    min_distance = row.get("min_station_distance_km")
     return {
         "type": "Feature",
         "geometry": geometry,
@@ -336,6 +357,7 @@ def _build_direct_feature(row: dict) -> dict | None:
             "id": row.get("id"),
             "objectid": row.get("objectid"),
             "length_km": round(float(row.get("length_km") or 0.0), 3),
+            "min_station_distance_km": round(float(min_distance), 3) if min_distance is not None else None,
             "trigger_station_count": int(row.get("trigger_station_count") or len(trigger_stations)),
             "trigger_stations": trigger_stations,
             "geometry_source": "postgis",
@@ -422,12 +444,14 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
             if not columns:
                 raise ValueError(f"未找到河流表：{args.db_schema}.{args.river_table_full}")
 
-            _create_temp_station_table(cur, impact_stations, srid=args.db_srid)
             direct_rows = _query_direct_rows(
                 cur,
                 schema=args.db_schema,
                 table=args.river_table_full,
                 columns=columns,
+                geom_column=args.river_geom_column,
+                srid=args.db_srid,
+                stations=impact_stations,
                 buffer_km=args.station_buffer_km,
             )
 
@@ -441,11 +465,12 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
             )
             downstream_objectids = {x for x in downstream_objectids if x not in direct_objectids}
 
-            downstream_rows, match_mode = _query_rows_by_objectids_or_names(
+            downstream_rows, match_mode = _query_downstream_rows(
                 cur,
                 schema=args.db_schema,
                 table=args.river_table_full,
                 columns=columns,
+                geom_column=args.river_geom_column,
                 objectids=downstream_objectids,
                 river_names=downstream_map.keys(),
                 allow_name_fallback=args.allow_name_fallback,
@@ -492,6 +517,7 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
         encoding="utf-8",
     )
 
+    downstream_river_list = sorted(downstream_map.values(), key=lambda x: x["river_name"])
     summary = {
         "status": "ok",
         "params": {
@@ -502,6 +528,7 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
             "db_name": args.db_name,
             "db_schema": args.db_schema,
             "river_table_full": args.river_table_full,
+            "river_geom_column": args.river_geom_column,
             "rain_threshold_mm": args.rain_threshold_mm,
             "station_buffer_km": args.station_buffer_km,
             "downstream_km": args.downstream_km,
@@ -525,7 +552,16 @@ def build_db_test_outputs(args: argparse.Namespace) -> dict:
             "downstream_geometry_match_mode": match_mode,
         },
         "direct_rivers": direct_rivers,
-        "downstream_rivers": sorted(downstream_map.values(), key=lambda x: x["river_name"]),
+        "direct_segments": [
+            {
+                "river_name": row.get("river_name"),
+                "objectid": row.get("objectid"),
+                "min_station_distance_km": round(float(row.get("min_station_distance_km") or 0.0), 3),
+                "trigger_station_count": int(row.get("trigger_station_count") or 0),
+            }
+            for row in direct_rows
+        ],
+        "downstream_rivers": downstream_river_list,
         "outputs": {
             "river_geojson": str(river_geojson_path),
             "station_geojson": str(station_geojson_path),
@@ -552,7 +588,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-name-fallback",
         action="store_true",
-        help="当 pkl 边 objectid 与数据库不匹配时，允许按河名回查下游几何；可能会多返回同名河段。",
+        help="当 pkl 边 objectid 与数据库不匹配时，允许按河名回查下游几何；可能多返回同名河段。",
     )
 
     parser.add_argument("--db-host", default=_env("HHLY_DB_HOST", DEFAULT_DB_HOST))
@@ -573,6 +609,11 @@ def parse_args() -> argparse.Namespace:
         default=_env("HHLY_RIVER_TABLE_FULL", DEFAULT_RIVER_TABLE_FULL),
         help="完整真实河流表，默认 haihe_river_directed_full_v5",
     )
+    parser.add_argument(
+        "--river-geom-column",
+        default=_env("HHLY_RIVER_GEOM_COLUMN", DEFAULT_RIVER_GEOM_COLUMN),
+        help="河流表几何字段，默认 geom",
+    )
     return parser.parse_args()
 
 
@@ -590,6 +631,13 @@ def main() -> None:
     print(f"下游影响河流：{summary['river_summary']['downstream_river_count']}")
     print(f"下游DB河段：{summary['river_summary']['downstream_db_segment_count']}")
     print(f"GeoJSON要素数：{summary['river_summary']['geojson_feature_count']}")
+    if summary.get("direct_segments"):
+        print("直接影响河段明细：")
+        for row in summary["direct_segments"]:
+            print(
+                f"  - {row['river_name']} objectid={row['objectid']} "
+                f"distance={row['min_station_distance_km']}km stations={row['trigger_station_count']}"
+            )
     print("输出文件：")
     for name, path in summary["outputs"].items():
         print(f"  - {name}: {path}")
