@@ -1,4 +1,4 @@
-"""边级裁剪影响河流公共函数。"""
+"""边级影响河流公共函数。"""
 from __future__ import annotations
 
 import heapq
@@ -84,6 +84,11 @@ def graph_edges_by_objectid(graph_path: str | None) -> dict[str, list[dict]]:
 
 
 def direct_seed_nodes(direct_rows: list[dict], graph_path: str | None) -> tuple[dict[Any, float], set[str], set[str]]:
+    """用直接影响边的下游端点作为下游 50km 起点。
+
+    直接影响边本身不再按 30km 缓冲区裁剪，因此下游追踪从直接边的下游端点开始，
+    初始累计距离为 0km。
+    """
     edge_map = graph_edges_by_objectid(graph_path)
     node_dist: dict[Any, float] = {}
     direct_objectids: set[str] = set()
@@ -95,11 +100,10 @@ def direct_seed_nodes(direct_rows: list[dict], graph_path: str | None) -> tuple[
             direct_objectids.add(objectid)
         if river_name:
             direct_rivers.add(river_name)
-        remain = float(row.get("remaining_after_buffer_km") or 0.0)
         for edge in edge_map.get(objectid, []):
             node = edge.get("v")
-            if node is not None and remain < node_dist.get(node, math.inf):
-                node_dist[node] = remain
+            if node is not None and 0.0 < node_dist.get(node, math.inf):
+                node_dist[node] = 0.0
     return node_dist, direct_objectids, direct_rivers
 
 
