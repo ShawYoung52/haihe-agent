@@ -198,6 +198,7 @@ def _query_direct_rows(
     q_geom = _quote_ident(geom_col)
     objectid_expr = f"r.{_quote_ident(objectid_col)}::text" if objectid_col else "NULL::text"
     id_expr = f"r.{_quote_ident(id_col)}::text" if id_col else objectid_expr
+    buffer_m = float(buffer_km) * 1000.0
 
     sql = f"""
         WITH stations ({_station_cte_columns()}) AS (VALUES %s)
@@ -225,7 +226,7 @@ def _query_direct_rows(
             ) AS trigger_stations
         FROM {q_schema}.{q_table} r
         JOIN stations s
-          ON ST_DWithin(r.{q_geom}::geography, s.geom::geography, %s)
+          ON ST_DWithin(r.{q_geom}::geography, s.geom::geography, {buffer_m})
         WHERE r.{q_geom} IS NOT NULL
           AND NOT ST_IsEmpty(r.{q_geom})
         GROUP BY r.{q_geom}, {id_expr}, {objectid_expr}, {river_expr}
