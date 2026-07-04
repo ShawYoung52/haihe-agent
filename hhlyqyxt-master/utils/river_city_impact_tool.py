@@ -5,6 +5,7 @@
 - impact_type=downstream_50km/downstream/indirect 归为间接影响。
 
 函数只负责一件事：河流 GeoJSON 与行政区划面表空间相交，并按城市聚合。
+城市同时出现在直接和间接结果时，按业务口径归为直接影响。
 """
 from __future__ import annotations
 
@@ -170,7 +171,14 @@ def _group_city_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
             direct.append(item)
         elif row.get("impact_type") == "indirect":
             indirect.append(item)
-    return direct, indirect
+    return _apply_direct_city_priority(direct, indirect)
+
+
+def _apply_direct_city_priority(direct: list[dict], indirect: list[dict]) -> tuple[list[dict], list[dict]]:
+    """同一城市既直接又间接受影响时，只保留在直接影响结果中。"""
+    direct_names = {item["city_name"] for item in direct if item.get("city_name")}
+    filtered_indirect = [item for item in indirect if item.get("city_name") not in direct_names]
+    return direct, filtered_indirect
 
 
 def get_river_impact_cities(
@@ -227,6 +235,7 @@ def _build_result(direct: list[dict], indirect: list[dict], schema: str, table: 
         "params": {
             "admin_table": f"{schema}.{table}",
             "admin_geom_col": geom_col,
+            "city_priority_rule": "同一城市既直接又间接受影响时，归入直接影响并从间接影响中移除",
         },
         "direct": {"city_count": len(direct_names), "cities": direct},
         "indirect": {"city_count": len(indirect_names), "cities": indirect},
