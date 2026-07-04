@@ -162,23 +162,22 @@ def _format_city_item(row: dict) -> dict:
     }
 
 
-def _group_city_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+def _group_city_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     direct: list[dict] = []
-    indirect: list[dict] = []
+    indirect_raw: list[dict] = []
     for row in rows:
         item = _format_city_item(row)
         if row.get("impact_type") == "direct":
             direct.append(item)
         elif row.get("impact_type") == "indirect":
-            indirect.append(item)
-    return _apply_direct_city_priority(direct, indirect)
+            indirect_raw.append(item)
+    return direct, indirect_raw, _apply_direct_city_priority(direct, indirect_raw)
 
 
-def _apply_direct_city_priority(direct: list[dict], indirect: list[dict]) -> tuple[list[dict], list[dict]]:
+def _apply_direct_city_priority(direct: list[dict], indirect: list[dict]) -> list[dict]:
     """同一城市既直接又间接受影响时，只保留在直接影响结果中。"""
     direct_names = {item["city_name"] for item in direct if item.get("city_name")}
-    filtered_indirect = [item for item in indirect if item.get("city_name") not in direct_names]
-    return direct, filtered_indirect
+    return [item for item in indirect if item.get("city_name") not in direct_names]
 
 
 def get_river_impact_cities(
@@ -211,8 +210,8 @@ def get_river_impact_cities(
     finally:
         connection.close()
 
-    direct, indirect = _group_city_rows(city_rows)
-    return _build_result(direct, indirect, admin_schema, admin_table, admin_geom_col)
+    direct, indirect_raw, indirect = _group_city_rows(city_rows)
+    return _build_result(direct, indirect_raw, indirect, admin_schema, admin_table, admin_geom_col)
 
 
 def _empty_result(message: str) -> dict:
@@ -221,15 +220,19 @@ def _empty_result(message: str) -> dict:
         "direct": {"city_count": 0, "cities": []},
         "indirect": {"city_count": 0, "cities": []},
         "direct_city_names": [],
+        "indirect_city_names_raw": [],
         "indirect_city_names": [],
+        "overlap_city_names": [],
         "all_city_names": [],
         "message": message,
     }
 
 
-def _build_result(direct: list[dict], indirect: list[dict], schema: str, table: str, geom_col: str) -> dict:
+def _build_result(direct: list[dict], indirect_raw: list[dict], indirect: list[dict], schema: str, table: str, geom_col: str) -> dict:
     direct_names = sorted({item["city_name"] for item in direct})
+    indirect_raw_names = sorted({item["city_name"] for item in indirect_raw})
     indirect_names = sorted({item["city_name"] for item in indirect})
+    overlap_names = sorted(set(direct_names) & set(indirect_raw_names))
     return {
         "status": "ok",
         "params": {
@@ -239,10 +242,17 @@ def _build_result(direct: list[dict], indirect: list[dict], schema: str, table: 
         },
         "direct": {"city_count": len(direct_names), "cities": direct},
         "indirect": {"city_count": len(indirect_names), "cities": indirect},
+        "diagnostics": {
+            "indirect_raw_city_count": len(indirect_raw_names),
+            "overlap_city_count": len(overlap_names),
+            "indirect_after_priority_city_count": len(indirect_names),
+        },
         "direct_city_names": direct_names,
+        "indirect_city_names_raw": indirect_raw_names,
+        "overlap_city_names": overlap_names,
         "indirect_city_names": indirect_names,
         "all_city_names": sorted(set(direct_names) | set(indirect_names)),
-        "message": f"直接河流影响 {len(direct_names)} 个市，间接河流影响 {len(indirect_names)} 个市。",
+        "message": f"直接河流影响 {len(direct_names)} 个市，间接河流去重后影响 {len(indirect_names)} 个市。",
     }
 
 
