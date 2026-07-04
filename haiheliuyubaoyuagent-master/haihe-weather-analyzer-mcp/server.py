@@ -9,6 +9,7 @@ from custom_tools import (
     register_last_month_areal_rainfall_tool,
     register_last_year_max_daily_rainfall_tool,
     register_poi_nearest_observation_tool,
+    register_risk_warning_tool,
     register_year_to_date_areal_rainfall_tool,
 )
 
@@ -29,6 +30,7 @@ class HaiheWeatherAnalyzerMCP:
         register_historical_same_period_rainfall_tool(self.mcp)
         register_year_to_date_areal_rainfall_tool(self.mcp)
         register_poi_nearest_observation_tool(self.mcp)
+        register_risk_warning_tool(self.mcp)
 
         @self.mcp.tool()
         def get_service_info() -> dict:
@@ -72,6 +74,7 @@ class HaiheWeatherAnalyzerMCP:
                     "query_last_year_max_daily_rainfall - 查询上一个自然年最大日降雨量",
                     "query_historical_same_period_avg_rainfall - 查询历史同期平均降雨量",
                     "query_poi_nearest_observation - 查询POI经纬度及最近观测站实况值",
+                    "query_risk_warning - 查询山洪、地质灾害或中小河流洪水风险预警",
                     "search_poi - 按名称查询 POI 地点/设施/单位",
                     "search_poi_by_distance - 按名称和经纬度范围查询附近 POI",
                     "query_rolling_forecast - 天津滚动预报综合天气查询",
