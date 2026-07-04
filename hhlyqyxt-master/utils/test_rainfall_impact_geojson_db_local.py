@@ -4,6 +4,7 @@ r"""本地 DB 版测试：5 分钟 CSV -> 24 小时降水 -> 真实影响河流 
 - 30km 缓冲区只用于判断直接影响，不截断直接命中的真实河段；
 - 直接河流按 full_v5 的 ST_Dump 后单个真实线段判断，避免同一 MultiLineString 里的远处碎线被带出；
 - 下游 50km 按 river_directed_v5.pkl 拓扑追踪；
+- 下游起点同时来自 30km 内 pkl 边、以及直接命中真实河段附近匹配到的 pkl 边；
 - 下游回 full_v5 时按 pkl 边位置匹配最近真实线段，并只输出 50km 范围内的截断线段。
 """
 from __future__ import annotations
@@ -92,14 +93,6 @@ def connect_db(args: argparse.Namespace):
     )
 
 
-def sqlalchemy_engine_for_rig(args: argparse.Namespace):
-    password = quote_plus(str(args.db_password))
-    url = f"postgresql+psycopg2://{args.db_user}:{password}@{args.db_host}:{args.db_port}/{args.db_name}"
-    from sqlalchemy import create_engine
-
-    return create_engine(url, connect_args={"sslmode": args.db_sslmode, "connect_timeout": args.db_connect_timeout})
-
-
 def table_columns(cur, schema: str, table: str) -> set[str]:
     cur.execute(
         "SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name=%s",
@@ -142,15 +135,7 @@ def create_station_temp(cur, stations: list[dict], srid: int) -> None:
         )
 
 
-def query_direct_river_parts(
-    cur,
-    *,
-    schema: str,
-    table: str,
-    columns: set[str],
-    geom_col: str,
-    buffer_km: float,
-) -> list[dict]:
+def query_direct_river_parts(cur, *, schema: str, table: str, columns: set[str], geom_col: str, buffer_km: float) -> list[dict]:
     objectid_col = first_col(columns, ("objectid", "OBJECTID", "id", "gid"))
     id_col = first_col(columns, ("id", "gid"))
     objectid_expr = f"r.{quote_ident(objectid_col)}::text" if objectid_col else "NULL::text"
@@ -226,37 +211,124 @@ def point_to_segment_km(lon: float, lat: float, p1: tuple[float, float], p2: tup
     return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
 
 
+def point_to_line_km(lon: float, lat: float, line: list[list[float]]) -> float:
+    if len(line) < 2:
+        return math.inf
+    return min(
+        point_to_segment_km(lon, lat, (float(line[i][0]), float(line[i][1])), (float(line[i + 1][0]), float(line[i + 1][1])))
+        for i in range(len(line) - 1)
+    )
+
+
+def edge_to_line_km(p1: tuple[float, float], p2: tuple[float, float], line: list[list[float]]) -> float:
+    if len(line) < 2:
+        return math.inf
+    candidates = [
+        point_to_line_km(p1[0], p1[1], line),
+        point_to_line_km(p2[0], p2[1], line),
+    ]
+    candidates.extend(point_to_segment_km(float(pt[0]), float(pt[1]), p1, p2) for pt in line)
+    return min(candidates)
+
+
+def geometry_lines(geometry: dict) -> list[list[list[float]]]:
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "LineString":
+        return [coords] if len(coords) >= 2 else []
+    if gtype == "MultiLineString":
+        return [line for line in coords if len(line) >= 2]
+    return []
+
+
+def direct_part_refs(direct_rows: list[dict]) -> list[dict]:
+    refs = []
+    for row in direct_rows:
+        geometry = geometry_from_row(row)
+        if not geometry:
+            continue
+        lines = geometry_lines(geometry)
+        if not lines:
+            continue
+        refs.append({
+            "objectid": str(row.get("objectid") or "").strip(),
+            "river_name": str(row.get("river_name") or "").strip(),
+            "lines": lines,
+        })
+    return refs
+
+
 def graph_edge_key(source_node: Any, target_node: Any, key: Any, attr: dict) -> str:
     objectid = rig._edge_objectid_key(attr) or ""
     river_name = rig.get_edge_river_name(attr) or ""
     return f"{source_node}|{target_node}|{key}|{objectid}|{river_name}"
 
 
-def find_direct_graph_starts(stations: list[dict], graph_path: str, buffer_km: float) -> tuple[dict[Any, float], set[str], int]:
+def matches_direct_part(
+    edge_objectid: str,
+    edge_river_name: str,
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    refs: list[dict],
+    max_distance_km: float,
+) -> bool:
+    for ref in refs:
+        ref_objectid = ref["objectid"]
+        ref_river_name = ref["river_name"]
+        same_objectid = bool(edge_objectid and ref_objectid and edge_objectid == ref_objectid)
+        same_name = bool(edge_river_name and ref_river_name and edge_river_name == ref_river_name)
+        if not same_objectid and not same_name:
+            continue
+        if any(edge_to_line_km(p1, p2, line) <= max_distance_km for line in ref["lines"]):
+            return True
+    return False
+
+
+def find_direct_graph_starts(
+    stations: list[dict],
+    direct_rows: list[dict],
+    graph_path: str,
+    buffer_km: float,
+    direct_match_km: float,
+) -> tuple[dict[Any, float], set[str], dict]:
     graph = rig.get_graph(graph_path)
     station_points = [(float(s["lon"]), float(s["lat"])) for s in stations]
+    refs = direct_part_refs(direct_rows)
     start_nodes: dict[Any, float] = {}
     direct_edge_keys: set[str] = set()
+    station_edge_count = 0
+    matched_part_edge_count = 0
 
     for u, v, key, attr in rig.iter_graph_edges(graph):
         ux, uy = parse_node_xy(u)
         vx, vy = parse_node_xy(v)
         if ux is None or uy is None or vx is None or vy is None:
             continue
-        min_dist = min(point_to_segment_km(lon, lat, (ux, uy), (vx, vy)) for lon, lat in station_points)
-        if min_dist <= float(buffer_km):
-            direct_edge_keys.add(graph_edge_key(u, v, key, attr))
+        p1 = (ux, uy)
+        p2 = (vx, vy)
+        edge_key = graph_edge_key(u, v, key, attr)
+        station_dist = min(point_to_segment_km(lon, lat, p1, p2) for lon, lat in station_points)
+        station_hit = station_dist <= float(buffer_km)
+        edge_objectid = str(rig._edge_objectid_key(attr) or "").strip()
+        edge_river_name = str(rig.get_edge_river_name(attr) or "").strip()
+        direct_part_hit = matches_direct_part(edge_objectid, edge_river_name, p1, p2, refs, float(direct_match_km))
+
+        if station_hit or direct_part_hit:
+            direct_edge_keys.add(edge_key)
             start_nodes[v] = 0.0
-    return start_nodes, direct_edge_keys, len(direct_edge_keys)
+            station_edge_count += int(station_hit)
+            matched_part_edge_count += int(direct_part_hit and not station_hit)
+
+    stats = {
+        "direct_graph_edge_count": len(direct_edge_keys),
+        "station_buffer_graph_edge_count": station_edge_count,
+        "direct_part_matched_graph_edge_count": matched_part_edge_count,
+        "direct_part_match_km": float(direct_match_km),
+    }
+    return start_nodes, direct_edge_keys, stats
 
 
-def collect_downstream_segments(
-    start_nodes: dict[Any, float],
-    *,
-    graph_path: str,
-    direct_edge_keys: set[str],
-    downstream_km: float,
-) -> tuple[dict[str, dict], list[dict]]:
+def collect_downstream_segments(start_nodes: dict[Any, float], *, graph_path: str, direct_edge_keys: set[str], downstream_km: float) -> tuple[dict[str, dict], list[dict]]:
     limit = float(downstream_km)
     if not start_nodes or limit <= 0:
         return {}, []
@@ -339,26 +411,9 @@ def create_downstream_temp(cur, segments: list[dict]) -> None:
     for segment in segments:
         fx, fy, tx, ty = segment.get("from_x"), segment.get("from_y"), segment.get("to_x"), segment.get("to_y")
         rows.append((
-            segment["edge_key"],
-            segment["objectid"],
-            segment["river_name"],
-            segment["min_distance_km"],
-            segment["end_distance_km"],
-            segment["keep_km"],
-            segment["clip_fraction"],
-            bool(segment.get("is_direct_graph_edge")),
-            fx,
-            fy,
-            tx,
-            ty,
-            fx,
-            fy,
-            tx,
-            ty,
-            fx,
-            fy,
-            tx,
-            ty,
+            segment["edge_key"], segment["objectid"], segment["river_name"], segment["min_distance_km"],
+            segment["end_distance_km"], segment["keep_km"], segment["clip_fraction"], bool(segment.get("is_direct_graph_edge")),
+            fx, fy, tx, ty, fx, fy, tx, ty, fx, fy, tx, ty,
         ))
     if rows:
         cur.executemany("""
@@ -370,16 +425,7 @@ def create_downstream_temp(cur, segments: list[dict]) -> None:
         """, rows)
 
 
-def query_downstream_river_parts(
-    cur,
-    *,
-    schema: str,
-    table: str,
-    columns: set[str],
-    geom_col: str,
-    segments: list[dict],
-    buffer_km: float,
-) -> list[dict]:
+def query_downstream_river_parts(cur, *, schema: str, table: str, columns: set[str], geom_col: str, segments: list[dict], buffer_km: float) -> list[dict]:
     if not segments:
         return []
     objectid_col = first_col(columns, ("objectid", "OBJECTID", "id", "gid"))
@@ -576,16 +622,18 @@ def build_outputs(args: argparse.Namespace) -> dict:
     top_csv_path = output / "rain24h_top_stations.csv"
     summary_path = output / "summary.json"
 
-    station_geojson_path.write_text(
-        json.dumps(rig._make_station_geojson(impact_stations), ensure_ascii=False, indent=2, default=json_default),
-        encoding="utf-8",
-    )
+    station_geojson_path.write_text(json.dumps(rig._make_station_geojson(impact_stations), ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
     station_df.head(max(args.top_station_limit, 0)).to_csv(top_csv_path, index=False, encoding="utf-8-sig")
 
     direct_rows: list[dict] = []
     downstream_rows: list[dict] = []
     downstream_segments: list[dict] = []
-    direct_graph_edge_count = 0
+    direct_start_stats = {
+        "direct_graph_edge_count": 0,
+        "station_buffer_graph_edge_count": 0,
+        "direct_part_matched_graph_edge_count": 0,
+        "direct_part_match_km": args.direct_graph_match_km,
+    }
 
     if impact_stations:
         conn = connect_db(args)
@@ -607,10 +655,12 @@ def build_outputs(args: argparse.Namespace) -> dict:
                     geom_col=geom_col,
                     buffer_km=args.station_buffer_km,
                 )
-                start_nodes, direct_edge_keys, direct_graph_edge_count = find_direct_graph_starts(
+                start_nodes, direct_edge_keys, direct_start_stats = find_direct_graph_starts(
                     impact_stations,
+                    direct_rows,
                     args.graph,
                     args.station_buffer_km,
+                    args.direct_graph_match_km,
                 )
                 _downstream_map, downstream_segments = collect_downstream_segments(
                     start_nodes,
@@ -654,8 +704,7 @@ def build_outputs(args: argparse.Namespace) -> dict:
         item["properties"].get("river_name") or "",
         item["properties"].get("edge_key") or item["properties"].get("objectid") or "",
     ))
-    river_geojson = {"type": "FeatureCollection", "features": features}
-    river_geojson_path.write_text(json.dumps(river_geojson, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
+    river_geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
 
     direct_rivers = sorted({str(row.get("river_name") or "") for row in direct_rows if row.get("river_name")})
     downstream_rivers = sorted({str(row.get("river_name") or "") for row in downstream_rows if row.get("river_name")})
@@ -666,8 +715,9 @@ def build_outputs(args: argparse.Namespace) -> dict:
             "rain_threshold_mm": args.rain_threshold_mm,
             "station_buffer_km": args.station_buffer_km,
             "downstream_km": args.downstream_km,
+            "direct_graph_match_km": args.direct_graph_match_km,
             "direct_rule": "ST_Dump full_v5 geom, only direct-hit line parts within 30km are output uncut",
-            "downstream_rule": "trace pkl topology 50km, match nearest ST_Dump full_v5 part by pkl edge, output clipped part only",
+            "downstream_rule": "trace pkl topology 50km from station-hit or direct-part-matched graph starts, output clipped dump parts only",
         },
         "station_summary": {
             "total_station_count": int(len(station_df)),
@@ -677,7 +727,9 @@ def build_outputs(args: argparse.Namespace) -> dict:
         "river_summary": {
             "direct_feature_count": len(direct_rows),
             "direct_river_count": len(direct_rivers),
-            "direct_graph_edge_count": direct_graph_edge_count,
+            "direct_graph_edge_count": direct_start_stats["direct_graph_edge_count"],
+            "station_buffer_graph_edge_count": direct_start_stats["station_buffer_graph_edge_count"],
+            "direct_part_matched_graph_edge_count": direct_start_stats["direct_part_matched_graph_edge_count"],
             "downstream_graph_segment_count": len(downstream_segments),
             "downstream_feature_count": len(downstream_rows),
             "downstream_river_count": len(downstream_rivers),
@@ -705,6 +757,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rain-threshold-mm", type=float, default=50.0)
     parser.add_argument("--station-buffer-km", type=float, default=30.0)
     parser.add_argument("--downstream-km", type=float, default=50.0)
+    parser.add_argument("--direct-graph-match-km", type=float, default=15.0)
     parser.add_argument("--top-station-limit", type=int, default=100)
     parser.add_argument("--db-host", default=os.getenv("HHLY_DB_HOST", DEFAULT_DB_HOST))
     parser.add_argument("--db-port", type=int, default=int(os.getenv("HHLY_DB_PORT", DEFAULT_DB_PORT)))
@@ -727,6 +780,9 @@ def main() -> None:
     print(f"总站数：{summary['station_summary']['total_station_count']}")
     print(f"触发站数：{summary['station_summary']['impact_station_count']}")
     print(f"直接河流要素：{summary['river_summary']['direct_feature_count']}")
+    print(f"pkl直接起点边：{summary['river_summary']['direct_graph_edge_count']}")
+    print(f"  - 站点30km命中：{summary['river_summary']['station_buffer_graph_edge_count']}")
+    print(f"  - 真实直接河段匹配：{summary['river_summary']['direct_part_matched_graph_edge_count']}")
     print(f"下游图边段：{summary['river_summary']['downstream_graph_segment_count']}")
     print(f"下游河流要素：{summary['river_summary']['downstream_feature_count']}")
     print(f"GeoJSON要素数：{summary['river_summary']['geojson_feature_count']}")
