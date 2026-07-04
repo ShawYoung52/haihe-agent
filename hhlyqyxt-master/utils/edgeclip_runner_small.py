@@ -1,4 +1,4 @@
-"""边级裁剪运行函数。"""
+"""边级影响河流运行函数。"""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,8 @@ from pathlib import Path
 from psycopg2.extras import RealDictCursor
 from rainfall_impact_geojson import _station_record, aggregate_5min_station_pre_to_24h
 from rainfall_edgeclip_common import collect_downstream_segments, direct_seed_nodes
-from rainfall_edgeclip_db import build_feature, create_station_temp, get_table_columns, query_direct_edges_clipped, query_downstream_edges_clipped
+from rainfall_edgeclip_db import build_feature, create_station_temp, get_table_columns, query_downstream_edges_clipped
+from rainfall_edgeclip_direct_full import query_direct_edges_full
 
 
 def run_edgeclip(*, conn, csv_path: str, graph_path: str, output_dir: str, db_schema: str = "public", db_srid: int = 4326, river_edge_table: str = "haihe_river_directed_simple_v5", river_geom_column: str = "geom", rain_threshold_mm: float = 50.0, station_buffer_km: float = 30.0, downstream_km: float = 50.0) -> dict:
@@ -27,7 +28,7 @@ def run_edgeclip(*, conn, csv_path: str, graph_path: str, output_dir: str, db_sc
             if not columns:
                 raise ValueError(f"未找到河流边表：{db_schema}.{river_edge_table}")
             create_station_temp(cur, stations, srid=db_srid)
-            direct_rows = query_direct_edges_clipped(cur, schema=db_schema, table=river_edge_table, columns=columns, geom_column=river_geom_column, buffer_km=station_buffer_km)
+            direct_rows = query_direct_edges_full(cur, schema=db_schema, table=river_edge_table, columns=columns, geom_column=river_geom_column, buffer_km=station_buffer_km)
             start_dist, direct_objectids, direct_rivers = direct_seed_nodes(direct_rows, graph_path)
             downstream_map, downstream_segments = collect_downstream_segments(start_dist, graph_path=graph_path, direct_objectids=direct_objectids, direct_rivers=direct_rivers, downstream_km=downstream_km)
             downstream_segments = [x for x in downstream_segments if str(x.get("objectid") or "") not in direct_objectids and str(x.get("river_name") or "") not in direct_rivers]
