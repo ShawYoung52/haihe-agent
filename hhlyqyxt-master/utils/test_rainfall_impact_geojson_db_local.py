@@ -4,7 +4,7 @@ r"""本地 DB 版测试：5 分钟 CSV -> 24 小时降水 -> 真实河流 GeoJSO
 - 30km 缓冲区只用于判断直接影响河流，不截断直接河流；
 - 直接河流使用 haihe_river_directed_full_v5 的真实 geom 完整输出；
 - 下游 50km 使用 river_directed_v5.pkl 做拓扑追踪，最后一段尽量按比例截断；
-- 同一 objectid 或河名同时直接/间接出现时，保留直接河流。
+- 直接/间接去重只按 objectid，不按 river_name。也就是说，同名但不同 objectid 的下游河段仍会被纳入下游 50km。
 
 运行：
     cd hhlyqyxt-master
@@ -129,7 +129,15 @@ def create_station_temp(cur, stations: list[dict], srid: int) -> None:
     for s in stations:
         lon = float(s["lon"])
         lat = float(s["lat"])
-        rows.append((str(s.get("station_id") or ""), str(s.get("station_name") or ""), lon, lat, float(s.get("rain_24h") or 0.0), lon, lat))
+        rows.append((
+            str(s.get("station_id") or ""),
+            str(s.get("station_name") or ""),
+            lon,
+            lat,
+            float(s.get("rain_24h") or 0.0),
+            lon,
+            lat,
+        ))
     cur.executemany(
         f"INSERT INTO tmp_rain_impact_stations VALUES(%s,%s,%s,%s,%s,ST_SetSRID(ST_MakePoint(%s,%s),{int(srid)}))",
         rows,
@@ -187,10 +195,11 @@ def parse_node_xy(node: Any) -> tuple[float | None, float | None]:
 def direct_start_nodes(direct_rows: list[dict], graph_path: str) -> tuple[dict[Any, float], set[str], set[str]]:
     graph = get_graph(graph_path)
     edge_by_objectid: dict[str, list[Any]] = {}
-    for u, v, _key, attr in iter_graph_edges(graph):
+    for _u, v, _key, attr in iter_graph_edges(graph):
         objectid = _edge_objectid_key(attr)
         if objectid:
             edge_by_objectid.setdefault(str(objectid), []).append(v)
+
     start_nodes: dict[Any, float] = {}
     direct_objectids = {str(r.get("objectid") or "").strip() for r in direct_rows if r.get("objectid")}
     direct_rivers = {str(r.get("river_name") or "").strip() for r in direct_rows if r.get("river_name")}
@@ -200,10 +209,22 @@ def direct_start_nodes(direct_rows: list[dict], graph_path: str) -> tuple[dict[A
     return start_nodes, direct_objectids, direct_rivers
 
 
-def collect_downstream_segments(start_nodes: dict[Any, float], *, graph_path: str, direct_objectids: set[str], direct_rivers: set[str], downstream_km: float) -> tuple[dict[str, dict], list[dict]]:
+def collect_downstream_segments(
+    start_nodes: dict[Any, float],
+    *,
+    graph_path: str,
+    direct_objectids: set[str],
+    downstream_km: float,
+) -> tuple[dict[str, dict], list[dict]]:
+    """向下游追踪 50km。
+
+    注意：这里只用 objectid 判断“是否已经是直接河段”。
+    不能用 river_name 过滤，因为同名河段可能有上下游多个 objectid。
+    """
     limit = float(downstream_km)
     if not start_nodes or limit <= 0:
         return {}, []
+
     graph = get_graph(graph_path)
     best_dist = dict(start_nodes)
     seq = count()
@@ -211,25 +232,29 @@ def collect_downstream_segments(start_nodes: dict[Any, float], *, graph_path: st
     heapq.heapify(heap)
     river_map: dict[str, dict] = {}
     segment_map: dict[tuple[str, str], dict] = {}
+
     while heap:
         curr_dist, _seq, node = heapq.heappop(heap)
         if curr_dist > best_dist.get(node, math.inf) or curr_dist >= limit:
             continue
+
         for u, v, _key, attr in iter_out_edges(graph, node):
             objectid = _edge_objectid_key(attr)
+            objectid_text = str(objectid or "").strip()
             river_name = get_edge_river_name(attr)
             length_km = max(float(get_edge_length_km(attr, attr_name="length_km") or 0.0), 0.0)
             next_dist = curr_dist + length_km
             keep_km = max(min(limit - curr_dist, length_km), 0.0) if length_km > 0 else 0.0
             clip_fraction = 1.0 if length_km <= 0 else max(min(keep_km / length_km, 1.0), 0.0)
-            is_direct = bool(objectid and str(objectid) in direct_objectids) or bool(river_name and river_name in direct_rivers)
-            if objectid and river_name and not is_direct and clip_fraction > 0:
+            is_direct_objectid = bool(objectid_text and objectid_text in direct_objectids)
+
+            if objectid_text and river_name and not is_direct_objectid and clip_fraction > 0:
                 from_x, from_y = parse_node_xy(u)
-                key = (str(objectid), river_name)
+                key = (objectid_text, river_name)
                 old = segment_map.get(key)
                 if old is None or curr_dist < old["min_distance_km"] or clip_fraction > old["clip_fraction"]:
                     segment_map[key] = {
-                        "objectid": str(objectid),
+                        "objectid": objectid_text,
                         "river_name": river_name,
                         "min_distance_km": round(float(curr_dist), 3),
                         "end_distance_km": round(float(curr_dist + keep_km), 3),
@@ -240,9 +265,11 @@ def collect_downstream_segments(start_nodes: dict[Any, float], *, graph_path: st
                 item = river_map.setdefault(river_name, {"river_name": river_name, "min_distance_km": math.inf})
                 if curr_dist < item["min_distance_km"]:
                     item["min_distance_km"] = curr_dist
+
             if next_dist <= limit and next_dist < best_dist.get(v, math.inf):
                 best_dist[v] = next_dist
                 heapq.heappush(heap, (next_dist, next(seq), v))
+
     for item in river_map.values():
         item["min_distance_km"] = round(float(item["min_distance_km"]), 3)
     return river_map, sorted(segment_map.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["objectid"]))
@@ -424,11 +451,9 @@ def build_outputs(args: argparse.Namespace) -> dict:
                     start_nodes,
                     graph_path=args.graph,
                     direct_objectids=direct_objectids,
-                    direct_rivers=direct_rivers,
                     downstream_km=args.downstream_km,
                 )
-                downstream_segments = [s for s in downstream_segments if s["objectid"] not in direct_objectids and s["river_name"] not in direct_rivers]
-                downstream_map = {name: info for name, info in downstream_map.items() if name not in direct_rivers}
+                downstream_segments = [s for s in downstream_segments if s["objectid"] not in direct_objectids]
                 downstream_rows = query_downstream_rivers(cur, schema=args.db_schema, table=args.river_table, columns=columns, geom_col=geom_col, segments=downstream_segments)
         finally:
             conn.close()
@@ -444,8 +469,7 @@ def build_outputs(args: argparse.Namespace) -> dict:
                 features.append(feat)
     for row in downstream_rows:
         objectid = str(row.get("objectid") or "")
-        river_name = str(row.get("river_name") or "")
-        if objectid in direct_objectids or river_name in direct_rivers:
+        if objectid in direct_objectids:
             continue
         feat = feature_from_row(row, "downstream_50km", downstream_map)
         if feat:
@@ -456,6 +480,7 @@ def build_outputs(args: argparse.Namespace) -> dict:
     features.sort(key=lambda f: (0 if f["properties"].get("impact_type") == "direct_buffer" else 1, f["properties"].get("river_name") or "", f["properties"].get("objectid") or ""))
     river_geojson.write_text(json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
 
+    downstream_rivers = sorted({str(s.get("river_name") or "") for s in downstream_segments if s.get("river_name")})
     summary = {
         "status": "ok",
         "params": {
@@ -463,6 +488,7 @@ def build_outputs(args: argparse.Namespace) -> dict:
             "rain_threshold_mm": args.rain_threshold_mm,
             "station_buffer_km": args.station_buffer_km,
             "downstream_km": args.downstream_km,
+            "dedupe_rule": "direct/indirect dedupe by objectid only, not river_name",
         },
         "station_summary": {
             "total_station_count": int(len(station_df)),
@@ -474,9 +500,11 @@ def build_outputs(args: argparse.Namespace) -> dict:
             "direct_river_count": len(direct_rivers),
             "downstream_graph_segment_count": len(downstream_segments),
             "downstream_db_segment_count": len(downstream_rows),
+            "downstream_river_count": len(downstream_rivers),
             "geojson_feature_count": len(features),
         },
         "direct_rivers": sorted(direct_rivers),
+        "downstream_rivers": downstream_rivers,
         "downstream_segments": downstream_segments,
         "outputs": {
             "river_geojson": str(river_geojson),
@@ -523,6 +551,7 @@ def main() -> None:
     print(f"直接影响河流：{summary['river_summary']['direct_river_count']}")
     print(f"下游图边段：{summary['river_summary']['downstream_graph_segment_count']}")
     print(f"下游DB河段：{summary['river_summary']['downstream_db_segment_count']}")
+    print(f"下游河流数：{summary['river_summary']['downstream_river_count']}")
     print(f"GeoJSON要素数：{summary['river_summary']['geojson_feature_count']}")
     print("输出文件：")
     for name, path in summary["outputs"].items():
