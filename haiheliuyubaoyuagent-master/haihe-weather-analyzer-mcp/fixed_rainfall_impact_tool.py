@@ -46,8 +46,9 @@ def _extract_rainstorm_stations(rainfall_result: dict, threshold_mm: float, base
     for level_item in rainfall_result.get("level_analysis", []) or []:
         level = level_item.get("level", "")
         if level_to_threshold.get(level, math.inf) < threshold_mm:
-            zone_77_regions.update(str(x).strip() for x in level_item.get("zone_77_regions", []) or [] if x)
-            admin_divisions.update(str(x).strip() for x in level_item.get("admin_divisions", []) or [] if x)
+            continue
+        zone_77_regions.update(str(x).strip() for x in level_item.get("zone_77_regions", []) or [] if x)
+        admin_divisions.update(str(x).strip() for x in level_item.get("admin_divisions", []) or [] if x)
         for station in level_item.get("stations", []) or []:
             if _station_reaches_threshold(station, threshold_mm):
                 stations.append(_normalize_station(station, level))
