@@ -4,7 +4,8 @@ r"""本地 DB 版测试：5 分钟 CSV -> 24 小时降水 -> 真实河流 GeoJSO
 - 30km 缓冲区只用于判断直接影响河流，不截断直接河流；
 - 直接河流使用 haihe_river_directed_full_v5 的真实 geom 完整输出；
 - 下游 50km 使用 river_directed_v5.pkl 做拓扑追踪，最后一段尽量按比例截断；
-- 直接/间接去重只按 objectid，不按 river_name。也就是说，同名但不同 objectid 的下游河段仍会被纳入下游 50km。
+- 下游追踪按 pkl 拓扑边去重，不按 river_name，也不按 objectid；
+  因为同名河段、甚至同 objectid 河段，都可能是上下游不同拓扑边。
 
 运行：
     cd hhlyqyxt-master
@@ -56,6 +57,7 @@ DEFAULT_DB_USER = "postgres"
 DEFAULT_DB_SCHEMA = "public"
 DEFAULT_RIVER_TABLE = "haihe_river_directed_full_v5"
 DEFAULT_RIVER_GEOM_COLUMN = "geom"
+EARTH_KM_PER_DEG = 111.32
 
 
 def quote_ident(name: str) -> str:
@@ -129,15 +131,7 @@ def create_station_temp(cur, stations: list[dict], srid: int) -> None:
     for s in stations:
         lon = float(s["lon"])
         lat = float(s["lat"])
-        rows.append((
-            str(s.get("station_id") or ""),
-            str(s.get("station_name") or ""),
-            lon,
-            lat,
-            float(s.get("rain_24h") or 0.0),
-            lon,
-            lat,
-        ))
+        rows.append((str(s.get("station_id") or ""), str(s.get("station_name") or ""), lon, lat, float(s.get("rain_24h") or 0.0), lon, lat))
     cur.executemany(
         f"INSERT INTO tmp_rain_impact_stations VALUES(%s,%s,%s,%s,%s,ST_SetSRID(ST_MakePoint(%s,%s),{int(srid)}))",
         rows,
@@ -192,75 +186,104 @@ def parse_node_xy(node: Any) -> tuple[float | None, float | None]:
     return None, None
 
 
-def direct_start_nodes(direct_rows: list[dict], graph_path: str) -> tuple[dict[Any, float], set[str], set[str]]:
-    graph = get_graph(graph_path)
-    edge_by_objectid: dict[str, list[Any]] = {}
-    for _u, v, _key, attr in iter_graph_edges(graph):
-        objectid = _edge_objectid_key(attr)
-        if objectid:
-            edge_by_objectid.setdefault(str(objectid), []).append(v)
+def graph_edge_key(u: Any, v: Any, key: Any, attr: dict) -> str:
+    objectid = _edge_objectid_key(attr) or ""
+    river_name = get_edge_river_name(attr) or ""
+    return f"{u}|{v}|{key}|{objectid}|{river_name}"
 
+
+def station_to_segment_km(lon: float, lat: float, p1: tuple[float, float], p2: tuple[float, float]) -> float:
+    lon1, lat1 = p1
+    lon2, lat2 = p2
+    mean_lat = math.radians((lat + lat1 + lat2) / 3.0)
+    x = lon * math.cos(mean_lat) * EARTH_KM_PER_DEG
+    y = lat * EARTH_KM_PER_DEG
+    x1 = lon1 * math.cos(mean_lat) * EARTH_KM_PER_DEG
+    y1 = lat1 * EARTH_KM_PER_DEG
+    x2 = lon2 * math.cos(mean_lat) * EARTH_KM_PER_DEG
+    y2 = lat2 * EARTH_KM_PER_DEG
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(x - x1, y - y1)
+    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)))
+    px = x1 + t * dx
+    py = y1 + t * dy
+    return math.hypot(x - px, y - py)
+
+
+def find_direct_graph_edges(stations: list[dict], graph_path: str, buffer_km: float) -> tuple[dict[Any, float], set[str], int]:
+    """用 pkl 拓扑边判断哪些具体边在 30km 内。
+
+    不再用 river_name/objectid 判定具体边，因为它们都可能重复。
+    """
+    graph = get_graph(graph_path)
     start_nodes: dict[Any, float] = {}
-    direct_objectids = {str(r.get("objectid") or "").strip() for r in direct_rows if r.get("objectid")}
-    direct_rivers = {str(r.get("river_name") or "").strip() for r in direct_rows if r.get("river_name")}
-    for objectid in direct_objectids:
-        for node in edge_by_objectid.get(objectid, []):
-            start_nodes[node] = 0.0
-    return start_nodes, direct_objectids, direct_rivers
+    direct_edge_keys: set[str] = set()
+    station_points = [(float(s["lon"]), float(s["lat"])) for s in stations]
+
+    for u, v, key, attr in iter_graph_edges(graph):
+        ux, uy = parse_node_xy(u)
+        vx, vy = parse_node_xy(v)
+        if ux is None or uy is None or vx is None or vy is None:
+            continue
+        min_dist = min(station_to_segment_km(lon, lat, (ux, uy), (vx, vy)) for lon, lat in station_points)
+        if min_dist <= float(buffer_km):
+            direct_edge_keys.add(graph_edge_key(u, v, key, attr))
+            start_nodes[v] = 0.0
+    return start_nodes, direct_edge_keys, len(direct_edge_keys)
 
 
 def collect_downstream_segments(
     start_nodes: dict[Any, float],
     *,
     graph_path: str,
-    direct_objectids: set[str],
+    direct_edge_keys: set[str],
     downstream_km: float,
 ) -> tuple[dict[str, dict], list[dict]]:
-    """向下游追踪 50km。
-
-    注意：这里只用 objectid 判断“是否已经是直接河段”。
-    不能用 river_name 过滤，因为同名河段可能有上下游多个 objectid。
-    """
+    """向下游追踪 50km，按 pkl 拓扑边 edge_key 去重。"""
     limit = float(downstream_km)
     if not start_nodes or limit <= 0:
         return {}, []
-
     graph = get_graph(graph_path)
     best_dist = dict(start_nodes)
     seq = count()
     heap = [(float(dist), next(seq), node) for node, dist in start_nodes.items()]
     heapq.heapify(heap)
     river_map: dict[str, dict] = {}
-    segment_map: dict[tuple[str, str], dict] = {}
+    segment_map: dict[str, dict] = {}
 
     while heap:
         curr_dist, _seq, node = heapq.heappop(heap)
         if curr_dist > best_dist.get(node, math.inf) or curr_dist >= limit:
             continue
 
-        for u, v, _key, attr in iter_out_edges(graph, node):
-            objectid = _edge_objectid_key(attr)
-            objectid_text = str(objectid or "").strip()
+        for u, v, key, attr in iter_out_edges(graph, node):
+            edge_key = graph_edge_key(u, v, key, attr)
+            objectid = str(_edge_objectid_key(attr) or "").strip()
             river_name = get_edge_river_name(attr)
             length_km = max(float(get_edge_length_km(attr, attr_name="length_km") or 0.0), 0.0)
             next_dist = curr_dist + length_km
             keep_km = max(min(limit - curr_dist, length_km), 0.0) if length_km > 0 else 0.0
             clip_fraction = 1.0 if length_km <= 0 else max(min(keep_km / length_km, 1.0), 0.0)
-            is_direct_objectid = bool(objectid_text and objectid_text in direct_objectids)
 
-            if objectid_text and river_name and not is_direct_objectid and clip_fraction > 0:
+            if edge_key not in direct_edge_keys and objectid and river_name and clip_fraction > 0:
                 from_x, from_y = parse_node_xy(u)
-                key = (objectid_text, river_name)
-                old = segment_map.get(key)
+                to_x, to_y = parse_node_xy(v)
+                old = segment_map.get(edge_key)
                 if old is None or curr_dist < old["min_distance_km"] or clip_fraction > old["clip_fraction"]:
-                    segment_map[key] = {
-                        "objectid": objectid_text,
+                    segment_map[edge_key] = {
+                        "edge_key": edge_key,
+                        "objectid": objectid,
                         "river_name": river_name,
                         "min_distance_km": round(float(curr_dist), 3),
                         "end_distance_km": round(float(curr_dist + keep_km), 3),
+                        "keep_km": round(float(keep_km), 3),
                         "clip_fraction": round(float(clip_fraction), 8),
                         "from_x": from_x,
                         "from_y": from_y,
+                        "to_x": to_x,
+                        "to_y": to_y,
                     }
                 item = river_map.setdefault(river_name, {"river_name": river_name, "min_distance_km": math.inf})
                 if curr_dist < item["min_distance_km"]:
@@ -272,25 +295,32 @@ def collect_downstream_segments(
 
     for item in river_map.values():
         item["min_distance_km"] = round(float(item["min_distance_km"]), 3)
-    return river_map, sorted(segment_map.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["objectid"]))
+    return river_map, sorted(segment_map.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["edge_key"]))
 
 
 def create_downstream_temp(cur, segments: list[dict]) -> None:
     cur.execute("DROP TABLE IF EXISTS tmp_downstream_segments")
     cur.execute("""
         CREATE TEMP TABLE tmp_downstream_segments(
+            edge_key text,
             objectid text,
             river_name text,
             min_distance_km double precision,
             end_distance_km double precision,
+            keep_km double precision,
             clip_fraction double precision,
             from_x double precision,
-            from_y double precision
+            from_y double precision,
+            to_x double precision,
+            to_y double precision
         ) ON COMMIT DROP
     """)
     cur.executemany(
-        "INSERT INTO tmp_downstream_segments VALUES(%s,%s,%s,%s,%s,%s,%s)",
-        [(s["objectid"], s["river_name"], s["min_distance_km"], s["end_distance_km"], s["clip_fraction"], s.get("from_x"), s.get("from_y")) for s in segments],
+        "INSERT INTO tmp_downstream_segments VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        [(
+            s["edge_key"], s["objectid"], s["river_name"], s["min_distance_km"], s["end_distance_km"],
+            s["keep_km"], s["clip_fraction"], s.get("from_x"), s.get("from_y"), s.get("to_x"), s.get("to_y")
+        ) for s in segments],
     )
 
 
@@ -312,15 +342,19 @@ def query_downstream_rivers(cur, *, schema: str, table: str, columns: set[str], 
     cur.execute(f"""
         WITH joined AS (
             SELECT
+                ds.edge_key,
                 {id_expr} AS id,
                 {objectid_expr} AS objectid,
                 {river_expr} AS db_river_name,
                 ds.river_name AS graph_river_name,
                 ds.min_distance_km,
                 ds.end_distance_km,
+                ds.keep_km,
                 ds.clip_fraction,
                 ds.from_x,
                 ds.from_y,
+                ds.to_x,
+                ds.to_y,
                 r.{q_geom} AS original_geom,
                 ST_LineMerge(r.{q_geom}) AS merged_geom
             FROM {q_schema}.{q_table} r
@@ -328,46 +362,58 @@ def query_downstream_rivers(cur, *, schema: str, table: str, columns: set[str], 
             WHERE r.{q_geom} IS NOT NULL
               AND NOT ST_IsEmpty(r.{q_geom})
         ),
-        oriented AS (
+        located AS (
             SELECT *,
-                CASE
-                    WHEN GeometryType(merged_geom) != 'LINESTRING' THEN NULL
-                    WHEN from_x IS NULL OR from_y IS NULL THEN merged_geom
-                    WHEN ST_Distance(ST_StartPoint(merged_geom), ST_SetSRID(ST_MakePoint(from_x, from_y), 4326)) <=
-                         ST_Distance(ST_EndPoint(merged_geom), ST_SetSRID(ST_MakePoint(from_x, from_y), 4326))
-                    THEN merged_geom
-                    ELSE ST_Reverse(merged_geom)
-                END AS directed_line
+                CASE WHEN GeometryType(merged_geom) = 'LINESTRING' THEN merged_geom ELSE NULL END AS line_geom
             FROM joined
+        ),
+        fractions AS (
+            SELECT *,
+                CASE WHEN line_geom IS NULL OR from_x IS NULL OR from_y IS NULL THEN NULL
+                     ELSE ST_LineLocatePoint(line_geom, ST_SetSRID(ST_MakePoint(from_x, from_y), 4326)) END AS from_frac,
+                CASE WHEN line_geom IS NULL OR to_x IS NULL OR to_y IS NULL THEN NULL
+                     ELSE ST_LineLocatePoint(line_geom, ST_SetSRID(ST_MakePoint(to_x, to_y), 4326)) END AS to_frac,
+                CASE WHEN line_geom IS NULL THEN NULL ELSE ST_Length(line_geom::geography) / 1000.0 END AS line_km
+            FROM located
         ),
         clipped AS (
             SELECT
+                edge_key,
                 id,
                 objectid,
                 COALESCE(NULLIF(TRIM(db_river_name), ''), graph_river_name) AS river_name,
                 min_distance_km,
                 end_distance_km,
+                keep_km,
                 clip_fraction,
                 CASE
-                    WHEN directed_line IS NOT NULL AND clip_fraction < 0.999999 THEN ST_Multi(ST_LineSubstring(directed_line, 0, clip_fraction))
-                    WHEN directed_line IS NOT NULL THEN directed_line
+                    WHEN line_geom IS NOT NULL AND from_frac IS NOT NULL AND to_frac IS NOT NULL AND line_km > 0 THEN
+                        ST_Multi(ST_LineSubstring(
+                            line_geom,
+                            LEAST(from_frac, GREATEST(0.0, LEAST(1.0, from_frac + CASE WHEN to_frac >= from_frac THEN keep_km / line_km ELSE -keep_km / line_km END))),
+                            GREATEST(from_frac, GREATEST(0.0, LEAST(1.0, from_frac + CASE WHEN to_frac >= from_frac THEN keep_km / line_km ELSE -keep_km / line_km END)))
+                        ))
+                    WHEN line_geom IS NOT NULL AND clip_fraction < 0.999999 THEN ST_Multi(ST_LineSubstring(line_geom, 0, clip_fraction))
+                    WHEN line_geom IS NOT NULL THEN line_geom
                     ELSE original_geom
                 END AS clipped_geom
-            FROM oriented
+            FROM fractions
         )
         SELECT
+            edge_key,
             id,
             objectid,
             river_name,
             min_distance_km AS min_downstream_distance_km,
             end_distance_km AS end_downstream_distance_km,
+            keep_km,
             clip_fraction,
             ST_AsGeoJSON(clipped_geom) AS geom_json,
             ST_Length(clipped_geom::geography) / 1000.0 AS length_km
         FROM clipped
         WHERE clipped_geom IS NOT NULL
           AND NOT ST_IsEmpty(clipped_geom)
-        ORDER BY min_distance_km, river_name, objectid
+        ORDER BY min_distance_km, river_name, edge_key
     """)
     return list(cur.fetchall())
 
@@ -389,6 +435,7 @@ def feature_from_row(row: dict, impact_type: str, downstream_map: dict[str, dict
         "river_name": river_name,
         "id": row.get("id"),
         "objectid": row.get("objectid"),
+        "edge_key": row.get("edge_key"),
         "length_km": round(float(row.get("length_km") or 0.0), 3),
     }
     if impact_type == "direct_buffer":
@@ -403,6 +450,7 @@ def feature_from_row(row: dict, impact_type: str, downstream_map: dict[str, dict
         props.update({
             "min_downstream_distance_km": row.get("min_downstream_distance_km") or info.get("min_distance_km"),
             "end_downstream_distance_km": row.get("end_downstream_distance_km"),
+            "keep_km": row.get("keep_km"),
             "clip_fraction": row.get("clip_fraction"),
             "geometry_source": "full_table_downstream_50km_clipped_best_effort",
         })
@@ -431,8 +479,7 @@ def build_outputs(args: argparse.Namespace) -> dict:
     downstream_rows: list[dict] = []
     downstream_map: dict[str, dict] = {}
     downstream_segments: list[dict] = []
-    direct_objectids: set[str] = set()
-    direct_rivers: set[str] = set()
+    direct_graph_edge_count = 0
 
     if stations:
         conn = connect_db(args)
@@ -446,14 +493,13 @@ def build_outputs(args: argparse.Namespace) -> dict:
                     raise ValueError("河流表未找到几何字段")
                 create_station_temp(cur, stations, args.db_srid)
                 direct_rows = query_direct_rivers(cur, schema=args.db_schema, table=args.river_table, columns=columns, geom_col=geom_col, buffer_km=args.station_buffer_km)
-                start_nodes, direct_objectids, direct_rivers = direct_start_nodes(direct_rows, args.graph)
+                start_nodes, direct_edge_keys, direct_graph_edge_count = find_direct_graph_edges(stations, args.graph, args.station_buffer_km)
                 downstream_map, downstream_segments = collect_downstream_segments(
                     start_nodes,
                     graph_path=args.graph,
-                    direct_objectids=direct_objectids,
+                    direct_edge_keys=direct_edge_keys,
                     downstream_km=args.downstream_km,
                 )
-                downstream_segments = [s for s in downstream_segments if s["objectid"] not in direct_objectids]
                 downstream_rows = query_downstream_rivers(cur, schema=args.db_schema, table=args.river_table, columns=columns, geom_col=geom_col, segments=downstream_segments)
         finally:
             conn.close()
@@ -463,24 +509,22 @@ def build_outputs(args: argparse.Namespace) -> dict:
     for row in direct_rows:
         feat = feature_from_row(row, "direct_buffer")
         if feat:
-            key = (feat["properties"].get("objectid"), feat["properties"].get("river_name"), "direct")
+            key = ("direct", feat["properties"].get("id"), feat["properties"].get("objectid"), feat["properties"].get("river_name"))
             if key not in seen:
                 seen.add(key)
                 features.append(feat)
     for row in downstream_rows:
-        objectid = str(row.get("objectid") or "")
-        if objectid in direct_objectids:
-            continue
         feat = feature_from_row(row, "downstream_50km", downstream_map)
         if feat:
-            key = (feat["properties"].get("objectid"), feat["properties"].get("river_name"), "downstream")
+            key = ("downstream", feat["properties"].get("edge_key"))
             if key not in seen:
                 seen.add(key)
                 features.append(feat)
-    features.sort(key=lambda f: (0 if f["properties"].get("impact_type") == "direct_buffer" else 1, f["properties"].get("river_name") or "", f["properties"].get("objectid") or ""))
+    features.sort(key=lambda f: (0 if f["properties"].get("impact_type") == "direct_buffer" else 1, f["properties"].get("river_name") or "", f["properties"].get("edge_key") or f["properties"].get("objectid") or ""))
     river_geojson.write_text(json.dumps({"type": "FeatureCollection", "features": features}, ensure_ascii=False, indent=2, default=json_default), encoding="utf-8")
 
     downstream_rivers = sorted({str(s.get("river_name") or "") for s in downstream_segments if s.get("river_name")})
+    direct_rivers = sorted({str(r.get("river_name") or "") for r in direct_rows if r.get("river_name")})
     summary = {
         "status": "ok",
         "params": {
@@ -488,7 +532,7 @@ def build_outputs(args: argparse.Namespace) -> dict:
             "rain_threshold_mm": args.rain_threshold_mm,
             "station_buffer_km": args.station_buffer_km,
             "downstream_km": args.downstream_km,
-            "dedupe_rule": "direct/indirect dedupe by objectid only, not river_name",
+            "dedupe_rule": "downstream dedupe by pkl edge_key, not river_name or objectid",
         },
         "station_summary": {
             "total_station_count": int(len(station_df)),
@@ -496,14 +540,15 @@ def build_outputs(args: argparse.Namespace) -> dict:
             "max_rain_24h": float(station_df["rain_24h"].max() or 0.0),
         },
         "river_summary": {
-            "direct_segment_count": len(direct_rows),
+            "direct_db_feature_count": len(direct_rows),
+            "direct_graph_edge_count": direct_graph_edge_count,
             "direct_river_count": len(direct_rivers),
             "downstream_graph_segment_count": len(downstream_segments),
-            "downstream_db_segment_count": len(downstream_rows),
+            "downstream_db_feature_count": len(downstream_rows),
             "downstream_river_count": len(downstream_rivers),
             "geojson_feature_count": len(features),
         },
-        "direct_rivers": sorted(direct_rivers),
+        "direct_rivers": direct_rivers,
         "downstream_rivers": downstream_rivers,
         "downstream_segments": downstream_segments,
         "outputs": {
@@ -547,10 +592,10 @@ def main() -> None:
     print(f"总站数：{summary['station_summary']['total_station_count']}")
     print(f"触发站数：{summary['station_summary']['impact_station_count']}")
     print(f"最大24小时雨量：{summary['station_summary']['max_rain_24h']} mm")
-    print(f"直接影响河段：{summary['river_summary']['direct_segment_count']}")
-    print(f"直接影响河流：{summary['river_summary']['direct_river_count']}")
+    print(f"直接DB河流要素：{summary['river_summary']['direct_db_feature_count']}")
+    print(f"直接拓扑边数：{summary['river_summary']['direct_graph_edge_count']}")
     print(f"下游图边段：{summary['river_summary']['downstream_graph_segment_count']}")
-    print(f"下游DB河段：{summary['river_summary']['downstream_db_segment_count']}")
+    print(f"下游DB要素：{summary['river_summary']['downstream_db_feature_count']}")
     print(f"下游河流数：{summary['river_summary']['downstream_river_count']}")
     print(f"GeoJSON要素数：{summary['river_summary']['geojson_feature_count']}")
     print("输出文件：")
