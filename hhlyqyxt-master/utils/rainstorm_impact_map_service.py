@@ -1,30 +1,24 @@
 """暴雨影响专题图数据与制图样式封装。
 
-给业务系统或同事代码直接调用的轻量入口，内部复用
-utils.rainfall_impact_geojson.build_rain24h_impact_river_geojson。
+本模块分三层：
+1. get_rainstorm_impact_thematic_map_style：只返回当前制图样式，不查库、不查接口；
+2. create_rainstorm_impact_thematic_map_from_station_records：给实况接口链路用，传入站点24h累计雨量记录即可制图；
+3. create_rainstorm_impact_thematic_map：保留给离线 CSV 场景，内部复用牵引智能体原始 CSV 算法。
 
-典型调用：
+实况业务推荐链路：
+    实况降雨接口 -> 站点24h累计雨量 records -> create_rainstorm_impact_thematic_map_from_station_records(records)
 
-    from utils.rainstorm_impact_map_service import (
-        create_rainstorm_impact_thematic_map,
-        get_rainstorm_impact_thematic_map_style,
-    )
-
-    result = create_rainstorm_impact_thematic_map(
-        csv_path="/data/24hourmindata.csv",
-        output_dir="/tmp/rainstorm_impact",
-    )
-    style = get_rainstorm_impact_thematic_map_style()
-
-返回 result["map_layers"] 可直接给前端/GIS 渲染；style 可直接给前端/GIS 做图层样式。
-如果传 output_dir，会同时落盘 river_impact.geojson、impact_stations.geojson、summary.json。
+CSV 入口只是牵引智能体原来的离线能力，不要求前端或同事手工准备 CSV。
 """
 from __future__ import annotations
 
 import copy
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 try:
     from utils.rainfall_impact_geojson import build_rain24h_impact_river_geojson
@@ -187,12 +181,7 @@ RAINFALL_IMPACT_MAP_STYLE = {
 def get_rainstorm_impact_thematic_map_style() -> dict:
     """返回暴雨影响专题图当前制图样式。
 
-    给前端/GIS 同事调用，不依赖数据库、不读取CSV、不生成数据，只返回当前约定样式：
-    - 图层顺序
-    - 河段/站点颜色与线宽/点半径
-    - 图例
-    - 字段映射
-    - popup 推荐字段
+    给前端/GIS 同事调用，不依赖数据库、不读取CSV、不生成数据，只返回当前约定样式。
     """
     return copy.deepcopy(RAINFALL_IMPACT_MAP_STYLE)
 
@@ -201,6 +190,69 @@ def _write_json(path: Path, data: Any) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
+
+
+def _first_value(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    lower = {str(k).lower(): v for k, v in row.items()}
+    for key in keys:
+        if key in row and row.get(key) not in (None, "", "null", "None"):
+            return row.get(key)
+        val = lower.get(key.lower())
+        if val not in (None, "", "null", "None"):
+            return val
+    return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, "", "null", "None", "-", "--"):
+            return None
+        number = float(value)
+    except Exception:
+        return None
+    if pd.isna(number) or number < -9990 or abs(number) >= 99999:
+        return None
+    return number
+
+
+def _normalize_station_records_for_csv(
+    station_records: list[dict[str, Any]],
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> pd.DataFrame:
+    """把实况接口返回的站点累计雨量记录标准化成核心算法可识别的表结构。"""
+    rows: list[dict[str, Any]] = []
+    for item in station_records or []:
+        if not isinstance(item, dict):
+            continue
+        station_id = _first_value(item, ("station_id", "Station_Id_C", "stationId", "id"))
+        station_name = _first_value(item, ("station_name", "name", "Station_Name", "stationName"))
+        lon = _safe_float(_first_value(item, ("lon", "Lon", "longitude", "lng")))
+        lat = _safe_float(_first_value(item, ("lat", "Lat", "latitude")))
+        rain = _safe_float(_first_value(item, ("rain_24h", "rainfall", "PRE_24h", "pre_24h", "rain", "PRE")))
+        if not station_id or lon is None or lat is None or rain is None:
+            continue
+        rows.append({
+            "Station_Id_C": str(station_id),
+            "Datetime": end_time or _first_value(item, ("end_time", "Datetime", "datetime", "time", "dataTime")) or "",
+            "PRE": max(float(rain), 0.0),
+            "Lon": lon,
+            "Lat": lat,
+            "Station_Name": station_name or str(station_id),
+            "City": _first_value(item, ("city", "City")),
+            "Cnty": _first_value(item, ("cnty", "county", "Cnty")),
+            "Province": _first_value(item, ("province", "Province")),
+            "Town": _first_value(item, ("town", "Town")),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise ValueError("没有可用于制图的有效站点记录：需要站号、经纬度、24小时累计雨量。")
+    if start_time and end_time:
+        # 这里传入的是站点已累计好的24小时雨量。核心CSV算法会按站号sum PRE，
+        # 所以每站只写一条记录即可，Datetime 用 end_time 标识统计结束时刻。
+        df["Datetime"] = end_time
+    return df
 
 
 def _river_names_from_geojson(river_geojson: dict) -> list[str]:
@@ -244,53 +296,7 @@ def _build_summary(core_result: dict) -> dict:
     }
 
 
-def build_rainstorm_impact_thematic_map_data(
-    csv_path: str | Path,
-    *,
-    rain_threshold_mm: float = 50.0,
-    station_buffer_km: float = 30.0,
-    downstream_km: float = 50.0,
-    river_table: str = "haihe_river_directed_full_v5",
-    schema: str = "public",
-    graph_path: str | Path | None = None,
-    top_station_limit: int = 100,
-    direct_match_km: float = 3.0,
-    output_dir: str | Path | None = None,
-) -> dict:
-    """构建暴雨影响专题图数据。
-
-    Args:
-        csv_path: 5分钟站点降水CSV，需包含 Station_Id_C、Datetime、PRE、Lon、Lat。
-        rain_threshold_mm: 暴雨触发阈值，默认50mm。
-        station_buffer_km: 直接影响河段缓冲半径，默认30km。
-        downstream_km: 下游追踪距离，默认50km。
-        river_table: PostGIS 河流表，默认 haihe_river_directed_full_v5。
-        schema: PostGIS schema，默认 public。
-        graph_path: river_directed_v5.pkl 路径；不传则使用牵引智能体默认查找逻辑。
-        top_station_limit: 返回雨量排名站点数量。
-        direct_match_km: 直接河段与pkl边匹配阈值，默认3km，对齐牵引智能体。
-        output_dir: 可选，传入后将专题图GeoJSON和摘要落盘。
-
-    Returns:
-        dict，核心字段：
-        - summary: 业务摘要
-        - map_layers.rivers: 影响河段 GeoJSON
-        - map_layers.stations: 暴雨触发站 GeoJSON
-        - raw: 原核心函数完整返回
-        - output_files: output_dir 不为空时包含落盘文件路径
-    """
-    core_result = build_rain24h_impact_river_geojson(
-        csv_path=str(csv_path),
-        rain_threshold_mm=rain_threshold_mm,
-        station_buffer_km=station_buffer_km,
-        downstream_km=downstream_km,
-        river_table=river_table,
-        schema=schema,
-        graph_path=graph_path,
-        top_station_limit=top_station_limit,
-        direct_match_km=direct_match_km,
-    )
-
+def _pack_result(core_result: dict, output_dir: str | Path | None = None) -> dict:
     river_geojson = core_result.get("river_geojson") or {"type": "FeatureCollection", "features": []}
     station_geojson = core_result.get("station_geojson") or {"type": "FeatureCollection", "features": []}
     summary = _build_summary(core_result)
@@ -322,8 +328,93 @@ def build_rainstorm_impact_thematic_map_data(
             "summary_json": _write_json(out / "summary.json", summary),
             "style_json": _write_json(out / "style.json", style),
         }
-
     return result
+
+
+def build_rainstorm_impact_thematic_map_data(
+    csv_path: str | Path,
+    *,
+    rain_threshold_mm: float = 50.0,
+    station_buffer_km: float = 30.0,
+    downstream_km: float = 50.0,
+    river_table: str = "haihe_river_directed_full_v5",
+    schema: str = "public",
+    graph_path: str | Path | None = None,
+    top_station_limit: int = 100,
+    direct_match_km: float = 3.0,
+    output_dir: str | Path | None = None,
+) -> dict:
+    """离线CSV入口：构建暴雨影响专题图数据。
+
+    适合已有 5分钟站点降水 CSV 的牵引智能体/历史文件场景。
+    实况接口链路不要优先用这个入口，应用 create_rainstorm_impact_thematic_map_from_station_records。
+    """
+    core_result = build_rain24h_impact_river_geojson(
+        csv_path=str(csv_path),
+        rain_threshold_mm=rain_threshold_mm,
+        station_buffer_km=station_buffer_km,
+        downstream_km=downstream_km,
+        river_table=river_table,
+        schema=schema,
+        graph_path=graph_path,
+        top_station_limit=top_station_limit,
+        direct_match_km=direct_match_km,
+    )
+    return _pack_result(core_result, output_dir=output_dir)
+
+
+def create_rainstorm_impact_thematic_map_from_station_records(
+    station_records: list[dict[str, Any]],
+    *,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    rain_threshold_mm: float = 50.0,
+    station_buffer_km: float = 30.0,
+    downstream_km: float = 50.0,
+    river_table: str = "haihe_river_directed_full_v5",
+    schema: str = "public",
+    graph_path: str | Path | None = None,
+    top_station_limit: int = 100,
+    direct_match_km: float = 3.0,
+    output_dir: str | Path | None = None,
+) -> dict:
+    """实况接口入口：用站点24小时累计雨量记录制作暴雨影响专题图。
+
+    Args:
+        station_records: 实况接口返回并已累计好的站点雨量记录。每条至少需要：
+            station_id/Station_Id_C、lon/Lon、lat/Lat、rain_24h/rainfall/PRE_24h。
+        start_time/end_time: 统计时段，可选；用于摘要和站点属性展示。
+
+    说明：
+        这个方法不负责调用实况接口。它负责把接口返回的站点累计雨量接入既有河网制图逻辑。
+        这样接口鉴权、接口地址、时间窗口由业务服务控制，制图模块只负责制图。
+    """
+    df = _normalize_station_records_for_csv(station_records, start_time=start_time, end_time=end_time)
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", encoding="utf-8", newline="", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        df.to_csv(tmp, index=False)
+    try:
+        result = build_rainstorm_impact_thematic_map_data(
+            csv_path=tmp_path,
+            rain_threshold_mm=rain_threshold_mm,
+            station_buffer_km=station_buffer_km,
+            downstream_km=downstream_km,
+            river_table=river_table,
+            schema=schema,
+            graph_path=graph_path,
+            top_station_limit=top_station_limit,
+            direct_match_km=direct_match_km,
+            output_dir=output_dir,
+        )
+        if start_time or end_time:
+            result["summary"]["time_range"] = {"start_time": start_time, "end_time": end_time}
+            result["raw"]["time_range"] = {"start_time": start_time, "end_time": end_time}
+        return result
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def create_rainstorm_impact_thematic_map(
@@ -331,7 +422,7 @@ def create_rainstorm_impact_thematic_map(
     output_dir: str | Path | None = None,
     **kwargs: Any,
 ) -> dict:
-    """同事调用友好入口：制作暴雨影响专题图数据。"""
+    """离线CSV友好入口：制作暴雨影响专题图数据。"""
     return build_rainstorm_impact_thematic_map_data(
         csv_path=csv_path,
         output_dir=output_dir,
@@ -342,5 +433,6 @@ def create_rainstorm_impact_thematic_map(
 __all__ = [
     "build_rainstorm_impact_thematic_map_data",
     "create_rainstorm_impact_thematic_map",
+    "create_rainstorm_impact_thematic_map_from_station_records",
     "get_rainstorm_impact_thematic_map_style",
 ]
