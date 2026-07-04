@@ -37,13 +37,6 @@ def _quote_ident(identifier: str) -> str:
     return f'"{identifier}"'
 
 
-def _required_env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise ValueError(f"缺少环境变量：{name}")
-    return value
-
-
 def _connect_db(args: argparse.Namespace):
     return psycopg2.connect(
         host=args.db_host,
@@ -100,11 +93,14 @@ def _inspect_geometry_column(cur, schema: str, table: str, geom_col: str) -> dic
     q_schema = _quote_ident(schema)
     q_table = _quote_ident(table)
     q_geom = _quote_ident(geom_col)
+
     cur.execute(
         f"""
         SELECT
             COUNT(*) AS row_count,
             COUNT({q_geom}) AS geom_count,
+            COUNT(*) FILTER (WHERE {q_geom} IS NOT NULL AND ST_IsEmpty({q_geom})) AS empty_geom_count,
+            COUNT(*) FILTER (WHERE {q_geom} IS NOT NULL AND NOT ST_IsEmpty({q_geom})) AS non_empty_geom_count,
             COUNT(*) FILTER (WHERE {q_geom} IS NOT NULL AND ST_IsValid({q_geom})) AS valid_geom_count,
             ST_SRID({q_geom}) AS srid,
             GeometryType({q_geom}) AS geometry_type,
@@ -115,11 +111,32 @@ def _inspect_geometry_column(cur, schema: str, table: str, geom_col: str) -> dic
         """
     )
     groups = list(cur.fetchall())
+
+    # 额外输出非空几何总体范围，避免 ST_Extent 被 EMPTY/null 干扰。
+    cur.execute(
+        f"""
+        SELECT
+            COUNT(*) AS non_empty_count,
+            ST_AsText(ST_Extent({q_geom})) AS non_empty_extent_wkt,
+            MIN(ST_XMin(Box2D({q_geom}))) AS xmin,
+            MIN(ST_YMin(Box2D({q_geom}))) AS ymin,
+            MAX(ST_XMax(Box2D({q_geom}))) AS xmax,
+            MAX(ST_YMax(Box2D({q_geom}))) AS ymax
+        FROM {q_schema}.{q_table}
+        WHERE {q_geom} IS NOT NULL
+          AND NOT ST_IsEmpty({q_geom})
+        """
+    )
+    extent = cur.fetchone() or {}
+
     total_geom_count = sum(int(row.get("geom_count") or 0) for row in groups)
+    total_non_empty_count = sum(int(row.get("non_empty_geom_count") or 0) for row in groups)
     return {
         "column": geom_col,
         "total_geom_count": total_geom_count,
+        "total_non_empty_count": total_non_empty_count,
         "groups": groups,
+        "non_empty_extent": extent,
     }
 
 
@@ -141,9 +158,13 @@ def inspect(args: argparse.Namespace) -> dict:
         conn.close()
 
     usable = [
-        {"column": item["column"], "total_geom_count": item["total_geom_count"]}
+        {
+            "column": item["column"],
+            "total_geom_count": item["total_geom_count"],
+            "total_non_empty_count": item["total_non_empty_count"],
+        }
         for item in inspections
-        if int(item.get("total_geom_count") or 0) > 0
+        if int(item.get("total_non_empty_count") or 0) > 0
     ]
     report = {
         "status": "ok",
@@ -183,6 +204,19 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _print_group(group: dict) -> None:
+    print(
+        "    "
+        f"type={group.get('geometry_type')}, "
+        f"srid={group.get('srid')}, "
+        f"geom={group.get('geom_count')}, "
+        f"non_empty={group.get('non_empty_geom_count')}, "
+        f"empty={group.get('empty_geom_count')}, "
+        f"valid={group.get('valid_geom_count')}"
+    )
+    print(f"      extent={group.get('extent_wkt')}")
+
+
 def main() -> None:
     report = inspect(parse_args())
     print("河流表 geometry 字段检查完成")
@@ -190,12 +224,27 @@ def main() -> None:
     print(f"识别到 geometry 字段：{report['geometry_columns']}")
     print(f"可用 geometry 字段：{report['usable_geometry_columns']}")
     print(f"报告：{report['report_path']}")
+
+    for item in report.get("inspections", []):
+        print(f"\n字段：{item['column']}")
+        print(f"  非空几何总数：{item.get('total_non_empty_count')}")
+        extent = item.get("non_empty_extent") or {}
+        print(f"  非空范围：{extent.get('non_empty_extent_wkt')}")
+        print(
+            "  bbox: "
+            f"xmin={extent.get('xmin')}, ymin={extent.get('ymin')}, "
+            f"xmax={extent.get('xmax')}, ymax={extent.get('ymax')}"
+        )
+        print("  分组：")
+        for group in item.get("groups", []):
+            _print_group(group)
+
     if not report["geometry_columns"]:
-        print("结论：没有识别到 geometry 字段。")
+        print("\n结论：没有识别到 geometry 字段。")
     elif not report["usable_geometry_columns"]:
-        print("结论：识别到了 geometry 字段，但这些字段几何数量都是 0。")
+        print("\n结论：识别到了 geometry 字段，但没有非空几何。")
     else:
-        print(f"建议使用几何字段：{report['usable_geometry_columns'][0]['column']}")
+        print(f"\n建议使用几何字段：{report['usable_geometry_columns'][0]['column']}")
 
 
 if __name__ == "__main__":
