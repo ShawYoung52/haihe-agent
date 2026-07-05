@@ -1,7 +1,7 @@
 """暴雨影响河流专题图服务。
 
 保留两个职责：
-1. 生成服务：按时间段生成专题图文件，并返回 HTTP 地址；
+1. 生成服务：按时间段或 CSV 生成专题图/GeoJSON 文件，并返回 HTTP 地址；
 2. 入库服务：从已生成的 rainstorm_impact_map.json 地址中提取入库需要的 JSON 地址。
 """
 from __future__ import annotations
@@ -88,6 +88,7 @@ def get_rainstorm_impact_map_style() -> dict[str, Any]:
 
 def _build_rainstorm_context(
     *,
+    csv_path: str | Path | None = None,
     start_time: str | datetime | None = None,
     end_time: str | datetime | None = None,
     hours: int = 24,
@@ -103,9 +104,23 @@ def _build_rainstorm_context(
     schema: str = "public",
     graph_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    if csv_path:
+        return _build_context_from_csv(
+            csv_path=csv_path,
+            rain_threshold_mm=rain_threshold_mm,
+            output_dir=output_dir,
+            public_base_url=public_base_url,
+            station_buffer_km=station_buffer_km,
+            downstream_km=downstream_km,
+            direct_match_km=direct_match_km,
+            river_table=river_table,
+            schema=schema,
+            graph_path=graph_path,
+        )
+
     start_dt, end_dt = _resolve_time_window(start_time, end_time, hours)
     rows = _query_haihe_rainfall_rows(start_dt, end_dt, basin_codes, api_time_shift_hours)
-    core = _build_impact_core(rows, rain_threshold_mm, station_buffer_km, downstream_km, river_table, schema, graph_path, direct_match_km)
+    core = _build_impact_core_from_rows(rows, rain_threshold_mm, station_buffer_km, downstream_km, river_table, schema, graph_path, direct_match_km)
     stations = _aggregate_station_rainfall(rows)
     heavy_stations = [item for item in stations if item["rain_24h"] >= float(rain_threshold_mm)]
     return {
@@ -115,6 +130,7 @@ def _build_rainstorm_context(
         "job_id": _build_job_id(start_dt, end_dt),
         "summary": _build_summary(core),
         "rainfall_source": {
+            "source_type": "music_realtime",
             "interface_id": "getSurfEleInBasinByTimeRange",
             "data_code": MUSIC_DATA_CODE_HOURLY,
             "basin_codes": basin_codes,
@@ -126,7 +142,45 @@ def _build_rainstorm_context(
     }
 
 
-def _build_impact_core(
+def _build_context_from_csv(
+    *,
+    csv_path: str | Path,
+    rain_threshold_mm: float,
+    output_dir: str | Path | None,
+    public_base_url: str | None,
+    station_buffer_km: float,
+    downstream_km: float,
+    direct_match_km: float,
+    river_table: str,
+    schema: str,
+    graph_path: str | Path | None,
+) -> dict[str, Any]:
+    source_path = _resolve_csv_path(csv_path)
+    core = build_rain24h_impact_river_geojson(
+        csv_path=str(source_path),
+        rain_threshold_mm=rain_threshold_mm,
+        station_buffer_km=station_buffer_km,
+        downstream_km=downstream_km,
+        river_table=river_table,
+        schema=schema,
+        graph_path=graph_path,
+        direct_match_km=direct_match_km,
+    )
+    return {
+        "core": core,
+        "output_root": _resolve_output_root(output_dir),
+        "public_base_url": public_base_url,
+        "job_id": _build_csv_job_id(source_path),
+        "summary": _build_summary(core),
+        "rainfall_source": {
+            "source_type": "csv",
+            "csv_path": str(source_path),
+            "rain_threshold_mm": rain_threshold_mm,
+        },
+    }
+
+
+def _build_impact_core_from_rows(
     rows: list[dict[str, Any]],
     rain_threshold_mm: float,
     station_buffer_km: float,
@@ -405,6 +459,13 @@ def _resolve_output_root(output_dir: str | Path | None) -> Path:
     return Path(output_dir or os.getenv(OUTPUT_DIR_ENV) or Path.cwd() / "rainstorm_impact_output")
 
 
+def _resolve_csv_path(csv_path: str | Path) -> Path:
+    path = Path(csv_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"CSV文件不存在：{path}")
+    return path
+
+
 def _relative_path(path: Path, root: Path) -> Path:
     try:
         return path.resolve().relative_to(root.resolve())
@@ -414,6 +475,11 @@ def _relative_path(path: Path, root: Path) -> Path:
 
 def _build_job_id(start_dt: datetime, end_dt: datetime) -> str:
     return f"rainstorm_impact_{start_dt:%Y%m%d%H%M}_{end_dt:%Y%m%d%H%M}_{uuid.uuid4().hex[:8]}"
+
+
+def _build_csv_job_id(csv_path: Path) -> str:
+    name = "".join(char if char.isalnum() else "_" for char in csv_path.stem)[:48] or "input"
+    return f"rainstorm_impact_csv_{name}_{uuid.uuid4().hex[:8]}"
 
 
 def _write_json(path: Path, data: Any) -> str:
