@@ -1,12 +1,11 @@
 """暴雨影响河流专题图服务。
 
 同事只需要传统计时间段；本服务会自动查询海河流域实况降雨，筛选达到暴雨级别的站点，
-生成专题图文件，并返回十四所可取用的文件地址。
+生成专题图文件，并返回十四所可取用的 HTTP 文件地址。
 
-地址优先级：
-1. 配置 RAINSTORM_IMPACT_PUBLIC_BASE_URL 时返回 HTTP 地址；
-2. 配置 RAINSTORM_IMPACT_MOUNT_ROOT 时返回挂载盘符/共享目录地址；
-3. 都未配置时返回本机落盘路径。
+使用前配置：
+- RAINSTORM_IMPACT_OUTPUT_DIR：专题图文件落盘目录；
+- RAINSTORM_IMPACT_PUBLIC_BASE_URL：上述目录对外暴露的 HTTP 根地址。
 """
 from __future__ import annotations
 
@@ -36,9 +35,8 @@ BASIN_CODE_HAIHE = "HHLY"
 MUSIC_DATA_CODE_HOURLY = "SURF_CHN_MUL_HOR"
 MUSIC_RAIN_ELEMENTS = "Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime,PRE_1h,PRE"
 CORE_INPUT_FIELDS = ["Station_Id_C", "Datetime", "PRE", "Lon", "Lat", "Station_Name", "City", "Cnty", "Province", "Town"]
-DEFAULT_OUTPUT_DIR_ENV = "RAINSTORM_IMPACT_OUTPUT_DIR"
+OUTPUT_DIR_ENV = "RAINSTORM_IMPACT_OUTPUT_DIR"
 PUBLIC_BASE_URL_ENV = "RAINSTORM_IMPACT_PUBLIC_BASE_URL"
-MOUNT_ROOT_ENV = "RAINSTORM_IMPACT_MOUNT_ROOT"
 PACKAGE_FILE_NAME = "rainstorm_impact_map.json"
 
 RAINSTORM_IMPACT_STYLE = {
@@ -81,7 +79,6 @@ def create_rainstorm_impact_map(
     basin_codes: str = BASIN_CODE_HAIHE,
     output_dir: str | Path | None = None,
     public_base_url: str | None = None,
-    mount_root: str | Path | None = None,
     api_time_shift_hours: int | None = None,
     station_buffer_km: float = 30.0,
     downstream_km: float = 50.0,
@@ -90,7 +87,7 @@ def create_rainstorm_impact_map(
     schema: str = "public",
     graph_path: str | Path | None = None,
 ) -> dict:
-    """按时间段生成暴雨影响河流专题图文件，并返回文件地址。"""
+    """按时间段生成暴雨影响河流专题图文件，并返回 HTTP 文件地址。"""
     start_dt, end_dt = _resolve_time_window(start_time, end_time, hours)
     rows = _query_haihe_rainfall_rows(start_dt, end_dt, basin_codes, api_time_shift_hours)
     station_rainfall = _aggregate_station_rainfall(rows)
@@ -102,7 +99,6 @@ def create_rainstorm_impact_map(
         output_dir=output_dir,
         job_id=_build_job_id(start_dt, end_dt),
         public_base_url=public_base_url,
-        mount_root=mount_root,
     )
     result["rainfall_source"] = {
         "interface_id": "getSurfEleInBasinByTimeRange",
@@ -293,7 +289,7 @@ def _to_core_input_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None, job_id: str, public_base_url: str | None, mount_root: str | Path | None) -> dict[str, Any]:
+def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None, job_id: str, public_base_url: str | None) -> dict[str, Any]:
     rivers = core.get("river_geojson") or {"type": "FeatureCollection", "features": []}
     stations = core.get("station_geojson") or {"type": "FeatureCollection", "features": []}
     result = {
@@ -306,7 +302,7 @@ def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None, job_id
     root = _resolve_output_root(output_dir)
     out = root / job_id
     result["output_files"] = _write_map_files(out, result)
-    result["delivery"] = _build_delivery(result["output_files"], root, public_base_url, mount_root)
+    result["delivery"] = _build_http_delivery(result["output_files"], root, public_base_url)
     return result
 
 
@@ -320,39 +316,32 @@ def _write_map_files(out: Path, result: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _build_delivery(files: dict[str, str], output_root: Path, public_base_url: str | None, mount_root: str | Path | None) -> dict[str, Any]:
-    address_type = _address_type(public_base_url, mount_root)
-    addressed_files = {name: _file_address(path, output_root, public_base_url, mount_root) for name, path in files.items()}
+def _build_http_delivery(files: dict[str, str], output_root: Path, public_base_url: str | None) -> dict[str, Any]:
+    urls = {name: _file_http_url(path, output_root, public_base_url) for name, path in files.items()}
     return {
-        "address_type": address_type,
+        "address_type": "http",
         "main_file": {
             "name": "map_package_json",
             "path": files["map_package_json"],
-            "address": addressed_files["map_package_json"],
+            "address": urls["map_package_json"],
         },
-        "files": addressed_files,
+        "files": urls,
     }
 
 
-def _address_type(public_base_url: str | None, mount_root: str | Path | None) -> str:
-    if (public_base_url or os.getenv(PUBLIC_BASE_URL_ENV, "")).strip():
-        return "http"
-    if str(mount_root or os.getenv(MOUNT_ROOT_ENV, "")).strip():
-        return "mount_path"
-    return "local_path"
+def _file_http_url(path_text: str, output_root: Path, public_base_url: str | None) -> str:
+    base_url = _public_base_url(public_base_url)
+    relative_path = _relative_path(Path(path_text), output_root).as_posix()
+    return f"{base_url}/{relative_path}"
 
 
-def _file_address(path_text: str, output_root: Path, public_base_url: str | None, mount_root: str | Path | None) -> str:
-    path = Path(path_text)
-    rel = _relative_path(path, output_root)
-    base_url = (public_base_url or os.getenv(PUBLIC_BASE_URL_ENV, "")).rstrip("/")
-    if base_url:
-        return f"{base_url}/{rel.as_posix()}"
-    mount = str(mount_root or os.getenv(MOUNT_ROOT_ENV, "")).rstrip("\\/")
-    if mount:
-        sep = "\\" if "\\" in mount or ":" in mount else "/"
-        return mount + sep + rel.as_posix().replace("/", sep)
-    return str(path)
+def _public_base_url(value: str | None) -> str:
+    base_url = (value or os.getenv(PUBLIC_BASE_URL_ENV, "")).strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError(f"缺少HTTP发布地址：请传 public_base_url 或配置 {PUBLIC_BASE_URL_ENV}")
+    if not base_url.startswith(("http://", "https://")):
+        raise ValueError("public_base_url 必须以 http:// 或 https:// 开头")
+    return base_url
 
 
 def _relative_path(path: Path, root: Path) -> Path:
@@ -363,7 +352,7 @@ def _relative_path(path: Path, root: Path) -> Path:
 
 
 def _resolve_output_root(output_dir: str | Path | None) -> Path:
-    configured = output_dir or os.getenv(DEFAULT_OUTPUT_DIR_ENV)
+    configured = output_dir or os.getenv(OUTPUT_DIR_ENV)
     return Path(configured or Path.cwd() / "rainstorm_impact_output")
 
 
