@@ -22,6 +22,8 @@ from fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 DEFAULT_RISK_WARN_BASE = "http://10.226.107.35:8070"
+DEFAULT_PAGE_NUM = 1
+DEFAULT_PAGE_SIZE = 1000
 RISK_ROUTE = "/hhfw/riskWarnNew/findDataListByConfig"
 
 RISK_CONFIGS: dict[str, dict[str, Any]] = {
@@ -128,6 +130,13 @@ def _load_json_response(url: str, timeout_sec: int) -> dict[str, Any]:
         return {"raw": raw}
 
 
+def _read_http_error_body(exc: HTTPError) -> str:
+    try:
+        return exc.read().decode("utf-8", errors="replace")[:500]
+    except Exception:
+        return ""
+
+
 def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
     cfg = RISK_CONFIGS[kind]
     bases = _risk_api_base_urls()
@@ -135,6 +144,8 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
         raise RuntimeError("风险预警服务地址未配置，请配置 RISK_WARN_BASE 或 HHFW_API_BASE。")
 
     params: dict[str, Any] = {k: v for k, v in (extra_params or {}).items() if v not in (None, "")}
+    params.setdefault("pageNum", DEFAULT_PAGE_NUM)
+    params.setdefault("pageSize", DEFAULT_PAGE_SIZE)
     params.update({"model": cfg["model"], "type": cfg["type"]})
     query = urlencode(params, doseq=False)
 
@@ -145,7 +156,10 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
         try:
             return _load_json_response(url, timeout_sec)
         except HTTPError as exc:
+            body = _read_http_error_body(exc)
             msg = f"{base}: HTTP {exc.code}"
+            if body:
+                msg = f"{msg}, body={body}"
             errors.append(msg)
             logger.warning("[risk_warning] %s", msg)
         except URLError as exc:
