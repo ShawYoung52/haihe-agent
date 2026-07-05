@@ -1,7 +1,7 @@
 """暴雨影响河流专题图服务。
 
 同事只需要传统计时间段；本服务会自动查询海河流域实况降雨，筛选达到暴雨级别的站点，
-生成专题图文件，并返回十四所可取用的 HTTP 文件地址。
+生成暴雨影响河流 GeoJSON 文件，并返回十四所可取用的 HTTP 地址。
 
 使用前配置：
 - RAINSTORM_IMPACT_OUTPUT_DIR：专题图文件落盘目录；
@@ -87,7 +87,7 @@ def create_rainstorm_impact_map(
     schema: str = "public",
     graph_path: str | Path | None = None,
 ) -> dict:
-    """按时间段生成暴雨影响河流专题图文件，并返回 HTTP 文件地址。"""
+    """按时间段生成暴雨影响河流 GeoJSON 文件，并返回 HTTP 地址。"""
     start_dt, end_dt = _resolve_time_window(start_time, end_time, hours)
     rows = _query_haihe_rainfall_rows(start_dt, end_dt, basin_codes, api_time_shift_hours)
     station_rainfall = _aggregate_station_rainfall(rows)
@@ -113,6 +113,7 @@ def create_rainstorm_impact_map(
         "time_range": _format_time_range(start_dt, end_dt),
         "heavy_rain_station_count": len(heavy_stations),
     })
+    result["geojson_url"] = result["delivery"]["main_file"]["address"]
     _write_json(Path(result["output_files"]["map_package_json"]), result)
     return result
 
@@ -321,9 +322,9 @@ def _build_http_delivery(files: dict[str, str], output_root: Path, public_base_u
     return {
         "address_type": "http",
         "main_file": {
-            "name": "map_package_json",
-            "path": files["map_package_json"],
-            "address": urls["map_package_json"],
+            "name": "river_impact_geojson",
+            "path": files["river_impact_geojson"],
+            "address": urls["river_impact_geojson"],
         },
         "files": urls,
     }
