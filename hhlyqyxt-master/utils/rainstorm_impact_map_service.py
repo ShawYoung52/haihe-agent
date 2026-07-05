@@ -1,10 +1,15 @@
-"""暴雨影响河流对外文件服务。
+"""暴雨影响河流专题图服务。
 
-这里分清两个对外产物：
-1. GeoJSON 文件：只包含暴雨影响河流/站点数据，给十四所或其他系统直接加载。
-2. 专题图文件包：包含 GeoJSON 地址、图层样式、图例和摘要，给前端按专题图方式渲染。
+常用入口：
+1. create_rainstorm_impact_map：按时间段生成专题图文件包，返回 rainstorm_impact_map.json 地址；
+2. build_rainstorm_impact_map_from_package：直接接收 rainstorm_impact_map.json 的返回内容，整理成前端可渲染结构；
+3. get_rainstorm_impact_map_style：返回当前样式配置。
 
-核心河流计算仍由 rainfall_impact_geojson.py 完成；本文件只负责查实况降雨、写文件、返回 HTTP 地址。
+示例：
+    map_json = requests.get(
+        "http://10.226.107.130:4396/rainstorm_impact_output/.../rainstorm_impact_map.json"
+    ).json()
+    view = build_rainstorm_impact_map_from_package(map_json)
 """
 from __future__ import annotations
 
@@ -60,13 +65,42 @@ def get_rainstorm_impact_map_style() -> dict:
     return copy.deepcopy(RAINSTORM_IMPACT_STYLE)
 
 
-def create_rainstorm_impact_geojson_file(**kwargs) -> dict:
+def build_rainstorm_impact_map_from_package(map_package: dict[str, Any]) -> dict[str, Any]:
+    """整理 rainstorm_impact_map.json 的返回内容，供前端/GIS 直接渲染。"""
+    if not isinstance(map_package, dict):
+        raise TypeError("map_package 必须是 rainstorm_impact_map.json 解析后的 dict")
+    layers = _require_dict(map_package, "layers")
+    rivers = _require_dict(layers, "rivers")
+    stations = _require_dict(layers, "stations")
+
+    return {
+        "status": "ok",
+        "product_type": map_package.get("product_type") or "thematic_map",
+        "title": map_package.get("title") or RAINSTORM_IMPACT_STYLE["title"],
+        "summary": map_package.get("summary") or {},
+        "rainfall_source": map_package.get("rainfall_source") or {},
+        "map_layers": {
+            "rivers": {
+                "url": _require_text(rivers, "url"),
+                "style": rivers.get("style") or RAINSTORM_IMPACT_STYLE["layers"],
+            },
+            "stations": {
+                "url": _require_text(stations, "url"),
+                "style": stations.get("style") or RAINSTORM_IMPACT_STYLE["layers"]["impact_stations"],
+            },
+        },
+        "legend": map_package.get("legend") or RAINSTORM_IMPACT_STYLE["legend"],
+        "files": map_package.get("files") or {},
+    }
+
+
+def create_rainstorm_impact_geojson_file(**kwargs: Any) -> dict[str, Any]:
     """生成暴雨影响河流 GeoJSON 文件，并返回 river_impact.geojson 的 HTTP 地址。"""
     context = _build_rainstorm_context(**kwargs)
     return _write_product_response(context, product_type="geojson", main_file="river_impact_geojson")
 
 
-def create_rainstorm_impact_map(**kwargs) -> dict:
+def create_rainstorm_impact_map(**kwargs: Any) -> dict[str, Any]:
     """生成暴雨影响河流专题图文件包，并返回 rainstorm_impact_map.json 的 HTTP 地址。"""
     context = _build_rainstorm_context(**kwargs)
     return _write_product_response(context, product_type="thematic_map", main_file="map_package_json")
@@ -88,13 +122,12 @@ def _build_rainstorm_context(
     river_table: str = "haihe_river_directed_full_v5",
     schema: str = "public",
     graph_path: str | Path | None = None,
-) -> dict:
+) -> dict[str, Any]:
     start_dt, end_dt = _resolve_time_window(start_time, end_time, hours)
     rows = _query_haihe_rainfall_rows(start_dt, end_dt, basin_codes, api_time_shift_hours)
     core = _build_impact_core(rows, rain_threshold_mm, station_buffer_km, downstream_km, river_table, schema, graph_path, direct_match_km)
     stations = _aggregate_station_rainfall(rows)
     heavy_stations = [item for item in stations if item["rain_24h"] >= float(rain_threshold_mm)]
-
     return {
         "core": core,
         "output_root": _resolve_output_root(output_dir),
@@ -113,7 +146,16 @@ def _build_rainstorm_context(
     }
 
 
-def _build_impact_core(rows: list[dict[str, Any]], rain_threshold_mm: float, station_buffer_km: float, downstream_km: float, river_table: str, schema: str, graph_path: str | Path | None, direct_match_km: float) -> dict:
+def _build_impact_core(
+    rows: list[dict[str, Any]],
+    rain_threshold_mm: float,
+    station_buffer_km: float,
+    downstream_km: float,
+    river_table: str,
+    schema: str,
+    graph_path: str | Path | None,
+    direct_match_km: float,
+) -> dict[str, Any]:
     csv_path = _write_core_algorithm_input(rows)
     try:
         return build_rain24h_impact_river_geojson(
@@ -130,13 +172,12 @@ def _build_impact_core(rows: list[dict[str, Any]], rain_threshold_mm: float, sta
         csv_path.unlink(missing_ok=True)
 
 
-def _write_product_response(context: dict, *, product_type: str, main_file: str) -> dict:
+def _write_product_response(context: dict[str, Any], *, product_type: str, main_file: str) -> dict[str, Any]:
     paths = _write_geojson_files(context)
     urls = _to_http_urls(paths, context["output_root"], context["public_base_url"])
     if product_type == "thematic_map":
         paths["map_package_json"] = _write_map_package(context, urls)
         urls = _to_http_urls(paths, context["output_root"], context["public_base_url"])
-
     return {
         "status": "ok",
         "product_type": product_type,
@@ -146,17 +187,13 @@ def _write_product_response(context: dict, *, product_type: str, main_file: str)
         "map_package_url": urls.get("map_package_json"),
         "delivery": {
             "address_type": "http",
-            "main_file": {
-                "name": main_file,
-                "path": paths[main_file],
-                "address": urls[main_file],
-            },
+            "main_file": {"name": main_file, "path": paths[main_file], "address": urls[main_file]},
             "files": urls,
         },
     }
 
 
-def _write_geojson_files(context: dict) -> dict[str, str]:
+def _write_geojson_files(context: dict[str, Any]) -> dict[str, str]:
     core = context["core"]
     output_dir = context["output_root"] / context["job_id"]
     return {
@@ -167,7 +204,7 @@ def _write_geojson_files(context: dict) -> dict[str, str]:
     }
 
 
-def _write_map_package(context: dict, urls: dict[str, str]) -> str:
+def _write_map_package(context: dict[str, Any], urls: dict[str, str]) -> str:
     package = {
         "product_type": "thematic_map",
         "title": RAINSTORM_IMPACT_STYLE["title"],
@@ -180,8 +217,7 @@ def _write_map_package(context: dict, urls: dict[str, str]) -> str:
         "legend": RAINSTORM_IMPACT_STYLE["legend"],
         "files": urls,
     }
-    path = context["output_root"] / context["job_id"] / "rainstorm_impact_map.json"
-    return _write_json(path, package)
+    return _write_json(context["output_root"] / context["job_id"] / "rainstorm_impact_map.json", package)
 
 
 def _query_haihe_rainfall_rows(start_dt: datetime, end_dt: datetime, basin_codes: str, api_time_shift_hours: int | None) -> list[dict[str, Any]]:
@@ -207,7 +243,6 @@ def _music_call(interface_id: str, **params: Any) -> list[dict[str, Any]]:
         raise RuntimeError(f"MUSIC接口请求失败：{interface_id}") from exc
     except ValueError as exc:
         raise RuntimeError(f"MUSIC接口返回非JSON：{interface_id}") from exc
-
     data = payload.get("DS") if isinstance(payload, dict) else None
     if isinstance(data, list):
         return data
@@ -281,10 +316,7 @@ def _music_time_range(start_dt: datetime, end_dt: datetime, shift_hours: int) ->
 
 
 def _format_time_range(start_dt: datetime, end_dt: datetime) -> dict[str, str]:
-    return {
-        "start_time": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "end_time": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    return {"start_time": start_dt.strftime("%Y-%m-%d %H:%M:%S"), "end_time": end_dt.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 def _aggregate_station_rainfall(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -312,10 +344,10 @@ def _aggregate_station_rainfall(rows: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _write_core_algorithm_input(rows: list[dict[str, Any]]) -> Path:
-    tmp = tempfile.NamedTemporaryFile("w", suffix=".csv", encoding="utf-8", newline="", delete=False)
-    path = Path(tmp.name)
-    with tmp:
-        writer = csv.DictWriter(tmp, fieldnames=CORE_INPUT_FIELDS)
+    temp_file = tempfile.NamedTemporaryFile("w", suffix=".csv", encoding="utf-8", newline="", delete=False)
+    path = Path(temp_file.name)
+    with temp_file:
+        writer = csv.DictWriter(temp_file, fieldnames=CORE_INPUT_FIELDS)
         writer.writeheader()
         for row in rows:
             writer.writerow(_to_core_input_row(row))
@@ -391,8 +423,22 @@ def _write_json(path: Path, data: Any) -> str:
     return str(path)
 
 
-def _empty_feature_collection() -> dict:
+def _empty_feature_collection() -> dict[str, Any]:
     return {"type": "FeatureCollection", "features": []}
+
+
+def _require_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"rainstorm_impact_map.json 缺少对象字段：{key}")
+    return value
+
+
+def _require_text(data: dict[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"rainstorm_impact_map.json 缺少文本字段：{key}")
+    return value.strip()
 
 
 def _first(row: dict[str, Any], *keys: str) -> Any:
@@ -415,6 +461,7 @@ def _to_float(value: Any) -> float | None:
 
 
 __all__ = [
+    "build_rainstorm_impact_map_from_package",
     "create_rainstorm_impact_geojson_file",
     "create_rainstorm_impact_map",
     "get_rainstorm_impact_map_style",
