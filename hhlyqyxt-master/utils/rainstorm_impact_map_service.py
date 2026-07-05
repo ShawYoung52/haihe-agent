@@ -2,13 +2,16 @@
 
 常用入口：
 1. create_rainstorm_impact_map：按时间段生成专题图文件包，返回 rainstorm_impact_map.json 地址；
-2. build_rainstorm_impact_map_from_package：直接接收 rainstorm_impact_map.json 的返回内容，整理成前端可渲染结构；
+2. build_rainstorm_impact_map_from_package：接收 rainstorm_impact_map.json 的 URL 或请求返回内容，整理成前端可渲染结构；
 3. get_rainstorm_impact_map_style：返回当前样式配置。
 
 示例：
-    map_json = requests.get(
+    view = build_rainstorm_impact_map_from_package(
         "http://10.226.107.130:4396/rainstorm_impact_output/.../rainstorm_impact_map.json"
-    ).json()
+    )
+
+    # 或者：
+    map_json = requests.get(url).json()
     view = build_rainstorm_impact_map_from_package(map_json)
 """
 from __future__ import annotations
@@ -60,15 +63,14 @@ RAINSTORM_IMPACT_STYLE = {
 }
 
 
-def get_rainstorm_impact_map_style() -> dict:
+def get_rainstorm_impact_map_style() -> dict[str, Any]:
     """返回专题图样式配置。"""
     return copy.deepcopy(RAINSTORM_IMPACT_STYLE)
 
 
-def build_rainstorm_impact_map_from_package(map_package: dict[str, Any]) -> dict[str, Any]:
-    """整理 rainstorm_impact_map.json 的返回内容，供前端/GIS 直接渲染。"""
-    if not isinstance(map_package, dict):
-        raise TypeError("map_package 必须是 rainstorm_impact_map.json 解析后的 dict")
+def build_rainstorm_impact_map_from_package(map_package_or_url: dict[str, Any] | str) -> dict[str, Any]:
+    """整理 rainstorm_impact_map.json 的 URL 或返回内容，供前端/GIS 直接渲染。"""
+    map_package = _load_map_package(map_package_or_url)
     layers = _require_dict(map_package, "layers")
     rivers = _require_dict(layers, "rivers")
     stations = _require_dict(layers, "stations")
@@ -92,6 +94,24 @@ def build_rainstorm_impact_map_from_package(map_package: dict[str, Any]) -> dict
         "legend": map_package.get("legend") or RAINSTORM_IMPACT_STYLE["legend"],
         "files": map_package.get("files") or {},
     }
+
+
+def _load_map_package(value: dict[str, Any] | str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+        try:
+            response = requests.get(value.strip(), timeout=30)
+            response.raise_for_status()
+            package = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError("rainstorm_impact_map.json 请求失败") from exc
+        except ValueError as exc:
+            raise RuntimeError("rainstorm_impact_map.json 返回非JSON") from exc
+        if not isinstance(package, dict):
+            raise ValueError("rainstorm_impact_map.json 顶层必须是对象")
+        return package
+    raise TypeError("参数必须是 rainstorm_impact_map.json 的 URL 字符串，或请求后解析得到的 dict")
 
 
 def create_rainstorm_impact_geojson_file(**kwargs: Any) -> dict[str, Any]:
