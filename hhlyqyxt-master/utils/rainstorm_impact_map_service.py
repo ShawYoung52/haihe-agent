@@ -1,17 +1,12 @@
 """暴雨影响河流专题图服务。
 
 同事只需要传统计时间段；本服务会自动查询海河流域实况降雨，筛选达到暴雨级别的站点，
-并生成影响河流专题图数据。对外不要求传站点，也不要求传文件。
+生成专题图文件，并返回十四所可取用的文件地址。
 
-示例：
-    from utils import create_rainstorm_impact_map, get_rainstorm_impact_map_style
-
-    result = create_rainstorm_impact_map(
-        start_time="2026-06-30 00:00:00",
-        end_time="2026-07-01 00:00:00",
-        output_dir="./rainstorm_impact_output",
-    )
-    style = get_rainstorm_impact_map_style()
+地址优先级：
+1. 配置 RAINSTORM_IMPACT_PUBLIC_BASE_URL 时返回 HTTP 地址；
+2. 配置 RAINSTORM_IMPACT_MOUNT_ROOT 时返回挂载盘符/共享目录地址；
+3. 都未配置时返回本机落盘路径。
 """
 from __future__ import annotations
 
@@ -41,6 +36,10 @@ BASIN_CODE_HAIHE = "HHLY"
 MUSIC_DATA_CODE_HOURLY = "SURF_CHN_MUL_HOR"
 MUSIC_RAIN_ELEMENTS = "Station_Id_C,Station_Name,Lat,Lon,City,Cnty,Province,Town,Datetime,PRE_1h,PRE"
 CORE_INPUT_FIELDS = ["Station_Id_C", "Datetime", "PRE", "Lon", "Lat", "Station_Name", "City", "Cnty", "Province", "Town"]
+DEFAULT_OUTPUT_DIR_ENV = "RAINSTORM_IMPACT_OUTPUT_DIR"
+PUBLIC_BASE_URL_ENV = "RAINSTORM_IMPACT_PUBLIC_BASE_URL"
+MOUNT_ROOT_ENV = "RAINSTORM_IMPACT_MOUNT_ROOT"
+PACKAGE_FILE_NAME = "rainstorm_impact_map.json"
 
 RAINSTORM_IMPACT_STYLE = {
     "style_name": "rainstorm_impact_map_v1",
@@ -81,6 +80,8 @@ def create_rainstorm_impact_map(
     rain_threshold_mm: float = 50.0,
     basin_codes: str = BASIN_CODE_HAIHE,
     output_dir: str | Path | None = None,
+    public_base_url: str | None = None,
+    mount_root: str | Path | None = None,
     api_time_shift_hours: int | None = None,
     station_buffer_km: float = 30.0,
     downstream_km: float = 50.0,
@@ -89,28 +90,20 @@ def create_rainstorm_impact_map(
     schema: str = "public",
     graph_path: str | Path | None = None,
 ) -> dict:
-    """按时间段查询海河流域实况降雨，并生成暴雨影响河流专题图数据。"""
+    """按时间段生成暴雨影响河流专题图文件，并返回文件地址。"""
     start_dt, end_dt = _resolve_time_window(start_time, end_time, hours)
     rows = _query_haihe_rainfall_rows(start_dt, end_dt, basin_codes, api_time_shift_hours)
     station_rainfall = _aggregate_station_rainfall(rows)
-    core_input_path = _write_core_algorithm_input(rows)
-
-    try:
-        core = build_rain24h_impact_river_geojson(
-            csv_path=str(core_input_path),
-            rain_threshold_mm=rain_threshold_mm,
-            station_buffer_km=station_buffer_km,
-            downstream_km=downstream_km,
-            river_table=river_table,
-            schema=schema,
-            graph_path=graph_path,
-            direct_match_km=direct_match_km,
-        )
-    finally:
-        core_input_path.unlink(missing_ok=True)
-
+    core = _build_impact_core(rows, rain_threshold_mm, station_buffer_km, downstream_km, river_table, schema, graph_path, direct_match_km)
     heavy_stations = [item for item in station_rainfall if item["rain_24h"] >= float(rain_threshold_mm)]
-    result = _pack_map_result(core, output_dir)
+
+    result = _pack_map_result(
+        core=core,
+        output_dir=output_dir,
+        job_id=_build_job_id(start_dt, end_dt),
+        public_base_url=public_base_url,
+        mount_root=mount_root,
+    )
     result["rainfall_source"] = {
         "interface_id": "getSurfEleInBasinByTimeRange",
         "data_code": MUSIC_DATA_CODE_HOURLY,
@@ -124,15 +117,28 @@ def create_rainstorm_impact_map(
         "time_range": _format_time_range(start_dt, end_dt),
         "heavy_rain_station_count": len(heavy_stations),
     })
+    _write_json(Path(result["output_files"]["map_package_json"]), result)
     return result
 
 
-def _query_haihe_rainfall_rows(
-    start_dt: datetime,
-    end_dt: datetime,
-    basin_codes: str,
-    api_time_shift_hours: int | None,
-) -> list[dict[str, Any]]:
+def _build_impact_core(rows: list[dict[str, Any]], rain_threshold_mm: float, station_buffer_km: float, downstream_km: float, river_table: str, schema: str, graph_path: str | Path | None, direct_match_km: float) -> dict:
+    core_input_path = _write_core_algorithm_input(rows)
+    try:
+        return build_rain24h_impact_river_geojson(
+            csv_path=str(core_input_path),
+            rain_threshold_mm=rain_threshold_mm,
+            station_buffer_km=station_buffer_km,
+            downstream_km=downstream_km,
+            river_table=river_table,
+            schema=schema,
+            graph_path=graph_path,
+            direct_match_km=direct_match_km,
+        )
+    finally:
+        core_input_path.unlink(missing_ok=True)
+
+
+def _query_haihe_rainfall_rows(start_dt: datetime, end_dt: datetime, basin_codes: str, api_time_shift_hours: int | None) -> list[dict[str, Any]]:
     shift = int(os.getenv("MUSIC_API_TIME_SHIFT_HOURS", "-8")) if api_time_shift_hours is None else int(api_time_shift_hours)
     return _music_call(
         "getSurfEleInBasinByTimeRange",
@@ -147,7 +153,6 @@ def _music_call(interface_id: str, **params: Any) -> list[dict[str, Any]]:
     config = _music_config()
     query = _music_query(interface_id, config, params)
     url = f"http://{config['service_ip']}/music-ws/api?{urlencode(query, safe=':,[]()')}"
-
     try:
         response = requests.get(url, timeout=(config["connect_timeout"], config["read_timeout"]))
         response.raise_for_status()
@@ -241,7 +246,6 @@ def _format_time_range(start_dt: datetime, end_dt: datetime) -> dict[str, str]:
 def _aggregate_station_rainfall(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     totals: dict[str, float] = defaultdict(float)
     stations: dict[str, dict[str, Any]] = {}
-
     for row in rows:
         station_id = str(_first(row, "Station_Id_C", "station_id") or "").strip()
         lon = _to_float(_first(row, "Lon", "lon"))
@@ -258,7 +262,6 @@ def _aggregate_station_rainfall(rows: list[dict[str, Any]]) -> list[dict[str, An
             "city": _first(row, "City", "city"),
             "cnty": _first(row, "Cnty", "cnty"),
         })
-
     for station_id, station in stations.items():
         station["rain_24h"] = round(totals[station_id], 3)
     return sorted(stations.values(), key=lambda item: item["rain_24h"], reverse=True)
@@ -290,7 +293,7 @@ def _to_core_input_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None) -> dict[str, Any]:
+def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None, job_id: str, public_base_url: str | None, mount_root: str | Path | None) -> dict[str, Any]:
     rivers = core.get("river_geojson") or {"type": "FeatureCollection", "features": []}
     stations = core.get("station_geojson") or {"type": "FeatureCollection", "features": []}
     result = {
@@ -300,15 +303,72 @@ def _pack_map_result(core: dict[str, Any], output_dir: str | Path | None) -> dic
         "raw": core,
         "output_files": {},
     }
-    if output_dir:
-        out = Path(output_dir)
-        result["output_files"] = {
-            "river_impact_geojson": _write_json(out / "river_impact.geojson", rivers),
-            "impact_stations_geojson": _write_json(out / "impact_stations.geojson", stations),
-            "summary_json": _write_json(out / "summary.json", result["summary"]),
-            "style_json": _write_json(out / "style.json", result["map_layers"]["style"]),
-        }
+    root = _resolve_output_root(output_dir)
+    out = root / job_id
+    result["output_files"] = _write_map_files(out, result)
+    result["delivery"] = _build_delivery(result["output_files"], root, public_base_url, mount_root)
     return result
+
+
+def _write_map_files(out: Path, result: dict[str, Any]) -> dict[str, str]:
+    return {
+        "river_impact_geojson": _write_json(out / "river_impact.geojson", result["map_layers"]["rivers"]),
+        "impact_stations_geojson": _write_json(out / "impact_stations.geojson", result["map_layers"]["stations"]),
+        "summary_json": _write_json(out / "summary.json", result["summary"]),
+        "style_json": _write_json(out / "style.json", result["map_layers"]["style"]),
+        "map_package_json": str(out / PACKAGE_FILE_NAME),
+    }
+
+
+def _build_delivery(files: dict[str, str], output_root: Path, public_base_url: str | None, mount_root: str | Path | None) -> dict[str, Any]:
+    address_type = _address_type(public_base_url, mount_root)
+    addressed_files = {name: _file_address(path, output_root, public_base_url, mount_root) for name, path in files.items()}
+    return {
+        "address_type": address_type,
+        "main_file": {
+            "name": "map_package_json",
+            "path": files["map_package_json"],
+            "address": addressed_files["map_package_json"],
+        },
+        "files": addressed_files,
+    }
+
+
+def _address_type(public_base_url: str | None, mount_root: str | Path | None) -> str:
+    if (public_base_url or os.getenv(PUBLIC_BASE_URL_ENV, "")).strip():
+        return "http"
+    if str(mount_root or os.getenv(MOUNT_ROOT_ENV, "")).strip():
+        return "mount_path"
+    return "local_path"
+
+
+def _file_address(path_text: str, output_root: Path, public_base_url: str | None, mount_root: str | Path | None) -> str:
+    path = Path(path_text)
+    rel = _relative_path(path, output_root)
+    base_url = (public_base_url or os.getenv(PUBLIC_BASE_URL_ENV, "")).rstrip("/")
+    if base_url:
+        return f"{base_url}/{rel.as_posix()}"
+    mount = str(mount_root or os.getenv(MOUNT_ROOT_ENV, "")).rstrip("\\/")
+    if mount:
+        sep = "\\" if "\\" in mount or ":" in mount else "/"
+        return mount + sep + rel.as_posix().replace("/", sep)
+    return str(path)
+
+
+def _relative_path(path: Path, root: Path) -> Path:
+    try:
+        return path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return Path(path.name)
+
+
+def _resolve_output_root(output_dir: str | Path | None) -> Path:
+    configured = output_dir or os.getenv(DEFAULT_OUTPUT_DIR_ENV)
+    return Path(configured or Path.cwd() / "rainstorm_impact_output")
+
+
+def _build_job_id(start_dt: datetime, end_dt: datetime) -> str:
+    return f"rainstorm_impact_{start_dt:%Y%m%d%H%M}_{end_dt:%Y%m%d%H%M}_{uuid.uuid4().hex[:8]}"
 
 
 def _build_summary(core: dict[str, Any], rivers: dict[str, Any], stations: dict[str, Any]) -> dict[str, Any]:
