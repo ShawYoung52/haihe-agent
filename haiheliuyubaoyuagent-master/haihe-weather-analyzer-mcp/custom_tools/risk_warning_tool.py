@@ -21,6 +21,7 @@ from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_RISK_WARN_BASE = "http://10.226.107.35:8070"
 RISK_ROUTE = "/hhfw/riskWarnNew/findDataListByConfig"
 
 RISK_CONFIGS: dict[str, dict[str, Any]] = {
@@ -87,7 +88,8 @@ def _is_absolute_http_url(value: str) -> bool:
 def _risk_api_base_urls() -> list[str]:
     """返回风险预警服务候选根地址。
 
-    注意：这里不再默认使用 EMERGENCY_HTTP_BASE。日志已经证明 8080 的应急服务下没有
+    默认使用已确认的风险预警服务地址；环境变量可覆盖或追加候选地址。
+    这里不再默认使用 EMERGENCY_HTTP_BASE。日志已经证明 8080 的应急服务下没有
     /hhfw/riskWarnNew/findDataListByConfig，继续默认打过去只会产生误导性的 404。
     """
     values: list[str] = []
@@ -100,6 +102,7 @@ def _risk_api_base_urls() -> list[str]:
         val = (os.environ.get(key) or "").strip()
         if val:
             values.append(val)
+    values.append(DEFAULT_RISK_WARN_BASE)
 
     bases: list[str] = []
     seen: set[str] = set()
