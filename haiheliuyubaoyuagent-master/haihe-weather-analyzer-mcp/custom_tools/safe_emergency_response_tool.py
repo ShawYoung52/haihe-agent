@@ -1,8 +1,7 @@
-"""安全版实况应急响应判定 MCP 工具。
+"""安全版综合应急响应判定 MCP 工具。
 
-旧的 evaluate_haihe_emergency_response 在内部异常时会让 MCP 适配器抛出
-UnboundLocalError，前端只能看到“查询遇到异常”。本工具复用原核心判定函数，
-但把异常转换为结构化 error 返回，避免适配器二次报错。
+先按预案第一类条件检查官方防汛响应状态；未命中第一类时，再复用原实况降雨
+核心判定函数检查第二类监测降雨条件。异常统一转成结构化 error 返回。
 """
 from __future__ import annotations
 
@@ -13,6 +12,7 @@ from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_THRESHOLDS_MM
 from haihe_mcp_tools import evaluate_emergency_response_core
+from official_emergency_response_status import build_official_response_payload
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,12 @@ def register_safe_emergency_response_tool(mcp: FastMCP) -> None:
         extraordinary_24h: float = DEFAULT_THRESHOLDS_MM["extraordinary_24h"],
         include_records: bool = False,
     ) -> dict[str, Any]:
-        """安全查询海河流域实况应急响应判定结果。"""
+        """安全查询海河流域综合应急响应判定结果。"""
         try:
+            official = build_official_response_payload(times=times, basin_codes=basin_codes)
+            if official:
+                return official
+
             result = evaluate_emergency_response_core(
                 basin_codes=basin_codes,
                 times=times,
@@ -64,6 +68,9 @@ def register_safe_emergency_response_tool(mcp: FastMCP) -> None:
                 include_records=include_records,
             )
             result.setdefault("status", "ok")
+            result.setdefault("evidence", {})
+            if isinstance(result.get("evidence"), dict):
+                result["evidence"].setdefault("response_category", "second_class_observation")
             return result
         except Exception as exc:
             logger.exception("[safe_emergency_response] failed times=%s basin_codes=%s", times, basin_codes)
