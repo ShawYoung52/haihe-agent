@@ -105,6 +105,13 @@ def _empty_response(rainfall_result: dict, threshold_mm: float, zones: set[str],
         "total_segments": 0,
         "affected_segments": 0,
         "segments": [],
+        "flow_direction": {
+            "enabled": False,
+            "scope": "downstream_50km",
+            "field": "flow_direction",
+            "value": "pkl_from_to",
+            "note": "本次无受影响河段；有 downstream_50km 河段时会返回 flow_from/flow_to 和按流向校正后的坐标。",
+        },
         "summary": f"统计时段 {time_range} 内，未达到 {threshold_mm}mm 降雨阈值的河系数据。",
     }
 
@@ -113,6 +120,7 @@ def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: floa
     segments = result.get("segments", [])
     affected_rivers = result.get("affected_rivers") or sorted({str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")})
     time_range = rainfall_result.get("time_range_readable", "")
+    river_geojson = result.get("river_geojson")
     return {
         "time_range_readable": time_range,
         "rainfall_threshold_mm": threshold_mm,
@@ -123,17 +131,47 @@ def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: floa
         "total_segments": len(segments),
         "affected_segments": len(segments),
         "segments": segments,
+        "flow_direction": _flow_direction_info(segments, river_geojson),
         "start_stats": {
             "downstream_edge_count": result.get("river_summary", {}).get("downstream_edge_count", 0),
             "direct_part_match_km": result.get("params", {}).get("direct_match_km", DEFAULT_DIRECT_GRAPH_MATCH_KM),
         },
-        "river_geojson": result.get("river_geojson"),
+        "river_geojson": river_geojson,
         "summary": f"统计时段 {time_range} 内，降雨量≥{threshold_mm}mm 的站点共影响 {len(affected_rivers)} 条河流。",
         "rules": {
             "direct": "ST_Dump(full_v5.geom) 后单线段 ST_DWithin 30km 命中，直接段不截断",
-            "downstream": "从直接命中拓扑边沿 pkl 河网追踪 downstream_km，回 full_v5 匹配最近真实河段并截断",
+            "downstream": "从直接命中真实河段匹配到的 pkl 拓扑边向下游追踪 downstream_km，回 full_v5 匹配最近真实河段并截断",
+            "direction": "downstream_50km 河段按 pkl from->to 流向校正坐标顺序，并在属性中返回 flow_direction、flow_from、flow_to",
             "dedupe": "按拓扑 edge_key 区分，不按 river_name/objectid 提前误删",
         },
+    }
+
+
+def _flow_direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
+    downstream_segments = [s for s in segments if s.get("impact_type") == "downstream_50km"]
+    oriented_segments = [s for s in downstream_segments if s.get("flow_direction") == "pkl_from_to"]
+    downstream_features = []
+    if isinstance(river_geojson, dict):
+        downstream_features = [
+            f for f in river_geojson.get("features", []) or []
+            if isinstance(f, dict)
+            and (f.get("properties") or {}).get("impact_type") == "downstream_50km"
+        ]
+    oriented_features = [
+        f for f in downstream_features
+        if (f.get("properties") or {}).get("flow_direction") == "pkl_from_to"
+    ]
+    return {
+        "enabled": bool(downstream_segments or downstream_features),
+        "scope": "downstream_50km",
+        "field": "flow_direction",
+        "value": "pkl_from_to",
+        "segment_count": len(downstream_segments),
+        "oriented_segment_count": len(oriented_segments),
+        "geojson_feature_count": len(downstream_features),
+        "oriented_geojson_feature_count": len(oriented_features),
+        "coordinate_order": "下游影响河段坐标顺序按 flow_from -> flow_to 校正；直接影响河段 direct_buffer 保持 full_v5 原始几何顺序。",
+        "how_to_use": "前端或入库需要方向时，优先读取 downstream_50km 要素 properties.flow_direction=pkl_from_to、flow_from、flow_to；该要素 geometry.coordinates 已按该方向输出。",
     }
 
 
