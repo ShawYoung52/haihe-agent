@@ -7,6 +7,7 @@ from datetime import datetime as _dt
 from typing import Any
 
 _MARKER = "_safe_emergency_response_fast_path_installed"
+EMERGENCY_RESPONSE_TIMEOUT_SEC = 180
 
 
 def _unwrap(result: Any) -> Any:
@@ -109,7 +110,7 @@ def install_emergency_response_fast_path() -> bool:
         try:
             result = await asyncio.wait_for(
                 tool.ainvoke({"times": times, "basin_codes": "HHLY"}),
-                timeout=60,
+                timeout=EMERGENCY_RESPONSE_TIMEOUT_SEC,
             )
             data = _unwrap(result)
             if not isinstance(data, dict):
