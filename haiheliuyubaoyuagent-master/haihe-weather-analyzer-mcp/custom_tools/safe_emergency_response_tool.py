@@ -1,7 +1,7 @@
-"""安全版综合应急响应判定 MCP 工具。
+"""安全版第二类实况应急响应判定 MCP 工具。
 
-先按预案第一类条件检查官方防汛响应状态；未命中第一类时，再复用原实况降雨
-核心判定函数检查第二类监测降雨条件。异常统一转成结构化 error 返回。
+只按预案 2.1.2 第二类中的实况监测降雨条件判定；不接入第一类官方防汛响应状态。
+异常统一转成结构化 error 返回。
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_THRESHOLDS_MM
 from haihe_mcp_tools import evaluate_emergency_response_core
-from official_emergency_response_status import build_official_response_payload
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +20,9 @@ def _error_payload(times: str, basin_codes: str, exc: Exception) -> dict[str, An
     text = str(exc)
     lower = text.lower()
     if "no record" in lower or "无记录" in text or "暂无数据" in text:
-        message = "未查询到该时次的应急响应判定数据，可能该时段无有效分钟降水资料。"
+        message = "未查询到该时次的第二类实况应急响应判定数据，可能该时段无有效分钟降水资料。"
     else:
-        message = "当前无法获取应急响应判定数据，请稍后重试。"
+        message = "当前无法获取第二类实况应急响应判定数据，请稍后重试。"
     return {
         "status": "error",
         "error": text[:500],
@@ -31,6 +30,7 @@ def _error_payload(times: str, basin_codes: str, exc: Exception) -> dict[str, An
         "query": {
             "times": times,
             "basin_codes": basin_codes,
+            "response_category": "second_class_observation",
         },
     }
 
@@ -49,12 +49,8 @@ def register_safe_emergency_response_tool(mcp: FastMCP) -> None:
         extraordinary_24h: float = DEFAULT_THRESHOLDS_MM["extraordinary_24h"],
         include_records: bool = False,
     ) -> dict[str, Any]:
-        """安全查询海河流域综合应急响应判定结果。"""
+        """安全查询海河流域第二类实况应急响应判定结果。"""
         try:
-            official = build_official_response_payload(times=times, basin_codes=basin_codes)
-            if official:
-                return official
-
             result = evaluate_emergency_response_core(
                 basin_codes=basin_codes,
                 times=times,
