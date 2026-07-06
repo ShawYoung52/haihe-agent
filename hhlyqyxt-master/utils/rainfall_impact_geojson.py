@@ -388,20 +388,26 @@ def _create_downstream_temp(cur, edges: list[dict]) -> None:
 
 
 def _find_direct_graph_starts(stations: list[dict], direct_rows: list[dict], graph_path, buffer_km: float, direct_match_km: float) -> tuple[dict[Any, float], set[str]]:
+    """从真实直接影响河段匹配到的 pkl 边启动下游追踪。
+
+    直接影响河段仍由 PostGIS 按暴雨站 30km 查询；下游追踪起点不能再直接使用
+    “pkl 边距离暴雨站 30km”条件，否则一个暴雨站会把周边不相连的河系一并起追。
+    """
     graph = get_graph(graph_path)
-    station_points = [(float(s["lon"]), float(s["lat"])) for s in stations]
     direct_refs = _direct_refs(direct_rows)
+    if not direct_refs:
+        return {}, set()
+
     starts: dict[Any, float] = {}
     direct_keys: set[str] = set()
     for u, v, key, attr in iter_graph_edges(graph):
         p1, p2 = _edge_points(u, v)
         if p1 is None or p2 is None:
             continue
-        hit_station = min(_point_to_segment_km(lon, lat, p1, p2) for lon, lat in station_points) <= buffer_km
-        hit_part = _edge_matches_direct_part(attr, p1, p2, direct_refs, direct_match_km)
-        if hit_station or hit_part:
-            direct_keys.add(_edge_key(u, v, key, attr))
-            starts[v] = 0.0
+        if not _edge_matches_direct_part(attr, p1, p2, direct_refs, direct_match_km):
+            continue
+        direct_keys.add(_edge_key(u, v, key, attr))
+        starts[v] = 0.0
     return starts, direct_keys
 
 
