@@ -15,6 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 TOOL_NAME = "get_affected_river_network_by_rainfall"
 DEFAULT_DIRECT_GRAPH_MATCH_KM = 3.0
+DEFAULT_DIRECT_STATION_TOP_N = 1
 
 
 def _load_impact_builder():
@@ -105,13 +106,7 @@ def _empty_response(rainfall_result: dict, threshold_mm: float, zones: set[str],
         "total_segments": 0,
         "affected_segments": 0,
         "segments": [],
-        "flow_direction": {
-            "enabled": False,
-            "scope": "downstream_50km",
-            "field": "flow_direction",
-            "value": "pkl_from_to",
-            "note": "本次无受影响河段；有 downstream_50km 河段时会返回 flow_from/flow_to 和按流向校正后的坐标。",
-        },
+        "direction": _direction_info([], None),
         "summary": f"统计时段 {time_range} 内，未达到 {threshold_mm}mm 降雨阈值的河系数据。",
     }
 
@@ -121,6 +116,7 @@ def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: floa
     affected_rivers = result.get("affected_rivers") or sorted({str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")})
     time_range = rainfall_result.get("time_range_readable", "")
     river_geojson = result.get("river_geojson")
+    params = result.get("params", {})
     return {
         "time_range_readable": time_range,
         "rainfall_threshold_mm": threshold_mm,
@@ -131,47 +127,39 @@ def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: floa
         "total_segments": len(segments),
         "affected_segments": len(segments),
         "segments": segments,
-        "flow_direction": _flow_direction_info(segments, river_geojson),
+        "direction": _direction_info(segments, river_geojson),
         "start_stats": {
             "downstream_edge_count": result.get("river_summary", {}).get("downstream_edge_count", 0),
-            "direct_part_match_km": result.get("params", {}).get("direct_match_km", DEFAULT_DIRECT_GRAPH_MATCH_KM),
+            "direct_part_match_km": params.get("direct_match_km", DEFAULT_DIRECT_GRAPH_MATCH_KM),
+            "direct_station_top_n": params.get("direct_station_top_n", DEFAULT_DIRECT_STATION_TOP_N),
         },
         "river_geojson": river_geojson,
-        "summary": f"统计时段 {time_range} 内，降雨量≥{threshold_mm}mm 的站点共影响 {len(affected_rivers)} 条河流。",
+        "summary": f"统计时段 {time_range} 内，降雨量≥{threshold_mm}mm 的实况站点共影响 {len(affected_rivers)} 条河流。",
         "rules": {
-            "direct": "ST_Dump(full_v5.geom) 后单线段 ST_DWithin 30km 命中，直接段不截断",
-            "downstream": "从直接命中真实河段匹配到的 pkl 拓扑边向下游追踪 downstream_km，回 full_v5 匹配最近真实河段并截断",
-            "direction": "downstream_50km 河段按 pkl from->to 流向校正坐标顺序，并在属性中返回 flow_direction、flow_from、flow_to",
-            "dedupe": "按拓扑 edge_key 区分，不按 river_name/objectid 提前误删",
+            "direct": "实况问答默认每个暴雨站只取最近 direct_station_top_n 条 full_v5 直接河段，避免 1 个站点把 30km 内所有河系染红",
+            "downstream": "从直接影响真实河段匹配到的 pkl 拓扑边向下游追踪 downstream_km，再回 full_v5 匹配真实河段并截断",
+            "direction": "GeoJSON 坐标顺序使用 full_v5 数据库原始几何顺序；properties.flow_direction=database_geometry_order",
+            "dedupe": "直接河段优先，按 objectid + 真实几何去重，避免多条 pkl 边重复映射同一真实河段",
         },
     }
 
 
-def _flow_direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
-    downstream_segments = [s for s in segments if s.get("impact_type") == "downstream_50km"]
-    oriented_segments = [s for s in downstream_segments if s.get("flow_direction") == "pkl_from_to"]
-    downstream_features = []
-    if isinstance(river_geojson, dict):
-        downstream_features = [
-            f for f in river_geojson.get("features", []) or []
-            if isinstance(f, dict)
-            and (f.get("properties") or {}).get("impact_type") == "downstream_50km"
-        ]
-    oriented_features = [
-        f for f in downstream_features
-        if (f.get("properties") or {}).get("flow_direction") == "pkl_from_to"
+def _direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
+    features = river_geojson.get("features", []) if isinstance(river_geojson, dict) else []
+    directed_features = [
+        f for f in features
+        if isinstance(f, dict)
+        and (f.get("properties") or {}).get("flow_direction") == "database_geometry_order"
     ]
     return {
-        "enabled": bool(downstream_segments or downstream_features),
-        "scope": "downstream_50km",
+        "enabled": bool(features or segments),
         "field": "flow_direction",
-        "value": "pkl_from_to",
-        "segment_count": len(downstream_segments),
-        "oriented_segment_count": len(oriented_segments),
-        "geojson_feature_count": len(downstream_features),
-        "oriented_geojson_feature_count": len(oriented_features),
-        "coordinate_order": "下游影响河段坐标顺序按 flow_from -> flow_to 校正；直接影响河段 direct_buffer 保持 full_v5 原始几何顺序。",
-        "how_to_use": "前端或入库需要方向时，优先读取 downstream_50km 要素 properties.flow_direction=pkl_from_to、flow_from、flow_to；该要素 geometry.coordinates 已按该方向输出。",
+        "value": "database_geometry_order",
+        "direction_source": "full_v5_original_geometry",
+        "geojson_feature_count": len(features),
+        "directed_geojson_feature_count": len(directed_features),
+        "coordinate_order": "使用 full_v5 数据库原始几何点序，不在问答工具里反转坐标。",
+        "how_to_use": "前端或入库需要方向时，直接按 geometry.coordinates 的点序使用；properties.flow_direction 表示该点序来自数据库原始几何。",
     }
 
 
@@ -189,6 +177,7 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
         include_background: bool = True,
         downstream_km: float = 50.0,
         direct_graph_match_km: float = DEFAULT_DIRECT_GRAPH_MATCH_KM,
+        direct_station_top_n: int = DEFAULT_DIRECT_STATION_TOP_N,
     ) -> dict:
         """制作暴雨影响河流专题图数据。"""
         import tools as base_tools
@@ -208,6 +197,7 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
             rainfall_threshold_mm=rainfall_threshold_mm,
             downstream_km=downstream_km,
             direct_match_km=direct_graph_match_km,
+            direct_station_top_n=direct_station_top_n,
             max_segments=max_edges,
             extra_summary={"time_range_readable": rainfall_result.get("time_range_readable", "")},
         )
