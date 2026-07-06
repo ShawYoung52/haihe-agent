@@ -70,16 +70,32 @@ def _format_response(data: dict[str, Any], times: str) -> str:
     msg = data.get("message", "")
     evidence = data.get("evidence", {}) if isinstance(data.get("evidence"), dict) else {}
     time_label = _time_label(times)
+    category = evidence.get("response_category")
 
-    if triggered:
+    if triggered and category == "first_class":
+        lines = [f"## 防汛应急响应判定：已启动/维持 {level} 级响应\n"]
+        lines.append(f"截至 **{time_label}**，已命中预案**第一类应急响应条件**：海河防总/相关防汛机构已启动或调整防汛应急响应，流域气象中心应启动/调整同级别气象服务联防应急响应。\n")
+    elif triggered:
         lines = [f"## 防汛应急响应判定：已触发 {level} 级响应\n"]
         lines.append(f"截至 **{time_label}**，海河流域实况雨量已达到 **{level} 级**防汛应急响应启动条件。\n")
     else:
         lines = ["## 防汛应急响应判定：未触发\n"]
-        lines.append(f"截至 **{time_label}**，海河流域实况雨量**未达到**防汛应急响应启动条件。\n")
+        lines.append(f"截至 **{time_label}**，按当前已接入的实况雨量规则**未达到**防汛应急响应启动条件。\n")
 
     if msg:
         lines.append(f"**判定结论**：{msg}\n")
+
+    official = evidence.get("official_response") if isinstance(evidence.get("official_response"), dict) else None
+    if official:
+        lines.append("### 第一类响应依据\n")
+        lines.append(f"- 官方响应级别：{official.get('level', '-')}")
+        lines.append(f"- 响应来源：{official.get('source', '-')}")
+        lines.append(f"- 响应开始：{official.get('start_time', '-')}")
+        if official.get("end_time"):
+            lines.append(f"- 适用截至：{official.get('end_time')}")
+        if official.get("basis"):
+            lines.append(f"- 预案依据：{official.get('basis')}")
+        lines.append("")
 
     total = evidence.get("total_station_count")
     qualified = evidence.get("qualified_station_count") or evidence.get("qualified_adjacent_station_count")
@@ -88,7 +104,7 @@ def _format_response(data: dict[str, Any], times: str) -> str:
     window = evidence.get("window_hours")
 
     if total is not None:
-        lines.append("### 判定依据\n")
+        lines.append("### 第二类实况雨量判定依据\n")
         lines.append(f"- 参与判定国家站数：{total}")
         if qualified is not None:
             lines.append(f"- 达标站点数：{qualified}")
@@ -101,7 +117,7 @@ def _format_response(data: dict[str, Any], times: str) -> str:
             lines.append(f"- 触发阈值：最近 {window} 小时累计降水 ≥ {threshold} mm")
         lines.append("")
 
-    lines.append("\n数据来源：天擎分钟降水实况")
+    lines.append("\n数据来源：海河防汛响应状态配置 + 天擎分钟降水实况")
     return "\n".join(lines)
 
 
@@ -117,11 +133,21 @@ def _ensure_mcp_module_path() -> None:
 def _call_local_emergency_response(times: str) -> dict[str, Any]:
     _ensure_mcp_module_path()
     from haihe_mcp_tools import evaluate_emergency_response_core
+    from official_emergency_response_status import build_official_response_payload
 
-    return evaluate_emergency_response_core(
+    official = build_official_response_payload(times=times, basin_codes="HHLY")
+    if official:
+        return official
+
+    result = evaluate_emergency_response_core(
         basin_codes="HHLY",
         times=times,
     )
+    if isinstance(result, dict):
+        result.setdefault("evidence", {})
+        if isinstance(result.get("evidence"), dict):
+            result["evidence"].setdefault("response_category", "second_class_observation")
+    return result
 
 
 async def _query_emergency_response_locally(times: str) -> dict[str, Any]:
