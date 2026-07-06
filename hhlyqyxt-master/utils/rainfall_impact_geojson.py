@@ -1,8 +1,8 @@
 """暴雨影响河流专题图核心方法。
 
 主入口：
-- build_rainstorm_impact_thematic_map：同事/智能体传入暴雨站点列表，直接得到专题图数据。
-- build_rain24h_impact_river_geojson：本地 CSV 入口，先把 5 分钟 PRE 聚合为 24h 后再走同一套逻辑。
+- build_rainstorm_impact_thematic_map：按暴雨站点生成专题图数据；
+- build_rain24h_impact_river_geojson：从 5 分钟 CSV 聚合 24h 雨量后复用同一套逻辑。
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ _GRAPH_LOCK = threading.RLock()
 
 
 def aggregate_5min_station_pre_to_24h(csv_path: str | os.PathLike) -> pd.DataFrame:
-    """把 5 分钟站点降水 CSV 聚合成站点 24h 累计雨量。"""
+    """把 5 分钟站点降水 CSV 聚合为站点 24h 累计雨量。"""
     header = pd.read_csv(csv_path, nrows=0)
     required = {"Station_Id_C", "Datetime", "PRE", "Lon", "Lat"}
     missing = required - set(header.columns)
@@ -40,7 +40,8 @@ def aggregate_5min_station_pre_to_24h(csv_path: str | os.PathLike) -> pd.DataFra
         raise ValueError(f"CSV 缺少必要字段：{sorted(missing)}")
 
     usecols = [
-        c for c in [
+        c
+        for c in [
             "Station_Id_C", "Datetime", "PRE", "Lat", "Lon", "City",
             "Station_Name", "Cnty", "Province", "Town",
         ]
@@ -51,6 +52,7 @@ def aggregate_5min_station_pre_to_24h(csv_path: str | os.PathLike) -> pd.DataFra
     df["PRE"] = pd.to_numeric(df["PRE"], errors="coerce")
     df["Lon"] = pd.to_numeric(df["Lon"], errors="coerce")
     df["Lat"] = pd.to_numeric(df["Lat"], errors="coerce")
+
     valid_pre = df["PRE"].notna() & (df["PRE"] >= 0) & (df["PRE"] <= 9999.0)
     df["_pre_valid"] = valid_pre
     df.loc[~valid_pre, "PRE"] = 0.0
@@ -97,11 +99,16 @@ def build_rainstorm_impact_thematic_map(
     objectid_column: str = DEFAULT_OBJECTID_COLUMN,
     river_name_column: str = DEFAULT_RIVER_NAME_COLUMN,
     direct_match_km: float = 3.0,
+    direct_station_top_n: int = 0,
     max_segments: int = 0,
     extra_summary: dict | None = None,
 ) -> dict:
-    """根据暴雨站点生成影响河流专题图数据。"""
-    _validate_params(rainfall_threshold_mm, station_buffer_km, downstream_km)
+    """根据暴雨站点生成影响河流专题图数据。
+
+    direct_station_top_n=0 表示保留站点 30km 内全部直接河段；
+    direct_station_top_n>0 表示每个暴雨站只保留最近 N 条直接河段，适合实况问答场景。
+    """
+    _validate_params(rainfall_threshold_mm, station_buffer_km, downstream_km, direct_station_top_n)
     schema, river_table = _resolve_table(pg_conf, schema, river_table)
     rainstorm_stations = _normalize_stations(stations, rainfall_threshold_mm)
     result = _empty_result(
@@ -109,6 +116,7 @@ def build_rainstorm_impact_thematic_map(
         rainfall_threshold_mm,
         station_buffer_km,
         downstream_km,
+        direct_station_top_n,
         schema,
         river_table,
         graph_path,
@@ -125,15 +133,30 @@ def build_rainstorm_impact_thematic_map(
             _ensure_river_columns(cur, schema, river_table, geom_column, objectid_column, river_name_column)
             _create_station_temp(cur, rainstorm_stations)
             direct_rows = _query_direct_rows(
-                cur, schema, river_table, geom_column, objectid_column, river_name_column, station_buffer_km
+                cur,
+                schema,
+                river_table,
+                geom_column,
+                objectid_column,
+                river_name_column,
+                station_buffer_km,
+                direct_station_top_n,
             )
             start_nodes, direct_keys = _find_direct_graph_starts(
-                rainstorm_stations, direct_rows, graph_path, station_buffer_km, direct_match_km
+                direct_rows,
+                graph_path,
+                direct_match_km,
             )
             downstream_edges = _collect_downstream_edges(start_nodes, graph_path, direct_keys, downstream_km)
             downstream_rows = _query_downstream_rows(
-                cur, schema, river_table, geom_column, objectid_column, river_name_column,
-                downstream_edges, station_buffer_km
+                cur,
+                schema,
+                river_table,
+                geom_column,
+                objectid_column,
+                river_name_column,
+                downstream_edges,
+                station_buffer_km,
             )
     finally:
         if should_close:
@@ -152,9 +175,9 @@ def build_rainstorm_impact_thematic_map(
         "affected_rivers": sorted({s["rivername"] for s in segments if s.get("rivername")}),
         "downstream_edges": downstream_edges,
         "river_summary": {
-            "direct_feature_count": len(direct_rows),
+            "direct_feature_count": _count_features(river_geojson, "direct_buffer"),
             "downstream_edge_count": len(downstream_edges),
-            "downstream_feature_count": len(downstream_rows),
+            "downstream_feature_count": _count_features(river_geojson, "downstream_50km"),
             "geojson_feature_count": len(river_geojson["features"]),
             "plot_segment_count": len(segments),
         },
@@ -205,22 +228,24 @@ def build_rain24h_impact_river_geojson(
 
 
 def geojson_to_plot_segments(river_geojson: dict, stations: list[dict] | None = None) -> list[dict]:
-    """把河流 GeoJSON 转成前端专题图常用的线段结构。"""
+    """把河流 GeoJSON 转成前端专题图常用线段结构。"""
     result = []
-    for feature in river_geojson.get("features", []):
+    for feature in river_geojson.get("features", []) or []:
         props = feature.get("properties") or {}
         for index, path in enumerate(_geometry_lines(feature.get("geometry") or {})):
             result.append(_make_plot_segment(path, props, index, stations or []))
     return result
 
 
-def _validate_params(threshold: float, buffer_km: float, downstream_km: float) -> None:
+def _validate_params(threshold: float, buffer_km: float, downstream_km: float, direct_station_top_n: int) -> None:
     if threshold < 0:
         raise ValueError("rainfall_threshold_mm 不能为负数")
     if buffer_km <= 0:
         raise ValueError("station_buffer_km 必须大于 0")
     if downstream_km < 0:
         raise ValueError("downstream_km 不能为负数")
+    if int(direct_station_top_n or 0) < 0:
+        raise ValueError("direct_station_top_n 不能为负数")
 
 
 def _resolve_table(pg_conf: dict | None, schema: str, river_table: str) -> tuple[str, str]:
@@ -253,13 +278,24 @@ def _open_connection(pg_conf: dict | None, db_connection):
     return engine.raw_connection(), True
 
 
-def _empty_result(stations: list[dict], threshold: float, buffer_km: float, downstream_km: float, schema: str, table: str, graph_path, extra: dict | None) -> dict:
+def _empty_result(
+    stations: list[dict],
+    threshold: float,
+    buffer_km: float,
+    downstream_km: float,
+    direct_station_top_n: int,
+    schema: str,
+    table: str,
+    graph_path,
+    extra: dict | None,
+) -> dict:
     result = {
         "status": "ok",
         "params": {
             "rainfall_threshold_mm": float(threshold),
             "station_buffer_km": float(buffer_km),
             "downstream_km": float(downstream_km),
+            "direct_station_top_n": int(direct_station_top_n or 0),
             "river_table": f"{schema}.{table}",
             "graph_path": str(graph_path or _default_graph_path()),
         },
@@ -322,10 +358,24 @@ def _create_station_temp(cur, stations: list[dict]) -> None:
         ) ON COMMIT DROP
     """)
     rows = [(s["station_id"], s["station_name"], s["lon"], s["lat"], s["rain_24h"], s["lon"], s["lat"]) for s in stations]
-    execute_values(cur, "INSERT INTO tmp_rain24h_impact_stations VALUES %s", rows, template="(%s,%s,%s,%s,%s,ST_SetSRID(ST_MakePoint(%s,%s),4326))")
+    execute_values(
+        cur,
+        "INSERT INTO tmp_rain24h_impact_stations VALUES %s",
+        rows,
+        template="(%s,%s,%s,%s,%s,ST_SetSRID(ST_MakePoint(%s,%s),4326))",
+    )
 
 
-def _query_direct_rows(cur, schema: str, table: str, geom_col: str, objectid_col: str, river_name_col: str, buffer_km: float) -> list[dict]:
+def _query_direct_rows(
+    cur,
+    schema: str,
+    table: str,
+    geom_col: str,
+    objectid_col: str,
+    river_name_col: str,
+    buffer_km: float,
+    direct_station_top_n: int,
+) -> list[dict]:
     cur.execute(f"""
         WITH river_parts AS (
             SELECT r.{_qi(objectid_col)}::text AS objectid,
@@ -333,18 +383,32 @@ def _query_direct_rows(cur, schema: str, table: str, geom_col: str, objectid_col
                    (ST_Dump(r.{_qi(geom_col)})).geom AS geom
             FROM {_qi(schema)}.{_qi(table)} r
             WHERE r.{_qi(geom_col)} IS NOT NULL AND NOT ST_IsEmpty(r.{_qi(geom_col)})
+        ), station_hits AS (
+            SELECT p.objectid, p.river_name, p.geom,
+                   s.station_id, s.station_name, s.lon, s.lat, s.rain_24h,
+                   ST_Distance(p.geom::geography, s.geom::geography) / 1000.0 AS station_distance_km,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY s.station_id
+                       ORDER BY ST_Distance(p.geom::geography, s.geom::geography), p.river_name, p.objectid
+                   ) AS station_rank
+            FROM river_parts p
+            JOIN tmp_rain24h_impact_stations s ON ST_DWithin(p.geom::geography, s.geom::geography, %(buffer_m)s)
+        ), selected_hits AS (
+            SELECT * FROM station_hits
+            WHERE %(top_n)s <= 0 OR station_rank <= %(top_n)s
         )
-        SELECT p.objectid, p.objectid AS id, p.river_name,
-               ST_AsGeoJSON(p.geom) AS geom_json,
-               ST_Length(p.geom::geography) / 1000.0 AS length_km,
-               MIN(ST_Distance(p.geom::geography, s.geom::geography) / 1000.0) AS min_station_distance_km,
-               COUNT(DISTINCT s.station_id) AS trigger_station_count,
-               jsonb_agg(DISTINCT jsonb_build_object('station_id',s.station_id,'station_name',s.station_name,'lon',s.lon,'lat',s.lat,'rain_24h',s.rain_24h)) AS trigger_stations
-        FROM river_parts p
-        JOIN tmp_rain24h_impact_stations s ON ST_DWithin(p.geom::geography, s.geom::geography, %(buffer_m)s)
-        GROUP BY p.objectid, p.river_name, p.geom
-        ORDER BY min_station_distance_km, p.river_name, p.objectid
-    """, {"buffer_m": float(buffer_km) * 1000.0})
+        SELECT objectid, objectid AS id, river_name,
+               ST_AsGeoJSON(geom) AS geom_json,
+               ST_Length(geom::geography) / 1000.0 AS length_km,
+               MIN(station_distance_km) AS min_station_distance_km,
+               COUNT(DISTINCT station_id) AS trigger_station_count,
+               jsonb_agg(DISTINCT jsonb_build_object(
+                   'station_id',station_id,'station_name',station_name,'lon',lon,'lat',lat,'rain_24h',rain_24h
+               )) AS trigger_stations
+        FROM selected_hits
+        GROUP BY objectid, river_name, geom
+        ORDER BY min_station_distance_km, river_name, objectid
+    """, {"buffer_m": float(buffer_km) * 1000.0, "top_n": int(direct_station_top_n or 0)})
     return list(cur.fetchall())
 
 
@@ -365,7 +429,10 @@ def _query_downstream_rows(cur, schema: str, table: str, geom_col: str, objectid
             FROM river_parts p
             JOIN tmp_downstream_edges e ON p.objectid = e.objectid
             WHERE e.pkl_line IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM tmp_rain24h_impact_stations s WHERE ST_DWithin(p.geom::geography, s.geom::geography, %(buffer_m)s))
+              AND NOT EXISTS (
+                  SELECT 1 FROM tmp_rain24h_impact_stations s
+                  WHERE ST_DWithin(p.geom::geography, s.geom::geography, %(buffer_m)s)
+              )
         ), best_part AS (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY edge_key ORDER BY match_distance_km) AS rn
             FROM candidates
@@ -417,7 +484,11 @@ def _create_downstream_temp(cur, edges: list[dict]) -> None:
     rows = []
     for e in edges:
         fx, fy, tx, ty = e["from_x"], e["from_y"], e["to_x"], e["to_y"]
-        rows.append((e["edge_key"], e["objectid"], e["river_name"], e["min_distance_km"], e["end_distance_km"], e["keep_km"], e["clip_fraction"], bool(e["is_direct_graph_edge"]), fx, fy, tx, ty, fx, fy, tx, ty, fx, fy, tx, ty))
+        rows.append((
+            e["edge_key"], e["objectid"], e["river_name"], e["min_distance_km"], e["end_distance_km"],
+            e["keep_km"], e["clip_fraction"], bool(e["is_direct_graph_edge"]),
+            fx, fy, tx, ty, fx, fy, tx, ty, fx, fy, tx, ty,
+        ))
     execute_values(cur, "INSERT INTO tmp_downstream_edges VALUES %s", rows, template="""
         (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
          CASE WHEN %s IS NULL OR %s IS NULL OR %s IS NULL OR %s IS NULL THEN NULL
@@ -425,12 +496,8 @@ def _create_downstream_temp(cur, edges: list[dict]) -> None:
     """)
 
 
-def _find_direct_graph_starts(stations: list[dict], direct_rows: list[dict], graph_path, buffer_km: float, direct_match_km: float) -> tuple[dict[Any, float], set[str]]:
-    """从真实直接影响河段匹配到的 pkl 边启动下游追踪。
-
-    直接影响河段仍由 PostGIS 按暴雨站 30km 查询；下游追踪起点不能再直接使用
-    “pkl 边距离暴雨站 30km”条件，否则一个暴雨站会把周边不相连的河系一并起追。
-    """
+def _find_direct_graph_starts(direct_rows: list[dict], graph_path, direct_match_km: float) -> tuple[dict[Any, float], set[str]]:
+    """只从直接影响真实河段匹配到的 pkl 边启动下游追踪。"""
     graph = get_graph(graph_path)
     direct_refs = _direct_refs(direct_rows)
     if not direct_refs:
@@ -477,10 +544,12 @@ def _save_downstream_edge(edges: dict[str, dict], u, v, key, attr: dict, start_k
     keep_km = max(min(limit_km - start_km, length_km), 0.0) if length_km > 0 else 0.0
     if keep_km <= 0:
         return start_km + length_km
+
     edge_key = _edge_key(u, v, key, attr)
     old = edges.get(edge_key)
     if old and old["min_distance_km"] <= start_km:
         return start_km + length_km
+
     from_x, from_y = _parse_node_xy(u)
     to_x, to_y = _parse_node_xy(v)
     edges[edge_key] = {
@@ -501,25 +570,27 @@ def _save_downstream_edge(edges: dict[str, dict], u, v, key, attr: dict, start_k
 
 
 def _build_river_geojson(direct_rows: list[dict], downstream_rows: list[dict]) -> dict:
-    features, seen = [], set()
+    """生成河流 GeoJSON；直接河段优先，并按真实几何去重。"""
+    features = []
+    seen = set()
     for row, impact_type in [(r, "direct_buffer") for r in direct_rows] + [(r, "downstream_50km") for r in downstream_rows]:
         feature = _river_feature(row, impact_type)
         if not feature:
             continue
-        key = (impact_type, feature["properties"].get("edge_key"), feature["properties"].get("objectid"), json.dumps(feature["geometry"], ensure_ascii=False, sort_keys=True))
-        if key not in seen:
-            seen.add(key)
-            features.append(feature)
+        key = _feature_geometry_key(feature)
+        if key in seen:
+            continue
+        seen.add(key)
+        features.append(feature)
     features.sort(key=lambda f: (0 if f["properties"]["impact_type"] == "direct_buffer" else 1, f["properties"].get("river_name") or ""))
     return {"type": "FeatureCollection", "features": features}
 
 
 def _river_feature(row: dict, impact_type: str) -> dict | None:
     geometry = _geometry_from_row(row)
-    if not geometry:
+    if not _has_line_geometry(geometry):
         return None
-    if impact_type == "downstream_50km":
-        geometry = _orient_downstream_geometry_to_flow(geometry, row)
+
     props = {
         "impact_type": impact_type,
         "river_name": row.get("river_name") or "未知",
@@ -527,6 +598,8 @@ def _river_feature(row: dict, impact_type: str) -> dict | None:
         "objectid": row.get("objectid"),
         "edge_key": row.get("edge_key"),
         "length_km": round(float(row.get("length_km") or 0.0), 3),
+        "flow_direction": "database_geometry_order",
+        "direction_source": "full_v5_original_geometry",
     }
     if impact_type == "direct_buffer":
         props.update({
@@ -536,8 +609,6 @@ def _river_feature(row: dict, impact_type: str) -> dict | None:
             "geometry_source": "full_v5_direct_30km_uncut",
         })
     else:
-        from_point = _row_point(row, "from")
-        to_point = _row_point(row, "to")
         props.update({
             "min_downstream_distance_km": row.get("min_downstream_distance_km"),
             "end_downstream_distance_km": row.get("end_downstream_distance_km"),
@@ -545,85 +616,30 @@ def _river_feature(row: dict, impact_type: str) -> dict | None:
             "clip_fraction": row.get("clip_fraction"),
             "is_direct_graph_edge": row.get("is_direct_graph_edge"),
             "match_distance_km": _round(row.get("match_distance_km")),
-            "flow_direction": "pkl_from_to",
-            "flow_from": {"lon": from_point[0], "lat": from_point[1]} if from_point else None,
-            "flow_to": {"lon": to_point[0], "lat": to_point[1]} if to_point else None,
-            "geometry_source": "full_v5_downstream_50km_clipped_flow_oriented",
+            "topology_from": _point_property(row, "from"),
+            "topology_to": _point_property(row, "to"),
+            "geometry_source": "full_v5_downstream_50km_clipped_database_order",
         })
     return {"type": "Feature", "geometry": geometry, "properties": props}
 
 
-def _orient_downstream_geometry_to_flow(geometry: dict, row: dict) -> dict:
-    """把 downstream_50km 的 GeoJSON 坐标顺序校正为 pkl from->to 流向。"""
-    from_point = _row_point(row, "from")
-    to_point = _row_point(row, "to")
-    if not from_point or not to_point or not isinstance(geometry, dict):
-        return geometry
-
-    geom_type = geometry.get("type")
-    coords = geometry.get("coordinates") or []
-    if geom_type == "LineString":
-        oriented = _orient_line_to_flow(coords, from_point, to_point)
-        return {**geometry, "coordinates": oriented} if oriented else geometry
-    if geom_type == "MultiLineString":
-        oriented = _orient_multiline_to_flow(coords, from_point, to_point)
-        return {**geometry, "coordinates": oriented} if oriented else geometry
-    return geometry
+def _feature_geometry_key(feature: dict) -> tuple[str, str]:
+    props = feature.get("properties") or {}
+    objectid = str(props.get("objectid") or "")
+    geometry_key = json.dumps(feature.get("geometry") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return objectid, geometry_key
 
 
-def _row_point(row: dict, prefix: str) -> tuple[float, float] | None:
+def _has_line_geometry(geometry: dict | None) -> bool:
+    return bool(isinstance(geometry, dict) and _geometry_lines(geometry))
+
+
+def _point_property(row: dict, prefix: str) -> dict | None:
     lon = _safe_float(row.get(f"{prefix}_x"))
     lat = _safe_float(row.get(f"{prefix}_y"))
-    if lon is None or lat is None or not math.isfinite(lon) or not math.isfinite(lat):
+    if lon is None or lat is None:
         return None
-    return lon, lat
-
-
-def _orient_line_to_flow(line: list, from_point: tuple[float, float], to_point: tuple[float, float]) -> list | None:
-    if not isinstance(line, list) or len(line) < 2:
-        return None
-    forward = _line_flow_score(line, from_point, to_point)
-    reverse = _line_flow_score(list(reversed(line)), from_point, to_point)
-    return list(reversed(line)) if reverse < forward else line
-
-
-def _orient_multiline_to_flow(lines: list, from_point: tuple[float, float], to_point: tuple[float, float]) -> list | None:
-    valid_lines = [line for line in lines if isinstance(line, list) and len(line) >= 2]
-    if not valid_lines:
-        return None
-    forward = _multiline_flow_score(valid_lines, from_point, to_point)
-    reversed_lines = [list(reversed(line)) for line in reversed(valid_lines)]
-    reverse = _multiline_flow_score(reversed_lines, from_point, to_point)
-    return reversed_lines if reverse < forward else valid_lines
-
-
-def _line_flow_score(line: list, from_point: tuple[float, float], to_point: tuple[float, float]) -> float:
-    if len(line) < 2 or not _is_xy(line[0]) or not _is_xy(line[-1]):
-        return math.inf
-    start = (float(line[0][0]), float(line[0][1]))
-    end = (float(line[-1][0]), float(line[-1][1]))
-    return _haversine_km(start[0], start[1], from_point[0], from_point[1]) + _haversine_km(end[0], end[1], to_point[0], to_point[1])
-
-
-def _multiline_flow_score(lines: list, from_point: tuple[float, float], to_point: tuple[float, float]) -> float:
-    first = lines[0][0]
-    last = lines[-1][-1]
-    if not _is_xy(first) or not _is_xy(last):
-        return math.inf
-    start = (float(first[0]), float(first[1]))
-    end = (float(last[0]), float(last[1]))
-    return _haversine_km(start[0], start[1], from_point[0], from_point[1]) + _haversine_km(end[0], end[1], to_point[0], to_point[1])
-
-
-def _is_xy(value: Any) -> bool:
-    if not isinstance(value, (list, tuple)) or len(value) < 2:
-        return False
-    try:
-        x = float(value[0])
-        y = float(value[1])
-    except (TypeError, ValueError):
-        return False
-    return math.isfinite(x) and math.isfinite(y)
+    return {"lon": lon, "lat": lat}
 
 
 def _make_plot_segment(path: list[list[float]], props: dict, index: int, stations: list[dict]) -> dict:
@@ -651,8 +667,9 @@ def _make_plot_segment(path: list[list[float]], props: dict, index: int, station
         "clip_fraction": props.get("clip_fraction"),
         "match_distance_km": props.get("match_distance_km"),
         "flow_direction": props.get("flow_direction"),
-        "flow_from": props.get("flow_from"),
-        "flow_to": props.get("flow_to"),
+        "direction_source": props.get("direction_source"),
+        "topology_from": props.get("topology_from"),
+        "topology_to": props.get("topology_to"),
         "geometry_source": props.get("geometry_source"),
     }
 
@@ -661,8 +678,12 @@ def _direct_refs(rows: list[dict]) -> list[dict]:
     refs = []
     for row in rows:
         geometry = _geometry_from_row(row)
-        if geometry:
-            refs.append({"objectid": str(row.get("objectid") or ""), "river_name": str(row.get("river_name") or ""), "lines": _geometry_lines(geometry)})
+        if _has_line_geometry(geometry):
+            refs.append({
+                "objectid": str(row.get("objectid") or ""),
+                "river_name": str(row.get("river_name") or ""),
+                "lines": _geometry_lines(geometry),
+            })
     return refs
 
 
@@ -683,12 +704,18 @@ def _geometry_from_row(row: dict) -> dict | None:
 
 
 def _geometry_lines(geometry: dict) -> list[list[list[float]]]:
+    if not isinstance(geometry, dict):
+        return []
     if geometry.get("type") == "LineString":
         coords = geometry.get("coordinates") or []
         return [coords] if len(coords) >= 2 else []
     if geometry.get("type") == "MultiLineString":
         return [line for line in geometry.get("coordinates") or [] if len(line) >= 2]
     return []
+
+
+def _count_features(feature_collection: dict, impact_type: str) -> int:
+    return sum(1 for f in feature_collection.get("features", []) if (f.get("properties") or {}).get("impact_type") == impact_type)
 
 
 def _edge_to_line_km(p1: tuple[float, float], p2: tuple[float, float], line: list[list[float]]) -> float:
@@ -698,7 +725,12 @@ def _edge_to_line_km(p1: tuple[float, float], p2: tuple[float, float], line: lis
 
 
 def _point_to_line_km(lon: float, lat: float, line: list[list[float]]) -> float:
-    return min(_point_to_segment_km(lon, lat, (float(line[i][0]), float(line[i][1])), (float(line[i + 1][0]), float(line[i + 1][1]))) for i in range(len(line) - 1)) if len(line) >= 2 else math.inf
+    if len(line) < 2:
+        return math.inf
+    return min(
+        _point_to_segment_km(lon, lat, (float(line[i][0]), float(line[i][1])), (float(line[i + 1][0]), float(line[i + 1][1])))
+        for i in range(len(line) - 1)
+    )
 
 
 def _point_to_segment_km(lon: float, lat: float, p1: tuple[float, float], p2: tuple[float, float]) -> float:
@@ -716,12 +748,19 @@ def _point_to_segment_km(lon: float, lat: float, p1: tuple[float, float], p2: tu
 
 
 def _min_station_distance_km(line: list[list[float]], stations: list[dict]) -> float | None:
-    distances = [_point_to_line_km(float(s["lon"]), float(s["lat"]), line) for s in stations if s.get("lon") is not None and s.get("lat") is not None]
+    distances = [
+        _point_to_line_km(float(s["lon"]), float(s["lat"]), line)
+        for s in stations
+        if s.get("lon") is not None and s.get("lat") is not None
+    ]
     return min(distances) if distances else None
 
 
 def _line_length_km(line: list[list[float]]) -> float:
-    return sum(_haversine_km(float(line[i][0]), float(line[i][1]), float(line[i + 1][0]), float(line[i + 1][1])) for i in range(max(len(line) - 1, 0)))
+    return sum(
+        _haversine_km(float(line[i][0]), float(line[i][1]), float(line[i + 1][0]), float(line[i + 1][1]))
+        for i in range(max(len(line) - 1, 0))
+    )
 
 
 def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -764,7 +803,11 @@ def _first_not_empty(values: pd.Series) -> Any:
 
 
 def _station_record(row: pd.Series) -> dict:
-    return {field: _jsonable(row.get(field)) for field in ["station_id", "station_name", "province", "city", "cnty", "town", "lon", "lat", "rain_24h", "obs_count", "valid_pre_count", "start_time", "end_time"] if field in row.index}
+    fields = [
+        "station_id", "station_name", "province", "city", "cnty", "town",
+        "lon", "lat", "rain_24h", "obs_count", "valid_pre_count", "start_time", "end_time",
+    ]
+    return {field: _jsonable(row.get(field)) for field in fields if field in row.index}
 
 
 def _make_station_geojson(stations: list[dict]) -> dict:
@@ -775,7 +818,11 @@ def _make_station_geojson(stations: list[dict]) -> dict:
         props = dict(s)
         props.pop("lon", None)
         props.pop("lat", None)
-        features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [float(s["lon"]), float(s["lat"])]}, "properties": props})
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [float(s["lon"]), float(s["lat"])]},
+            "properties": props,
+        })
     return {"type": "FeatureCollection", "features": features}
 
 
