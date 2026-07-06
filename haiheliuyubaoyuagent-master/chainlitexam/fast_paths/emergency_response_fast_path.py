@@ -3,11 +3,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from datetime import datetime as _dt
+from pathlib import Path
 from typing import Any
 
 _MARKER = "_safe_emergency_response_fast_path_installed"
-EMERGENCY_RESPONSE_TIMEOUT_SEC = 180
+EMERGENCY_RESPONSE_TIMEOUT_SEC = 300
+_DAYPART_HOURS = (
+    ("凌晨", 2),
+    ("早晨", 8),
+    ("上午", 8),
+    ("中午", 12),
+    ("午后", 14),
+    ("下午", 14),
+    ("傍晚", 20),
+    ("晚上", 20),
+    ("夜间", 20),
+)
 
 
 def _unwrap(result: Any) -> Any:
@@ -29,6 +42,15 @@ def _time_label(times: str) -> str:
         return _dt.strptime(times, "%Y%m%d%H%M%S").strftime("%Y年%m月%d日%H时%M分")
     except Exception:
         return str(times or "所选时次")
+
+
+def _apply_daypart_hour(user_text: str, times: str) -> str:
+    if not times or len(times) != 14 or not times.isdigit():
+        return times
+    for keyword, hour in _DAYPART_HOURS:
+        if keyword in (user_text or ""):
+            return f"{times[:8]}{hour:02d}0000"
+    return times
 
 
 def _friendly_error(data: dict[str, Any], times: str) -> str:
@@ -83,6 +105,43 @@ def _format_response(data: dict[str, Any], times: str) -> str:
     return "\n".join(lines)
 
 
+def _ensure_mcp_module_path() -> None:
+    root = Path(__file__).resolve().parents[2]
+    mcp_dir = root / "haihe-weather-analyzer-mcp"
+    if mcp_dir.is_dir():
+        path = str(mcp_dir)
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def _call_local_emergency_response(times: str) -> dict[str, Any]:
+    _ensure_mcp_module_path()
+    from haihe_mcp_tools import evaluate_emergency_response_core
+
+    return evaluate_emergency_response_core(
+        basin_codes="HHLY",
+        times=times,
+    )
+
+
+async def _query_emergency_response_locally(times: str) -> dict[str, Any]:
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_call_local_emergency_response, times),
+            timeout=EMERGENCY_RESPONSE_TIMEOUT_SEC,
+        )
+        if isinstance(result, dict):
+            result.setdefault("status", "ok")
+            return result
+        return {"status": "error", "message": "应急响应判定结果格式异常。", "raw": str(result)[:500]}
+    except asyncio.TimeoutError:
+        return {"status": "error", "message": "应急响应判定查询超时，请稍后重试。"}
+    except Exception as exc:
+        text = str(exc)
+        print(f"[emergency_response_fast_path] 本地判定失败：{text}")
+        return {"status": "error", "error": text[:500], "message": "当前无法获取应急响应判定数据，请稍后重试。"}
+
+
 def install_emergency_response_fast_path() -> bool:
     try:
         import message_orchestrator as mo
@@ -92,43 +151,19 @@ def install_emergency_response_fast_path() -> bool:
     if getattr(mo, _MARKER, False):
         return True
 
-    original = getattr(mo, "_try_emergency_response_fast_path", None)
-    if not callable(original):
-        return False
-
     async def patched(user_text: str, tools, messages, callbacks) -> bool:
-        matched, times = mo._extract_emergency_response_time(user_text)
+        matched, raw_times = mo._extract_emergency_response_time(user_text)
         if not matched:
             return False
+        times = _apply_daypart_hour(user_text, raw_times)
 
-        tool = mo._find_tool(tools, "safe_evaluate_haihe_emergency_response")
-        if not tool:
-            return await original(user_text, tools, messages, callbacks)
-
-        print(f"\n=== 安全防汛应急响应快速路径：times={times} ===")
+        print(f"\n=== 本地防汛应急响应快速路径：raw_times={raw_times}, times={times} ===")
         thinking_msg = await mo._show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
-        try:
-            result = await asyncio.wait_for(
-                tool.ainvoke({"times": times, "basin_codes": "HHLY"}),
-                timeout=EMERGENCY_RESPONSE_TIMEOUT_SEC,
-            )
-            data = _unwrap(result)
-            if not isinstance(data, dict):
-                await mo._emit_fast_path_result(
-                    "应急响应判定结果格式异常，无法生成回答。", thinking_msg, messages, user_text
-                )
-                return True
-            await mo._emit_fast_path_result(_format_response(data, times), thinking_msg, messages, user_text)
-            return True
-        except asyncio.TimeoutError:
-            await mo._emit_fast_path_result("⏱️ 应急响应判定查询超时，请稍后重试。", thinking_msg, messages, user_text)
-            return True
-        except Exception as exc:
-            print(f"[emergency_response_fast_path] 查询失败：{exc}")
-            await mo._emit_fast_path_result("当前无法获取应急响应判定数据，请稍后重试。", thinking_msg, messages, user_text)
-            return True
+        data = await _query_emergency_response_locally(times)
+        await mo._emit_fast_path_result(_format_response(data, times), thinking_msg, messages, user_text)
+        return True
 
     mo._try_emergency_response_fast_path = patched
     setattr(mo, _MARKER, True)
-    print("[emergency_response_fast_path] 已安装：安全应急响应快速路径")
+    print("[emergency_response_fast_path] 已安装：本地应急响应快速路径")
     return True
