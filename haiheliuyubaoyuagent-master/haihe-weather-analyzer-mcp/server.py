@@ -10,6 +10,7 @@ from custom_tools import (
     register_last_year_max_daily_rainfall_tool,
     register_poi_nearest_observation_tool,
     register_risk_warning_tool,
+    register_safe_emergency_response_tool,
     register_year_to_date_areal_rainfall_tool,
 )
 
@@ -34,6 +35,7 @@ class HaiheWeatherAnalyzerMCP:
         register_year_to_date_areal_rainfall_tool(self.mcp)
         register_poi_nearest_observation_tool(self.mcp)
         register_risk_warning_tool(self.mcp)
+        register_safe_emergency_response_tool(self.mcp)
 
         @self.mcp.tool()
         def get_service_info() -> dict:
@@ -60,6 +62,7 @@ class HaiheWeatherAnalyzerMCP:
                     "filter_haihe_observation_response_records - 观测判定拆分(filter)",
                     "evaluate_haihe_observation_response_records - 观测判定拆分(evaluate)",
                     "report_haihe_observation_response - 观测判定拆分(report)",
+                    "safe_evaluate_haihe_emergency_response - 安全版实况应急响应判定",
                     "fetch_haihe_forecast_response_inputs - 预报判定拆分(fetch)",
                     "filter_haihe_forecast_response_inputs - 预报判定拆分(filter)",
                     "evaluate_haihe_forecast_response_inputs - 预报判定拆分(evaluate)",
