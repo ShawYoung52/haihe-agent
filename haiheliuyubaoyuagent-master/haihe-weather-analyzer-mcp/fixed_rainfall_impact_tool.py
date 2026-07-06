@@ -15,7 +15,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 TOOL_NAME = "get_affected_river_network_by_rainfall"
 DEFAULT_DIRECT_GRAPH_MATCH_KM = 3.0
-DEFAULT_DIRECT_STATION_TOP_N = 1
 
 
 def _load_impact_builder():
@@ -131,12 +130,11 @@ def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: floa
         "start_stats": {
             "downstream_edge_count": result.get("river_summary", {}).get("downstream_edge_count", 0),
             "direct_part_match_km": params.get("direct_match_km", DEFAULT_DIRECT_GRAPH_MATCH_KM),
-            "direct_station_top_n": params.get("direct_station_top_n", DEFAULT_DIRECT_STATION_TOP_N),
         },
         "river_geojson": river_geojson,
         "summary": f"统计时段 {time_range} 内，降雨量≥{threshold_mm}mm 的实况站点共影响 {len(affected_rivers)} 条河流。",
         "rules": {
-            "direct": "实况问答默认每个暴雨站只取最近 direct_station_top_n 条 full_v5 直接河段，避免 1 个站点把 30km 内所有河系染红",
+            "direct": "ST_Dump(full_v5.geom) 后单线段 ST_DWithin 30km 命中，直接段不截断",
             "downstream": "从直接影响真实河段匹配到的 pkl 拓扑边向下游追踪 downstream_km，再回 full_v5 匹配真实河段并截断",
             "direction": "GeoJSON 坐标顺序使用 full_v5 数据库原始几何顺序；properties.flow_direction=database_geometry_order",
             "dedupe": "直接河段优先，按 objectid + 真实几何去重，避免多条 pkl 边重复映射同一真实河段",
@@ -177,7 +175,6 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
         include_background: bool = True,
         downstream_km: float = 50.0,
         direct_graph_match_km: float = DEFAULT_DIRECT_GRAPH_MATCH_KM,
-        direct_station_top_n: int = DEFAULT_DIRECT_STATION_TOP_N,
     ) -> dict:
         """制作暴雨影响河流专题图数据。"""
         import tools as base_tools
@@ -197,7 +194,6 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
             rainfall_threshold_mm=rainfall_threshold_mm,
             downstream_km=downstream_km,
             direct_match_km=direct_graph_match_km,
-            direct_station_top_n=direct_station_top_n,
             max_segments=max_edges,
             extra_summary={"time_range_readable": rainfall_result.get("time_range_readable", "")},
         )
