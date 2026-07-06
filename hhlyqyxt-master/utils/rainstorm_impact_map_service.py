@@ -166,6 +166,7 @@ def _build_context_from_csv(
         graph_path=graph_path,
         direct_match_km=direct_match_km,
     )
+    core = _sanitize_core_river_geojson(core)
     return {
         "core": core,
         "output_root": _resolve_output_root(output_dir),
@@ -192,7 +193,7 @@ def _build_impact_core_from_rows(
 ) -> dict[str, Any]:
     core_input_path = _write_core_algorithm_input(rows)
     try:
-        return build_rain24h_impact_river_geojson(
+        core = build_rain24h_impact_river_geojson(
             csv_path=str(core_input_path),
             rain_threshold_mm=rain_threshold_mm,
             station_buffer_km=station_buffer_km,
@@ -202,6 +203,7 @@ def _build_impact_core_from_rows(
             graph_path=graph_path,
             direct_match_km=direct_match_km,
         )
+        return _sanitize_core_river_geojson(core)
     finally:
         core_input_path.unlink(missing_ok=True)
 
@@ -230,8 +232,11 @@ def _write_product_response(context: dict[str, Any], *, product_type: str, main_
 def _write_geojson_files(context: dict[str, Any]) -> dict[str, str]:
     core = context["core"]
     output_dir = context["output_root"] / context["job_id"]
+    river_geojson = _sanitize_river_feature_collection(core.get("river_geojson") or _empty_feature_collection())
+    core["river_geojson"] = river_geojson
+    context["summary"] = _build_summary(core)
     return {
-        "river_impact_geojson": _write_json(output_dir / "river_impact.geojson", core.get("river_geojson") or _empty_feature_collection()),
+        "river_impact_geojson": _write_json(output_dir / "river_impact.geojson", river_geojson),
         "impact_stations_geojson": _write_json(output_dir / "impact_stations.geojson", core.get("station_geojson") or _empty_feature_collection()),
         "summary_json": _write_json(output_dir / "summary.json", context["summary"]),
         "style_json": _write_json(output_dir / "style.json", get_rainstorm_impact_map_style()),
@@ -420,6 +425,78 @@ def _to_core_input_row(row: dict[str, Any]) -> dict[str, Any]:
         "Province": _first(row, "Province", "province"),
         "Town": _first(row, "Town", "town"),
     }
+
+
+def _sanitize_core_river_geojson(core: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(core or {})
+    sanitized["river_geojson"] = _sanitize_river_feature_collection(
+        sanitized.get("river_geojson") or _empty_feature_collection()
+    )
+    return sanitized
+
+
+def _sanitize_river_feature_collection(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return _empty_feature_collection()
+    features = []
+    for feature in data.get("features") or []:
+        if not isinstance(feature, dict):
+            continue
+        geometry = feature.get("geometry") or {}
+        if not _is_valid_line_geometry(geometry):
+            continue
+        feature_copy = dict(feature)
+        feature_copy["geometry"] = geometry
+        features.append(feature_copy)
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _is_valid_line_geometry(geometry: dict[str, Any]) -> bool:
+    return _geometry_line_length_km(geometry) > 0.001
+
+
+def _geometry_line_length_km(geometry: dict[str, Any]) -> float:
+    if not isinstance(geometry, dict):
+        return 0.0
+    geom_type = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if geom_type == "LineString":
+        return _coords_length_km(coords)
+    if geom_type == "MultiLineString":
+        return sum(_coords_length_km(line) for line in coords or [])
+    return 0.0
+
+
+def _coords_length_km(coords: Any) -> float:
+    if not isinstance(coords, list) or len(coords) < 2:
+        return 0.0
+    total = 0.0
+    for start, end in zip(coords, coords[1:]):
+        if not _is_lon_lat(start) or not _is_lon_lat(end):
+            continue
+        total += _haversine_km(float(start[0]), float(start[1]), float(end[0]), float(end[1]))
+    return total
+
+
+def _is_lon_lat(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return False
+    try:
+        lon = float(value[0])
+        lat = float(value[1])
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(lon) and math.isfinite(lat)
+
+
+def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    radius = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def _build_summary(core: dict[str, Any]) -> dict[str, Any]:
