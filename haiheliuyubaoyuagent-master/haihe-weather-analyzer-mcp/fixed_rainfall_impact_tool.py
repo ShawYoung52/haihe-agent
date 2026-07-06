@@ -161,6 +161,75 @@ def _direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
     }
 
 
+def _debug_station_summary(stations: list[dict]) -> list[dict]:
+    return [
+        {
+            "station_id": s.get("station_id"),
+            "name": s.get("name") or s.get("station_name"),
+            "lon": s.get("lon"),
+            "lat": s.get("lat"),
+            "rainfall": s.get("rainfall") or s.get("rain_24h"),
+            "level": s.get("level"),
+        }
+        for s in stations[:50]
+        if isinstance(s, dict)
+    ]
+
+
+def _debug_feature_summary(feature: dict) -> dict:
+    props = feature.get("properties") or {}
+    geom = feature.get("geometry") or {}
+    return {
+        "impact_type": props.get("impact_type"),
+        "river_name": props.get("river_name"),
+        "objectid": props.get("objectid"),
+        "geometry_type": geom.get("type"),
+        "min_station_distance_km": props.get("min_station_distance_km"),
+        "min_downstream_distance_km": props.get("min_downstream_distance_km"),
+        "end_downstream_distance_km": props.get("end_downstream_distance_km"),
+        "is_direct_graph_edge": props.get("is_direct_graph_edge"),
+        "flow_direction": props.get("flow_direction"),
+        "direction_source": props.get("direction_source"),
+        "topology_from": props.get("topology_from"),
+        "topology_to": props.get("topology_to"),
+    }
+
+
+def _log_impact_debug(builder, stations: list[dict], result: dict) -> None:
+    """记录问答暴雨影响河系的 MCP 返回数据，用于判断前端图层来源。"""
+    try:
+        river_geojson = result.get("river_geojson") if isinstance(result, dict) else None
+        features = river_geojson.get("features", []) if isinstance(river_geojson, dict) else []
+        by_name: dict[str, dict[str, int]] = {}
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            props = feature.get("properties") or {}
+            name = str(props.get("river_name") or "未知")
+            impact_type = str(props.get("impact_type") or "unknown")
+            by_name.setdefault(name, {})[impact_type] = by_name.setdefault(name, {}).get(impact_type, 0) + 1
+
+        logger.warning(
+            "rainfall_impact_debug summary=%s",
+            {
+                "builder_file": getattr(getattr(builder, "__code__", None), "co_filename", ""),
+                "station_count": len(stations),
+                "stations": _debug_station_summary(stations),
+                "direct_rivers": result.get("direct_rivers"),
+                "downstream_rivers": result.get("downstream_rivers"),
+                "affected_rivers": result.get("affected_rivers"),
+                "river_summary": result.get("river_summary"),
+                "feature_count": len(features),
+                "feature_count_by_river": by_name,
+            },
+        )
+        for idx, feature in enumerate(features[:120]):
+            if isinstance(feature, dict):
+                logger.warning("rainfall_impact_debug feature_%03d=%s", idx, _debug_feature_summary(feature))
+    except Exception:
+        logger.exception("rainfall impact debug logging failed")
+
+
 def register_fixed_rainfall_impact_tool(mcp) -> None:
     """注册暴雨影响河流专题图工具。"""
     _unregister_existing_tool(mcp, TOOL_NAME)
@@ -197,6 +266,7 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
             max_segments=max_edges,
             extra_summary={"time_range_readable": rainfall_result.get("time_range_readable", "")},
         )
+        _log_impact_debug(builder, stations, result)
         return _format_mcp_response(result, rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
 
     logger.info("已注册 %s 工具", TOOL_NAME)
