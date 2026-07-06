@@ -6,6 +6,7 @@ from .water_level_fast_paths import install_water_level_fast_paths
 from .poi_weather_fast_paths import install_poi_weather_fast_paths
 from .risk_warning_fast_paths import install_risk_warning_fast_paths
 from .rainstorm_impact_time_fast_path import install_rainstorm_impact_time_fast_path
+from .emergency_response_fast_path import install_emergency_response_fast_path
 
 
 def install_all_fast_paths() -> None:
@@ -14,6 +15,7 @@ def install_all_fast_paths() -> None:
     install_poi_weather_fast_paths()
     install_risk_warning_fast_paths()
     install_rainstorm_impact_time_fast_path()
+    install_emergency_response_fast_path()
 
 
 __all__ = ["install_all_fast_paths"]
