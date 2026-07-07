@@ -1,4 +1,4 @@
-"""防汛应急响应第二类判定快速路径。"""
+"""防汛应急响应判定快速路径修正。"""
 from __future__ import annotations
 
 import asyncio
@@ -57,8 +57,8 @@ def _friendly_error(data: dict[str, Any], times: str) -> str:
     raw_err = str(data.get("error") or data.get("debug_reason") or "")
     message = str(data.get("message") or "").strip()
     if "no record" in raw_err.lower() or "无记录" in raw_err or "暂无数据" in raw_err or "未查询到" in message:
-        return f"未查询到 {_time_label(times)} 的第二类实况应急响应判定数据，可能该时段无有效分钟降水资料。"
-    return message or "当前无法获取第二类实况应急响应判定数据，请稍后重试。"
+        return f"未查询到 {_time_label(times)} 的应急响应判定数据，可能该时段无有效分钟降水资料。"
+    return message or "当前无法获取应急响应判定数据，请稍后重试。"
 
 
 def _format_response(data: dict[str, Any], times: str) -> str:
@@ -72,11 +72,11 @@ def _format_response(data: dict[str, Any], times: str) -> str:
     time_label = _time_label(times)
 
     if triggered:
-        lines = [f"## 第二类应急响应判定：达到 {level} 级启动条件\n"]
-        lines.append(f"截至 **{time_label}**，海河流域实况雨量达到预案 2.1.2 第二类 **{level} 级**启动条件。\n")
+        lines = [f"## 防汛应急响应判定：已触发 {level} 级响应\n"]
+        lines.append(f"截至 **{time_label}**，海河流域实况雨量已达到 **{level} 级**防汛应急响应启动条件。\n")
     else:
-        lines = ["## 第二类应急响应判定：未达到启动条件\n"]
-        lines.append(f"截至 **{time_label}**，按当前已接入的第二类实况雨量规则**未达到** I/II/III/IV 级启动条件。\n")
+        lines = ["## 防汛应急响应判定：未触发\n"]
+        lines.append(f"截至 **{time_label}**，海河流域实况雨量**未达到**防汛应急响应启动条件。\n")
 
     if msg:
         lines.append(f"**判定结论**：{msg}\n")
@@ -88,7 +88,7 @@ def _format_response(data: dict[str, Any], times: str) -> str:
     window = evidence.get("window_hours")
 
     if total is not None:
-        lines.append("### 第二类实况雨量判定依据\n")
+        lines.append("### 判定依据\n")
         lines.append(f"- 参与判定国家站数：{total}")
         if qualified is not None:
             lines.append(f"- 达标站点数：{qualified}")
@@ -98,10 +98,9 @@ def _format_response(data: dict[str, Any], times: str) -> str:
             except Exception:
                 lines.append(f"- 达标站点占比：{ratio}")
         if threshold is not None and window is not None:
-            lines.append(f"- 触发阈值：过去 {window} 小时累计降水 ≥ {threshold} mm")
+            lines.append(f"- 触发阈值：最近 {window} 小时累计降水 ≥ {threshold} mm")
         lines.append("")
 
-    lines.append("\n说明：本结果只对应预案 2.1.2 第二类中的实况监测降雨条件，不代表第一类官方防汛响应状态。")
     lines.append("\n数据来源：天擎分钟降水实况")
     return "\n".join(lines)
 
@@ -119,15 +118,10 @@ def _call_local_emergency_response(times: str) -> dict[str, Any]:
     _ensure_mcp_module_path()
     from haihe_mcp_tools import evaluate_emergency_response_core
 
-    result = evaluate_emergency_response_core(
+    return evaluate_emergency_response_core(
         basin_codes="HHLY",
         times=times,
     )
-    if isinstance(result, dict):
-        result.setdefault("evidence", {})
-        if isinstance(result.get("evidence"), dict):
-            result["evidence"].setdefault("response_category", "second_class_observation")
-    return result
 
 
 async def _query_emergency_response_locally(times: str) -> dict[str, Any]:
@@ -141,11 +135,11 @@ async def _query_emergency_response_locally(times: str) -> dict[str, Any]:
             return result
         return {"status": "error", "message": "应急响应判定结果格式异常。", "raw": str(result)[:500]}
     except asyncio.TimeoutError:
-        return {"status": "error", "message": "第二类实况应急响应判定查询超时，请稍后重试。"}
+        return {"status": "error", "message": "应急响应判定查询超时，请稍后重试。"}
     except Exception as exc:
         text = str(exc)
-        print(f"[emergency_response_fast_path] 本地第二类判定失败：{text}")
-        return {"status": "error", "error": text[:500], "message": "当前无法获取第二类实况应急响应判定数据，请稍后重试。"}
+        print(f"[emergency_response_fast_path] 本地判定失败：{text}")
+        return {"status": "error", "error": text[:500], "message": "当前无法获取应急响应判定数据，请稍后重试。"}
 
 
 def install_emergency_response_fast_path() -> bool:
@@ -163,13 +157,13 @@ def install_emergency_response_fast_path() -> bool:
             return False
         times = _apply_daypart_hour(user_text, raw_times)
 
-        print(f"\n=== 本地第二类应急响应快速路径：raw_times={raw_times}, times={times} ===")
-        thinking_msg = await mo._show_thinking("🔍 正在查询第二类应急响应判定结果，请稍候...")
+        print(f"\n=== 本地防汛应急响应快速路径：raw_times={raw_times}, times={times} ===")
+        thinking_msg = await mo._show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
         data = await _query_emergency_response_locally(times)
         await mo._emit_fast_path_result(_format_response(data, times), thinking_msg, messages, user_text)
         return True
 
     mo._try_emergency_response_fast_path = patched
     setattr(mo, _MARKER, True)
-    print("[emergency_response_fast_path] 已安装：本地第二类应急响应快速路径")
+    print("[emergency_response_fast_path] 已安装：本地应急响应快速路径")
     return True

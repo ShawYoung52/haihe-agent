@@ -268,6 +268,7 @@ def _normalize_warning_item(item: dict) -> dict:
             "time": None,
             "severity": None,
             "msgType": None,
+            "locationName": None,
         }
     return {
         "content": item.get("content"),
@@ -276,6 +277,7 @@ def _normalize_warning_item(item: dict) -> dict:
         "time": item.get("time"),
         "severity": item.get("severity"),
         "msgType": item.get("msgType"),
+        "locationName": item.get("locationName"),
     }
 
 
@@ -394,6 +396,7 @@ def _normalize_national_warning_row(row: list) -> dict:
         "severity": get(4),
         "publish_time": get(5),
         "content": get(9),
+        "msgType": get(10),
         "url": get(11),
     }
 
@@ -2304,18 +2307,41 @@ def _clean_rolling_forecast_value(value: Any) -> Any:
     return value
 
 
+def _format_rolling_forecast_coord(value: float | str) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except Exception:
+        return str(value).strip()
+
+
 def _build_rolling_forecast_periods(
     result_data: dict,
     regions: list[str],
     fcst_time: str,
     start_period: int,
     interval: int,
+    locations: list[dict] | None = None,
 ) -> list[dict]:
     fcst_dt = datetime.strptime(fcst_time, "%Y%m%d%H%M%S")
     periods: list[dict] = []
 
-    for region in regions:
-        coord = ROLLING_FORECAST_COORDS[region]
+    if locations is None:
+        locations = [
+            {
+                "name": region,
+                "region": region,
+                "lon": ROLLING_FORECAST_COORDS[region].split("_")[0],
+                "lat": ROLLING_FORECAST_COORDS[region].split("_")[1],
+                "coord": ROLLING_FORECAST_COORDS[region],
+            }
+            for region in regions
+        ]
+
+    for location in locations:
+        region = str(location.get("name") or location.get("region") or location.get("coord") or "指定点位")
+        coord = str(location.get("coord") or "")
+        if not coord:
+            coord = f"{_format_rolling_forecast_coord(location.get('lon'))}_{_format_rolling_forecast_coord(location.get('lat'))}"
         data = result_data.get(coord) or {}
         series_by_element = {
             element: _rolling_forecast_series(data.get(element))
@@ -2328,6 +2354,8 @@ def _build_rolling_forecast_periods(
             end_dt = start_dt + timedelta(hours=interval)
             row = {
                 "region": region,
+                "lon": location.get("lon"),
+                "lat": location.get("lat"),
                 "start_time": start_dt.strftime("%Y-%m-%d %H:%M"),
                 "end_time": end_dt.strftime("%Y-%m-%d %H:%M"),
                 "period_label": f"{start_dt.strftime('%m月%d日%H时')}-{end_dt.strftime('%m月%d日%H时')}",
@@ -2357,6 +2385,7 @@ def evaluate_emergency_response_core(
     records = _observation_fetch_core(
         basin_codes=basin_codes,
         times=times,
+        elements=DEFAULT_OBS_ELEMENTS,
     )
     filtered = _observation_filter_core(records=records, allowed_station_levels=allowed_station_levels)
     evaluation = _observation_evaluate_core(
@@ -2730,6 +2759,10 @@ def register_haihe_tools(mcp: FastMCP) -> None:
     def query_rolling_forecast(
         user_query: str,
         regions: str = "",
+        lon: float | None = None,
+        lat: float | None = None,
+        point_name: str = "",
+        matched_region: str = "",
         fcst_time: str | None = None,
         start_period: int = 0,
         end_period: int = 240,
@@ -2740,15 +2773,46 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         Args:
             user_query: 用户原始问题，用于解析区域；未说明地点时默认查询天津全部区域。
             regions: 可选的区域文本，例如“西青”“西青和津南”；为空时从 user_query 解析。
+            lon: 可选点位经度；传入 lon/lat 时进入点位模式，按指定坐标查询。
+            lat: 可选点位纬度；传入 lon/lat 时进入点位模式，按指定坐标查询。
+            point_name: 点位名称，用于返回结果标注，例如“梅江会展中心附近代表点”。
+            matched_region: 点位匹配到的滚动预报代表区域，例如“西青”。
             fcst_time: 可选起报时间，格式 YYYYMMDDHHMMSS；默认按当前时间自动选择最新可用起报时次。
             start_period: 起始预报时效，单位小时。
             end_period: 结束预报时效，单位小时，默认 240。
             interval: 时间步长，单位小时，默认 12。
         """
-        region_names = _parse_rolling_forecast_regions(regions or user_query)
-        coords = [ROLLING_FORECAST_COORDS[name] for name in region_names]
-        lons = [coord.split("_")[0] for coord in coords]
-        lats = [coord.split("_")[1] for coord in coords]
+        point_mode = lon is not None and lat is not None
+        if point_mode:
+            lon_text = _format_rolling_forecast_coord(lon)
+            lat_text = _format_rolling_forecast_coord(lat)
+            coord = f"{lon_text}_{lat_text}"
+            label = (point_name or matched_region or "指定点位").strip()
+            region_names = [label]
+            locations = [{
+                "name": label,
+                "region": matched_region or label,
+                "lon": lon_text,
+                "lat": lat_text,
+                "coord": coord,
+            }]
+            lons = [lon_text]
+            lats = [lat_text]
+        else:
+            region_names = _parse_rolling_forecast_regions(regions or user_query)
+            coords = [ROLLING_FORECAST_COORDS[name] for name in region_names]
+            locations = [
+                {
+                    "name": name,
+                    "region": name,
+                    "lon": coord.split("_")[0],
+                    "lat": coord.split("_")[1],
+                    "coord": coord,
+                }
+                for name, coord in zip(region_names, coords)
+            ]
+            lons = [coord.split("_")[0] for coord in coords]
+            lats = [coord.split("_")[1] for coord in coords]
         selected_fcst_time = fcst_time or _select_rolling_forecast_time()
         params = {
             "fcstTime": selected_fcst_time,
@@ -2770,9 +2834,16 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         return {
             "data_source": "天津市气象台滚动预报",
             "forecast_type": "rolling_forecast",
+            "query_mode": "point" if point_mode else "region",
             "query_time": datetime.now(TIANJIN_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
             "fcst_time": selected_fcst_time,
             "query_regions": region_names,
+            "query_point": {
+                "point_name": point_name or None,
+                "matched_region": matched_region or None,
+                "lon": lons[0] if point_mode else None,
+                "lat": lats[0] if point_mode else None,
+            } if point_mode else None,
             "elements": ROLLING_FORECAST_ELEMENT_NAMES,
             "start_period": start_period,
             "end_period": end_period,
@@ -2785,6 +2856,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
                 fcst_time=selected_fcst_time,
                 start_period=start_period,
                 interval=interval,
+                locations=locations,
             ),
         }
 

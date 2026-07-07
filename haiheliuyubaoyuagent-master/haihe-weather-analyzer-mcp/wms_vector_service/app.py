@@ -10,11 +10,18 @@ from .config import Settings, load_settings
 from .db import fetch_geometries, fetch_sql_text
 from .png import encode_rgba_png
 from .render import parse_style, render_png_array, tile_bbox
-
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="SQL driven vector WMS renderer")
 logger = logging.getLogger(__name__)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],         # 允许所有源
+    allow_credentials=True,
+    allow_methods=["*"],         # 允许所有方法
+    allow_headers=["*"],         # 允许所有请求头
+)
 
 def get_settings() -> Settings:
     return load_settings()

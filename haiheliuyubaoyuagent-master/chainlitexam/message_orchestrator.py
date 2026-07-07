@@ -2,8 +2,16 @@ import re
 import json
 import os
 import asyncio
+import math
 import chainlit as cl
+from datetime import datetime, timedelta
 from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
+
+try:
+    from prompts import WARNING_ROUTE_PROMPT, WARNING_SUMMARY_PROMPT
+except Exception:
+    WARNING_ROUTE_PROMPT = ""
+    WARNING_SUMMARY_PROMPT = ""
 
 
 class ReasoningStep:
@@ -167,6 +175,1103 @@ def _extract_emergency_response_time(user_text: str) -> tuple[bool, str]:
 
     # 只有应急响应关键词，无明确时间 → 默认当前时刻
     return True, now.strftime("%Y%m%d%H%M%S")
+
+DECISION_WEATHER_STATIONS = [
+    {"region": "天津市区", "lon": 117.14, "lat": 39.24},
+    {"region": "蓟州", "lon": 117.45, "lat": 40.05},
+    {"region": "宝坻", "lon": 117.28, "lat": 39.73},
+    {"region": "武清", "lon": 117.06, "lat": 39.43},
+    {"region": "宁河", "lon": 117.85, "lat": 39.38},
+    {"region": "静海", "lon": 116.92, "lat": 38.93},
+    {"region": "北辰", "lon": 117.21, "lat": 39.07},
+    {"region": "西青", "lon": 117.05, "lat": 39.08},
+    {"region": "津南", "lon": 117.42, "lat": 38.95},
+    {"region": "东丽", "lon": 117.34, "lat": 39.08},
+    {"region": "滨海新区", "lon": 117.79, "lat": 39.16},
+]
+
+DECISION_WEATHER_ALLOWED_INTERVALS = [1, 3, 6, 12, 24]
+
+
+def _extract_first_json_object(text: str) -> dict:
+    if not isinstance(text, str):
+        return {}
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        data = json.loads(cleaned)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(cleaned[start:end + 1])
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _parse_decision_dt(value) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _select_decision_fcst_time(now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    if now.hour >= 8:
+        return now.strftime("%Y%m%d080000")
+    return (now - timedelta(days=1)).strftime("%Y%m%d200000")
+
+
+def _normalize_decision_interval(value) -> int:
+    try:
+        interval = int(value)
+    except Exception:
+        interval = 12
+    if interval in DECISION_WEATHER_ALLOWED_INTERVALS:
+        return interval
+    return min(DECISION_WEATHER_ALLOWED_INTERVALS, key=lambda x: abs(x - interval))
+
+
+def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    radius_km = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lam = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lam / 2) ** 2
+    return 2 * radius_km * math.asin(math.sqrt(a))
+
+
+def _nearest_decision_station(lon: float, lat: float) -> dict:
+    nearest = min(
+        DECISION_WEATHER_STATIONS,
+        key=lambda station: _haversine_km(lon, lat, station["lon"], station["lat"]),
+    )
+    distance_km = _haversine_km(lon, lat, nearest["lon"], nearest["lat"])
+    return {**nearest, "distance_km": distance_km}
+
+
+def _decision_period_args(fcst_time: str, target_start: datetime, target_end: datetime) -> tuple[int, int]:
+    fcst_dt = datetime.strptime(fcst_time, "%Y%m%d%H%M%S")
+    start_hours = (target_start - fcst_dt).total_seconds() / 3600
+    end_hours = (target_end - fcst_dt).total_seconds() / 3600
+    start_period = max(0, int(math.floor(start_hours)))
+    end_period = max(start_period + 1, int(math.ceil(end_hours)))
+    return start_period, end_period
+
+
+def _decision_weather_prefilter(user_text: str) -> bool:
+    t = user_text or ""
+    weather_keywords = [
+        "天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风", "能见度",
+        "雾", "霾", "预报", "暴雨", "雷阵雨", "适合", "户外",
+    ]
+    return any(k in t for k in weather_keywords)
+
+
+def _decision_pick_first_poi(poi_payload: dict) -> dict | None:
+    pois = poi_payload.get("pois") if isinstance(poi_payload, dict) else None
+    if not isinstance(pois, list):
+        return None
+    for poi in pois:
+        if not isinstance(poi, dict):
+            continue
+        lon = poi.get("longitude")
+        lat = poi.get("latitude")
+        if lon is None or lat is None:
+            location = poi.get("location")
+            if isinstance(location, dict):
+                lon = lon if lon is not None else location.get("lon")
+                lat = lat if lat is not None else location.get("lat")
+        try:
+            return {**poi, "longitude": float(lon), "latitude": float(lat)}
+        except Exception:
+            continue
+    return None
+
+
+def _decision_period_overlaps(period: dict, start_dt: datetime, end_dt: datetime) -> bool:
+    p_start = _parse_decision_dt(period.get("start_time"))
+    p_end = _parse_decision_dt(period.get("end_time"))
+    if not p_start or not p_end:
+        return True
+    return p_start < end_dt and p_end > start_dt
+
+
+def _compact_decision_forecast_facts(forecast_payload: dict, target_start: datetime, target_end: datetime) -> dict:
+    periods = forecast_payload.get("periods") if isinstance(forecast_payload, dict) else []
+    if not isinstance(periods, list):
+        periods = []
+    selected = [p for p in periods if isinstance(p, dict) and _decision_period_overlaps(p, target_start, target_end)]
+    if not selected:
+        selected = [p for p in periods if isinstance(p, dict)][:8]
+
+    compact_periods = []
+    total_rain = 0.0
+    has_rain = False
+    for p in selected[:12]:
+        rain = p.get("TP1H")
+        try:
+            rain_value = float(rain)
+        except Exception:
+            rain_value = None
+        if rain_value is not None:
+            total_rain += rain_value
+            if rain_value > 0.1:
+                has_rain = True
+        compact_periods.append({
+            "region": p.get("region"),
+            "start_time": p.get("start_time"),
+            "end_time": p.get("end_time"),
+            "weather": p.get("WEA"),
+            "tmax": p.get("TMAX"),
+            "tmin": p.get("TMIN"),
+            "wind": p.get("EDA"),
+            "visibility_min": p.get("VISMIN"),
+            "rain_1h": rain,
+        })
+
+    return {
+        "data_source": forecast_payload.get("data_source"),
+        "query_mode": forecast_payload.get("query_mode"),
+        "fcst_time": forecast_payload.get("fcst_time"),
+        "interval_hours": forecast_payload.get("interval_hours"),
+        "target_start_time": target_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "target_end_time": target_end.strftime("%Y-%m-%d %H:%M:%S"),
+        "has_rain_signal": has_rain,
+        "total_rain_mm": round(total_rain, 2),
+        "periods": compact_periods,
+    }
+
+
+class DecisionWeatherQAService:
+    """点位决策天气问答：LLM 抽槽，代码定位点位、匹配代表站并查询滚动预报。"""
+
+    def __init__(self, answer_chain, tools, callbacks):
+        self.answer_chain = answer_chain
+        self.tools = tools
+        self.callbacks = callbacks
+        self.status_msg = None
+
+    async def try_handle(self, user_text: str, messages: list) -> bool:
+        if not user_text or not _decision_weather_prefilter(user_text):
+            return False
+        poi_tool = _find_tool(self.tools, "search_poi")
+        forecast_tool = _find_tool(self.tools, "query_rolling_forecast")
+        if not poi_tool or not forecast_tool:
+            return False
+
+        status_msg = cl.Message(content="🔎 正在分析问题，请稍候...")
+        self.status_msg = status_msg
+        await status_msg.send()
+
+        try:
+            slots = await self._extract_slots(user_text)
+        except Exception as exc:
+            print(f"[DecisionWeather] LLM 抽取失败：{exc}")
+            await status_msg.remove()
+            return False
+
+        if not bool(slots.get("is_decision_weather")):
+            await status_msg.remove()
+            return False
+
+        status_msg.content = "✅ 已识别为点位天气问题，正在校验时间和位置..."
+        await status_msg.update()
+
+        async with cl.Step(name="点位天气查询进度", type="tool") as step:
+            step.show_input = "markdown"
+            step.input = user_text
+            step.output = "✅ 已识别为点位天气问题，正在校验时间和位置...\n"
+            await step.update()
+
+            print(f"[DecisionWeather] LLM slots: {json.dumps(slots, ensure_ascii=False)}")
+
+            if bool(slots.get("need_clarification")):
+                question = str(slots.get("clarification_question") or "请补充具体位置和查询时段。").strip()
+                await status_msg.remove()
+                await cl.Message(content=question).send()
+                messages.append(HumanMessage(content=user_text))
+                messages.append(AIMessage(content=question))
+                cl.user_session.set("messages", messages)
+                return True
+
+            normalized = self._normalize_slots(slots)
+            if normalized.get("error"):
+                await status_msg.remove()
+                await cl.Message(content=normalized["error"]).send()
+                messages.append(HumanMessage(content=user_text))
+                messages.append(AIMessage(content=normalized["error"]))
+                cl.user_session.set("messages", messages)
+                return True
+
+            location_name = normalized["location_name"]
+            target_start = normalized["target_start"]
+            target_end = normalized["target_end"]
+            interval = normalized["interval"]
+            fcst_time = _select_decision_fcst_time()
+            start_period, end_period = _decision_period_args(fcst_time, target_start, target_end)
+
+            print(
+                "[DecisionWeather] normalized time: "
+                f"target_start={target_start}, target_end={target_end}, "
+                f"interval={interval}, fcst_time={fcst_time}, "
+                f"startPeriod={start_period}, endPeriod={end_period}"
+            )
+
+            await self._update_step(step, status_msg, f"📍 正在查询位置：{location_name} ...")
+            poi_raw = await poi_tool.ainvoke({"keyword": location_name, "size": 5})
+            poi_payload = _unwrap_tool_observation(poi_raw)
+            poi = _decision_pick_first_poi(poi_payload if isinstance(poi_payload, dict) else {})
+            if not poi:
+                text = f"未检索到“{_clean_table_cell(location_name)}”的可用经纬度信息，请换一个更明确的位置名称。"
+                await status_msg.remove()
+                await cl.Message(content=text).send()
+                messages.append(HumanMessage(content=user_text))
+                messages.append(AIMessage(content=text))
+                cl.user_session.set("messages", messages)
+                return True
+
+            poi_lon = float(poi["longitude"])
+            poi_lat = float(poi["latitude"])
+            nearest = _nearest_decision_station(poi_lon, poi_lat)
+            point_name = str(poi.get("name") or location_name)
+            poi_address = str(poi.get("address") or "")
+
+            print(
+                "[DecisionWeather] POI定位: "
+                f"name={point_name}, address={poi_address}, lon={poi_lon}, lat={poi_lat}; "
+                f"nearest_region={nearest['region']}, nearest_lon={nearest['lon']}, "
+                f"nearest_lat={nearest['lat']}, distance_km={nearest['distance_km']:.2f}"
+            )
+
+            await self._update_step(
+                step,
+                status_msg,
+                f"🧭 已定位到 {point_name}，正在匹配滚动预报代表区域..."
+            )
+
+            forecast_args = {
+                "user_query": user_text,
+                "regions": "",
+                "lon": nearest["lon"],
+                "lat": nearest["lat"],
+                "point_name": f"{point_name}附近（{nearest['region']}代表点）",
+                "matched_region": nearest["region"],
+                "fcst_time": fcst_time,
+                "start_period": start_period,
+                "end_period": end_period,
+                "interval": interval,
+            }
+            print(f"[DecisionWeather] query_rolling_forecast args: {json.dumps(forecast_args, ensure_ascii=False)}")
+
+            await self._update_step(step, status_msg, "🛰️ 正在调用滚动预报数据...")
+            forecast_raw = await forecast_tool.ainvoke(forecast_args)
+            forecast_payload = _unwrap_tool_observation(forecast_raw)
+            if not isinstance(forecast_payload, dict) or forecast_payload.get("api_code") not in (None, "200", 200):
+                print(f"[DecisionWeather] forecast raw payload: {forecast_payload}")
+
+            facts = _compact_decision_forecast_facts(
+                forecast_payload if isinstance(forecast_payload, dict) else {},
+                target_start,
+                target_end,
+            )
+            facts["poi"] = {
+                "name": point_name,
+                "address": poi_address,
+                "lon": poi_lon,
+                "lat": poi_lat,
+            }
+            facts["matched_station"] = nearest
+            facts["question_type"] = slots.get("question_type") or "general_weather"
+
+            await self._update_step(step, status_msg, "✍️ 数据已返回，正在生成面向用户的回答...")
+            final_text = await self._generate_answer(user_text, facts)
+            final_text = _sanitize_display_text(
+                self.callbacks["append_followup_if_needed"](final_text or "", user_text)
+            )
+
+            await status_msg.remove()
+            await self.callbacks["stream_text_to_message"](final_text)
+            messages.append(HumanMessage(content=user_text))
+            messages.append(AIMessage(content=final_text))
+            cl.user_session.set("messages", messages)
+            await self._update_step(step, None, "✅ 点位天气回答已完成。")
+            return True
+
+    async def _update_step(self, step, status_msg, text: str):
+        print(f"[DecisionWeather] {text}")
+        if status_msg is not None:
+            status_msg.content = text
+            await status_msg.update()
+        step.output = (step.output or "") + text + "\n"
+        await step.update()
+
+    async def _extract_slots(self, user_text: str) -> dict:
+        now = datetime.now()
+        prompt = (
+            "你是天津气象决策服务问答的结构化抽取器。请判断用户问题是否属于"
+            "“具体地点/单位/场馆/学校/医院/设施附近的未来或当前天气决策服务”。\n"
+            "普通区域预报（如天津、全市、西青、滨海新区、未来一周天气）不属于本类，返回 is_decision_weather=false。\n"
+            "如果属于本类，请抽取位置名称、目标开始时间、目标结束时间、时间步长和问题类型。\n"
+            "当前时间为："
+            f"{now.strftime('%Y-%m-%d %H:%M:%S')}。\n"
+            "时间规则：没有明确时间时，target_start_time 默认为当前时间，target_end_time 默认为当前时间后24小时，interval_hours=12；"
+            "明日/明天为明天00:00到后天00:00，interval_hours=24；"
+            "未来N小时为当前时间到N小时后，interval_hours优先取N，若N不在1/3/6/12/24中则选最接近值；"
+            "高考期间、国庆期间等公共事件可给出具体时间，但必须标明 time_basis=公共常识、time_confidence=medium；"
+            "展会期间、会议期间、考试期间等没有明确日期的事件必须 need_clarification=true。\n"
+            "滚动预报只适合未来时段；若目标时段已经过去或无法确定，need_clarification=true。\n"
+            "只返回 JSON，不要输出解释。格式：\n"
+            "{\n"
+            '  "is_decision_weather": true,\n'
+            '  "location_name": "梅江会展中心",\n'
+            '  "target_start_time": "YYYY-MM-DD HH:MM:SS",\n'
+            '  "target_end_time": "YYYY-MM-DD HH:MM:SS",\n'
+            '  "interval_hours": 12,\n'
+            '  "question_type": "general_weather|rain_now|rain_next_hours|event_weather|visibility|temperature|wind|activity",\n'
+            '  "time_basis": "用户明示|相对时间|公共常识|无法确定",\n'
+            '  "time_confidence": "high|medium|low",\n'
+            '  "need_clarification": false,\n'
+            '  "clarification_question": ""\n'
+            "}\n\n"
+            f"用户问题：{user_text}"
+        )
+        result = await self.callbacks["ainvoke_chain"](self.answer_chain, {"messages": [HumanMessage(content=prompt)]})
+        content = getattr(result, "content", None) or str(result)
+        return _extract_first_json_object(content)
+
+    def _normalize_slots(self, slots: dict) -> dict:
+        location_name = str(slots.get("location_name") or "").strip()
+        if not location_name:
+            return {"error": "请补充要查询天气的位置名称，例如学校、场馆、医院或具体单位。"}
+
+        now = datetime.now()
+        target_start = _parse_decision_dt(slots.get("target_start_time")) or now
+        target_end = _parse_decision_dt(slots.get("target_end_time")) or (target_start + timedelta(hours=24))
+        if target_end <= target_start:
+            return {"error": "请确认查询的结束时间需要晚于开始时间。"}
+
+        if target_end <= now:
+            return {"error": "该时段已经过去，滚动预报仅支持未来天气查询；如需历史天气，需要改用历史实况或历史预报数据。"}
+
+        max_end = now + timedelta(hours=240)
+        if target_start > max_end:
+            return {"error": "当前滚动预报最多支持未来约10天，请缩短或调整查询时段。"}
+        if target_end > max_end:
+            target_end = max_end
+
+        return {
+            "location_name": location_name,
+            "target_start": target_start,
+            "target_end": target_end,
+            "interval": _normalize_decision_interval(slots.get("interval_hours")),
+        }
+
+    async def _generate_answer(self, user_text: str, facts: dict) -> str:
+        business_facts = {
+            "位置名称": (facts.get("poi") or {}).get("name") or "该位置",
+            "位置地址": (facts.get("poi") or {}).get("address") or "",
+            "查询开始时间": facts.get("target_start_time"),
+            "查询结束时间": facts.get("target_end_time"),
+            "问题类型": facts.get("question_type"),
+            "是否有降雨信号": facts.get("has_rain_signal"),
+            "累计降水量毫米": facts.get("total_rain_mm"),
+            "预报时段": facts.get("periods") or [],
+            "数据来源": facts.get("data_source") or "天津市气象台滚动预报",
+        }
+        prompt = (
+            "请仅依据下面 JSON 中的业务天气事实回答用户问题。不要编造未返回的天气、雨量、温度、风力或能见度。\n"
+            "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
+            "回答统一采用业务口径：\n"
+            "1. 必须先输出【核心结论】，用一句话直接回答天气是否良好、是否有降雨、是否有灾害性天气或是否适合活动。\n"
+            "2. 综合天气/活动/考试/会展/节假日类：第二模块用【XX逐日预报】或【XX明日预报】，表格列为：日期｜天气现象｜气温(℃)｜风力（级）｜风向。\n"
+            "3. 未来N小时是否下雨类：第二模块用【XX逐小时预报】，表格列为：时段｜天气现象｜气温(℃)｜风力（级）｜风向。\n"
+            "4. 当前是否下雨类：核心结论写“当前无降雨/当前正在降雨”；第二模块用【降雨情况】，列出已返回的累计雨量或时段降水，缺失的1小时/3小时/6小时雨量不要编造。\n"
+            "5. 风况字段中若同时包含风向和风力，请拆成“风力（级）”和“风向”；无法拆分时可在对应列写原始风况中的可识别部分。\n"
+            "6. 末尾只写：数据来源：天津市气象台滚动预报。\n\n"
+            f"用户问题：{user_text}\n\n"
+            f"业务天气事实 JSON：{json.dumps(business_facts, ensure_ascii=False, default=str)}"
+        )
+        result = await self.callbacks["ainvoke_chain"](self.answer_chain, {"messages": [HumanMessage(content=prompt)]})
+        return getattr(result, "content", None) or str(result)
+
+
+async def _try_decision_weather_fast_path(user_text: str, answer_chain, tools, messages, callbacks) -> bool:
+    service = DecisionWeatherQAService(answer_chain=answer_chain, tools=tools, callbacks=callbacks)
+    try:
+        return await service.try_handle(user_text, messages)
+    except Exception as exc:
+        print(f"[DecisionWeather] fast path 失败，回退通用流程：{exc}")
+        import traceback
+        traceback.print_exc()
+        if service.status_msg is not None:
+            try:
+                await service.status_msg.remove()
+            except Exception:
+                pass
+        return False
+
+
+WARNING_TOOL_NAMES = {
+    "get_effective_warning_info",
+    "get_history_warning_info",
+    "get_today_warning_summary",
+    "get_national_warning_info",
+}
+
+
+def _unwrap_tool_observation(observation):
+    """把 MCP/LangChain 工具返回拆成 Python 对象。"""
+    if isinstance(observation, list) and observation and isinstance(observation[0], dict) and "text" in observation[0]:
+        text = observation[0].get("text", "")
+        try:
+            return json.loads(text)
+        except Exception:
+            return text
+    if isinstance(observation, str):
+        try:
+            return json.loads(observation)
+        except Exception:
+            return observation
+    return observation
+
+
+def _compact_warning_record_for_table(item) -> dict:
+    """预警记录只保留本轮输出所需字段。"""
+    if not isinstance(item, dict):
+        return {
+            "content": str(item),
+            "eventType": "",
+            "department": "",
+            "msgType": "",
+            "time": "",
+            "severity": "",
+            "locationName": "",
+        }
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    province = str(item.get("province") or raw.get("province") or "").strip()
+    city = str(item.get("city") or raw.get("city") or "").strip()
+    county = str(item.get("county") or raw.get("county") or "").strip()
+    national_area = "".join(part for part in [province, city, county] if part)
+    return {
+        "content": str(item.get("content") or raw.get("content") or ""),
+        "eventType": str(item.get("eventType") or item.get("event_type") or raw.get("eventType") or ""),
+        "department": str(item.get("department") or raw.get("department") or item.get("source") or raw.get("source") or ""),
+        "msgType": str(item.get("msgType") or item.get("msg_type") or raw.get("msgType") or ""),
+        "time": str(item.get("time") or item.get("publish_time") or raw.get("time") or ""),
+        "severity": str(item.get("severity") or raw.get("severity") or ""),
+        "locationName": str(item.get("locationName") or item.get("location_name") or raw.get("locationName") or national_area),
+    }
+
+
+def _warning_records_from_payload(tool_name: str, payload) -> list[dict]:
+    data = _unwrap_tool_observation(payload)
+    if not isinstance(data, dict):
+        return []
+    if tool_name == "get_today_warning_summary":
+        items = data.get("today_published_warnings") or data.get("today_new_or_update_warnings") or []
+    else:
+        items = data.get("warnings") or data.get("effective_warnings") or data.get("today_published_warnings") or []
+    if not isinstance(items, list):
+        return []
+    if tool_name == "get_national_warning_info":
+        source = "中央气象台"
+        return [
+            _compact_warning_record_for_table({**item, "department": item.get("department") or source})
+            if isinstance(item, dict)
+            else _compact_warning_record_for_table(item)
+            for item in items
+        ]
+    return [_compact_warning_record_for_table(item) for item in items]
+
+
+def _warning_table_title(tool_name: str, multi_tool: bool = False) -> str:
+    if multi_tool:
+        return "【相关预警清单】"
+    if tool_name == "get_national_warning_info":
+        return "【国家预警清单】"
+    if tool_name == "get_today_warning_summary":
+        return "【今日发布预警清单】"
+    if tool_name == "get_history_warning_info":
+        return "【历史预警清单】"
+    return "【生效预警清单】"
+
+
+def _warning_department_area(department: str) -> str:
+    dept = (department or "").strip()
+    if not dept:
+        return ""
+    area = re.sub(r"(气象台|气象局|预警发布中心|发布中心|台)$", "", dept).strip()
+    if area == "天津市":
+        return "天津市"
+    if "海洋中心" in area:
+        return "天津海域"
+    return area
+
+
+def _extract_warning_area(record: dict) -> str:
+    location_name = str(record.get("locationName") or "").strip()
+    if location_name:
+        return location_name
+    dept_area = _warning_department_area(str(record.get("department") or ""))
+    return dept_area or "暂未明确"
+
+
+def _warning_query_event_keywords(user_text: str) -> list[str]:
+    t = user_text or ""
+    keywords = []
+    if any(k in t for k in ["暴雨", "大暴雨", "强降雨", "短时强降水"]):
+        keywords.append("暴雨")
+    if "海上大风" in t:
+        keywords.append("海上大风")
+    elif any(k in t for k in ["雷雨大风", "雷暴大风", "大风"]):
+        keywords.append("雷雨大风")
+    if any(k in t for k in ["冰雹", "雹"]):
+        keywords.append("冰雹")
+    if "高温" in t:
+        keywords.append("高温")
+    if any(k in t for k in ["雷电", "雷雨"]):
+        keywords.append("雷")
+    if "寒潮" in t:
+        keywords.append("寒潮")
+    if any(k in t for k in ["大雾", "低能见度"]):
+        keywords.append("大雾")
+    if any(k in t for k in ["道路结冰", "结冰"]):
+        keywords.append("道路结冰")
+    if "霾" in t:
+        keywords.append("霾")
+    if any(k in t for k in ["地质灾害", "山洪"]):
+        keywords.extend(["地质灾害", "山洪"])
+    return list(dict.fromkeys(keywords))
+
+
+def _warning_record_matches_events(record: dict, event_keywords: list[str]) -> bool:
+    if not event_keywords:
+        return True
+    event = str(record.get("eventType") or "")
+    return any(keyword in event for keyword in event_keywords)
+
+
+
+def _warning_query_severities(user_text: str) -> list[str]:
+    return [severity for severity in ["红色", "橙色", "黄色", "蓝色"] if severity in (user_text or "")]
+
+
+def _warning_record_matches_area(record: dict, area_keywords: list[str]) -> bool:
+    if not area_keywords:
+        return True
+    area = _extract_warning_area(record)
+    department = str(record.get("department") or "")
+    return any(keyword in area or keyword in department for keyword in area_keywords)
+
+
+def _warning_query_area_keywords(records: list[dict], user_text: str) -> list[str]:
+    t = user_text or ""
+    broad_terms = {"天津", "天津市", "我市", "全市", "本市"}
+    area_keywords = []
+    for record in records:
+        area = _extract_warning_area(record)
+        if area and area not in broad_terms and area in t:
+            area_keywords.append(area)
+    return list(dict.fromkeys(area_keywords))
+
+    # 相对日期
+    if "前天" in t:
+        dt = now - timedelta(days=2)
+        return True, dt.strftime("%Y%m%d") + "080000"
+    if "昨天" in t:
+        dt = now - timedelta(days=1)
+        return True, dt.strftime("%Y%m%d") + "080000"
+    if "今天" in t:
+        return True, now.strftime("%Y%m%d") + "080000"
+
+def _filter_warning_records_for_user(records: list[dict], user_text: str) -> list[dict]:
+    """让代码表格和 LLM 正文使用同一批、同一顺序的预警记录。"""
+    if not records:
+        return []
+
+    filtered = list(records)
+
+    event_keywords = _warning_query_event_keywords(user_text)
+    if event_keywords:
+        filtered = [record for record in filtered if _warning_record_matches_events(record, event_keywords)]
+
+    severities = _warning_query_severities(user_text)
+    if severities:
+        filtered = [
+            record for record in filtered
+            if any(severity in str(record.get("severity") or "") for severity in severities)
+        ]
+
+    area_keywords = _warning_query_area_keywords(filtered, user_text)
+    if area_keywords:
+        filtered = [record for record in filtered if _warning_record_matches_area(record, area_keywords)]
+
+    t = user_text or ""
+    asks_released_list = any(k in t for k in ["已解除预警", "解除预警有哪些", "解除的预警"])
+    asks_release_judgement = any(k in t for k in ["解除了吗", "是否解除", "何时解除", "什么时候解除", "到什么时候"])
+    if asks_released_list and not asks_release_judgement:
+        filtered = [
+            record for record in filtered
+            if "解除" in str(record.get("msgType") or "")
+        ]
+
+    return filtered
+
+
+def _build_warning_table_markdown(records: list[dict], title: str) -> str:
+    if not records:
+        return f"{title}\n\n未检索到符合条件的预警记录。"
+    lines = [
+        f"{title}\n\n",
+        "| 序号 | 发布单位 | 预警类型 | 等级 | 影响区域 | 发布时间 | 发布状态 |\n",
+        "| :---: | :--- | :--- | :--- | :--- | :--- | :--- |\n",
+    ]
+    for idx, record in enumerate(records, 1):
+        lines.append(
+            "| "
+            f"{idx} | "
+            f"{_clean_table_cell(record.get('department') or '—')} | "
+            f"{_clean_table_cell(record.get('eventType') or '—')} | "
+            f"{_clean_table_cell(record.get('severity') or '—')} | "
+            f"{_clean_table_cell(record.get('locationName') or _extract_warning_area(record) or '暂未明确')} | "
+            f"{_clean_table_cell(record.get('time') or '—')} | "
+            f"{_clean_table_cell(record.get('msgType') or '—')} |\n"
+        )
+    return "".join(lines).strip()
+
+
+def _build_warning_bundle(tool_name: str, observation) -> dict:
+    records = _warning_records_from_payload(tool_name, observation)
+    for record in records:
+        if isinstance(record, dict):
+            record["_source_tool"] = tool_name
+    return {
+        "tool_name": tool_name,
+        "records": records,
+        "title": _warning_table_title(tool_name),
+    }
+
+
+def _merge_warning_bundles(bundles: list[dict]) -> dict:
+    records = []
+    tool_names = []
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        tool_name = str(bundle.get("tool_name") or "")
+        if tool_name:
+            tool_names.append(tool_name)
+        records.extend(bundle.get("records") or [])
+    title = _warning_table_title(tool_names[0], multi_tool=len(set(tool_names)) > 1) if tool_names else "【预警清单】"
+    return {"records": records, "title": title}
+
+
+def _build_warning_llm_messages(records: list[dict], user_text: str) -> list:
+    content_lines = []
+    for idx, record in enumerate(records, 1):
+        content = str(record.get("content") or "").strip()
+        if content:
+            content_lines.append(f"{idx}. {content}")
+    contents_text = "\n".join(content_lines) if content_lines else "无预警正文。"
+    instruction = (
+        "请仅根据下面按顺序给出的预警正文 content 回答用户问题。\n"
+        "除编号外，下面不提供其他结构化字段；不要自行编造发布单位、等级、时间、数量或区域。\n"
+        "请只生成以下模块：`【核心结论】`、`【预警内容】`、`【防范建议】`。\n"
+        "如果没有预警正文，只输出`【核心结论】`，说明未检索到符合条件的预警记录。\n"
+        "不要生成或复述预警清单表格；预警清单将由代码生成。\n"
+        "【预警内容】中的条目顺序必须与下面 content 编号顺序一致，不得重排。\n\n"
+        f"用户问题：{user_text}\n\n"
+        "预警正文 content：\n"
+        f"{contents_text}"
+    )
+    return [HumanMessage(content=instruction)]
+
+
+def _remove_llm_warning_table_sections(text: str) -> str:
+    table_heads = "生效预警清单|今日发布预警清单|历史预警清单|相关预警清单|预警清单"
+    return re.sub(
+        rf"\n*【(?:{table_heads})】.*?(?=\n*【(?:预警内容|防范建议)】|\Z)",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    ).strip()
+
+
+def _assemble_warning_hybrid_answer(llm_text: str, table_text: str) -> str:
+    cleaned = _remove_llm_warning_table_sections(_sanitize_display_text(llm_text or ""))
+    if not table_text:
+        return cleaned
+
+    match = re.search(r"(【核心结论】.*?)(?=\n*【(?:预警内容|防范建议)】|\Z)", cleaned, flags=re.DOTALL)
+    if not match:
+        return f"{table_text}\n\n{cleaned}".strip()
+
+    core = match.group(1).strip()
+    rest = (cleaned[:match.start()] + cleaned[match.end():]).strip()
+    if rest:
+        return f"{core}\n\n{table_text}\n\n{rest}".strip()
+    return f"{core}\n\n{table_text}".strip()
+
+
+def _warning_record_is_released(record: dict) -> bool:
+    msg_type = str(record.get("msgType") or "")
+    content = str(record.get("content") or "")
+    return "解除" in msg_type or "解除" in content
+
+
+def _warning_record_label(record: dict) -> str:
+    event = str(record.get("eventType") or "预警").strip() or "预警"
+    severity = str(record.get("severity") or "").strip()
+    if not severity or severity in event:
+        return event
+    if "预警" in event:
+        return f"{event}{severity}"
+    return f"{event}{severity}预警"
+
+
+def _warning_key_phrases(records: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    labels = []
+    areas = []
+    times = []
+    for record in records:
+        label = _warning_record_label(record)
+        if label:
+            labels.append(label)
+        area = str(record.get("locationName") or _extract_warning_area(record) or "").strip()
+        if area and area != "暂未明确":
+            areas.append(area)
+        t = str(record.get("time") or "").strip()
+        if t:
+            times.append(t)
+    return list(dict.fromkeys(labels)), list(dict.fromkeys(areas)), list(dict.fromkeys(times))
+
+
+def _build_warning_core_conclusion(records: list[dict], user_text: str, title: str) -> str:
+    if not records:
+        return "【核心结论】\n未检索到符合条件的预警记录。"
+
+    labels, areas, times = _warning_key_phrases(records)
+    active_count = sum(1 for r in records if not _warning_record_is_released(r))
+    released_count = len(records) - active_count
+    label_text = "、".join(labels[:5]) if labels else "预警信息"
+    area_text = "，涉及" + "、".join(areas[:6]) if areas else ""
+    time_text = f"，最新发布时间为{times[0]}" if times else ""
+
+    if "今日" in title or "今天" in user_text or "今日" in user_text:
+        detail = f"今日检索到 **{len(records)}条** 相关预警动态"
+        if released_count:
+            detail += f"，其中 **{active_count}条** 未解除、**{released_count}条** 已解除"
+        return f"【核心结论】\n{detail}，主要包括 **{label_text}**{area_text}{time_text}。"
+
+    if any(k in user_text for k in ["解除了吗", "是否解除", "已解除", "解除预警"]):
+        if active_count:
+            return f"【核心结论】\n当前仍检索到 **{active_count}条** 未解除的相关预警，主要包括 **{label_text}**{area_text}{time_text}。"
+        return f"【核心结论】\n检索到的 **{len(records)}条** 相关预警均为已解除或解除类记录，主要包括 **{label_text}**{area_text}{time_text}。"
+
+    if active_count:
+        return f"【核心结论】\n当前检索到 **{active_count}条** 正在生效或仍需关注的相关预警，主要包括 **{label_text}**{area_text}{time_text}。"
+    return f"【核心结论】\n当前未检索到仍在生效的相关预警；本次返回的 **{len(records)}条** 记录主要为已解除或历史预警，涉及 **{label_text}**{area_text}{time_text}。"
+
+
+def _extract_warning_advice(records: list[dict]) -> list[str]:
+    advice = []
+    for record in records:
+        if _warning_record_is_released(record):
+            continue
+        content = str(record.get("content") or "").strip()
+        if not content:
+            continue
+        parts = re.split(r"[。；;！!？?]\s*", content)
+        for part in parts:
+            p = part.strip()
+            if not p:
+                continue
+            if any(k in p for k in ["请", "注意", "加强", "避免", "防范", "转移", "做好", "减少", "远离"]):
+                if not p.endswith("。"):
+                    p += "。"
+                advice.append(p)
+    return list(dict.fromkeys(advice))[:5]
+
+
+def _build_warning_code_answer(warning_bundles: list[dict], user_text: str) -> str:
+    merged = _merge_warning_bundles(warning_bundles)
+    records = _filter_warning_records_for_user(merged["records"], user_text)
+    core_text = _build_warning_core_conclusion(records, user_text, merged["title"])
+    if not records:
+        return core_text
+
+    table_text = _build_warning_table_markdown(records, merged["title"])
+    content_lines = [
+        f"{idx}. {_sanitize_display_text(str(record.get('content') or '').strip())}"
+        for idx, record in enumerate(records, 1)
+        if str(record.get("content") or "").strip()
+    ]
+
+    sections = [core_text, table_text]
+    if content_lines:
+        sections.append("【预警内容】\n" + "\n".join(content_lines))
+
+    advice = _extract_warning_advice(records)
+    if advice:
+        sections.append("【防范建议】\n" + "\n".join(f"{idx}. {item}" for idx, item in enumerate(advice, 1)))
+
+    return "\n\n".join(section for section in sections if section).strip()
+
+
+async def _generate_warning_hybrid_answer(answer_chain, warning_bundles: list[dict], user_text: str, callbacks) -> str:
+    merged = _merge_warning_bundles(warning_bundles)
+    records = _filter_warning_records_for_user(merged["records"], user_text)
+    if not records:
+        llm_text = await _generate_warning_core_and_advice(answer_chain, [], user_text, callbacks)
+        return _assemble_warning_final_answer(llm_text=llm_text, table_text="", content_text="")
+
+    table_text = _build_warning_table_markdown(records, merged["title"])
+    content_text = _build_warning_content_section(records)
+    llm_text = await _generate_warning_core_and_advice(answer_chain, records, user_text, callbacks)
+    return _assemble_warning_final_answer(llm_text=llm_text, table_text=table_text, content_text=content_text)
+
+
+def _is_warning_fact_query(user_text: str) -> bool:
+    text = user_text or ""
+    return "预警" in text
+
+
+def _warning_tool_display_name(tool_name: str) -> str:
+    return {
+        "get_effective_warning_info": "生效预警信息",
+        "get_history_warning_info": "历史预警信息",
+        "get_today_warning_summary": "今日预警动态",
+        "get_national_warning_info": "中央气象台预警信息",
+    }.get(tool_name, tool_name)
+
+
+def _normalize_warning_route(route: dict) -> dict:
+    allowed = {
+        "get_effective_warning_info",
+        "get_history_warning_info",
+        "get_today_warning_summary",
+        "get_national_warning_info",
+    }
+    names = route.get("tool_names") if isinstance(route, dict) else None
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list):
+        names = []
+    tool_names = [str(name).strip() for name in names if str(name).strip() in allowed]
+    if not tool_names:
+        tool_names = ["get_effective_warning_info"]
+    national_keywords = str((route or {}).get("national_keywords") or "天津").strip()
+    return {
+        "tool_names": list(dict.fromkeys(tool_names)),
+        "national_keywords": national_keywords,
+        "reason": str((route or {}).get("reason") or "").strip(),
+    }
+
+
+def _fill_warning_prompt(template: str, **values) -> str:
+    prompt = template or ""
+    for key, value in values.items():
+        prompt = prompt.replace("{" + key + "}", str(value))
+    return prompt
+
+
+async def _route_warning_tools(answer_chain, user_text: str, callbacks) -> dict:
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prompt_template = WARNING_ROUTE_PROMPT or ""
+    if not prompt_template.strip():
+        prompt_template = (
+            "请根据用户问题选择预警接口，只输出JSON："
+            '{"tool_names":["get_effective_warning_info"],"national_keywords":"天津","reason":""}\n'
+            "当前时间：{current_time}\n用户问题：{user_query}"
+        )
+    prompt = _fill_warning_prompt(prompt_template, current_time=current_time, user_query=user_text)
+    result = await callbacks["ainvoke_chain"](answer_chain, {"messages": [HumanMessage(content=prompt)]})
+    content = getattr(result, "content", None) or str(result)
+    route = _extract_first_json_object(content)
+    normalized = _normalize_warning_route(route)
+    if "get_national_warning_info" in normalized["tool_names"]:
+        normalized["national_keywords"] = _infer_national_warning_keywords(
+            user_text,
+            normalized.get("national_keywords"),
+        )
+    print(f"[WarningFastPath] route={json.dumps(normalized, ensure_ascii=False)} raw={content}")
+    return normalized
+
+
+def _infer_national_warning_keywords(user_text: str, model_keywords: str | None = None) -> str:
+    text = user_text or ""
+    if "全国" in text:
+        return ""
+    if "华北" in text:
+        return "北京,天津,河北,山西,内蒙古"
+    if "京津冀" in text:
+        return "北京,天津,河北"
+    explicit_parts = []
+    for name in ("北京", "北京市", "河北", "河北省", "天津", "天津市"):
+        if name in text:
+            explicit_parts.append(name.replace("北京市", "北京").replace("河北省", "河北").replace("天津市", "天津"))
+    if explicit_parts:
+        return ",".join(dict.fromkeys(explicit_parts))
+    if any(keyword in text for keyword in ("周边", "邻近", "附近省市", "周边地区", "周边省市")):
+        return "北京,河北"
+    if any(keyword in text for keyword in ("国家局", "中央气象台", "国家中央气象台", "国家气象中心", "中央台")):
+        return "天津"
+    cleaned = str(model_keywords or "").strip()
+    return cleaned or "天津"
+
+
+def _warning_tool_args(tool_name: str, route: dict) -> dict:
+    if tool_name == "get_national_warning_info":
+        keywords = route.get("national_keywords")
+        return {
+            "keywords": "" if keywords == "" else (keywords or "天津"),
+            "max_items": 30,
+        }
+    return {}
+
+
+def _build_warning_content_section(records: list[dict]) -> str:
+    content_lines = [
+        f"{idx}. {_sanitize_display_text(str(record.get('content') or '').strip())}"
+        for idx, record in enumerate(records, 1)
+        if str(record.get("content") or "").strip()
+    ]
+    if not content_lines:
+        return ""
+    return "【预警内容】\n" + "\n".join(content_lines)
+
+
+def _warning_contents_for_llm(records: list[dict]) -> str:
+    lines = []
+    for idx, record in enumerate(records, 1):
+        content = str(record.get("content") or "").strip()
+        if not content:
+            continue
+        meta = "；".join(
+            part for part in [
+                f"预警类型：{record.get('eventType')}" if record.get("eventType") else "",
+                f"等级：{record.get('severity')}" if record.get("severity") else "",
+                f"发布单位：{record.get('department')}" if record.get("department") else "",
+                f"影响区域：{record.get('locationName')}" if record.get("locationName") else "",
+                f"发布时间：{record.get('time')}" if record.get("time") else "",
+                f"状态：{record.get('msgType')}" if record.get("msgType") else "",
+                f"数据类别：{record.get('_source_tool')}" if record.get("_source_tool") else "",
+            ]
+            if part
+        )
+        lines.append(f"{idx}. {meta}\ncontent：{content}")
+    return "\n\n".join(lines) if lines else "无预警正文。"
+
+
+async def _generate_warning_core_and_advice(
+    answer_chain,
+    records: list[dict],
+    user_text: str,
+    callbacks,
+) -> str:
+    contents_text = _warning_contents_for_llm(records)
+    prompt_template = WARNING_SUMMARY_PROMPT or ""
+    if not prompt_template.strip():
+        prompt_template = (
+            "请仅依据预警正文生成【核心结论】和【防范建议】两个模块，不要输出表格和预警清单。\n"
+            "用户问题：{user_query}\n预警正文 content：\n{contents_text}"
+        )
+    prompt = _fill_warning_prompt(prompt_template, user_query=user_text, contents_text=contents_text)
+    result = await callbacks["ainvoke_chain"](answer_chain, {"messages": [HumanMessage(content=prompt)]})
+    text = getattr(result, "content", None) or str(result)
+    text = _sanitize_display_text(text)
+    text = _remove_llm_warning_table_sections(text)
+    return text.strip()
+
+
+def _assemble_warning_final_answer(llm_text: str, table_text: str, content_text: str) -> str:
+    cleaned = _sanitize_display_text(llm_text or "").strip()
+    core_match = re.search(r"(【核心结论】.*?)(?=\n*【防范建议】|\Z)", cleaned, flags=re.DOTALL)
+    advice_match = re.search(r"(【防范建议】.*)\Z", cleaned, flags=re.DOTALL)
+    core = core_match.group(1).strip() if core_match else (cleaned or "【核心结论】\n已获取预警信息。")
+    advice = advice_match.group(1).strip() if advice_match else ""
+    sections = [core, table_text, content_text, advice]
+    return "\n\n".join(section for section in sections if section).strip()
+
+
+async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messages, callbacks) -> bool:
+    if not _is_warning_fact_query(user_text):
+        return False
+
+    thinking_msg = await _show_thinking("🧭 正在判断预警接口，请稍候...")
+    bundles = []
+    try:
+        route = await _route_warning_tools(answer_chain, user_text, callbacks)
+        tool_names = route["tool_names"]
+        selected_tools = [(name, _find_tool(tools, name)) for name in tool_names]
+        selected_tools = [(name, tool) for name, tool in selected_tools if tool is not None]
+        if not selected_tools:
+            await thinking_msg.remove()
+            return False
+
+        display_names = "、".join(_warning_tool_display_name(name) for name, _ in selected_tools)
+        thinking_msg.content = f"🔔 正在调用{display_names}..."
+        await thinking_msg.update()
+
+        async with cl.Step(name="预警信息查询", type="tool") as step:
+            step.show_input = False
+            step.output = f"🔎 已选择接口：{display_names}\n"
+            await step.update()
+
+            for name, tool in selected_tools:
+                args = _warning_tool_args(name, route)
+                print(f"[WarningFastPath] 调用 {name} 参数: {json.dumps(args, ensure_ascii=False)}")
+                step.output += f"📡 正在调用{_warning_tool_display_name(name)}...\n"
+                await step.update()
+                result = await asyncio.wait_for(tool.ainvoke(args), timeout=30)
+                bundles.append(_build_warning_bundle(name, result))
+                step.output += f"✅ {_warning_tool_display_name(name)}查询完成。\n"
+                await step.update()
+
+        thinking_msg.content = "✍️ 正在生成回答..."
+        await thinking_msg.update()
+        final_text = await _generate_warning_hybrid_answer(answer_chain, bundles, user_text, callbacks)
+        final_text = _sanitize_display_text(callbacks["append_followup_if_needed"](final_text or "", user_text))
+        await thinking_msg.remove()
+        await callbacks["stream_text_to_message"](final_text)
+        messages.append(HumanMessage(content=user_text))
+        messages.append(AIMessage(content=final_text))
+        cl.user_session.set("messages", messages)
+        return True
+    except asyncio.TimeoutError:
+        await thinking_msg.remove()
+        text = "⏱️ 预警信息查询超时，请稍后重试。"
+        await cl.Message(content=text).send()
+        messages.append(HumanMessage(content=user_text))
+        messages.append(AIMessage(content=text))
+        cl.user_session.set("messages", messages)
+        return True
+    except Exception as exc:
+        print(f"[WarningFastPath] 失败，回退通用流程：{exc}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await thinking_msg.remove()
+        except Exception:
+            pass
+        return False
 
 
 def _sanitize_display_text(text: str) -> str:
@@ -1118,6 +2223,7 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks):
     ree = None
     forced_final_text = None
+    warning_bundles = []
     tool_names = [tc['name'] for tc in planner_msg.tool_calls]
     print(f"\n=== 第 {iteration} 轮工具调用 ===")
 
@@ -1174,7 +2280,14 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     elif tool_name == "analyze_rainstorm_impact" and callbacks["should_force_structured_impact_reply"](user_text):
                         forced_final_text = callbacks["build_structured_impact_reply"](observation)
 
-                    if tool_name == "get_river_network_for_plot":
+                    if tool_name in WARNING_TOOL_NAMES:
+                        warning_bundles.append(_build_warning_bundle(tool_name, observation))
+                        observation_text = (
+                            "预警数据已进入专用组装流程：预警清单表格由代码根据 "
+                            "eventType、department、time、severity、locationName 生成；"
+                            "预警内容由 content 组装，核心结论和防范建议由大模型基于 content 生成。"
+                        )
+                    elif tool_name == "get_river_network_for_plot":
                         river_name = tool_args.get("start_river", "全流域")
                         try:
                             await _render_river_plot_with_overlay(tools, observation, river_name, callbacks)
@@ -1309,7 +2422,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     )
                 )
 
-    return forced_final_text,ree
+    return forced_final_text, ree, warning_bundles
 
 
 async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -3287,6 +4400,14 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     if await _try_city_avg_rainfall_fast_path(message.content, tools, messages, callbacks):
         return
 
+    # 预警事实查询快速路径（包含“预警”时先判断接口，再调用工具并混合生成回答）
+    if await _try_warning_fact_fast_path(message.content, answer_chain, tools, messages, callbacks):
+        return
+
+    # 点位决策天气快速路径（具体学校/场馆/单位/设施附近天气，先 POI 定位再查滚动预报）
+    if await _try_decision_weather_fast_path(message.content, answer_chain, tools, messages, callbacks):
+        return
+
     # 今日累计降雨时长快速路径（比"今天降雨"更具体，优先判断）
     if await _try_today_rain_duration_fast_path(message.content, tools, messages, callbacks):
         return
@@ -3441,7 +4562,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         thinking_msg.content = f"🔧 第 {iteration} 轮：正在查询数据..."
         await thinking_msg.update()
 
-        forced_final_text,ree = await _run_tool_round(planner_msg, tools, messages, message.content, iteration, callbacks)
+        forced_final_text, ree, warning_bundles = await _run_tool_round(
+            planner_msg, tools, messages, message.content, iteration, callbacks
+        )
         if ree:
             await cl.send_window_message(ree)
 
@@ -3452,6 +4575,47 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
             messages.append(AIMessage(content=forced_final_text))
             print("\n=== 使用定制化收口答案，退出循环 ===\n")
+            answer_generated = True
+            break
+
+        if warning_bundles:
+            await reasoning.line("**预警数据已返回，正在由代码整理清单和预警内容，并由大模型生成核心结论和防范建议。**")
+            await reasoning.close()
+            thinking_msg.content = "✍️ 正在生成回答..."
+            await thinking_msg.update()
+            try:
+                final_text = await _generate_warning_hybrid_answer(
+                    answer_chain, warning_bundles, message.content, callbacks
+                )
+                final_text = _sanitize_display_text(
+                    callbacks["append_followup_if_needed"](final_text or "", message.content)
+                )
+            except Exception as e:
+                print(f"预警专用回答生成失败：{e}")
+                merged = _merge_warning_bundles(warning_bundles)
+                records = _filter_warning_records_for_user(merged["records"], message.content)
+                table_text = _build_warning_table_markdown(records, merged["title"]) if records else ""
+                content_lines = [
+                    f"{idx}. {_sanitize_display_text(str(record.get('content') or '').strip())}"
+                    for idx, record in enumerate(records, 1)
+                    if str(record.get("content") or "").strip()
+                ]
+                if records:
+                    final_text = (
+                        "【核心结论】\n"
+                        "智能摘要生成超时，以下先提供代码生成的预警清单和原始预警内容。"
+                        f"\n\n{table_text}"
+                    )
+                    if content_lines:
+                        final_text += "\n\n【预警内容】\n" + "\n".join(content_lines)
+                else:
+                    final_text = "【核心结论】\n未检索到符合条件的预警记录。"
+
+            await thinking_msg.remove()
+            await callbacks["stream_text_to_message"](final_text, stream_msg=stream_msg)
+            messages.append(AIMessage(content=final_text))
+            cl.user_session.set("messages", messages)
+            print("\n=== 使用预警专用组装答案，退出循环 ===\n")
             answer_generated = True
             break
 

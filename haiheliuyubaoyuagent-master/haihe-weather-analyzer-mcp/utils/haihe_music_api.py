@@ -155,31 +155,7 @@ class MusicClient:
             dataProvinceId=data_province_id,
         )
 
-    # 2) 按时间段、流域查询地面数据要素（支持分钟级窗口）
-    def get_surf_ele_in_basin_by_time_range(
-        self,
-        basin_codes: str,
-        time_range: str,
-        elements: str = DEFAULT_OBS_ELEMENTS,
-        data_code: str = "SURF_CHN_MUL_HOR",
-        ele_value_ranges: Optional[str] = None,
-        order_by: Optional[str] = None,
-        limit_cnt: Optional[int] = None,
-        data_province_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        return self.call_api(
-            "getSurfEleInBasinByTimeRange",
-            dataCode=data_code,
-            elements=elements,
-            timeRange=time_range,
-            basinCodes=basin_codes,
-            eleValueRanges=ele_value_ranges,
-            orderBy=order_by,
-            limitCnt=limit_cnt,
-            dataProvinceId=data_province_id,
-        )
-
-    # 3) 按时间段、流域统计逐小时降水量
+    # 2) 按时间段、流域统计逐小时降水量
     def stat_surf_pre_in_basin(
         self,
         basin_codes: str,

@@ -5,6 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.10"
 dependencies = [
     "ecmwf-opendata>=0.3.0",
+    "elasticsearch>=7.17.0",
     "fastapi>=0.115.0",
     "geopandas>=1.0.0",
     "matplotlib>=3.8.0",

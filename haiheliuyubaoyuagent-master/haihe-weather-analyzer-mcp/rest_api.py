@@ -21,8 +21,9 @@ from typing import Any
 from constants import DEFAULT_BASIN_CODES
 
 import psycopg2
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 
 # 导入 MCP 工具核心函数
@@ -228,6 +229,89 @@ def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+ALLOWED_ROLES = {"admin", "forecaster", "external"}
+ROLE_LABELS = {
+    "admin": "管理员",
+    "forecaster": "预报员",
+    "external": "外部用户",
+}
+security = HTTPBasic(auto_error=False)
+
+
+def _role_label(role: str) -> str:
+    return ROLE_LABELS.get(role, role)
+
+
+def _require_admin(credentials: HTTPBasicCredentials | None = Depends(security)) -> dict:
+    """HTTP Basic Auth 校验：仅允许状态 active 的管理员访问。"""
+    if not credentials:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少认证信息", headers={"WWW-Authenticate": "Basic"})
+    _ensure_auth_tables()
+    schema = _schema()
+    try:
+        with _get_pg_conn() as conn:
+            with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT username, password_hash, role, status
+                    FROM {schema}.hh_user_account
+                    WHERE username = %s
+                    LIMIT 1
+                    """,
+                    (credentials.username,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"鉴权失败: {e}")
+
+    if not row or row.get("status") != "active" or row["password_hash"] != _hash_password(credentials.password):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误", headers={"WWW-Authenticate": "Basic"})
+    if row["role"] != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可操作")
+    return dict(row)
+
+
+def _upsert_user(username: str, password: str, role: str, allow_admin: bool) -> dict:
+    """创建或覆盖用户。allow_admin=False 时禁止创建管理员。"""
+    if not username or len(username) > 64:
+        raise HTTPException(400, "用户名长度应为 1~64 字符")
+    if not password:
+        raise HTTPException(400, "密码不能为空")
+    role = role or "external"
+    if role not in ALLOWED_ROLES:
+        raise HTTPException(400, f"无效角色，可选: {', '.join(sorted(ALLOWED_ROLES))}")
+    if not allow_admin and role == "admin":
+        raise HTTPException(400, "注册接口不允许创建管理员账号")
+
+    _ensure_auth_tables()
+    schema = _schema()
+    try:
+        with _get_pg_conn() as conn:
+            with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO {schema}.hh_user_account (username, password_hash, role, status, updated_at)
+                    VALUES (%s, %s, %s, 'active', NOW())
+                    ON CONFLICT (username) DO UPDATE
+                    SET password_hash = EXCLUDED.password_hash,
+                        role = EXCLUDED.role,
+                        status = 'active',
+                        updated_at = NOW()
+                    RETURNING username, role, status, created_at, updated_at
+                    """,
+                    (username, _hash_password(password), role),
+                )
+                row = cur.fetchone()
+                conn.commit()
+        return {
+            "username": row["username"],
+            "status": row["status"],
+            "role": row["role"],
+            "role_label": _role_label(row["role"]),
+        }
+    except Exception as e:
+        raise HTTPException(500, f"保存用户失败: {e}")
+
 def _ensure_auth_tables() -> None:
     schema = _schema()
     ddl = f"""
@@ -257,6 +341,25 @@ class LoginRequest(BaseModel):
     username: str = Field(..., description="用户名")
     password: str = Field(..., description="密码")
 
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., description="用户名，1~64 字符")
+    password: str = Field(..., description="密码")
+    role: str = Field("external", description="角色，默认 external")
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(..., description="用户名，1~64 字符")
+    password: str = Field(..., description="密码")
+    role: str = Field("external", description="角色，默认 external")
+
+
+class StatusUpdateRequest(BaseModel):
+    status: str = Field(..., description="状态：active / disabled")
+
+
+class ResetPasswordRequest(BaseModel):
+    password: str = Field(..., description="新密码")
 
 @app.post("/api/v1/auth/login", tags=["认证"])
 def login(req: LoginRequest):
@@ -293,34 +396,129 @@ def login(req: LoginRequest):
         raise HTTPException(500, f"登录失败: {e}")
 
 
-def _get_pg_conf() -> dict:
-    if "postgres" not in _config:
-        raise HTTPException(500, "config.ini中缺少 [postgres] 配置段")
-    return dict(_config["postgres"])
+@app.post("/api/v1/auth/register", tags=["认证"])
+def register(req: RegisterRequest):
+    """注册普通用户，不允许注册管理员；同名用户会覆盖密码/角色并恢复 active。"""
+    result = _upsert_user(req.username, req.password, req.role, allow_admin=False)
+    return {"code": 200, "data": result, "message": "success"}
 
 
-def _get_pg_conn():
-    pg = _get_pg_conf()
-    return psycopg2.connect(
-        host=pg.get("host", "127.0.0.1"), port=int(pg.get("port", 5432)),
-        dbname=pg.get("dbname"), user=pg.get("user"), password=pg.get("password"),
-        sslmode=pg.get("sslmode", "disable"), connect_timeout=int(pg.get("connect_timeout", "5")),
-    )
+# ========== 管理员用户管理 ==========
+
+@app.get("/api/v1/admin/users", tags=["管理员"])
+def list_users(admin: dict = Depends(_require_admin)):
+    """获取全部用户列表（仅管理员）。"""
+    schema = _schema()
+    try:
+        with _get_pg_conn() as conn:
+            with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT username, role, status, created_at, updated_at
+                    FROM {schema}.hh_user_account
+                    ORDER BY created_at DESC, username ASC
+                    """
+                )
+                users = []
+                for row in cur.fetchall():
+                    user = dict(row)
+                    for k in ("created_at", "updated_at"):
+                        if isinstance(user.get(k), datetime):
+                            user[k] = user[k].strftime("%Y-%m-%d %H:%M:%S")
+                    user["role_label"] = _role_label(user["role"])
+                    users.append(user)
+        return {"code": 200, "data": users, "message": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"查询用户列表失败: {e}")
 
 
-def _schema() -> str:
-    return _config.get("postgres", "schema", fallback="public")
+@app.post("/api/v1/admin/users", tags=["管理员"])
+def admin_create_user(req: AdminCreateUserRequest, admin: dict = Depends(_require_admin)):
+    """管理员创建/覆盖用户，允许创建管理员角色。"""
+    result = _upsert_user(req.username, req.password, req.role, allow_admin=True)
+    return {"code": 200, "data": result, "message": "success"}
 
 
-class EmergencyEvaluateRequest(BaseModel):
-    start_time: str = Field("", description="开始时间")
-    end_time: str = Field("", description="结束时间")
-    basin_codes: str = Field(DEFAULT_BASIN_CODES, description="流域代码")
-    allowed_station_levels: str = Field("", description="站点等级")
+@app.patch("/api/v1/admin/users/{username}/status", tags=["管理员"])
+def update_user_status(
+    username: str,
+    req: StatusUpdateRequest,
+    admin: dict = Depends(_require_admin),
+):
+    """修改用户状态；默认管理员 admin 不允许被禁用。"""
+    if req.status not in {"active", "disabled"}:
+        raise HTTPException(400, "状态只能是 active 或 disabled")
+    if username == ADMIN_DEFAULT_USERNAME and req.status == "disabled":
+        raise HTTPException(403, "默认管理员不允许被禁用")
+
+    schema = _schema()
+    try:
+        with _get_pg_conn() as conn:
+            with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    UPDATE {schema}.hh_user_account
+                    SET status = %s, updated_at = NOW()
+                    WHERE username = %s
+                    RETURNING username, status
+                    """,
+                    (req.status, username),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, f"用户 {username} 不存在")
+                conn.commit()
+        return {"code": 200, "data": {"username": row["username"], "status": row["status"]}, "message": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"更新用户状态失败: {e}")
 
 
-class RiverQuery(BaseModel):
-    name: str = Field(..., description="河流名称", examples=["永定河"])
+@app.post("/api/v1/admin/users/{username}/reset-password", tags=["管理员"])
+def reset_user_password(
+    username: str,
+    req: ResetPasswordRequest,
+    admin: dict = Depends(_require_admin),
+):
+    """重置指定用户密码，并恢复 active 状态。"""
+    if not req.password:
+        raise HTTPException(400, "密码不能为空")
+
+    schema = _schema()
+    try:
+        with _get_pg_conn() as conn:
+            with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    UPDATE {schema}.hh_user_account
+                    SET password_hash = %s, status = 'active', updated_at = NOW()
+                    WHERE username = %s
+                    RETURNING username, role, status
+                    """,
+                    (_hash_password(req.password), username),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, f"用户 {username} 不存在")
+                conn.commit()
+        return {
+            "code": 200,
+            "data": {
+                "username": row["username"],
+                "status": row["status"],
+                "role": row["role"],
+                "role_label": _role_label(row["role"]),
+            },
+            "message": "success",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"重置密码失败: {e}")
+
 
 class RainfallAnalysisRequest(BaseModel):
     start_time: str = Field("", description="开始时间 YYYY-MM-DD HH:MM:SS")
@@ -494,6 +692,12 @@ def list_endpoints():
         "code": 200,
         "data": {
             "health": {"method": "GET", "path": "/health", "desc": "健康检查"},
+            "auth_login": {"method": "POST", "path": "/api/v1/auth/login", "desc": "用户登录"},
+            "auth_register": {"method": "POST", "path": "/api/v1/auth/register", "desc": "用户注册"},
+            "admin_users_list": {"method": "GET", "path": "/api/v1/admin/users", "desc": "获取用户列表（管理员）"},
+            "admin_users_create": {"method": "POST", "path": "/api/v1/admin/users", "desc": "管理员创建/覆盖用户"},
+            "admin_users_update_status": {"method": "PATCH", "path": "/api/v1/admin/users/{username}/status", "desc": "修改用户状态（管理员）"},
+            "admin_users_reset_password": {"method": "POST", "path": "/api/v1/admin/users/{username}/reset-password", "desc": "重置用户密码（管理员）"},
             "emergency_evaluate": {"method": "POST", "path": "/api/v1/emergency/evaluate", "desc": "应急响应判定（按时间扫各整点时次）"},
             "emergency_summary": {"method": "POST", "path": "/api/v1/emergency/summary", "desc": "应急响应按日汇总"},
             "events_list": {"method": "GET", "path": "/api/v1/emergency/events", "desc": "查询应急事件列表（含状态）"},
