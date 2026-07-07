@@ -1713,6 +1713,9 @@ async def _handle_fast_path_error(
     exc: Exception | None = None,
 ) -> bool:
     """统一 fast path 错误出口：timeout 时提醒用户并记录历史，一般异常打印回溯。返回 True 表示已处理。"""
+    session_id = cl.user_session.get("id") or ""
+    query_summary = cl.user_session.get("last_query") or ""
+    query_start_time = cl.user_session.get("query_start_time")
     try:
         await thinking_msg.remove()
     except Exception:
@@ -1721,6 +1724,11 @@ async def _handle_fast_path_error(
         print(f"[{tag}] 查询超时")
         text = f"⏱️ {tag}查询超时，请稍后重试。"
         await cl.Message(content=text).send()
+        try:
+            elapsed = time.time() - query_start_time if query_start_time else 0.0
+            TimingLogger.log_query(session_id, query_summary, elapsed, status="fail")
+        except Exception:
+            pass
         _save_to_history(user_text, text, messages)
         return True
     print(f"[{tag}] 失败：{exc}")
@@ -4345,6 +4353,7 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
 
 async def process_message(message: cl.Message, planner_chain, answer_chain, tools, messages, callbacks):
     query_start_time = time.time()
+    cl.user_session.set("query_start_time", query_start_time)
     session_id = cl.user_session.get("id") or ""
     query_summary = message.content
     _query_timing_logged = False
