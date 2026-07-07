@@ -281,6 +281,10 @@ def _decision_period_args(fcst_time: str, target_start: datetime, target_end: da
 
 def _decision_weather_prefilter(user_text: str) -> bool:
     t = user_text or ""
+    # 排除纯时间查询，避免 LLM 误将"周末""今天"等当成地名
+    time_blocklist = ["周末", "周六", "周日", "今天", "今日", "明天", "后天", "未来一周", "本周"]
+    if any(k in t for k in time_blocklist):
+        return False
     weather_keywords = [
         "天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风", "能见度",
         "雾", "霾", "预报", "暴雨", "雷阵雨", "适合", "户外",
@@ -3584,6 +3588,7 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
         "站点", "国家站", "自动站", "观测",
         "昨日", "昨天", "过去", "历史", "近",
         "雨情汇总", "降雨汇总", "雨情分析", "降雨分析",
+        "周末", "周六", "周日",
     ]
     if any(k in t for k in excluded):
         return False
@@ -4326,15 +4331,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     if await _try_city_avg_rainfall_fast_path(message.content, tools, messages, callbacks):
         return
 
-    # 预警事实查询快速路径（包含“预警”时先判断接口，再调用工具并混合生成回答）
+    # 预警事实查询快速路径（包含”预警”时先判断接口，再调用工具并混合生成回答）
     if await _try_warning_fact_fast_path(message.content, answer_chain, tools, messages, callbacks):
         return
 
-    # 点位决策天气快速路径（具体学校/场馆/单位/设施附近天气，先 POI 定位再查滚动预报）
-    if await _try_decision_weather_fast_path(message.content, answer_chain, tools, messages, callbacks):
-        return
-
-    # 今日累计降雨时长快速路径（比"今天降雨"更具体，优先判断）
+    # 今日累计降雨时长快速路径（比”今天降雨”更具体，优先判断）
     if await _try_today_rain_duration_fast_path(message.content, tools, messages, callbacks):
         return
 
@@ -4372,6 +4373,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
     # 通用天气快速路径（今天/明天/后天/未来N天天气）
     if await _try_general_weather_fast_path(message.content, tools, messages, callbacks):
+        return
+
+    # 点位决策天气快速路径（具体学校/场馆/单位/设施，需先被以上路径排除后才做 POI 定位）
+    if await _try_decision_weather_fast_path(message.content, answer_chain, tools, messages, callbacks):
         return
 
     messages.append(HumanMessage(content=message.content))
