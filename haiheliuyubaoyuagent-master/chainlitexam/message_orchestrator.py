@@ -60,22 +60,6 @@ class ReasoningStep:
             await self.step.update()
 
 
-def _extract_think_content(text: str) -> tuple[str, str]:
-    """
-    从模型输出中提取 <think>...</think> 形式的思考内容。
-    返回 (thinking_content, remaining_text)。
-    """
-    if not isinstance(text, str):
-        return "", text
-
-    pattern = r"\s*<think\s*>(.*?)\s*</\s*think\s*>"
-    matches = re.findall(pattern, text, re.DOTALL)
-    if not matches:
-        return "", text
-
-    thinking = "\n\n".join(m.strip() for m in matches if m.strip())
-    remaining = re.sub(pattern, "", text, flags=re.DOTALL).strip()
-    return thinking, remaining
 
 
 def _compress_messages(messages: list, max_tool_len: int = 500, max_ai_len: int = 1500):
