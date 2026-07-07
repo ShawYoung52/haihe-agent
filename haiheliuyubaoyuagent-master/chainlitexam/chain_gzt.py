@@ -830,10 +830,10 @@ async def _process_planner_stream(chain, input_dict, reasoning_step, config):
     if inside_think and think_buf.strip():
         await reasoning_step.append(think_buf)
 
-    return AIMessage(
-        content=content_buf.strip() if content_buf else "",
-        tool_calls=tool_calls_data if tool_calls_data else None,
-    )
+    msg = AIMessage(content=content_buf.strip() if content_buf else "")
+    if tool_calls_data:
+        msg.tool_calls = tool_calls_data
+    return msg
 
 
 async def astream_planner_think(chain, input_dict, reasoning_step, config: RunnableConfig | None = None):
