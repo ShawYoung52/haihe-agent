@@ -155,7 +155,8 @@ reasoning = await _show_business_reasoning(
 
 新增 helper：
 
-```pythonndef _build_thinking_summary(query: str, stages: list[str],
+```python
+def _build_thinking_summary(query: str, stages: list[str],
                             tool_display_names: list[str] | None = None,
                             has_chart: bool = False) -> str:
     """根据已走过的阶段和工具，生成一句业务化前缀。"""
