@@ -763,44 +763,33 @@ async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None)
 
 
 async def _process_planner_stream(chain, input_dict, reasoning_step, config):
-    """流式处理 planner 输出：所有 token 实时展示为思考过程。"""
+    """流式处理 planner 输出：所有 token 实时展示为思考过程。
+
+    使用 chain.astream() 获取 AIMessageChunk，兼容各版本 langchain-core。
+    当模型输出文本内容时（如"我需要查询天津降雨..."），逐字展示；
+    当模型直接输出工具调用时（content 为空），后续由 process_message 显示工具名称。
+    """
     content_buf = ""
     tool_calls_data = []
-    final_msg = None
-    first_token = True
+    has_streamed = False
 
-    async for event in chain.astream_events(input_dict, config=config, version="v2"):
-        kind = event.get("event", "")
-
-        if kind == "on_chat_model_stream":
-            chunk = event.get("data", {}).get("chunk")
-            if chunk is None:
-                continue
-            token = getattr(chunk, "content", None)
-            if not token:
-                continue
-            if first_token:
-                first_token = False
+    async for chunk in chain.astream(input_dict, config=config):
+        token = getattr(chunk, "content", None)
+        if token:
             content_buf += token
             await reasoning_step.append(token)
+            has_streamed = True
 
-        elif kind == "on_chat_model_end":
-            output = event.get("data", {}).get("output")
-            if output is not None:
-                tc = getattr(output, "tool_calls", None)
-                if tc:
-                    tool_calls_data = tc
-                if hasattr(output, "content") and output.content:
-                    content_buf = output.content
-                final_msg = output
+        tc = getattr(chunk, "tool_calls", None)
+        if tc:
+            tool_calls_data = tc
 
-        elif kind == "on_chain_end":
-            if final_msg is None:
-                output = event.get("data", {}).get("output")
-                if output is not None and hasattr(output, "content"):
-                    content_buf = getattr(output, "content", content_buf) or content_buf
-                    final_msg = output
+        # 累积 tool_call_chunks（某些版本用这个字段）
+        tcc = getattr(chunk, "tool_call_chunks", None)
+        if tcc and not tool_calls_data:
+            pass  # tool_call_chunks 由 langchain 内部累积，最终在最后一个 chunk 出现完整 tool_calls
 
+    print(f"[planner_stream] streamed={has_streamed} content_len={len(content_buf)} tool_calls={len(tool_calls_data)}")
     msg = AIMessage(content=content_buf.strip() if content_buf else "")
     if tool_calls_data:
         msg.tool_calls = tool_calls_data
