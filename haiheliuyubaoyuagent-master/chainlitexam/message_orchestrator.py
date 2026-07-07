@@ -1705,6 +1705,18 @@ async def _emit_fast_path_result(
     _save_to_history(user_text, text, messages)
 
 
+def _log_query_exit(query_start_time: float, session_id: str, query_summary: str, status: str = "ok"):
+    if cl.user_session.get("query_timing_logged"):
+        return
+    try:
+        total_elapsed = time.time() - query_start_time
+        TimingLogger.log_query(session_id, query_summary, total_elapsed, status=status)
+    except Exception:
+        pass
+    finally:
+        cl.user_session.set("query_timing_logged", True)
+
+
 async def _handle_fast_path_error(
     tag: str,
     thinking_msg: cl.Message,
@@ -1724,12 +1736,8 @@ async def _handle_fast_path_error(
         print(f"[{tag}] 查询超时")
         text = f"⏱️ {tag}查询超时，请稍后重试。"
         await cl.Message(content=text).send()
-        try:
-            elapsed = time.time() - query_start_time if query_start_time else 0.0
-            TimingLogger.log_query(session_id, query_summary, elapsed, status="fail")
-            cl.user_session.set("query_timing_logged", True)
-        except Exception:
-            pass
+        if query_start_time:
+            _log_query_exit(query_start_time, session_id, query_summary, "fail")
         _save_to_history(user_text, text, messages)
         return True
     print(f"[{tag}] 失败：{exc}")
@@ -4359,107 +4367,96 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     query_summary = message.content
     cl.user_session.set("query_timing_logged", False)
 
-    def _log_query_exit(status: str = "ok"):
-        if cl.user_session.get("query_timing_logged"):
-            return
-        try:
-            total_elapsed = time.time() - query_start_time
-            TimingLogger.log_query(session_id, query_summary, total_elapsed, status=status)
-        except Exception:
-            pass
-        finally:
-            cl.user_session.set("query_timing_logged", True)
-
     # 降雨分布图快速路径（优先判断，避免误入河网路径）
     if await _try_rainfall_img_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 防汛应急响应判定快速路径
     if await _try_emergency_response_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 暴雨影响河系专题图快速路径（比通用河网路径更具体，优先判断）
     if await _try_affected_river_network_by_rainfall_fast_path(
         message.content, tools, messages, callbacks
     ):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 河网图快速路径
     if await _try_river_plot_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 降雨分析快速路径
     if await _try_rainfall_analysis_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 城市平均降雨量快速路径
     if await _try_city_avg_rainfall_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 预警事实查询快速路径（包含”预警”时先判断接口，再调用工具并混合生成回答）
     if await _try_warning_fact_fast_path(message.content, answer_chain, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 今日累计降雨时长快速路径（比”今天降雨”更具体，优先判断）
     if await _try_today_rain_duration_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 今天降雨快速路径（分两段：今天0点~现在用实况，现在~明天0点用预报）
     if await _try_today_rainfall_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 未来一周预报快速路径
     if await _try_weekly_forecast_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 强降雨/暴雨检查快速路径
     if await _try_heavy_rain_check_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 子流域未来天气预报快速路径（大清河/子牙河等未来N天天气）
     if await _try_subbasin_forecast_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 面雨量快速路径（子流域对比、排名）
     if await _try_basin_areal_rainfall_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 周末户外活动建议快速路径
     if await _try_weekend_activity_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 海河流域整体天气快速路径（今天/明天/后天海河流域/天津天气如何）
     if await _try_basin_weather_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 水位查询快速路径（避免模型生成畸形表格）
     if await _try_water_level_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 通用天气快速路径（今天/明天/后天/未来N天天气）
     if await _try_general_weather_fast_path(message.content, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 点位决策天气快速路径（具体学校/场馆/单位/设施，需先被以上路径排除后才做 POI 定位）
     if await _try_decision_weather_fast_path(message.content, answer_chain, tools, messages, callbacks):
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     messages.append(HumanMessage(content=message.content))
@@ -4488,7 +4485,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
         traceback.print_exc()
         cl.user_session.set("messages", messages)
-        _log_query_exit("fail")
+        _log_query_exit(query_start_time, session_id, query_summary, "fail")
         return
 
     if planner_msg.tool_calls:
@@ -4521,7 +4518,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await reasoning.close()
             messages.append(AIMessage(content=stream_msg.content))
             cl.user_session.set("messages", messages)
-            _log_query_exit("ok")
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
             return
 
         # 若 planner 已经生成完整业务化回答，直接复用，避免 answer_chain 二次生成导致格式异常
@@ -4534,7 +4531,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await callbacks["stream_text_to_message"](text, stream_msg=stream_msg)
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
-            _log_query_exit("ok")
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
             return
 
         # 首轮 answer_chain（真实流式输出）
@@ -4553,13 +4550,13 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     
             traceback.print_exc()
             cl.user_session.set("messages", messages)
-            _log_query_exit("fail")
+            _log_query_exit(query_start_time, session_id, query_summary, "fail")
             return
         text = _sanitize_display_text(callbacks["append_followup_if_needed"](text or "", message.content))
         if text:
             messages.append(AIMessage(content=text))
         cl.user_session.set("messages", messages)
-        _log_query_exit("ok")
+        _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     messages.append(planner_msg)
@@ -4592,7 +4589,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
             messages.append(AIMessage(content=forced_final_text))
             print("\n=== 使用定制化收口答案，退出循环 ===\n")
-            _log_query_exit("ok")
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
             answer_generated = True
             break
 
@@ -4634,7 +4631,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             messages.append(AIMessage(content=final_text))
             cl.user_session.set("messages", messages)
             print("\n=== 使用预警专用组装答案，退出循环 ===\n")
-            _log_query_exit("ok")
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
             answer_generated = True
             break
 
@@ -4713,6 +4710,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     
             traceback.print_exc()
             print(f"Messages 内容：{messages}")
+            _log_query_exit(query_start_time, session_id, query_summary, "fail")
             break  # 中断循环，避免同一异常重复报错，后续走循环外兜底
 
     cl.user_session.set("messages", messages)
@@ -4737,14 +4735,13 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await reasoning.close()
             await cl.Message(content="当前查询未能获得有效结果，请换个问法或稍后重试。").send()
             print(f"兜底回答调用失败：{e}")
-            _log_query_exit("fail")
+            _log_query_exit(query_start_time, session_id, query_summary, "fail")
             return
         if text:
             text = callbacks["append_followup_if_needed"](text, message.content)
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
 
-    if not cl.user_session.get("query_timing_logged"):
-        _log_query_exit("ok")
+    _log_query_exit(query_start_time, session_id, query_summary, "ok")
     await reasoning.close()
     return
