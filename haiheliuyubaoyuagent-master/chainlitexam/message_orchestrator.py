@@ -4469,7 +4469,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
     reasoning = ReasoningStep("🤔 思考过程")
     await reasoning.__aenter__()
-    await reasoning.line("正在分析您的问题，识别需要查询的气象、水文数据...")
+    await reasoning.stage("🔍 理解问题", "正在分析您的问题，识别需要关注的时间、区域和气象要素...")
 
     try:
         _compress_messages(messages)
@@ -4493,11 +4493,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         tool_names_display = "、".join(
             TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
         )
-        await reasoning.line(f"**需要查询以下数据：{tool_names_display}（共 {tool_count} 项）**")
+        await reasoning.stage("📡 查询数据", f"需要查询以下数据：{tool_names_display}（共 {tool_count} 项）")
         thinking_msg.content = f"🔧 正在查询 {tool_count} 项数据，请稍候..."
         await thinking_msg.update()
     else:
-        await reasoning.line("**已掌握足够信息，直接为您整理回答。**")
+        await reasoning.stage("✍️ 生成结论", "已掌握足够信息，直接为您整理回答。")
         thinking_msg.content = "✍️ 正在整理回答..."
         await thinking_msg.update()
 
@@ -4524,7 +4524,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         # 若 planner 已经生成完整业务化回答，直接复用，避免 answer_chain 二次生成导致格式异常
         cleaned_planner_content = _sanitize_display_text(planner_msg.content or "")
         if cleaned_planner_content.strip():
-            await reasoning.line("**正在为您整理分析结论...**")
+            await reasoning.stage("✍️ 生成结论", "正在为您整理分析结论...")
             await reasoning.close()
             await thinking_msg.remove()
             text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
@@ -4537,7 +4537,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         # 首轮 answer_chain（真实流式输出）
         try:
             _compress_messages(messages)
-            await reasoning.line("**正在为您生成分析结论...**")
+            await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
             await reasoning.close()
             await thinking_msg.remove()
             text = await asyncio.wait_for(
@@ -4572,7 +4572,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         tool_names_display = "、".join(
             TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
         )
-        await reasoning.line(f"**补充查询第 {iteration} 轮：{tool_names_display}**")
+        await reasoning.stage("📡 查询数据", f"补充查询更多数据：{tool_names_display}")
         thinking_msg.content = f"🔧 第 {iteration} 轮补充查询中..."
         await thinking_msg.update()
 
@@ -4583,7 +4583,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await cl.send_window_message(ree)
 
         if forced_final_text:
-            await reasoning.line("**数据已获取完毕，正在为您整理结论。**")
+            await reasoning.stage("✍️ 生成结论", "数据已获取完毕，正在为您整理结论。")
             await reasoning.close()
             await thinking_msg.remove()
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
@@ -4594,7 +4594,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             break
 
         if warning_bundles:
-            await reasoning.line("**预警数据已获取，正在整理预警清单并生成防范建议。**")
+            await reasoning.stage("✍️ 生成结论", "预警数据已获取，正在整理预警清单并生成防范建议。")
             await reasoning.close()
             thinking_msg.content = "✍️ 正在生成回答..."
             await thinking_msg.update()
@@ -4635,7 +4635,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             answer_generated = True
             break
 
-        await reasoning.line("**正在评估已获取的数据是否足够回答您的问题...**")
+        await reasoning.stage("✅ 评估结果", "已获取数据，正在判断能否完整回答您的问题...")
         thinking_msg.content = "🧭 正在评估是否需要补充查询..."
         await thinking_msg.update()
 
@@ -4662,7 +4662,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                 cleaned_planner_content = _sanitize_display_text(planner_msg.content or "")
                 if cleaned_planner_content.strip():
                     # 二轮 planner 已生成完整回答，直接复用，避免 answer_chain 超时/格式异常
-                    await reasoning.line("**正在整理回答...**")
+                    await reasoning.stage("✍️ 生成结论", "正在整理回答...")
                     await reasoning.close()
                     thinking_msg.content = "✍️ 正在整理回答..."
                     await thinking_msg.update()
@@ -4676,7 +4676,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
                 try:
                     _compress_messages(messages)
-                    await reasoning.line("**正在为您生成分析结论...**")
+                    await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
                     await reasoning.close()
                     thinking_msg.content = "✍️ 正在整理回答..."
                     await thinking_msg.update()
@@ -4723,7 +4723,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await thinking_msg.update()
         try:
             _compress_messages(messages)
-            await reasoning.line("**正在为您生成分析结论...**")
+            await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
             await reasoning.close()
             await thinking_msg.remove()
             text = await asyncio.wait_for(
