@@ -41,7 +41,14 @@ class ReasoningStep:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.close()
+        try:
+            await self.close()
+        except Exception as close_err:
+            if exc_type is None:
+                raise close_err
+            # 如果已有异常在传播，不要用它替换原始异常；
+            # 可以打印一条简短日志帮助排查，但不破坏原始 traceback。
+            print(f"[ReasoningStep] close failed during exception handling: {close_err}")
 
     async def stage(self, title: str, detail: str = ""):
         """开启一个业务化子阶段，前一个阶段会自动保留。"""
