@@ -21,7 +21,8 @@ except Exception:
 class ReasoningStep:
     """
     DeepSeek 式实时思考步骤：在 Chainlit 界面展示可展开的推理过程。
-    通过 append/update 实时刷新，让领导看到系统每一步在思考什么。
+    通过 append/update 实时刷新，让业务人员看到系统每一步在做什么。
+    支持业务化子阶段（stage），便于按"理解问题-查询数据-评估结果-生成结论"组织。
     """
 
     def __init__(self, name: str = "🤔 思考过程"):
@@ -29,6 +30,7 @@ class ReasoningStep:
         self.step: cl.Step | None = None
         self._buffer: str = ""
         self._closed: bool = False
+        self._current_stage: cl.Step | None = None
 
     async def __aenter__(self):
         self.step = cl.Step(name=self.name, type="llm")
@@ -39,21 +41,39 @@ class ReasoningStep:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        if self.step is not None and not self._closed:
-            self.step.output = self._buffer or "思考完成"
-            await self.step.update()
+        await self.close()
+
+    async def stage(self, title: str, detail: str = ""):
+        """开启一个业务化子阶段，前一个阶段会自动保留。"""
+        if self.step is None:
+            return None
+        if self._current_stage is not None:
+            await self._current_stage.update()
+        self._current_stage = cl.Step(name=title, parent_id=self.step.id, type="tool")
+        self._current_stage.show_input = "markdown"
+        self._current_stage.input = ""
+        self._current_stage.output = detail or ""
+        await self._current_stage.send()
+        return self._current_stage
 
     async def append(self, text: str):
-        if not text or self.step is None:
+        if not text:
             return
-        self._buffer += text
-        self.step.output = self._buffer
-        await self.step.update()
+        if self._current_stage is not None:
+            self._current_stage.output += text
+            await self._current_stage.update()
+        elif self.step is not None:
+            self._buffer += text
+            self.step.output = self._buffer
+            await self.step.update()
 
     async def line(self, text: str):
         await self.append(text + "\n")
 
     async def close(self):
+        if self._current_stage is not None:
+            await self._current_stage.update()
+            self._current_stage = None
         if self.step is not None and not self._closed:
             self._closed = True
             self.step.output = self._buffer or "思考完成"
@@ -2252,6 +2272,68 @@ TOOL_DISPLAY_NAMES = {
     "local_analyze_rainfall_by_time": "降雨量时段分析",
 }
 
+
+def _extract_historical_weather_images(data):
+    """从 historical_weather_* 工具返回中提取图片和观测文本。返回 (images, observation_text)。"""
+    img_msgs = []
+
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "image" or "image" in str(item.get("mimeType", "")):
+                src = item.get("source", item)
+                b64 = src.get("data", src.get("base64", "")) if isinstance(src, dict) else str(src)
+                if not b64:
+                    continue
+                try:
+                    if "," in b64:
+                        b64 = b64.split(",")[1]
+                    img_bytes = base64.b64decode(b64)
+                    img_msgs.append(cl.Image(content=img_bytes, name=f"chart_{len(img_msgs)}"))
+                except Exception:
+                    pass
+
+    if not img_msgs:
+        data = _unwrap_tool_observation(data)
+        if isinstance(data, dict):
+            for key, val in data.items():
+                if not isinstance(val, str):
+                    continue
+                if "png" not in val.lower() and "chart" not in key.lower() and "image" not in key.lower():
+                    continue
+                if val.startswith("data:image") or val.startswith("/9j/"):
+                    try:
+                        b64 = val.split(",")[1] if "," in val else val
+                        img_bytes = base64.b64decode(b64)
+                        img_msgs.append(cl.Image(content=img_bytes, name=f"chart_{key}"))
+                    except Exception:
+                        pass
+                elif val.endswith(".png") and os.path.isfile(val):
+                    with open(val, "rb") as f:
+                        img_msgs.append(cl.Image(content=f.read(), name=f"chart_{key}"))
+
+            if not img_msgs:
+                for m in re.finditer(r'[\w\-]+\.png', str(data)):
+                    fname = m.group()
+                    for base_url in ["http://10.226.107.133:8000",
+                                     "http://10.226.107.133:8000/output",
+                                     "http://10.226.107.133:8000/files"]:
+                        try:
+                            resp = httpx.get(f"{base_url}/{fname}", timeout=5)
+                            if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+                                img_msgs.append(cl.Image(content=resp.content, name=f"chart_{fname.replace('.','_')}"))
+                                break
+                        except Exception:
+                            continue
+
+    if img_msgs:
+        return img_msgs, "（系统消息：历史极端天气图表已生成并展示）"
+    if isinstance(data, dict) and data.get("text"):
+        return [], data["text"][:2000]
+    return [], str(data)[:2000]
+
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks):
     ree = None
     forced_final_text = None
@@ -2370,68 +2452,9 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         else:
                             observation_text = "已获取降水实况图数据。"
                     elif tool_name.startswith("historical_weather_"):
-                        data = observation
-                        img_msgs = []
-                        # MCP 可能返回图片内容（type=image），不一定是文本
-                        if isinstance(data, list):
-                            for item in data:
-                                if isinstance(item, dict):
-                                    if item.get("type") == "image" or "image" in str(item.get("mimeType", "")):
-                                        src = item.get("source", item)
-                                        if isinstance(src, dict):
-                                            b64 = src.get("data", src.get("base64", ""))
-                                        else:
-                                            b64 = str(src)
-                                        if b64:
-                                            try:
-                                                if "," in b64:
-                                                    b64 = b64.split(",")[1]
-                                                img_bytes = base64.b64decode(b64)
-                                                img_msgs.append(cl.Image(content=img_bytes, name=f"chart_{len(img_msgs)}"))
-                                            except Exception:
-                                                pass
-                        # 也尝试从 text 中解析 base64/文件路径
-                        if not img_msgs:
-                            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-                                try:
-                                    data = json.loads(data[0]["text"])
-                                except Exception:
-                                    data = data[0]["text"]
-                            if isinstance(data, dict):
-                                for key, val in data.items():
-                                    if isinstance(val, str) and ("png" in val.lower() or "chart" in key.lower() or "image" in key.lower()):
-                                        if val.startswith("data:image") or val.startswith("/9j/"):
-                                            try:
-                                                b64 = val.split(",")[1] if "," in val else val
-                                                img_bytes = base64.b64decode(b64)
-                                                img_msgs.append(cl.Image(content=img_bytes, name=f"chart_{key}"))
-                                            except Exception:
-                                                pass
-                                        elif val.endswith(".png") and os.path.isfile(val):
-                                            with open(val, "rb") as f:
-                                                img_msgs.append(cl.Image(content=f.read(), name=f"chart_{key}"))
-                                # 兜底：从文本中提取 .png 文件名，尝试从 MCP 服务器 HTTP 下载
-                                if not img_msgs:
-                                    obs_text = str(data)
-                                    for m in re.finditer(r'[\w\-]+\.png', obs_text):
-                                        fname = m.group()
-                                        for base_url in ["http://10.226.107.133:8000",
-                                                         "http://10.226.107.133:8000/output",
-                                                         "http://10.226.107.133:8000/files"]:
-                                            try:
-                                                resp = httpx.get(f"{base_url}/{fname}", timeout=5)
-                                                if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
-                                                    img_msgs.append(cl.Image(content=resp.content, name=f"chart_{fname.replace('.','_')}"))
-                                                    break
-                                            except Exception:
-                                                continue
+                        img_msgs, observation_text = _extract_historical_weather_images(observation)
                         if img_msgs:
                             await cl.Message(content="📊 图表已生成：", elements=img_msgs).send()
-                            observation_text = "（系统消息：历史极端天气图表已生成并展示）"
-                        elif isinstance(data, dict) and data.get("text"):
-                            observation_text = data["text"][:2000]
-                        else:
-                            observation_text = str(data)[:2000]
                     else:
                         observation_text = callbacks["tool_observation_to_text"](observation)
 
