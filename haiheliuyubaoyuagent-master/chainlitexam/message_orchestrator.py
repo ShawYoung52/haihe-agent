@@ -33,6 +33,7 @@ class ReasoningStep:
     async def __aenter__(self):
         self.step = cl.Step(name=self.name, type="llm")
         self.step.show_input = "markdown"
+        self.step.input = ""
         self.step.output = ""
         await self.step.send()
         return self
@@ -1054,14 +1055,6 @@ def _is_warning_fact_query(user_text: str) -> bool:
     return "预警" in text
 
 
-def _warning_tool_display_name(tool_name: str) -> str:
-    return {
-        "get_effective_warning_info": "生效预警信息",
-        "get_history_warning_info": "历史预警信息",
-        "get_today_warning_summary": "今日预警动态",
-        "get_national_warning_info": "中央气象台预警信息",
-    }.get(tool_name, tool_name)
-
 
 def _normalize_warning_route(route: dict) -> dict:
     allowed = {
@@ -1227,7 +1220,7 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
             await thinking_msg.remove()
             return False
 
-        display_names = "、".join(_warning_tool_display_name(name) for name, _ in selected_tools)
+        display_names = "、".join(TOOL_DISPLAY_NAMES.get(name, name) for name, _ in selected_tools)
         thinking_msg.content = f"🔔 正在调用{display_names}..."
         await thinking_msg.update()
 
@@ -1239,11 +1232,11 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
             for name, tool in selected_tools:
                 args = _warning_tool_args(name, route)
                 print(f"[WarningFastPath] 调用 {name} 参数: {json.dumps(args, ensure_ascii=False)}")
-                step.output += f"📡 正在调用{_warning_tool_display_name(name)}...\n"
+                step.output += f"📡 正在调用{TOOL_DISPLAY_NAMES.get(name, name)}...\n"
                 await step.update()
                 result = await asyncio.wait_for(tool.ainvoke(args), timeout=30)
                 bundles.append(_build_warning_bundle(name, result))
-                step.output += f"✅ {_warning_tool_display_name(name)}查询完成。\n"
+                step.output += f"✅ {TOOL_DISPLAY_NAMES.get(name, name)}查询完成。\n"
                 await step.update()
 
         thinking_msg.content = "✍️ 正在生成回答..."
@@ -1266,6 +1259,23 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
         except Exception:
             pass
         return False
+
+
+# 内部数据模式：IP地址、端口、凭据片段等不应出现在用户可见文本中
+_INTERNAL_DATA_PATTERNS = [
+    (re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d{2,5})?\b'), '[内部地址]'),
+    (re.compile(r'sk-[a-zA-Z0-9]{20,}'), '[已隐藏]'),
+    (re.compile(r'(api[_-]?key|api[_-]?secret|password|token)\s*[:=]\s*\S+', re.IGNORECASE), r'\1=[已隐藏]'),
+]
+
+
+def _scrub_internal_data(text: str) -> str:
+    """移除或替换可能泄露内部基础设施信息的字符串。"""
+    if not isinstance(text, str):
+        return text
+    for pattern, replacement in _INTERNAL_DATA_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _sanitize_display_text(text: str) -> str:
@@ -2442,7 +2452,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     # 控制台保留详细错误，UI 只展示友好提示
                     print(f"[工具错误] {tool_name}: {e}")
                     await cl.Message(content="数据查询遇到问题，请稍后重试。").send()
-                    observation_text = f"工具执行失败：{str(e)}"
+                    observation_text = _scrub_internal_data(f"工具执行失败：{str(e)}")
                     tool_step.output = "查询失败"
 
                 messages.append(
@@ -4378,7 +4388,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     think_content, cleaned_content = _extract_think_content(planner_msg.content)
     if think_content:
         await reasoning.line("**分析思路：**")
-        await reasoning.append(think_content)
+        await reasoning.append(_sanitize_display_text(think_content))
         planner_msg.content = cleaned_content
 
     if planner_msg.tool_calls:
@@ -4541,7 +4551,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             think_content, cleaned_content = _extract_think_content(planner_msg.content)
             if think_content:
                 await reasoning.line("**进一步分析：**")
-                await reasoning.append(think_content)
+                await reasoning.append(_sanitize_display_text(think_content))
                 planner_msg.content = cleaned_content
 
             print(f"\n=== 第 {iteration} 轮 Planner 调用结果 ===")
