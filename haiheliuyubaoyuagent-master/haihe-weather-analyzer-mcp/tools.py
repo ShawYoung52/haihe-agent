@@ -1,4 +1,4 @@
-﻿"""降雨数据查询工具集合"""
+"""降雨数据查询工具集合"""
 import os
 import threading
 import configparser

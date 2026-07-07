@@ -1,4 +1,4 @@
-﻿"""
+"""
 应急响应查询/确认接口
 
 POST /api/emergency/observation  实况判定（传 times）

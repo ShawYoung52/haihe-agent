@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 按时间窗批量调用实况应急判定（与 emergency_http_server /emergency/observation 同源逻辑）。

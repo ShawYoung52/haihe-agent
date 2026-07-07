@@ -1,4 +1,4 @@
-﻿"""
+"""
 NOTE: This MusicClient implementation is NOT used by the main MCP server.
 The canonical implementation is in haihe_mcp_tools.py (imported by tools.py).
 This file is kept for standalone CLI/scripts only; do not modify independently.

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 在服务器上直接测试 MCP 工具（不启动 HTTP/SSE）。

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 向 config.ini 中 [postgres] 所指向的库（通常为测试库）写入应急「演示数据」，供前端联调：

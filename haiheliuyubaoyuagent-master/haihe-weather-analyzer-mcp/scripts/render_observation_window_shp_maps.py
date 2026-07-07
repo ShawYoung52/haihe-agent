@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 按时间窗批量生成“实况应急验证”产品图（基于 shapefile 边界裁剪）。

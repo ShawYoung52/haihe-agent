@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 把 station_rain_api 导出结果转换为 rainfall_timeline 风格数据（按时次生成）。

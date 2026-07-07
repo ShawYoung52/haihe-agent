@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 内网站点降雨数据导出脚本（通过实况接口，导出到服务器本地）
