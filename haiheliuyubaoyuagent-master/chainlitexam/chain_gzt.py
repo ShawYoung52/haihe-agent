@@ -763,12 +763,11 @@ async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None)
 
 
 async def _process_planner_stream(chain, input_dict, reasoning_step, config):
-    """流式处理 planner 输出：解析 <think> 标签实时展示，累积非 think 内容。"""
-    inside_think = False
-    think_buf = ""
+    """流式处理 planner 输出：所有 token 实时展示为思考过程。"""
     content_buf = ""
     tool_calls_data = []
     final_msg = None
+    first_token = True
 
     async for event in chain.astream_events(input_dict, config=config, version="v2"):
         kind = event.get("event", "")
@@ -780,35 +779,10 @@ async def _process_planner_stream(chain, input_dict, reasoning_step, config):
             token = getattr(chunk, "content", None)
             if not token:
                 continue
-
-            remaining = token
-            while remaining:
-                if not inside_think:
-                    idx = remaining.find("<think>")
-                    if idx == -1:
-                        content_buf += _strip_think_newline_prefix(remaining)
-                        break
-                    else:
-                        content_buf += _strip_think_newline_prefix(remaining[:idx])
-                        remaining = remaining[idx + len("<think>"):]
-                        inside_think = True
-                        think_buf = ""
-                else:
-                    idx = remaining.find("</think>")
-                    if idx == -1:
-                        think_buf += remaining
-                        if think_buf.strip():
-                            await reasoning_step.append(think_buf)
-                            think_buf = ""
-                        break
-                    else:
-                        think_buf += remaining[:idx]
-                        if think_buf.strip():
-                            await reasoning_step.append(think_buf)
-                            think_buf = ""
-                        remaining = remaining[idx + len("</think>"):]
-                        inside_think = False
-                        await reasoning_step.line("")
+            if first_token:
+                first_token = False
+            content_buf += token
+            await reasoning_step.append(token)
 
         elif kind == "on_chat_model_end":
             output = event.get("data", {}).get("output")
@@ -826,9 +800,6 @@ async def _process_planner_stream(chain, input_dict, reasoning_step, config):
                 if output is not None and hasattr(output, "content"):
                     content_buf = getattr(output, "content", content_buf) or content_buf
                     final_msg = output
-
-    if inside_think and think_buf.strip():
-        await reasoning_step.append(think_buf)
 
     msg = AIMessage(content=content_buf.strip() if content_buf else "")
     if tool_calls_data:
@@ -850,14 +821,6 @@ async def astream_planner_think(chain, input_dict, reasoning_step, config: Runna
             print(f"[astream_planner_think] 第 {attempt + 1} 次调用超时，准备重试...")
             await asyncio.sleep(1)
     raise last_exc
-
-
-def _strip_think_newline_prefix(text: str) -> str:
-    """去除 <think> 紧跟的单个换行符，保持内容整洁。"""
-    if text.startswith("\n"):
-        return text[1:]
-    return text
-
 
 async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None, chunk_size: int = 32, delay_ms: float | None = None):
     """
