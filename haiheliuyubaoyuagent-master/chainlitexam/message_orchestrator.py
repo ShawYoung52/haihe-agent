@@ -1714,7 +1714,7 @@ async def _handle_fast_path_error(
 ) -> bool:
     """统一 fast path 错误出口：timeout 时提醒用户并记录历史，一般异常打印回溯。返回 True 表示已处理。"""
     session_id = cl.user_session.get("id") or ""
-    query_summary = cl.user_session.get("last_query") or ""
+    query_summary = user_text or cl.user_session.get("last_query") or ""
     query_start_time = cl.user_session.get("query_start_time")
     try:
         await thinking_msg.remove()
