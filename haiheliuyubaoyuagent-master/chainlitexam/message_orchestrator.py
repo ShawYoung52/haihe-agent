@@ -4392,7 +4392,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
     try:
         _compress_messages(messages)
-        planner_msg = await callbacks["ainvoke_chain"](planner_chain, {"messages": messages})
+        planner_msg = await callbacks["astream_planner_think"](
+            planner_chain, {"messages": messages}, reasoning
+        )
         planner_msg = _ensure_tool_calls_from_content(planner_msg)
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
@@ -4403,13 +4405,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         traceback.print_exc()
         cl.user_session.set("messages", messages)
         return
-
-    # 捕获模型自带的 <think> 推理内容（DeepSeek/QwQ 等模型风格）
-    think_content, cleaned_content = _extract_think_content(planner_msg.content)
-    if think_content:
-        await reasoning.line("**分析思路：**")
-        await reasoning.append(_sanitize_display_text(think_content))
-        planner_msg.content = cleaned_content
 
     if planner_msg.tool_calls:
         tool_count = len(planner_msg.tool_calls)
@@ -4564,15 +4559,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
         try:
             _compress_messages(messages)
-            planner_msg = await callbacks["ainvoke_chain"](planner_chain, {"messages": messages})
+            planner_msg = await callbacks["astream_planner_think"](
+                planner_chain, {"messages": messages}, reasoning
+            )
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
-
-            # 再次捕获可能的 <think> 内容
-            think_content, cleaned_content = _extract_think_content(planner_msg.content)
-            if think_content:
-                await reasoning.line("**进一步分析：**")
-                await reasoning.append(_sanitize_display_text(think_content))
-                planner_msg.content = cleaned_content
 
             print(f"\n=== 第 {iteration} 轮 Planner 调用结果 ===")
             print(f"Planner Message: {planner_msg}")

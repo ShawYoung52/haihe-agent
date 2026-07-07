@@ -762,6 +762,101 @@ async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None)
     raise last_exc
 
 
+async def astream_planner_think(chain, input_dict, reasoning_step, config: RunnableConfig | None = None):
+    """流式调用模型，实时解析 <think> 标签并展示思考过程。
+
+    在 <think>...</think> 内的内容实时追加到 reasoning_step（前端可见），
+    标签外的内容累积为最终 AIMessage.content。
+    支持带 tool_calls 的响应。
+    """
+    inside_think = False
+    think_buf = ""
+    content_buf = ""
+    tool_calls_data = []
+    final_msg = None
+
+    async for event in chain.astream_events(input_dict, config=config, version="v2"):
+        kind = event.get("event", "")
+
+        if kind == "on_chat_model_stream":
+            chunk = event.get("data", {}).get("chunk")
+            if chunk is None:
+                continue
+            token = getattr(chunk, "content", None)
+            if not token:
+                continue
+
+            # <think> 标签状态机
+            remaining = token
+            while remaining:
+                if not inside_think:
+                    # 查找 <think> 开始标签
+                    idx = remaining.find("<think>")
+                    if idx == -1:
+                        # 无可开头的 think内容 → 全部算content
+                        content_buf += _strip_think_newline_prefix(remaining)
+                        break
+                    else:
+                        content_buf += _strip_think_newline_prefix(remaining[:idx])
+                        remaining = remaining[idx + len("<think>"):]
+                        inside_think = True
+                        think_buf = ""
+                else:
+                    # 查找 </think> 结束标签
+                    idx = remaining.find("</think>")
+                    if idx == -1:
+                        think_buf += remaining
+                        if think_buf.strip():
+                            await reasoning_step.append(think_buf)
+                            think_buf = ""
+                        break
+                    else:
+                        think_buf += remaining[:idx]
+                        if think_buf.strip():
+                            await reasoning_step.append(think_buf)
+                            think_buf = ""
+                        remaining = remaining[idx + len("</think>"):]
+                        inside_think = False
+                        await reasoning_step.line("")
+
+        elif kind == "on_chat_model_end":
+            # 提取 tool_calls
+            output = event.get("data", {}).get("output")
+            if output is not None:
+                tc = getattr(output, "tool_calls", None)
+                if tc:
+                    tool_calls_data = tc
+                if hasattr(output, "content") and output.content:
+                    content_buf = output.content
+                final_msg = output
+
+        # 也处理 on_chain_end 以防 on_chat_model_end 未触发
+        elif kind == "on_chain_end":
+            if final_msg is None:
+                output = event.get("data", {}).get("output")
+                if output is not None and hasattr(output, "content"):
+                    content_buf = getattr(output, "content", content_buf) or content_buf
+                    final_msg = output
+
+    # 关闭未闭合的 <think>
+    if inside_think and think_buf.strip():
+        await reasoning_step.append(think_buf)
+
+    # 构造返回的 AIMessage
+    from langchain_core.messages import AIMessage
+    return AIMessage(
+        content=content_buf.strip() if content_buf else "",
+        tool_calls=tool_calls_data if tool_calls_data else None,
+    )
+
+
+def _strip_think_newline_prefix(text: str) -> str:
+    """去除 <think> 紧跟的单个换行符，保持内容整洁。"""
+    if text.startswith("\n"):
+        return text[1:]
+    return text
+
+
 async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None, chunk_size: int = 32, delay_ms: float | None = None):
     """
     统一的前端流式输出：
@@ -2277,7 +2372,7 @@ async def _init_runtime_session(messages_seed=None):
 
     planner_llm = ChatOpenAI(
         model="Qwen3.6-27B",
-        streaming=False,
+        streaming=True,
         temperature=0.7,
         openai_api_base="http://10.226.188.156:8000/v1/",
         openai_api_key="EMPTY",
@@ -3518,6 +3613,7 @@ async def on_message(message: cl.Message):
         "user_forbids_followup": _user_forbids_followup,
         "make_followup_question": _make_followup_question,
         "ainvoke_chain": ainvoke_chain,
+        "astream_planner_think": astream_planner_think,
         "astream_answer_chain_to_message": astream_answer_chain_to_message,
         "should_force_admin_units_reply": _should_force_admin_units_reply,
         "should_force_partition_table_reply": _should_force_partition_table_reply,
