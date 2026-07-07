@@ -1,41 +1,45 @@
-# Task Plan: "本周末天气如何" 路由问题修复
+# Task Plan: 问答智能体快速路径冲突修复
 
 **创建时间:** 2026-07-07
-i**状态:** complete
+**状态:** complete
 
-## 目标
+## 已完成
 
-修复 "本周末天气如何" 被错误路由到 POI/观测站查询的问题。用户问周末天气应该直接返回周末天气预报，而非单一观测站实况数据。
+### Phase 1: 周末快速路径放宽流域限制 ✓
+- 非流域周末查询默认查天津，流域查询保持不变
+- 新增"如何"/"怎么样"/"预报"/"雨"等天气意图关键词
 
-## 根因分析
+### Phase 2: DecisionWeather 调度位置修正 ✓  
+- 从位置 8 移到位置 17（general_weather 之后）
+- prefilter 新增时间词排除（"周末"/"今天"/"明天"等）
 
-`_try_weekend_activity_fast_path` (line 3252) 有三个过于严格的前置条件：
+### Phase 3: 快速路径冲突审查 ✓
+- 审计 17 个快速路径触发条件
+- 识别 7 个冲突点，修复 3 个关键问题
+- general_weather 排除列表新增"周末"/"周六"/"周日"
 
-| 条件 | 关键词要求 | "本周末天气如何" | 结果 |
-|------|-----------|-----------------|------|
-| 1. 周末关键词 | "周末"/"周六"/"周日" | 含 "周末" | ✓ |
-| 2. 流域范围 | **必须含**"海河流域"/"海河"/"流域" | 无 | ✗ → 返回 False |
-| 3. 活动意图 | "户外"/"出行"/"天气"等 或 `适合.{0,6}吗` | 含 "天气" 但 pattern 不匹配 | 未到达 |
+### Phase 4: 验证 ✓
+- Python 语法通过
+- 调度顺序：weekend(13) → basin(14) → general(16) → decision_weather(17)
 
-因为条件2失败，快速路径直接返回 False，后续路径链最终走到 Planner LLM，LLM 调用了 POI/观测站工具。
-
-## Phases
-
-### Phase 1: 周末快速路径放宽流域限制
-- **文件:** `chainlitexam/message_orchestrator.py`
-- **目标:** "本周末天气如何" 不含流域关键词时，默认查天津周末天气
-- **状态:** pending
-
-### Phase 2: 周末快速路径意图识别扩展
-- **文件:** `chainlitexam/message_orchestrator.py`
-- **目标:** "如何"/"怎么样"/"预报"/"什么天气" 也视为天气查询意图
-- **状态:** pending
-
-### Phase 3: 验证快速路径不冲突
-- **文件:** 检查全部14+快速路径的执行顺序
-- **目标:** 确保修复后不影响其他快速路径
-- **状态:** pending
-
-### Phase 4: Superpowers 验证
-- **文件:** 调用 `superpowers:verification-before-completion`
-- **状态:** pending
+## 最终调度顺序
+```
+ 1. rainfall_img
+ 2. emergency_response  
+ 3. affected_river_network
+ 4. river_plot
+ 5. rainfall_analysis
+ 6. city_avg_rainfall
+ 7. warning_fact
+ 8. rain_duration
+ 9. today_rainfall
+10. weekly_forecast
+11. heavy_rain_check
+12. subbasin_forecast
+13. basin_areal_rainfall
+14. weekend_activity
+15. basin_weather
+16. water_level
+17. general_weather
+18. decision_weather    ← 从 pos 8 移至此
+```
