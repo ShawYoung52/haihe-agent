@@ -1,6 +1,6 @@
 # test_grib2nc.py
 
-from commonUtils import buildOverview
+from utils.commonUtils import buildOverview
 
 
 def batch_process_aifs_rainfall_to_tif(input_dir, output_dir, shp_path=None):

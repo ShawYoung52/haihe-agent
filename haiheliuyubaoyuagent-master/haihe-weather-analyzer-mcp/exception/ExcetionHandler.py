@@ -1,13 +1,14 @@
-# bp_exception = Blueprint('exception', __name__)
-from flask import current_app as app
-
-from App.dto.Result import error
 import logging
 
 logger = logging.getLogger(__name__)
 """
     异常处理
 """
+
+
+def error(message="", status_code=500):
+    """返回标准错误响应。"""
+    return {"error": str(message), "status_code": status_code}
 
 
 def handle_business_exception(e):
