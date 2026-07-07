@@ -65,6 +65,8 @@ class ReasoningStep:
 
     async def stage(self, title: str, detail: str = ""):
         """开启一个业务化子阶段，前一个阶段会自动保留。"""
+        if self._closed:
+            return None
         if self.step is None:
             return None
         if self._current_stage is not None:
@@ -77,6 +79,8 @@ class ReasoningStep:
         return self._current_stage
 
     async def append(self, text: str):
+        if self._closed or self.step is None:
+            return
         if not text:
             return
         if self._current_stage is not None:
@@ -4585,8 +4589,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await cl.send_window_message(ree)
 
         if forced_final_text:
-            await reasoning.stage("✅ 评估结果", "已获取足够数据，准备生成定制化结论。")
-            await reasoning.stage("✍️ 生成结论", "正在为您整理定制化结论...")
+            await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
             await thinking_msg.remove()
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
             await reasoning.close()
@@ -4597,8 +4600,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             break
 
         if warning_bundles:
-            await reasoning.stage("✅ 评估结果", "预警数据已获取，数据完整。")
-            await reasoning.stage("✍️ 生成结论", "正在整理预警清单并生成防范建议...")
+            await reasoning.stage("✅ 评估结果", "预警数据已获取完整，正在整理预警清单并生成防范建议...")
             thinking_msg.content = "✍️ 正在生成回答..."
             await thinking_msg.update()
             try:
@@ -4693,7 +4695,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                     await reasoning.close()
                 except Exception as e:
                     await reasoning.line(f"❌ 循环生成回答失败：{str(e)[:200]}")
-                    await reasoning.close()
+                    # 不 close，让循环外兜底继续复用 reasoning
                     print(f"Answer 循环调用失败：{e}")
                     # 不 break，继续走循环外兜底
                 else:
@@ -4731,7 +4733,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await thinking_msg.update()
         try:
             _compress_messages(messages)
-            await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
+            if not reasoning._closed:
+                await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
             await thinking_msg.remove()
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
