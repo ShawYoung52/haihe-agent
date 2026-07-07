@@ -4,64 +4,55 @@ Outputs `[TOOL_TIMING]` and `[QUERY_TIMING]` lines to the console so that
 performance metrics can be collected from logs.
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
-
 
 class TimingLogger:
     """Lightweight helper for logging timing metrics."""
 
     @staticmethod
-    def _safe_summary(text: str, max_len: int = 40) -> str:
+    def _safe_summary(text: str | None, max_len: int = 40) -> str:
         """Clean whitespace and truncate ``text`` to ``max_len`` characters."""
         if text is None:
             text = ""
         text = str(text)
         cleaned = " ".join(text.split())
-        if len(cleaned) > max_len:
-            if max_len <= 3:
-                return "..."
-            cleaned = cleaned[: max_len - 3] + "..."
-        return cleaned
+        if max_len <= 0:
+            return ""
+        if len(cleaned) <= max_len:
+            return cleaned
+        if max_len <= 3:
+            return "." * max_len
+        return cleaned[: max_len - 3] + "..."
 
     @staticmethod
     def log_tool(
-        session_id: str,
-        query_summary: str,
-        tool_name: str,
+        session_id: str | None,
+        query_summary: str | None,
+        tool_name: str | None,
         elapsed: float,
-        status: str = "ok",
+        status: str | None = "ok",
     ) -> None:
         """Log a single tool invocation timing."""
         session_id = session_id or "unknown"
         query_summary = TimingLogger._safe_summary(query_summary)
         tool_name = tool_name or "unknown"
         status = status or "ok"
-        logger.info(
-            "[TOOL_TIMING] session=%s query=\"%s\" tool=%s elapsed=%ss status=%s",
-            session_id,
-            query_summary,
-            tool_name,
-            elapsed,
-            status,
+        print(
+            f"[TOOL_TIMING] session={session_id} query=\"{query_summary}\" "
+            f"tool={tool_name} elapsed={elapsed}s status={status}"
         )
 
     @staticmethod
     def log_query(
-        session_id: str,
-        query_summary: str,
+        session_id: str | None,
+        query_summary: str | None,
         total_elapsed: float,
-        status: str = "ok",
+        status: str | None = "ok",
     ) -> None:
         """Log the total elapsed time for a user query."""
         session_id = session_id or "unknown"
         query_summary = TimingLogger._safe_summary(query_summary)
         status = status or "ok"
-        logger.info(
-            "[QUERY_TIMING] session=%s query=\"%s\" total_elapsed=%ss status=%s",
-            session_id,
-            query_summary,
-            total_elapsed,
-            status,
+        print(
+            f"[QUERY_TIMING] session={session_id} query=\"{query_summary}\" "
+            f"total_elapsed={total_elapsed}s status={status}"
         )
