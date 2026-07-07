@@ -1,38 +1,44 @@
 [
   {
     "file": "chainlitexam/message_orchestrator.py",
-    "line": 2447,
-    "summary": "工具失败错误文本通过ToolMessage进入LLM上下文，LLM可能在用户可见的回复中复述内部数据（IP、主机名等）",
-    "failure_scenario": "MCP工具调用失败，异常消息包含\"Connection refused to 10.226.107.133:8000\"。该文本存入ToolMessage→LLM在下一轮将其作为回答的一部分输出→前端业务人员在cot=full模式下看到内部IP地址。_sanitize_display_text只过滤XML/JSON工具调用标记，不过滤IP、主机名、凭据模式。forced_final_text路径甚至绕过了这个不充分的清洗。"
+    "line": 4333,
+    "summary": "DecisionWeather 在周末/流域天气路径前拦截所有含'天气'关键词的查询，LLM 可能误判为 POI 查询",
+    "failure_scenario": "查询'本周末天气如何'→_decision_weather_prefilter('天气')匹配→调用LLM提取is_decision_weather→LLM误判'本周末如何'为地点→search_poi搜到'周末'→返回观测站数据。DecisionWeather(pos 8)在weekend_activity(pos 15)、basin_weather(pos 16)、general_weather(pos 18)之前执行。修复：将DecisionWeather移到通用天气路径之后，或在prefilter中排除时间词。"
   },
   {
     "file": "chainlitexam/message_orchestrator.py",
-    "line": 4420,
-    "summary": "模型<think>思考内容未经_sanitize_display_text清洗直接追加到用户可见的reasoning步骤",
-    "failure_scenario": "DeepSeek/QwQ模型将工具调用推理和参数schema放入<think>...</think>块。_extract_think_content提取原始内容后直接传给reasoning.append()，绕过_sanitize_display_text。用户看到原始JSON工具调用格式、参数schema等内部信息。两处（首轮line 4420，循环line 4583）均未清洗。"
+    "line": 282,
+    "summary": "DecisionWeather prefilter 只做关键词匹配无意图验证，浪费 LLM 调用且误拦截概率高",
+    "failure_scenario": "任何含'天气''降雨''预报''暴雨'的查询（如'今天天气''海河流域暴雨'）都触发DecisionWeather→调用LLM提取is_decision_weather→即使LLM正确拒绝，也已浪费一次LLM调用。建议增加POI意图前置判断：必须有机构/地名模式（如'XX学校''XX场馆'）才进入LLM判断。"
   },
   {
     "file": "chainlitexam/message_orchestrator.py",
-    "line": 1060,
-    "summary": "_warning_tool_display_name()与TOOL_DISPLAY_NAMES对同一预警工具显示不同中文名称",
-    "failure_scenario": "get_effective_warning_info在预警快速路径显示为\"生效预警信息\"，在通用工具轮次显示为\"查询当前生效预警\"。get_today_warning_summary在预警路径显示为\"今日预警动态\"，在通用路径显示为\"查询今日预警概况\"。业务人员同一工具看到两个不同名称，造成混淆。"
+    "line": 4340,
+    "summary": "'暴雨'关键词同时触发5个快速路径（affected_river/decision_weather/heavy_rain_check/basin_weather/general_weather），顺序保护但中场拦截风险高",
+    "failure_scenario": "'近期有暴雨吗'→affected_river(需要'暴雨影响'+'河流'→不匹配)→decision_weather(prefilter匹配'暴雨')→调用LLM判断→可能误判→search_poi。正确路径应为heavy_rain_check(pos 12)，但因decision_weather在pos 8提前拦截。"
+  },
+  {
+    "file": "chainlitexam/fast_paths/poi_weather_fast_paths.py",
+    "line": 33,
+    "summary": "POI天气快速路径拦截_general_weather_fast_path 时过于宽泛，仅需'实况'或'天气'+长度≥4",
+    "failure_scenario": "查询'今天天气如何'→_try_general_weather_fast_path→内含poi_weather_fast_paths的_is_poi_weather_question检查→'天气'在文本+len≥4→触发POI定位→可能返回错误的观测站数据而非天气预报。"
+  },
+  {
+    "file": "chainlitexam/fast_paths/rainfall_fast_paths.py",
+    "line": 315,
+    "summary": "_is_max_station 和 _try_basin_areal_rainfall_fast_path 对'站点'关键词互斥但排除逻辑不一致",
+    "failure_scenario": "'哪个站点降雨量最大'→_try_basin_areal_rainfall_fast_path检查到'站点'关键词→触发站点排除返回False→正确落到_is_max_station。但'子流域自动站雨量'同时含'子流域'(应basin_areal)和'自动站'(应max_station)→basin_areal被'自动站'排除→max_station被'子流域'排除→双重排除掉到Planner LLM。"
   },
   {
     "file": "chainlitexam/message_orchestrator.py",
-    "line": 34,
-    "summary": "ReasoningStep设置show_input='markdown'但未显式设置step.input，依赖Chainlit版本默认值可能泄露内部数据",
-    "failure_scenario": "在某些Chainlit版本中，未设置的step.input配合show_input='markdown'可能渲染模型的原始输入（包含完整消息历史、工具观察结果）。在cot='full'模式下，该内容对前端用户可见。"
+    "line": 4346,
+    "summary": "_try_weekly_forecast_fast_path 仅覆盖'一周天气''7天天气'等精确短语，未覆盖'未来几天'等变体",
+    "failure_scenario": "查询'未来几天的天气怎么样'→weekly_forecast关键词不匹配→所有快速路径失败→落到Planner LLM→LLM可能误调其他工具而非正确执行滚动预报。"
   },
   {
     "file": "chainlitexam/message_orchestrator.py",
-    "line": 2232,
-    "summary": "TOOL_DISPLAY_NAMES静态字典缺少新工具检测，新增MCP工具将静默显示原始英文名称",
-    "failure_scenario": "在MCP服务器中新增工具（如get_flood_risk_zones），TOOL_DISPLAY_NAMES中没有对应条目。.get()回退到原始名称\"get_flood_risk_zones\"，直接显示在业务人员的思考步骤和查询状态中，而非中文业务名称。"
-  },
-  {
-    "file": "chainlitexam/message_orchestrator.py",
-    "line": 1603,
-    "summary": "工具耗时检测仅覆盖_run_tool_round路径，20+快速路径函数的tool.ainvoke()调用均未计入",
-    "failure_scenario": "业务人员问\"今天天津降雨情况\"→命中_try_today_rainfall_fast_path快速路径→直接调用tool.ainvoke()→后端无[工具耗时]日志输出。性能优化时无法定位快速路径中的慢查询，耗时统计不完整。"
+    "line": 4362,
+    "summary": "周末快速路径新增的非流域分支与 basin_weather 和 general_weather 的天津天气查询职责重叠",
+    "failure_scenario": "'天津周末天气'→weekend_activity(天津+周末天气)→basin_weather(需'海河流域'→不匹配)→general_weather(需要'下雨'/'降雨'等→'天气'不匹配general_weather关键词)→剩weekend_activity处理。但如果未来有人改general_weather使'天气'不再被排除，则两个路径会竞争同一查询。建议明确职责边界。"
   }
 ]
