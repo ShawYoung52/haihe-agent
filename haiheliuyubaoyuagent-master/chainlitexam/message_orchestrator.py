@@ -9,6 +9,7 @@ import math
 import httpx
 import chainlit as cl
 from datetime import datetime, timedelta
+from typing import Any
 from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
 
 try:
@@ -1628,9 +1629,9 @@ def _build_hour_tolerant_args(tool_args):
     return new_args, old_hour, new_hour
 
 
-async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step):
+async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step, user_text: str = "") -> tuple[Any, float]:
     session_id = cl.user_session.get("id") or ""
-    query_summary = cl.user_session.get("last_query") or ""
+    query_summary = TimingLogger._safe_summary(user_text) if user_text else ""
 
     start_time = time.time()
     try:
@@ -1651,17 +1652,23 @@ async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step):
         if not retry_args:
             raise
 
-        step.input += (
+        step.input = (step.input or "") + (
             f"⚠️ 检测到小时参数不合法：{old_hour}，"
             f"已自动纠偏为 {new_hour} 并重试。\n"
         )
         print(f"[容错重试] {tool_name}: hour {old_hour} -> {new_hour}")
         retry_start = time.time()
-        result = await tool.ainvoke(retry_args)
-        retry_elapsed = time.time() - retry_start
-        print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s")
-        TimingLogger.log_tool(session_id, query_summary, f"{tool_name}(retry)", retry_elapsed, status="ok")
-        return result, retry_elapsed
+        try:
+            result = await tool.ainvoke(retry_args)
+            retry_elapsed = time.time() - retry_start
+            print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s")
+            TimingLogger.log_tool(session_id, query_summary, f"{tool_name}(retry)", retry_elapsed, status="ok")
+            return result, retry_elapsed
+        except Exception:
+            retry_elapsed = time.time() - retry_start
+            print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s (失败)")
+            TimingLogger.log_tool(session_id, query_summary, f"{tool_name}(retry)", retry_elapsed, status="fail")
+            raise
 
 
 async def _render_river_plot_with_overlay(tools, river_observation, river_name: str, callbacks):
@@ -2391,7 +2398,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     tool_step.output = f"❌ {observation_text}"
                     continue
                 try:
-                    observation, tool_elapsed = await _invoke_tool_with_tolerance(tool_name, tool, tool_args, tool_step)
+                    observation, tool_elapsed = await _invoke_tool_with_tolerance(tool_name, tool, tool_args, tool_step, user_text=user_text)
                     if tool_name == "analyze_rainstorm_impact":
                         observation = await callbacks["enrich_with_impact_time_tool"](
                             observation=observation,
