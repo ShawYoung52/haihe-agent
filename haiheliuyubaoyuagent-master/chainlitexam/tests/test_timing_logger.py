@@ -70,7 +70,7 @@ def test_log_query_format():
 def test_summary_truncation():
     long_query = "这是" + "一个" * 50 + "非常长的查询文本"
     summary = TimingLogger._safe_summary(long_query, max_len=40)
-    assert len(summary) <= 43  # 40 chars + "..."
+    assert len(summary) <= 40
     assert summary.endswith("...")
     assert "  " not in summary  # whitespace collapsed
 

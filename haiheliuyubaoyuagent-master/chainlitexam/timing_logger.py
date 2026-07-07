@@ -20,7 +20,9 @@ class TimingLogger:
         text = str(text)
         cleaned = " ".join(text.split())
         if len(cleaned) > max_len:
-            cleaned = cleaned[:max_len] + "..."
+            if max_len <= 3:
+                return "..."
+            cleaned = cleaned[: max_len - 3] + "..."
         return cleaned
 
     @staticmethod
