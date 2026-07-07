@@ -3268,7 +3268,7 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
     is_basin_scope = any(k in t for k in basin_scope_kw)
 
     # 天气查询意图：天气/降雨/如何/怎么样/预报
-    weather_intent_kw = ["天气", "下雨", "有雨", "降雨", "如何", "怎么样", "预报", "什么天"]
+    weather_intent_kw = ["天气", "下雨", "有雨", "降雨", "雨", "如何", "怎么样", "预报", "什么天"]
     has_weather_intent = any(k in t for k in weather_intent_kw)
 
     # 活动意图
