@@ -19,7 +19,6 @@ from chainlit.types import ThreadDict
 from chainlit.user import User
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_community.chat_models import ChatTongyi
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
@@ -71,50 +70,36 @@ def _get_river_plot_pg_pool():
         return _RIVER_PLOT_PG_POOL
 
 
-# ===============================
 # 修复 Matplotlib 中文显示问题
-# ===============================
 import matplotlib.font_manager as fm
 
-# 直接按文件路径搜索中文字体（不依赖缓存）
-_cjk_font_paths = [
-    os.path.join(os.sep, "usr", "share", "fonts", "simhei.ttf"),
-    os.path.join(os.sep, "usr", "local", "share", "fonts", "simhei.ttf"),
-    os.path.join(os.path.expanduser("~"), ".fonts", "simhei.ttf"),
-    os.path.join(os.sep, "usr", "share", "fonts", "truetype", "simhei.ttf"),
-    os.path.join(os.sep, "tmp", "simhei.ttf"),
-    os.path.join(os.sep, "usr", "share", "fonts", "wqy-microhei.ttc"),
-    os.path.join(os.sep, "usr", "local", "share", "fonts", "wqy-microhei.ttc"),
-    os.path.join(os.path.expanduser("~"), ".fonts", "wqy-microhei.ttc"),
+_CJK_CANDIDATES = ("simhei.ttf", "wqy-microhei.ttc", "wqy-zenhei.ttc", "notosanscjk.ttc")
+_CJK_SEARCH_DIRS = [
+    os.path.join(os.sep, "usr", "share", "fonts"),
+    os.path.join(os.sep, "usr", "share", "fonts", "truetype"),
+    os.path.join(os.sep, "usr", "local", "share", "fonts"),
+    os.path.join(os.sep, "tmp"),
+    os.path.join(os.path.expanduser("~"), ".fonts"),
 ]
-_chosen = None
-for _fp in _cjk_font_paths:
-    if os.path.isfile(_fp):
-        try:
-            fm.fontManager.addfont(_fp)
-            _chosen = fm.FontProperties(fname=_fp).get_name()
-            break
-        except Exception:
+
+
+def _find_cjk_font():
+    for d in _CJK_SEARCH_DIRS:
+        if not os.path.isdir(d):
             continue
-if not _chosen:
-    # 兜底：递归搜索常见字体目录
-    _root_dirs = ["/usr/share/fonts", "/usr/local/share/fonts", os.path.join(os.path.expanduser("~"), ".fonts")]
-    for _d in _root_dirs:
-        if not os.path.isdir(_d):
-            continue
-        for _root, _dirs, _files in os.walk(_d):
-            for _f in _files:
-                if _f.lower() in ("simhei.ttf", "wqy-microhei.ttc", "wqy-zenhei.ttc", "notosanscjk.ttc"):
+        for root, _dirs, files in os.walk(d):
+            for f in files:
+                if f.lower() in _CJK_CANDIDATES:
+                    fp = os.path.join(root, f)
                     try:
-                        fm.fontManager.addfont(os.path.join(_root, _f))
-                        _chosen = fm.FontProperties(fname=os.path.join(_root, _f)).get_name()
-                        break
+                        fm.fontManager.addfont(fp)
+                        return fm.FontProperties(fname=fp).get_name()
                     except Exception:
                         continue
-            if _chosen:
-                break
-        if _chosen:
-            break
+    return None
+
+
+_chosen = _find_cjk_font()
 if _chosen:
     plt.rcParams['font.sans-serif'] = [_chosen, 'DejaVu Sans']
     print(f"[Matplotlib] 使用字体: {_chosen}")
@@ -491,7 +476,8 @@ def _init_chainlit_data_layer() -> None:
                 if m:
                     try:
                         thread["metadata"] = json.loads(m)
-                    except Exception:
+                    except Exception as e:
+                        print(f"[DB] 解析 thread metadata JSON 失败: {e}")
                         thread["metadata"] = {"raw": m}
                 else:
                     thread["metadata"] = {}
@@ -511,7 +497,8 @@ def _init_chainlit_data_layer() -> None:
                         if txt:
                             try:
                                 step[key] = json.loads(txt)
-                            except Exception:
+                            except Exception as e:
+                                print(f"[DB] 解析 step {key} JSON 失败: {e}")
                                 step[key] = {"raw": txt}
                         else:
                             step[key] = {}
@@ -1529,7 +1516,8 @@ def _extract_downstream_transport_time(raw_result) -> str:
                 try:
                     hours = float(duration.get("hours"))
                     human = f"{hours:.2f} 小时"
-                except Exception:
+                except Exception as e:
+                    print(f"[交通时间] 解析时长失败: {e}")
                     human = ""
         if human:
             parts.append(f"{river}:{human}")
@@ -1688,13 +1676,15 @@ def _unwrap_tool_result(raw_result):
         text = raw_result[0]["text"]
         try:
             return json.loads(text)
-        except Exception:
+        except Exception as e:
+            print(f"[工具结果解包] JSON 解析失败: {e}")
             return text
 
     if isinstance(raw_result, str):
         try:
             return json.loads(raw_result)
-        except Exception:
+        except Exception as e:
+            print(f"[工具结果解包] JSON 解析失败: {e}")
             return raw_result
 
     if hasattr(raw_result, "content"):
@@ -1702,7 +1692,8 @@ def _unwrap_tool_result(raw_result):
         if isinstance(content, str):
             try:
                 return json.loads(content)
-            except Exception:
+            except Exception as e:
+                print(f"[工具结果解包] 解析 content JSON 失败: {e}")
                 return content
         return content
 
@@ -1883,7 +1874,8 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
             })
             if r_name and r_name not in ("未知", "None", ""):
                 river_names.add(r_name)
-        except Exception:
+        except Exception as e:
+            print(f"[绘图] 解析拓扑线段失败: {e}")
             continue
 
     if not topo_segments:
@@ -1957,8 +1949,8 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
         if conn is not None:
             try:
                 _get_river_plot_pg_pool().putconn(conn)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[绘图] 归还数据库连接失败: {e}")
 
     # 解析 GeoJSON 坐标为折线
     def _geojson_to_coords(geojson_str):
@@ -1975,7 +1967,8 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
                     coords = [(float(p[0]), float(p[1])) for p in line]
                     lines.append(coords)
                 return max(lines, key=len) if lines else None
-        except Exception:
+        except Exception as e:
+            print(f"[绘图] 解析 GeoJSON 坐标失败: {e}")
             return None
         return None
 
@@ -2128,7 +2121,8 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
                 if level in level_groups:
                     level_groups[level].append((lon, lat))
                     valid_count += 1
-            except Exception:
+            except Exception as e:
+                print(f"[绘图] 站点坐标解析失败: {e}")
                 continue
         print(f"[绘图] 有效站点坐标：{valid_count} 个")
 
@@ -2281,19 +2275,6 @@ async def _init_runtime_session(messages_seed=None):
     """
     await _ensure_chainlit_tables()
 
-    # planner_llm = ChatTongyi(
-    #     model="qwen-plus",
-    #     streaming=False,
-    #     temperature=0.7,
-    #     api_key=os.getenv("DASHSCOPE_API_KEY", "sk-40c16d460ec44feb91006524c12ad8b2")
-    # )
-    # answer_llm = ChatTongyi(
-    #     model="qwen-plus",
-    #     streaming=False,
-    #     temperature=0.7,
-    #     api_key=os.getenv("DASHSCOPE_API_KEY", "sk-40c16d460ec44feb91006524c12ad8b2")
-    # )
-
     planner_llm = ChatOpenAI(
         model="Qwen3.6-27B",
         streaming=False,
@@ -2405,7 +2386,8 @@ async def _build_admin_overlay_for_plot(tools, river_observation):
             try:
                 xs.extend([float(seg["from_x"]), float(seg["to_x"])])
                 ys.extend([float(seg["from_y"]), float(seg["to_y"])])
-            except Exception:
+            except Exception as e:
+                print(f"[GIS] 河段坐标解析失败: {e}")
                 continue
 
     bbox = _calc_bbox(xs, ys)
@@ -2509,7 +2491,8 @@ def _segments_to_geojson(segments):
         try:
             x1, y1 = float(seg["from_x"]), float(seg["from_y"])
             x2, y2 = float(seg["to_x"]), float(seg["to_y"])
-        except Exception:
+        except Exception as e:
+            print(f"[GIS] 线段坐标解析失败: {e}")
             continue
 
         locate_id = seg.get("id") or seg.get("segment_id") or f"river_seg_{i+1}"
@@ -2543,9 +2526,9 @@ def _station_rows_to_geojson(rows):
         if lon is None or lat is None:
             continue
         try:
-            lon = float(lon)
-            lat = float(lat)
-        except Exception:
+            lon = float(lon); lat = float(lat)
+        except Exception as e:
+            print(f"[GIS] 站点经纬度解析失败: {e}")
             continue
 
         locate_id = (
@@ -2879,7 +2862,8 @@ def _extract_emergency_river_geojson(data):
                         },
                     }
                 )
-            except Exception:
+            except Exception as e:
+                print(f"[GIS] 应急河流坐标提取失败: {e}")
                 continue
 
     return {"type": "FeatureCollection", "features": features}
@@ -3402,7 +3386,8 @@ def _build_river_network_brief(raw_result, river_name: str) -> str:
             order = int(seg.get("strahler_order", 1))
             name = (seg.get("rivername") or "").strip()
             valid.append((x1, y1, x2, y2, order, name))
-        except Exception:
+        except Exception as e:
+            print(f"[绘图] 河网线段解析失败: {e}")
             continue
 
     if not valid:

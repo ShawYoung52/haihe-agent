@@ -1,0 +1,38 @@
+[
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 2447,
+    "summary": "工具失败错误文本通过ToolMessage进入LLM上下文，LLM可能在用户可见的回复中复述内部数据（IP、主机名等）",
+    "failure_scenario": "MCP工具调用失败，异常消息包含\"Connection refused to 10.226.107.133:8000\"。该文本存入ToolMessage→LLM在下一轮将其作为回答的一部分输出→前端业务人员在cot=full模式下看到内部IP地址。_sanitize_display_text只过滤XML/JSON工具调用标记，不过滤IP、主机名、凭据模式。forced_final_text路径甚至绕过了这个不充分的清洗。"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 4420,
+    "summary": "模型<think>思考内容未经_sanitize_display_text清洗直接追加到用户可见的reasoning步骤",
+    "failure_scenario": "DeepSeek/QwQ模型将工具调用推理和参数schema放入<think>...</think>块。_extract_think_content提取原始内容后直接传给reasoning.append()，绕过_sanitize_display_text。用户看到原始JSON工具调用格式、参数schema等内部信息。两处（首轮line 4420，循环line 4583）均未清洗。"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 1060,
+    "summary": "_warning_tool_display_name()与TOOL_DISPLAY_NAMES对同一预警工具显示不同中文名称",
+    "failure_scenario": "get_effective_warning_info在预警快速路径显示为\"生效预警信息\"，在通用工具轮次显示为\"查询当前生效预警\"。get_today_warning_summary在预警路径显示为\"今日预警动态\"，在通用路径显示为\"查询今日预警概况\"。业务人员同一工具看到两个不同名称，造成混淆。"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 34,
+    "summary": "ReasoningStep设置show_input='markdown'但未显式设置step.input，依赖Chainlit版本默认值可能泄露内部数据",
+    "failure_scenario": "在某些Chainlit版本中，未设置的step.input配合show_input='markdown'可能渲染模型的原始输入（包含完整消息历史、工具观察结果）。在cot='full'模式下，该内容对前端用户可见。"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 2232,
+    "summary": "TOOL_DISPLAY_NAMES静态字典缺少新工具检测，新增MCP工具将静默显示原始英文名称",
+    "failure_scenario": "在MCP服务器中新增工具（如get_flood_risk_zones），TOOL_DISPLAY_NAMES中没有对应条目。.get()回退到原始名称\"get_flood_risk_zones\"，直接显示在业务人员的思考步骤和查询状态中，而非中文业务名称。"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 1603,
+    "summary": "工具耗时检测仅覆盖_run_tool_round路径，20+快速路径函数的tool.ainvoke()调用均未计入",
+    "failure_scenario": "业务人员问\"今天天津降雨情况\"→命中_try_today_rainfall_fast_path快速路径→直接调用tool.ainvoke()→后端无[工具耗时]日志输出。性能优化时无法定位快速路径中的慢查询，耗时统计不完整。"
+  }
+]

@@ -1,8 +1,12 @@
-import re
+﻿import re
 import json
 import os
+import time
+import base64
+import traceback
 import asyncio
 import math
+import httpx
 import chainlit as cl
 from datetime import datetime, timedelta
 from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
@@ -138,7 +142,6 @@ def _extract_emergency_response_time(user_text: str) -> tuple[bool, str]:
       - 现在/当前/目前 → 当前时刻 YYYYMMDDHHMMSS
       - 未识别到时间但包含应急响应关键词 → 当前时刻
     """
-    from datetime import datetime, timedelta
     t = (user_text or "").strip()
     if not t:
         return False, ""
@@ -618,7 +621,7 @@ async def _try_decision_weather_fast_path(user_text: str, answer_chain, tools, m
         return await service.try_handle(user_text, messages)
     except Exception as exc:
         print(f"[DecisionWeather] fast path 失败，回退通用流程：{exc}")
-        import traceback
+
         traceback.print_exc()
         if service.status_msg is not None:
             try:
@@ -650,6 +653,13 @@ def _unwrap_tool_observation(observation):
         except Exception:
             return observation
     return observation
+
+
+def _save_to_history(user_text: str, assistant_text: str, messages: list):
+    """追加用户问题与助手回复到对话历史。"""
+    messages.append(HumanMessage(content=user_text))
+    messages.append(AIMessage(content=assistant_text))
+    cl.user_session.set("messages", messages)
 
 
 def _compact_warning_record_for_table(item) -> dict:
@@ -791,15 +801,6 @@ def _warning_query_area_keywords(records: list[dict], user_text: str) -> list[st
             area_keywords.append(area)
     return list(dict.fromkeys(area_keywords))
 
-    # 相对日期
-    if "前天" in t:
-        dt = now - timedelta(days=2)
-        return True, dt.strftime("%Y%m%d") + "080000"
-    if "昨天" in t:
-        dt = now - timedelta(days=1)
-        return True, dt.strftime("%Y%m%d") + "080000"
-    if "今天" in t:
-        return True, now.strftime("%Y%m%d") + "080000"
 
 def _filter_warning_records_for_user(records: list[dict], user_text: str) -> list[dict]:
     """让代码表格和 LLM 正文使用同一批、同一顺序的预警记录。"""
@@ -1256,16 +1257,9 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
         cl.user_session.set("messages", messages)
         return True
     except asyncio.TimeoutError:
-        await thinking_msg.remove()
-        text = "⏱️ 预警信息查询超时，请稍后重试。"
-        await cl.Message(content=text).send()
-        messages.append(HumanMessage(content=user_text))
-        messages.append(AIMessage(content=text))
-        cl.user_session.set("messages", messages)
-        return True
+        return await _handle_fast_path_error("预警信息", thinking_msg, messages, user_text)
     except Exception as exc:
         print(f"[WarningFastPath] 失败，回退通用流程：{exc}")
-        import traceback
         traceback.print_exc()
         try:
             await thinking_msg.remove()
@@ -1544,7 +1538,7 @@ def _ensure_tool_calls_from_content(planner_msg):
             print(f"[工具调用解析] 清理后 content：{planner_msg.content!r}")
     except Exception as e:
         print(f"[工具调用解析] 失败，跳过：{e}")
-        import traceback
+
         traceback.print_exc()
     return planner_msg
 
@@ -1598,9 +1592,15 @@ def _build_hour_tolerant_args(tool_args):
 
 
 async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step):
+    start_time = time.time()
     try:
-        return await tool.ainvoke(tool_args)
+        result = await tool.ainvoke(tool_args)
+        elapsed = time.time() - start_time
+        print(f"[工具耗时] {tool_name}: {elapsed:.2f}s")
+        return result, elapsed
     except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"[工具耗时] {tool_name}: {elapsed:.2f}s (失败)")
         err_text = str(e)
         if tool_name != "get_city_rainfall_time_range" or "hour%6==2" not in err_text:
             raise
@@ -1614,7 +1614,11 @@ async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step):
             f"已自动纠偏为 {new_hour} 并重试。\n"
         )
         print(f"[容错重试] {tool_name}: hour {old_hour} -> {new_hour}")
-        return await tool.ainvoke(retry_args)
+        retry_start = time.time()
+        result = await tool.ainvoke(retry_args)
+        retry_elapsed = time.time() - retry_start
+        print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s")
+        return result, retry_elapsed
 
 
 async def _render_river_plot_with_overlay(tools, river_observation, river_name: str, callbacks):
@@ -1648,9 +1652,30 @@ async def _emit_fast_path_result(
         await cl.Message(content=text, elements=images).send()
     else:
         await cl.Message(content=text).send()
-    messages.append(HumanMessage(content=user_text))
-    messages.append(AIMessage(content=text))
-    cl.user_session.set("messages", messages)
+    _save_to_history(user_text, text, messages)
+
+
+async def _handle_fast_path_error(
+    tag: str,
+    thinking_msg: cl.Message,
+    messages: list,
+    user_text: str,
+    exc: Exception | None = None,
+) -> bool:
+    """统一 fast path 错误出口：timeout 时提醒用户并记录历史，一般异常打印回溯。返回 True 表示已处理。"""
+    try:
+        await thinking_msg.remove()
+    except Exception:
+        pass
+    if exc is None:
+        print(f"[{tag}] 查询超时")
+        text = f"⏱️ {tag}查询超时，请稍后重试。"
+        await cl.Message(content=text).send()
+        _save_to_history(user_text, text, messages)
+        return True
+    print(f"[{tag}] 失败：{exc}")
+    traceback.print_exc()
+    return False
 
 
 async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -1753,7 +1778,6 @@ async def _try_affected_river_network_by_rainfall_fast_path(
         end_time = ""
         if not time_str:
             # 如果用户未指定明确历史时间，默认查最近 24 小时到当前
-            from datetime import datetime, timedelta
             now = datetime.now()
             end_time = now.strftime("%Y%m%d%H%M%S")
             start_time = (now - timedelta(hours=24)).strftime("%Y%m%d%H%M%S")
@@ -1785,16 +1809,8 @@ async def _try_affected_river_network_by_rainfall_fast_path(
                     result_data = {"text": content}
             else:
                 result_data = content
-        elif isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "text" in result[0]:
-            try:
-                result_data = json.loads(result[0]["text"])
-            except Exception:
-                result_data = result[0]["text"]
-        elif isinstance(result, str):
-            try:
-                result_data = json.loads(result)
-            except Exception:
-                pass
+        else:
+            result_data = _unwrap_tool_observation(result)
         if not isinstance(result_data, dict):
             raise ValueError(f"工具返回格式异常：{type(result_data)}")
 
@@ -1908,8 +1924,6 @@ def _detect_rainfall_time(text: str) -> str | None:
     rain_keywords = ["降雨", "雨情", "雨量", "降水", "雨势", "雨分析", "雨数据", "雨情况"]
     if not any(k in t for k in rain_keywords) and "雨" not in t:
         return None
-
-    from datetime import datetime, timedelta
     now = datetime.now()
 
     # 解析相对时间词 → 绝对 datetime
@@ -1999,7 +2013,6 @@ def _build_rainfall_time_window(user_text: str, time_str: str) -> tuple[str | No
         return None, None
 
     t = user_text.strip()
-    from datetime import datetime, timedelta
     try:
         ref = datetime.strptime(time_str, "%Y%m%d%H%M%S")
     except Exception:
@@ -2031,8 +2044,7 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
     # 对"最大雨强/雨强最大/最大小时雨强"等明确降雨分析类问题，未识别到时间时默认查最近24小时
     intensity_keywords = ["最大雨强", "雨强最大", "最大小时雨强", "小时雨强最大", "雨强出现在"]
     if not time_str and any(k in user_text for k in intensity_keywords):
-        from datetime import datetime as _dt
-        time_str = _dt.now().strftime("%Y%m%d%H%M%S")
+        time_str = datetime.now().strftime("%Y%m%d%H%M%S")
 
     if not time_str:
         return False
@@ -2051,13 +2063,7 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
             invoke_args["start_time"] = start_time
             invoke_args["end_time"] = end_time
         result = await asyncio.wait_for(tool.ainvoke(invoke_args), timeout=30)
-        import json
-        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "text" in result[0]:
-            data = json.loads(result[0]["text"])
-        elif isinstance(result, str):
-            data = json.loads(result)
-        else:
-            data = result
+        data = _unwrap_tool_observation(result)
 
         # 如果查询含"全市"，将数据过滤为仅天津市站点
         if "全市" in user_text:
@@ -2211,7 +2217,7 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
         cl.user_session.set("messages", messages)
         return True
     except Exception as e:
-        import traceback
+
         print(f"[降雨分析快速路径] 失败：{e}")
         traceback.print_exc()
         await thinking_msg.remove()
@@ -2220,6 +2226,34 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
         return False
 
 
+# 工具名 -> 业务可读名称映射，供思考过程和工具步骤展示使用
+TOOL_DISPLAY_NAMES = {
+    "get_river_network_for_plot": "查询河网数据",
+    "get_affected_river_network_by_rainfall": "暴雨影响河道分析",
+    "analyze_rainstorm_impact": "暴雨影响分析",
+    "analyze_rainfall_by_time": "降雨量时段分析",
+    "get_station_rainfall_real_img": "生成降雨实况分布图",
+    "get_city_rainfall_time_range": "查询城市降雨时段",
+    "query_rolling_forecast": "查询滚动预报",
+    "query_basin_areal_rainfall": "查询流域面雨量",
+    "get_effective_warning_info": "查询当前生效预警",
+    "get_history_warning_info": "查询历史预警信息",
+    "get_today_warning_summary": "查询今日预警概况",
+    "get_national_warning_info": "查询全国预警信息",
+    "search_poi": "搜索关注点位",
+    "search_poi_by_distance": "搜索周边点位",
+    "rag_search": "知识库检索",
+    "get_admin_division_for_plot": "加载行政区划底图",
+    "locate_region_rivers": "定位区域河道",
+    "estimate_river_impact_time": "估算河道影响时间",
+    "get_tianjin_wind_warning_assessment": "天津大风预警评估",
+    "route_partner_skill": "调度合作单位技能",
+    "invoke_partner_skill_alpha_hydro": "调用水文合作单位",
+    "invoke_partner_skill_beta_emergency": "调用应急合作单位",
+    "invoke_partner_skill_shortterm": "调用短临预报合作单位",
+    "local_analyze_rainfall_by_time": "降雨量时段分析",
+}
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks):
     ree = None
     forced_final_text = None
@@ -2227,7 +2261,8 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     tool_names = [tc['name'] for tc in planner_msg.tool_calls]
     print(f"\n=== 第 {iteration} 轮工具调用 ===")
 
-    async with cl.Step(name=f"正在查询数据（第 {iteration} 轮）", type="tool") as step:
+    round_start = time.time()
+    async with cl.Step(name=f"第 {iteration} 轮数据查询（共 {len(planner_msg.tool_calls)} 项）", type="tool") as step:
         step.show_input = False
         # 开发者调试信息保留在控制台，不暴露给业务用户
         print(f"\n=== 准备执行工具 ===")
@@ -2239,8 +2274,9 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             tool = _find_tool(tools, tool_name)
+            display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
 
-            async with cl.Step(name="数据查询中...", parent_id=step.id, type="tool") as tool_step:
+            async with cl.Step(name=display_name, parent_id=step.id, type="tool") as tool_step:
                 tool_step.show_input = False
                 print(f"[工具] {tool_name} 参数: {tool_args}")
 
@@ -2250,7 +2286,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     tool_step.output = f"❌ {observation_text}"
                     continue
                 try:
-                    observation = await _invoke_tool_with_tolerance(tool_name, tool, tool_args, tool_step)
+                    observation, tool_elapsed = await _invoke_tool_with_tolerance(tool_name, tool, tool_args, tool_step)
                     if tool_name == "analyze_rainstorm_impact":
                         observation = await callbacks["enrich_with_impact_time_tool"](
                             observation=observation,
@@ -2302,9 +2338,8 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     elif tool_name == "get_station_rainfall_real_img":
                         data = observation
                         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-                            import json as _json
                             try:
-                                data = _json.loads(data[0]["text"])
+                                data = json.loads(data[0]["text"])
                             except Exception:
                                 data = data[0]["text"]
                         if isinstance(data, dict) and "base64" in data:
@@ -2312,9 +2347,9 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                             # 去掉 data:image/...;base64, 前缀（如有）
                             if "," in b64_str:
                                 b64_str = b64_str.split(",")[1]
-                            import base64 as _b64
+
                             try:
-                                img_bytes = _b64.b64decode(b64_str)
+                                img_bytes = base64.b64decode(b64_str)
                                 begin_time = data.get("beginTime", "")
                                 end_time = data.get("endTime", "")
                                 range_type = data.get("range", "9")
@@ -2344,7 +2379,6 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                             for item in data:
                                 if isinstance(item, dict):
                                     if item.get("type") == "image" or "image" in str(item.get("mimeType", "")):
-                                        import base64 as _b64img
                                         src = item.get("source", item)
                                         if isinstance(src, dict):
                                             b64 = src.get("data", src.get("base64", ""))
@@ -2354,26 +2388,24 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                             try:
                                                 if "," in b64:
                                                     b64 = b64.split(",")[1]
-                                                img_bytes = _b64img.b64decode(b64)
+                                                img_bytes = base64.b64decode(b64)
                                                 img_msgs.append(cl.Image(content=img_bytes, name=f"chart_{len(img_msgs)}"))
                                             except Exception:
                                                 pass
                         # 也尝试从 text 中解析 base64/文件路径
                         if not img_msgs:
                             if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-                                import json as _json
                                 try:
-                                    data = _json.loads(data[0]["text"])
+                                    data = json.loads(data[0]["text"])
                                 except Exception:
                                     data = data[0]["text"]
                             if isinstance(data, dict):
                                 for key, val in data.items():
                                     if isinstance(val, str) and ("png" in val.lower() or "chart" in key.lower() or "image" in key.lower()):
                                         if val.startswith("data:image") or val.startswith("/9j/"):
-                                            import base64 as _b64img
                                             try:
                                                 b64 = val.split(",")[1] if "," in val else val
-                                                img_bytes = _b64img.b64decode(b64)
+                                                img_bytes = base64.b64decode(b64)
                                                 img_msgs.append(cl.Image(content=img_bytes, name=f"chart_{key}"))
                                             except Exception:
                                                 pass
@@ -2389,8 +2421,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                                          "http://10.226.107.133:8000/output",
                                                          "http://10.226.107.133:8000/files"]:
                                             try:
-                                                import httpx as _httpx
-                                                resp = _httpx.get(f"{base_url}/{fname}", timeout=5)
+                                                resp = httpx.get(f"{base_url}/{fname}", timeout=5)
                                                 if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
                                                     img_msgs.append(cl.Image(content=resp.content, name=f"chart_{fname.replace('.','_')}"))
                                                     break
@@ -2406,7 +2437,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     else:
                         observation_text = callbacks["tool_observation_to_text"](observation)
 
-                    tool_step.output = "查询完成"
+                    tool_step.output = f"查询完成（耗时 {tool_elapsed:.1f} 秒）"
                 except Exception as e:
                     # 控制台保留详细错误，UI 只展示友好提示
                     print(f"[工具错误] {tool_name}: {e}")
@@ -2421,6 +2452,9 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         role="tool",
                     )
                 )
+
+    round_elapsed = time.time() - round_start
+    print(f"[本轮耗时] 第 {iteration} 轮工具调用总耗时: {round_elapsed:.2f}s")
 
     return forced_final_text, ree, warning_bundles
 
@@ -2447,9 +2481,7 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
     thinking_msg = await _show_thinking("🔍 正在生成降水实况图，请稍候...")
 
     try:
-        from datetime import datetime as _dt, timedelta as _td
-
-        now = _dt.now()
+        now = datetime.now()
         interval = 24
         beginTime = ""
         endTime = ""
@@ -2473,9 +2505,9 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
 
             now_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if "前天" in day_word:
-                base_date = now_date - _td(days=2)
+                base_date = now_date - timedelta(days=2)
             elif "昨天" in day_word:
-                base_date = now_date - _td(days=1)
+                base_date = now_date - timedelta(days=1)
             else:
                 base_date = now_date
 
@@ -2487,11 +2519,11 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
             h1 = resolve_hour(hour1, prefix1 or prefix2 or "上午")
             h2 = resolve_hour(hour2, prefix2 or prefix1 or "下午")
 
-            start_dt = base_date + _td(hours=h1)
-            end_dt = base_date + _td(hours=h2)
+            start_dt = base_date + timedelta(hours=h1)
+            end_dt = base_date + timedelta(hours=h2)
 
             if end_dt <= start_dt:
-                end_dt = start_dt + _td(hours=3)
+                end_dt = start_dt + timedelta(hours=3)
 
             beginTime = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             endTime = end_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -2501,8 +2533,8 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
             time_str = _detect_rainfall_time(t)
             if time_str:
                 try:
-                    end_dt = _dt.strptime(time_str, "%Y%m%d%H%M%S")
-                    begin_dt = end_dt - _td(hours=interval)
+                    end_dt = datetime.strptime(time_str, "%Y%m%d%H%M%S")
+                    begin_dt = end_dt - timedelta(hours=interval)
                     beginTime = begin_dt.strftime("%Y-%m-%d %H:%M:%S")
                     endTime = end_dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
@@ -2530,9 +2562,9 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
             b64_str = data["base64"]
             if "," in b64_str:
                 b64_str = b64_str.split(",")[1]
-            import base64 as _b64
+
             try:
-                img_bytes = _b64.b64decode(b64_str)
+                img_bytes = base64.b64decode(b64_str)
                 bt = data.get("beginTime", beginTime) or beginTime
                 et = data.get("endTime", endTime) or endTime
                 rng = data.get("range", "9")
@@ -2602,11 +2634,10 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
     await thinking_msg.send()
 
     try:
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = datetime.now()
         time_str = now.strftime("%Y%m%d%H%M%S")
         # 使用自定义时间范围：[当前-24h, 当前]，避免 -32h/-8h 偏移
-        start_dt = now - _td(hours=24)
+        start_dt = now - timedelta(hours=24)
         start_s = start_dt.strftime("%Y%m%d%H%M%S")
         end_s = now.strftime("%Y%m%d%H%M%S")
 
@@ -2615,12 +2646,10 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
             timeout=30,
         )
         await thinking_msg.remove()
-
-        import json as _js
         data = result
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
             try:
-                data = _js.loads(data[0]["text"])
+                data = json.loads(data[0]["text"])
             except Exception:
                 data = data[0]["text"]
 
@@ -2698,8 +2727,7 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
     await thinking_msg.send()
 
     try:
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = datetime.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
         # 实况与预报的分界时次：取最近一个过去的整点（2/8/14/20）
@@ -2718,12 +2746,10 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
             tool.ainvoke({"time_str": now.strftime("%Y%m%d%H%M%S"), "start_time": obs_start_s, "end_time": obs_end_s}),
             timeout=30,
         )
-
-        import json as _js
         obs_data = obs_result
         if isinstance(obs_result, list) and len(obs_result) > 0 and isinstance(obs_result[0], dict) and "text" in obs_result[0]:
             try:
-                obs_data = _js.loads(obs_result[0]["text"])
+                obs_data = json.loads(obs_result[0]["text"])
             except Exception:
                 obs_data = obs_result[0]["text"]
 
@@ -2732,7 +2758,7 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
         if fc_tool:
             try:
                 start_fc = split_dt.strftime("%Y-%m-%d %H:%M:%S")
-                fc_end_dt = split_dt + _td(hours=24)
+                fc_end_dt = split_dt + timedelta(hours=24)
                 fc_period = f"{split_dt.strftime('%Y-%m-%d %H:%M')} ~ {fc_end_dt.strftime('%Y-%m-%d %H:%M')}"
                 fc_result = await asyncio.wait_for(
                     fc_tool.ainvoke({"city_name": "天津市", "start_time": start_fc, "forecast_hours": 24}),
@@ -2741,7 +2767,7 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
                 fc_data = fc_result
                 if isinstance(fc_result, list) and len(fc_result) > 0 and isinstance(fc_result[0], dict) and "text" in fc_result[0]:
                     try:
-                        fc_data = _js.loads(fc_result[0]["text"])
+                        fc_data = json.loads(fc_result[0]["text"])
                     except Exception:
                         fc_data = fc_result[0]["text"]
                 if isinstance(fc_data, dict) and fc_data.get("average_rainfall_mm") is not None:
@@ -2843,8 +2869,7 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
     await thinking_msg.send()
 
     try:
-        from datetime import datetime as _dt
-        now = _dt.now()
+        now = datetime.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         period_hours = max(now.hour, 1)  # 已过小时数，最少1h
 
@@ -2857,12 +2882,10 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
             timeout=30,
         )
         await thinking_msg.remove()
-
-        import json as _js
         data = result
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
             try:
-                data = _js.loads(data[0]["text"])
+                data = json.loads(data[0]["text"])
             except Exception:
                 data = data[0]["text"]
 
@@ -2937,25 +2960,23 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
     await thinking_msg.send()
 
     try:
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = datetime.now()
         sync_h = [2, 8, 14, 20]
         base_h = max([h for h in sync_h if h <= now.hour], default=14)
 
         rows = []
         for day_off in range(0, 7):
-            day_dt = now.replace(hour=base_h, minute=0, second=0, microsecond=0) + _td(days=day_off)
+            day_dt = now.replace(hour=base_h, minute=0, second=0, microsecond=0) + timedelta(days=day_off)
             day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
             try:
                 r = await asyncio.wait_for(
                     tool.ainvoke({"city_name": "天津市", "start_time": day_str, "forecast_hours": 24}),
                     timeout=15,
                 )
-                import json as _js
                 rd = r
                 if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
                     try:
-                        rd = _js.loads(r[0]["text"])
+                        rd = json.loads(r[0]["text"])
                     except Exception:
                         rd = r[0]["text"]
                 if isinstance(rd, dict):
@@ -3023,9 +3044,8 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
     await thinking_msg.send()
 
     try:
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
-        start_72h = now - _td(hours=72)
+        now = datetime.now()
+        start_72h = now - timedelta(hours=72)
         time_str = now.strftime("%Y%m%d%H%M%S")
         start_s = start_72h.strftime("%Y%m%d%H%M%S")
         end_s = now.strftime("%Y%m%d%H%M%S")
@@ -3035,14 +3055,8 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
             timeout=30,
         )
         await thinking_msg.remove()
-
-        import json as _js
         data = result
-        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "text" in result[0]:
-            try:
-                data = _js.loads(result[0]["text"])
-            except Exception:
-                data = result[0]["text"]
+        data = _unwrap_tool_observation(result)
 
         if isinstance(data, dict):
             max_r = data.get("max_rainfall", 0)
@@ -3124,8 +3138,7 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
         return False
 
     # 解析时间偏移
-    from datetime import datetime as _dt, timedelta as _td
-    now = _dt.now()
+    now = datetime.now()
     if "后天" in t:
         day_off = 2
         label = "后天"
@@ -3136,7 +3149,7 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
         day_off = 0
         label = "今天"
 
-    day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + _td(days=day_off)
+    day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=day_off)
     day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
     date_label = day_dt.strftime("%m月%d日")
 
@@ -3151,11 +3164,10 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
                     fc_tool.ainvoke({"city_name": city, "start_time": day_str, "forecast_hours": 24}),
                     timeout=15,
                 )
-                import json as _js
                 rd = r
                 if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
                     try:
-                        rd = _js.loads(r[0]["text"])
+                        rd = json.loads(r[0]["text"])
                     except Exception:
                         rd = r[0]["text"]
                 if isinstance(rd, dict) and rd.get("average_rainfall_mm") is not None:
@@ -3261,8 +3273,7 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
         return False
 
     # 计算 upcoming 周六、周日
-    from datetime import datetime as _dt, timedelta as _td
-    now = _dt.now()
+    now = datetime.now()
     weekday = now.weekday()  # 0=周一
     if weekday < 5:  # 周一到周五
         sat_offset = 5 - weekday
@@ -3290,7 +3301,7 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
     try:
         day_results = {}
         for day_label, day_off in days:
-            day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + _td(days=day_off)
+            day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=day_off)
             day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
             date_label = day_dt.strftime("%m月%d日")
             city_rows = []
@@ -3300,11 +3311,10 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
                         fc_tool.ainvoke({"city_name": city, "start_time": day_str, "forecast_hours": 24}),
                         timeout=15,
                     )
-                    import json as _js
                     rd = r
                     if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
                         try:
-                            rd = _js.loads(r[0]["text"])
+                            rd = json.loads(r[0]["text"])
                         except Exception:
                             rd = r[0]["text"]
                     if isinstance(rd, dict) and rd.get("average_rainfall_mm") is not None:
@@ -3420,19 +3430,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         print(f"[水位快速路径] 原始结果类型={type(result)}, 内容={result}")
 
         # 统一解包 MCP 工具返回
-        data = result
-        if isinstance(result, list) and result and isinstance(result[0], dict) and "text" in result[0]:
-            try:
-                data = json.loads(result[0]["text"])
-            except Exception as e:
-                print(f"[水位快速路径] 解析list[0]['text']失败：{e}")
-                data = result[0]["text"]
-        elif isinstance(result, str):
-            try:
-                data = json.loads(result)
-            except Exception as e:
-                print(f"[水位快速路径] 解析str失败：{e}")
-                data = result
+        data = _unwrap_tool_observation(result)
 
         print(f"[水位快速路径] 解包后类型={type(data)}, 内容={data}")
 
@@ -3463,9 +3461,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
                 f"当前未查询到{river_name}相关站点水位数据。", thinking_msg, messages, user_text
             )
             return True
-
-        from datetime import datetime as _dt
-        now_str = _dt.now().strftime("%Y年%m月%d日%H:%M")
+        now_str = datetime.now().strftime("%Y年%m月%d日%H:%M")
 
         lines = [f"## {_clean_table_cell(river_name)}水位情况\n\n"]
         lines.append(f"截至{now_str}，{_clean_table_cell(river_name)}相关监测站点水位如下：\n\n")
@@ -3516,7 +3512,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         )
         return True
     except Exception as e:
-        import traceback
+
         print(f"[水位快速路径] 异常：{e}")
         traceback.print_exc()
         await _emit_fast_path_result(
@@ -3591,9 +3587,7 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
               "滨海新区", "武清", "宝坻", "静海", "宁河", "蓟州"]
     if any(k in t for k in cities):
         return False
-
-    from datetime import datetime as _dt, timedelta as _td
-    now = _dt.now()
+    now = datetime.now()
 
     # 今天 → 实况
     if has_today and not (has_tomorrow or has_dayafter or num_future_days):
@@ -3615,14 +3609,7 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
                 timeout=30,
             )
             await thinking_msg.remove()
-
-            import json as _js
-            data = result
-            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "text" in result[0]:
-                try:
-                    data = _js.loads(result[0]["text"])
-                except Exception:
-                    data = result[0]["text"]
+            data = _unwrap_tool_observation(result)
 
             if isinstance(data, dict) and data.get("total_stations", 0) > 0:
                 max_r = data.get("max_rainfall", 0)
@@ -3679,18 +3666,17 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
     try:
         rows = []
         for day_off in days_to_query:
-            day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + _td(days=day_off)
+            day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=day_off)
             day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
             try:
                 r = await asyncio.wait_for(
                     fc_tool.ainvoke({"city_name": "天津市", "start_time": day_str, "forecast_hours": 24}),
                     timeout=15,
                 )
-                import json as _js
                 rd = r
                 if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
                     try:
-                        rd = _js.loads(r[0]["text"])
+                        rd = json.loads(r[0]["text"])
                     except Exception:
                         rd = r[0]["text"]
                 if isinstance(rd, dict):
@@ -3815,12 +3801,11 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
     thinking_msg = await _show_thinking(f"🔍 正在查询{subbasin}代表城市未来{days}天降雨预报，请稍候...")
 
     try:
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = datetime.now()
         rows = []
 
         for day_off in range(days):
-            day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + _td(days=day_off)
+            day_dt = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=day_off)
             day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
             date_label = day_dt.strftime("%m月%d日")
 
@@ -3830,11 +3815,10 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
                         fc_tool.ainvoke({"city_name": city, "start_time": day_str, "forecast_hours": 24}),
                         timeout=15,
                     )
-                    import json as _js
                     rd = r
                     if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
                         try:
-                            rd = _js.loads(r[0]["text"])
+                            rd = json.loads(r[0]["text"])
                         except Exception:
                             rd = r[0]["text"]
                     if isinstance(rd, dict) and rd.get("average_rainfall_mm") is not None:
@@ -3915,8 +3899,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         time_range 为 [start,end] 格式（YYYYMMDDHHMMSS），time_label 为给业务展示的可读具体时段，
         explicit_time_range 表示用户是否明确指定了绝对日期。
         """
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = datetime.now()
 
         # 1. 绝对日期：2024年7月25日 / 2024-07-25 / 20240725 / 2024/07/25
         abs_patterns = [
@@ -3950,14 +3933,14 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         ]:
             if re.search(pattern, text):
                 end = now
-                start = end - _td(hours=h)
+                start = end - timedelta(hours=h)
                 time_range = f"[{start.strftime('%Y%m%d%H%M%S')},{end.strftime('%Y%m%d%H%M%S')}]"
                 label = f"{start.strftime('%Y年%m月%d日 %H:%M')} ~ {end.strftime('%Y年%m月%d日 %H:%M')}"
                 return h, time_range, label, False
 
         # 默认：未识别到具体时间词，按过去24小时查询并生成具体起止时间标签
         end = now
-        start = end - _td(hours=24)
+        start = end - timedelta(hours=24)
         time_range = f"[{start.strftime('%Y%m%d%H%M%S')},{end.strftime('%Y%m%d%H%M%S')}]"
         label = f"{start.strftime('%Y年%m月%d日 %H:%M')} ~ {end.strftime('%Y年%m月%d日 %H:%M')}"
         return 24, time_range, label, False
@@ -3977,13 +3960,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
             args["hours"] = hours
         # 长时段查询给更宽裕的超时，避免 168h 等大数据量请求被 30s 截断
         result = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
-        data = result
-        if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "text" in result[0]:
-            try:
-                data = json.loads(result[0]["text"])
-            except Exception:
-                data = result[0]["text"]
-        return data
+        return _unwrap_tool_observation(result)
 
     def _has_error(data) -> tuple[bool, str]:
         if isinstance(data, list) and data and isinstance(data[0], dict) and "error" in data[0]:
@@ -4052,8 +4029,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         用于后端不支持一次性查询168h等长时段的场景。
         返回 (聚合结果列表, 对齐后的时间标签)。
         """
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.now()
+        now = datetime.now()
         # 结束时刻对齐到最近的过去 08:00/20:00，与后端数据时次保持一致
         sync_hours = [h for h in [20, 8] if now.replace(hour=h, minute=0, second=0, microsecond=0) <= now]
         if not sync_hours:
@@ -4063,8 +4039,8 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         days = total_hours // 24
         aggregated: dict[str, dict] = {}
         for day in range(days):
-            day_end = end_dt - _td(days=day)
-            day_start = day_end - _td(hours=24)
+            day_end = end_dt - timedelta(days=day)
+            day_start = day_end - timedelta(hours=24)
             day_range = f"[{day_start.strftime('%Y%m%d%H%M%S')},{day_end.strftime('%Y%m%d%H%M%S')}]"
             print(f"[面雨量] 拆分查询第 {day + 1}/{days} 天：{day_range}")
             try:
@@ -4111,7 +4087,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
             })
         # 按累计面雨量降序
         result.sort(key=lambda x: float(x.get("avg_rainfall_mm", 0)), reverse=True)
-        start_dt = end_dt - _td(hours=total_hours)
+        start_dt = end_dt - timedelta(hours=total_hours)
         label = f"{start_dt.strftime('%Y年%m月%d日 %H:%M')} ~ {end_dt.strftime('%Y年%m月%d日 %H:%M')}"
         return result, label
 
@@ -4149,8 +4125,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
 
         if has_err and not explicit_time_range:
             # 用户未指定绝对日期且查询失败时，尝试用 08:00/20:00 对齐的时间范围再查一次，保持原时长时间隔
-            from datetime import datetime as _dt, timedelta as _td
-            now = _dt.now()
+            now = datetime.now()
             candidates = []
             for h in [8, 20]:
                 cand = now.replace(hour=h, minute=0, second=0, microsecond=0)
@@ -4158,7 +4133,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
                     candidates.append(cand)
             if candidates:
                 end = max(candidates)
-                start = end - _td(hours=hours)
+                start = end - timedelta(hours=hours)
                 fallback_range = f"[{start.strftime('%Y%m%d%H%M%S')},{end.strftime('%Y%m%d%H%M%S')}]"
                 fallback_label = f"{start.strftime('%Y年%m月%d日 %H:%M')} ~ {end.strftime('%Y年%m月%d日 %H:%M')}"
                 print(f"[面雨量] 尝试08:00/20:00对齐时间范围：{fallback_range}")
@@ -4202,7 +4177,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         return True
     except Exception as e:
         print(f"面雨量快速路径失败：{e}")
-        import traceback
+
         traceback.print_exc()
         await _emit_fast_path_result(
             "面雨量查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
@@ -4229,17 +4204,7 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
             timeout=60,
         )
 
-        data = result
-        if isinstance(result, list) and result and isinstance(result[0], dict) and "text" in result[0]:
-            try:
-                data = json.loads(result[0]["text"])
-            except Exception:
-                data = result[0]["text"]
-        elif isinstance(result, str):
-            try:
-                data = json.loads(result)
-            except Exception:
-                data = result
+        data = _unwrap_tool_observation(result)
 
         if not isinstance(data, dict):
             await _emit_fast_path_result(
@@ -4260,9 +4225,7 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
         level = data.get("level")
         msg = data.get("message", "")
         evidence = data.get("evidence", {}) if isinstance(data.get("evidence"), dict) else {}
-
-        from datetime import datetime as _dt
-        dt_obj = _dt.strptime(times, "%Y%m%d%H%M%S")
+        dt_obj = datetime.strptime(times, "%Y%m%d%H%M%S")
         time_label = dt_obj.strftime("%Y年%m月%d日%H时%M分")
 
         if triggered:
@@ -4303,74 +4266,12 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
         return True
     except Exception as e:
         print(f"防汛应急响应快速路径失败：{e}")
-        import traceback
+
         traceback.print_exc()
         await _emit_fast_path_result(
             "应急响应判定查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
         return True
-
-
-# async def _try_warning_fast_path(user_text: str, tools, messages, callbacks) -> bool:
-#     """生效预警快速路径"""
-#     if not user_text:
-#         return False
-#     t = user_text.strip()
-#
-#     trigger_keywords = ["预警", "警报", "预警信息", "生效预警", "暴雨预警", "地质灾害预警"]
-#     if not any(k in t for k in trigger_keywords):
-#         return False
-#
-#     tool = _find_tool(tools, "get_effective_warning_info")
-#     if not tool:
-#         return False
-#
-#     print("\n=== 生效预警快速路径 ===")
-#     thinking_msg = await _show_thinking("🔍 正在查询生效预警信息，请稍候...")
-#
-#     try:
-#         result = await asyncio.wait_for(tool.ainvoke({}), timeout=15)
-#
-#         import json as _js
-#         data = result
-#         if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and "text" in result[0]:
-#             try:
-#                 data = _js.loads(result[0]["text"])
-#             except Exception:
-#                 data = result[0]["text"]
-#
-#         warnings = []
-#         if isinstance(data, dict):
-#             warnings = data.get("warnings", data.get("data", [])) or []
-#         elif isinstance(data, list):
-#             warnings = data
-#
-#         if warnings:
-#             lines = [f"## 当前生效预警（共{len(warnings)}条）\n\n"]
-#             lines.append("| 类型 | 级别 | 发布时间 | 内容 |\n")
-#             lines.append("| :--- | :--- | :--- | :--- |\n")
-#             for w in warnings[:20]:
-#                 if isinstance(w, dict):
-#                     event = w.get("event_type", w.get("type", "-"))
-#                     severity = w.get("severity", w.get("level", "-"))
-#                     issue_time = w.get("issue_time", w.get("publish_time", "-"))
-#                     headline = w.get("headline", w.get("content", w.get("title", "-")))
-#                     lines.append(f"| {event} | {severity} | {issue_time} | {headline} |\n")
-#             text = "".join(lines)
-#         else:
-#             text = "当前无生效预警信息。"
-#
-#         await _emit_fast_path_result(text, thinking_msg, messages, user_text)
-#         return True
-#     except asyncio.TimeoutError:
-#         await _emit_fast_path_result(
-#             "⏱️ 预警查询超时，请稍后重试。", thinking_msg, messages, user_text
-#         )
-#         return True
-#     except Exception as e:
-#         print(f"预警快速路径失败：{e}")
-#         await thinking_msg.remove()
-#         return False
 
 
 async def process_message(message: cl.Message, planner_chain, answer_chain, tools, messages, callbacks):
@@ -4432,10 +4333,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     if await _try_basin_areal_rainfall_fast_path(message.content, tools, messages, callbacks):
         return
 
-    # # 生效预警快速路径
-    # if await _try_warning_fast_path(message.content, tools, messages, callbacks):
-    #     return
-
     # 周末户外活动建议快速路径
     if await _try_weekend_activity_fast_path(message.content, tools, messages, callbacks):
         return
@@ -4461,7 +4358,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
     reasoning = ReasoningStep("🤔 思考过程")
     await reasoning.__aenter__()
-    await reasoning.line("🧭 正在理解您的问题，并确定需要查询哪些数据...")
+    await reasoning.line("正在分析您的问题，识别需要查询的气象、水文数据...")
 
     try:
         _compress_messages(messages)
@@ -4472,7 +4369,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         await reasoning.__aexit__(None, None, None)
         await cl.Message(content=_friendly_llm_error_text(e)).send()
         print(f"Planner 首轮调用失败：{e}")
-        import traceback
+
         traceback.print_exc()
         cl.user_session.set("messages", messages)
         return
@@ -4480,17 +4377,20 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     # 捕获模型自带的 <think> 推理内容（DeepSeek/QwQ 等模型风格）
     think_content, cleaned_content = _extract_think_content(planner_msg.content)
     if think_content:
-        await reasoning.line("**模型推理：**")
+        await reasoning.line("**分析思路：**")
         await reasoning.append(think_content)
         planner_msg.content = cleaned_content
 
     if planner_msg.tool_calls:
         tool_count = len(planner_msg.tool_calls)
-        await reasoning.line(f"**决定调用 {tool_count} 个数据查询步骤。**")
-        thinking_msg.content = f"🔧 已规划 {tool_count} 个查询步骤，正在获取数据..."
+        tool_names_display = "、".join(
+            TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
+        )
+        await reasoning.line(f"**需要查询以下数据：{tool_names_display}（共 {tool_count} 项）**")
+        thinking_msg.content = f"🔧 正在查询 {tool_count} 项数据，请稍候..."
         await thinking_msg.update()
     else:
-        await reasoning.line("**无需调用工具，直接生成回答。**")
+        await reasoning.line("**已掌握足够信息，直接为您整理回答。**")
         thinking_msg.content = "✍️ 正在整理回答..."
         await thinking_msg.update()
 
@@ -4516,7 +4416,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         # 若 planner 已经生成完整业务化回答，直接复用，避免 answer_chain 二次生成导致格式异常
         cleaned_planner_content = _sanitize_display_text(planner_msg.content or "")
         if cleaned_planner_content.strip():
-            await reasoning.line("**正在整理回答...**")
+            await reasoning.line("**正在为您整理分析结论...**")
             await reasoning.close()
             await thinking_msg.remove()
             text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
@@ -4528,7 +4428,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         # 首轮 answer_chain（真实流式输出）
         try:
             _compress_messages(messages)
-            await reasoning.line("**正在生成最终回答...**")
+            await reasoning.line("**正在为您生成分析结论...**")
             await reasoning.close()
             await thinking_msg.remove()
             text = await asyncio.wait_for(
@@ -4538,7 +4438,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         except Exception as e:
             await cl.Message(content=_friendly_llm_error_text(e)).send()
             print(f"Answer 首轮调用失败：{e}")
-            import traceback
+    
             traceback.print_exc()
             cl.user_session.set("messages", messages)
             return
@@ -4558,8 +4458,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     while planner_msg.tool_calls and iteration < max_iterations:
         iteration += 1
         tool_count = len(planner_msg.tool_calls)
-        await reasoning.line(f"**第 {iteration} 轮：开始调用 {tool_count} 个数据查询。**")
-        thinking_msg.content = f"🔧 第 {iteration} 轮：正在查询数据..."
+        tool_names_display = "、".join(
+            TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
+        )
+        await reasoning.line(f"**补充查询第 {iteration} 轮：{tool_names_display}**")
+        thinking_msg.content = f"🔧 第 {iteration} 轮补充查询中..."
         await thinking_msg.update()
 
         forced_final_text, ree, warning_bundles = await _run_tool_round(
@@ -4569,7 +4472,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await cl.send_window_message(ree)
 
         if forced_final_text:
-            await reasoning.line("**已获得确定性结果，直接整理回答。**")
+            await reasoning.line("**数据已获取完毕，正在为您整理结论。**")
             await reasoning.close()
             await thinking_msg.remove()
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
@@ -4579,7 +4482,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             break
 
         if warning_bundles:
-            await reasoning.line("**预警数据已返回，正在由代码整理清单和预警内容，并由大模型生成核心结论和防范建议。**")
+            await reasoning.line("**预警数据已获取，正在整理预警清单并生成防范建议。**")
             await reasoning.close()
             thinking_msg.content = "✍️ 正在生成回答..."
             await thinking_msg.update()
@@ -4619,8 +4522,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             answer_generated = True
             break
 
-        await reasoning.line("**正在判断是否需要进一步查询...**")
-        thinking_msg.content = "🧭 正在判断是否需要进一步查询..."
+        await reasoning.line("**正在评估已获取的数据是否足够回答您的问题...**")
+        thinking_msg.content = "🧭 正在评估是否需要补充查询..."
         await thinking_msg.update()
 
         print(f"\n=== 第 {iteration} 轮 Planner 调用前 ===")
@@ -4637,7 +4540,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             # 再次捕获可能的 <think> 内容
             think_content, cleaned_content = _extract_think_content(planner_msg.content)
             if think_content:
-                await reasoning.line("**模型进一步推理：**")
+                await reasoning.line("**进一步分析：**")
                 await reasoning.append(think_content)
                 planner_msg.content = cleaned_content
 
@@ -4665,7 +4568,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
                 try:
                     _compress_messages(messages)
-                    await reasoning.line("**正在生成最终回答...**")
+                    await reasoning.line("**正在为您生成分析结论...**")
                     await reasoning.close()
                     thinking_msg.content = "✍️ 正在整理回答..."
                     await thinking_msg.update()
@@ -4696,7 +4599,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await reasoning.line(f"❌ 调用失败：{str(e)[:200]}")
             await cl.Message(content=error_msg).send()
             print(f"LLM 调用失败：{e}")
-            import traceback
+    
             traceback.print_exc()
             print(f"Messages 内容：{messages}")
             break  # 中断循环，避免同一异常重复报错，后续走循环外兜底
@@ -4711,7 +4614,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await thinking_msg.update()
         try:
             _compress_messages(messages)
-            await reasoning.line("**正在生成兜底回答...**")
+            await reasoning.line("**正在为您生成分析结论...**")
             await reasoning.close()
             await thinking_msg.remove()
             text = await asyncio.wait_for(

@@ -17,7 +17,6 @@ class RainfallData(BaseModel):
 
 
 class RainfallCityData(BaseModel):
-    """降雨数据基础模型"""
     """城市降雨详细数据模型 - 包含栅格统计信息"""
     city_name: str = Field(..., description="城市名称")
     time_period: str = Field(..., description="时间范围描述")
@@ -25,7 +24,6 @@ class RainfallCityData(BaseModel):
     average_rainfall_mm: float = Field(..., description="平均降雨量(mm)")
     max_rainfall_mm: float = Field(..., description="最大降雨量(mm)")
     min_rainfall_mm: float = Field(..., description="最小降雨量(mm)")
-    # total_rainfall_mm: float = Field(..., description="总降雨量(mm)")
     processed_files: int = Field(..., description="处理的文件数量")
     data_source: str = Field(default="ec", description="数据来源")
 
