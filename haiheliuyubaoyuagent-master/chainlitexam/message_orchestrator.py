@@ -1727,6 +1727,7 @@ async def _handle_fast_path_error(
         try:
             elapsed = time.time() - query_start_time if query_start_time else 0.0
             TimingLogger.log_query(session_id, query_summary, elapsed, status="fail")
+            cl.user_session.set("query_timing_logged", True)
         except Exception:
             pass
         _save_to_history(user_text, text, messages)
@@ -4356,16 +4357,18 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     cl.user_session.set("query_start_time", query_start_time)
     session_id = cl.user_session.get("id") or ""
     query_summary = message.content
-    _query_timing_logged = False
+    cl.user_session.set("query_timing_logged", False)
 
     def _log_query_exit(status: str = "ok"):
-        nonlocal _query_timing_logged
+        if cl.user_session.get("query_timing_logged"):
+            return
         try:
             total_elapsed = time.time() - query_start_time
             TimingLogger.log_query(session_id, query_summary, total_elapsed, status=status)
-            _query_timing_logged = True
         except Exception:
             pass
+        finally:
+            cl.user_session.set("query_timing_logged", True)
 
     # 降雨分布图快速路径（优先判断，避免误入河网路径）
     if await _try_rainfall_img_fast_path(message.content, tools, messages, callbacks):
@@ -4741,7 +4744,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
 
-    if not _query_timing_logged:
+    if not cl.user_session.get("query_timing_logged"):
         _log_query_exit("ok")
     await reasoning.close()
     return
