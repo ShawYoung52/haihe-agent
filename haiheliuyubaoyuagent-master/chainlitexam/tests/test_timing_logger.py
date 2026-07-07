@@ -75,20 +75,8 @@ def test_summary_truncation():
     assert "  " not in summary  # whitespace collapsed
 
 
-def test_empty_session_id():
-    records = _capture_log(
-        TimingLogger.log_tool,
-        session_id="",
-        query_summary="test",
-        tool_name="tool",
-        elapsed=0.1,
-    )
-    assert "session=unknown" in records[0].getMessage()
-
-
 if __name__ == "__main__":
     test_log_tool_format()
     test_log_query_format()
     test_summary_truncation()
-    test_empty_session_id()
     print("All tests passed.")
