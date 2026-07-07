@@ -3258,25 +3258,32 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
         return False
     t = user_text.strip()
 
-    # 必须包含周末或周六/周日
+    # 周末关键词
     weekend_kw = ["周末", "周六", "周日", "星期日", "星期天", "周六日"]
     if not any(k in t for k in weekend_kw):
         return False
 
-    # 只有明确问海河流域/流域范围时才用 EC 代表城市降雨判断；
-    # 未说明地点或天津/我市/本市周末活动适宜性，交给滚动预报。
+    # 流域范围：指定流域 → 查代表城市 + 活动建议；未指定 → 默认天津 + 天气预报
     basin_scope_kw = ["海河流域", "海河", "流域"]
-    if not any(k in t for k in basin_scope_kw):
-        return False
+    is_basin_scope = any(k in t for k in basin_scope_kw)
 
-    # 必须包含活动/天气/降雨意向之一；"适合...吗/能...吗/可以...吗/好吗" 也视为活动咨询
-    intent_kw = ["户外", "活动", "出行", "旅游", "游玩", "适合", "能去", "出去", "玩",
-                 "爬山", "跑步", "骑行", "露营", "野餐", "运动", "散步", "郊游",
-                 "天气", "下雨", "有雨", "降雨"]
-    has_activity_intent = any(k in t for k in intent_kw)
+    # 天气查询意图：天气/降雨/如何/怎么样/预报
+    weather_intent_kw = ["天气", "下雨", "有雨", "降雨", "如何", "怎么样", "预报", "什么天"]
+    has_weather_intent = any(k in t for k in weather_intent_kw)
+
+    # 活动意图
+    activity_kw = ["户外", "活动", "出行", "旅游", "游玩", "适合", "能去", "出去", "玩",
+                   "爬山", "跑步", "骑行", "露营", "野餐", "运动", "散步", "郊游"]
+    has_activity_intent = any(k in t for k in activity_kw)
     has_suitability_pattern = bool(re.search(r"(适合|能|可以|好不好|行不行|好).{0,6}(吗|么|呢)", t))
-    if not (has_activity_intent or has_suitability_pattern):
-        return False
+
+    # 流域范围：需活动/天气意图；非流域：天气意图或活动意图均可，默认查天津
+    if is_basin_scope:
+        if not (has_activity_intent or has_weather_intent or has_suitability_pattern):
+            return False
+    else:
+        if not (has_weather_intent or has_activity_intent or has_suitability_pattern):
+            return False
 
     fc_tool = _find_tool(tools, "get_city_rainfall_time_range")
     if not fc_tool:
@@ -3303,9 +3310,12 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
     else:
         days = [("周六", sat_offset), ("周日", sun_offset)]
 
-    cities = _BASIN_REP_CITIES[:3]  # 北京、天津、石家庄
+    if is_basin_scope:
+        cities = _BASIN_REP_CITIES[:3]
+    else:
+        cities = ["天津市"]
 
-    print(f"\n=== 周末活动快速路径：{[d[0] for d in days]} ===")
+    print(f"\n=== 周末{'活动' if is_basin_scope else '天气'}快速路径：{[d[0] for d in days]} ===")
     thinking_msg = await _show_thinking("🔍 正在查询周末降雨预报，请稍候...")
 
     try:
@@ -3344,40 +3354,45 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
 
         await thinking_msg.remove()
 
-        # 生成建议
-        lines = ["## 周末户外活动建议\n\n"]
-        overall_suitable = True
-        for day_label, info in day_results.items():
-            date_label = info["date"]
-            valid = [r for r in info["rows"] if isinstance(r["avg"], (int, float))]
-            if valid:
-                max_avg = max(float(r["avg"]) for r in valid)
-            else:
-                max_avg = 0.0
-            if max_avg >= 10:
-                advice = "不建议户外活动，建议安排室内行程"
-                overall_suitable = False
-            elif max_avg >= 1:
-                advice = "不太适合长时间户外活动，外出请携带雨具"
-                overall_suitable = False
-            elif max_avg >= 0.1:
-                advice = "基本适合户外活动，偶有微量降雨"
-            else:
-                advice = "适合户外活动"
-            lines.append(f"**{day_label}（{date_label}）**：{advice}\n\n")
-            lines.append("| 代表城市 | 平均雨量(mm) | 最大雨量(mm) | 降雨趋势 |\n")
-            lines.append("| :--- | :--- | :--- | :--- |\n")
-            for r in info["rows"]:
-                lines.append(f"| {r['city']} | {r['avg']} | {r['max']} | {r['judgment']} |\n")
-            lines.append("\n")
-
-        if overall_suitable:
-            conclusion = "📌 本周末海河流域代表城市整体降雨较弱，比较适合户外活动。"
+        # 生成输出：流域范围 → 活动建议；非流域 → 天气预报
+        if is_basin_scope:
+            lines = ["## 周末户外活动建议\n\n"]
+            overall_suitable = True
+            for day_label, info in day_results.items():
+                date_label = info["date"]
+                valid = [r for r in info["rows"] if isinstance(r["avg"], (int, float))]
+                max_avg = max(float(r["avg"]) for r in valid) if valid else 0.0
+                if max_avg >= 10:
+                    advice = "不建议户外活动，建议安排室内行程"
+                    overall_suitable = False
+                elif max_avg >= 1:
+                    advice = "不太适合长时间户外活动，外出请携带雨具"
+                    overall_suitable = False
+                elif max_avg >= 0.1:
+                    advice = "基本适合户外活动，偶有微量降雨"
+                else:
+                    advice = "适合户外活动"
+                lines.append(f"**{day_label}（{date_label}）**：{advice}\n\n")
+                lines.append("| 代表城市 | 平均雨量(mm) | 最大雨量(mm) | 降雨趋势 |\n")
+                lines.append("| :--- | :--- | :--- | :--- |\n")
+                for r in info["rows"]:
+                    lines.append(f"| {r['city']} | {r['avg']} | {r['max']} | {r['judgment']} |\n")
+                lines.append("\n")
+            conclusion = "📌 本周末海河流域代表城市整体降雨较弱，比较适合户外活动。" if overall_suitable else "📌 本周末海河流域部分时段有明显降雨，请根据具体日期和区域安排活动。"
+            text = conclusion + "\n\n" + "".join(lines)
+            text += "**说明**：以上为代表城市 24 小时降雨量预报（ECMWF AIFS），具体点位可能有差异；临近出行前请关注最新预报。"
         else:
-            conclusion = "📌 本周末海河流域部分时段有明显降雨，请根据具体日期和区域安排活动。"
-
-        text = conclusion + "\n\n" + "".join(lines)
-        text += "**说明**：以上为代表城市 24 小时降雨量预报（ECMWF AIFS），具体点位可能有差异；临近出行前请关注最新预报。"
+            lines = ["## 天津周末天气预报\n\n"]
+            for day_label, info in day_results.items():
+                date_label = info["date"]
+                lines.append(f"**{day_label}（{date_label}）**\n\n")
+                lines.append("| 城市 | 平均雨量(mm) | 最大雨量(mm) | 降雨趋势 |\n")
+                lines.append("| :--- | :--- | :--- | :--- |\n")
+                for r in info["rows"]:
+                    lines.append(f"| {r['city']} | {r['avg']} | {r['max']} | {r['judgment']} |\n")
+                lines.append("\n")
+            text = "".join(lines)
+            text += "**说明**：以上为天津 24 小时降雨量预报（ECMWF AIFS），临近出行前请关注最新预报。"
         text = callbacks.get("append_followup_if_needed", lambda txt, u: txt)(text, user_text)
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
