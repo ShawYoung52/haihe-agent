@@ -17,6 +17,18 @@ except Exception:
     WARNING_ROUTE_PROMPT = ""
     WARNING_SUMMARY_PROMPT = ""
 
+try:
+    from timing_logger import TimingLogger
+except Exception:
+    class TimingLogger:
+        @staticmethod
+        def log_tool(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def log_query(*args, **kwargs):
+            pass
+
 
 class ReasoningStep:
     """
@@ -1617,15 +1629,20 @@ def _build_hour_tolerant_args(tool_args):
 
 
 async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step):
+    session_id = cl.user_session.get("id") or ""
+    query_summary = cl.user_session.get("last_query") or ""
+
     start_time = time.time()
     try:
         result = await tool.ainvoke(tool_args)
         elapsed = time.time() - start_time
         print(f"[工具耗时] {tool_name}: {elapsed:.2f}s")
+        TimingLogger.log_tool(session_id, query_summary, tool_name, elapsed, status="ok")
         return result, elapsed
     except Exception as e:
         elapsed = time.time() - start_time
         print(f"[工具耗时] {tool_name}: {elapsed:.2f}s (失败)")
+        TimingLogger.log_tool(session_id, query_summary, tool_name, elapsed, status="fail")
         err_text = str(e)
         if tool_name != "get_city_rainfall_time_range" or "hour%6==2" not in err_text:
             raise
@@ -1643,6 +1660,7 @@ async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step):
         result = await tool.ainvoke(retry_args)
         retry_elapsed = time.time() - retry_start
         print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s")
+        TimingLogger.log_tool(session_id, query_summary, f"{tool_name}(retry)", retry_elapsed, status="ok")
         return result, retry_elapsed
 
 
