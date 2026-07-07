@@ -4538,16 +4538,18 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         try:
             _compress_messages(messages)
             await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-            await reasoning.close()
             await thinking_msg.remove()
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                 timeout=60,
             )
+            await reasoning.close()
         except Exception as e:
+            await reasoning.line(f"❌ 生成回答失败：{str(e)[:200]}")
+            await reasoning.close()
             await cl.Message(content=_friendly_llm_error_text(e)).send()
             print(f"Answer 首轮调用失败：{e}")
-    
+
             traceback.print_exc()
             cl.user_session.set("messages", messages)
             _log_query_exit(query_start_time, session_id, query_summary, "fail")
@@ -4583,10 +4585,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await cl.send_window_message(ree)
 
         if forced_final_text:
-            await reasoning.stage("✍️ 生成结论", "数据已获取完毕，正在为您整理结论。")
-            await reasoning.close()
+            await reasoning.stage("✅ 评估结果", "已获取足够数据，准备生成定制化结论。")
+            await reasoning.stage("✍️ 生成结论", "正在为您整理定制化结论...")
             await thinking_msg.remove()
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
+            await reasoning.close()
             messages.append(AIMessage(content=forced_final_text))
             print("\n=== 使用定制化收口答案，退出循环 ===\n")
             _log_query_exit(query_start_time, session_id, query_summary, "ok")
@@ -4594,8 +4597,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             break
 
         if warning_bundles:
-            await reasoning.stage("✍️ 生成结论", "预警数据已获取，正在整理预警清单并生成防范建议。")
-            await reasoning.close()
+            await reasoning.stage("✅ 评估结果", "预警数据已获取，数据完整。")
+            await reasoning.stage("✍️ 生成结论", "正在整理预警清单并生成防范建议...")
             thinking_msg.content = "✍️ 正在生成回答..."
             await thinking_msg.update()
             try:
@@ -4605,7 +4608,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                 final_text = _sanitize_display_text(
                     callbacks["append_followup_if_needed"](final_text or "", message.content)
                 )
+                await reasoning.close()
             except Exception as e:
+                await reasoning.line(f"❌ 预警专用回答生成失败：{str(e)[:200]}")
+                await reasoning.close()
                 print(f"预警专用回答生成失败：{e}")
                 merged = _merge_warning_bundles(warning_bundles)
                 records = _filter_warning_records_for_user(merged["records"], message.content)
@@ -4677,7 +4683,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                 try:
                     _compress_messages(messages)
                     await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-                    await reasoning.close()
                     thinking_msg.content = "✍️ 正在整理回答..."
                     await thinking_msg.update()
                     await thinking_msg.remove()
@@ -4685,7 +4690,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                         callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                         timeout=60,
                     )
+                    await reasoning.close()
                 except Exception as e:
+                    await reasoning.line(f"❌ 循环生成回答失败：{str(e)[:200]}")
+                    await reasoning.close()
                     print(f"Answer 循环调用失败：{e}")
                     # 不 break，继续走循环外兜底
                 else:
@@ -4724,12 +4732,12 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         try:
             _compress_messages(messages)
             await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-            await reasoning.close()
             await thinking_msg.remove()
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                 timeout=60,
             )
+            await reasoning.close()
         except Exception as e:
             await reasoning.line(f"❌ 兜底回答失败：{str(e)[:200]}")
             await reasoning.close()
