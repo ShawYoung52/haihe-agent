@@ -58,6 +58,7 @@ class ReasoningStep:
         self.step.output = ""
         self.step.collapsed = False  # 初始展开
         await self.step.send()
+        print(f"[ReasoningStep] created: collapsed={self.step.collapsed}")
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -1764,6 +1765,7 @@ async def generate_fast_path_thinking(
     data_sources: list[str],
 ) -> str:
     """为 fast path 生成一段自然语言深度思考。"""
+    print(f"[THINKING_FAST] generating thinking for intent='{intent_text}'")
     prompt = FAST_PATH_THINKING_PROMPT.format(
         current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
         user_query=user_text,
@@ -1784,7 +1786,8 @@ async def generate_fast_path_thinking(
             if len(thinking_text) > 300:
                 thinking_text = thinking_text[:300] + "..."
         return thinking_text
-    except Exception:
+    except Exception as e:
+        print(f"[THINKING_FAST] error for '{user_text[:30]}...': {e}")
         return ""
 
 
@@ -4953,6 +4956,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     # 生成并展示深度思考
     try:
+        print("[THINKING_PLANNER] starting thinking generation")
         await callbacks["astream_thinking_to_reasoning"](
             thinking_chain,
             {
@@ -4964,6 +4968,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             },
             reasoning,
         )
+        print("[THINKING_PLANNER] thinking generation done")
     except Exception:
         pass
 

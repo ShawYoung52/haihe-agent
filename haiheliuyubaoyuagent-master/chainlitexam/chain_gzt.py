@@ -824,12 +824,14 @@ async def astream_planner_think(chain, input_dict, reasoning_step, config: Runna
 
 async def _process_thinking_stream(chain, input_dict, reasoning_step, config):
     """流式调用 thinking chain，将模型自然语言思考实时追加到 ReasoningStep。"""
+    print("[THINKING_STREAM] starting stream")
     content_buf = ""
     async for chunk in chain.astream(input_dict, config=config):
         token = getattr(chunk, "content", None)
         if token:
             content_buf += token
             await reasoning_step.append(token)
+    print(f"[THINKING_STREAM] done, content_len={len(content_buf)}")
     return content_buf.strip()
 
 
@@ -840,10 +842,12 @@ async def astream_thinking_to_reasoning(thinking_chain, input_dict, reasoning_st
             _process_thinking_stream(thinking_chain, input_dict, reasoning_step, config),
             timeout=30,
         )
-    except (asyncio.TimeoutError, TimeoutError):
+    except (asyncio.TimeoutError, TimeoutError) as e:
+        print(f"[THINKING_STREAM] timeout: {e}")
         await reasoning_step.line("\n\n（思考生成超时，继续为您查询数据...）")
         return ""
     except Exception as e:
+        print(f"[THINKING_STREAM] error: {e}")
         await reasoning_step.line(f"\n\n（思考生成遇到异常：{str(e)[:100]}，继续为您查询数据...）")
         return ""
 
