@@ -63,8 +63,13 @@ def _install_langchain_stub():
         sys.modules["langchain_core"] = types.ModuleType("langchain_core")
     if "langchain_core.messages" not in sys.modules:
         lcms = types.ModuleType("langchain_core.messages")
+
+        class _BaseMessage:
+            def __init__(self, content: str = "", **kwargs):
+                self.content = content
+
         for name in ("ToolMessage", "HumanMessage", "AIMessage"):
-            setattr(lcms, name, type(name, (), {}))
+            setattr(lcms, name, type(name, (_BaseMessage,), {}))
         sys.modules["langchain_core.messages"] = lcms
 
 

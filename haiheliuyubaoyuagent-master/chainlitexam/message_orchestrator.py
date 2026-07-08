@@ -1776,7 +1776,7 @@ async def generate_fast_path_thinking(
         result = await asyncio.wait_for(
             thinking_chain.ainvoke({
                 "system_message": prompt,
-                "messages": [],
+                "messages": [HumanMessage(content=user_text)],
             }),
             timeout=10,
         )
@@ -4960,7 +4960,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         await callbacks["astream_thinking_to_reasoning"](
             thinking_chain,
             {
-                "messages": [],
+                "messages": [HumanMessage(content=message.content)],
                 "system_message": THINKING_PROMPT.format(
                     current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
                     user_query=message.content,
