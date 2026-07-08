@@ -1801,8 +1801,7 @@ async def _emit_fast_path_result(
     if has_chart:
         cl.user_session.set("has_chart_generated", True)
     await thinking_msg.remove()
-    summary = _build_thinking_summary(user_text, has_chart=has_chart)
-    final_text = summary + "\n\n" + text if summary else text
+    final_text = _prepend_thinking_summary(text, user_text, has_chart=has_chart)
     if images:
         await cl.Message(content=final_text, elements=images).send()
     else:
@@ -1875,7 +1874,6 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
 
         brief = callbacks["build_river_network_brief"](river_observation, river_name)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
-        cl.user_session.set("has_chart_generated", True)
         await _emit_fast_path_result(brief, thinking_msg, messages, user_text, has_chart=True)
         return True
     except Exception as e:
@@ -2061,7 +2059,6 @@ async def _try_affected_river_network_by_rainfall_fast_path(
 
         brief = _build_affected_river_network_brief(result_data, user_text)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
-        cl.user_session.set("has_chart_generated", True)
         await _emit_fast_path_result(brief, thinking_msg, messages, user_text, has_chart=True)
         return True
     except Exception as e:
@@ -2094,7 +2091,6 @@ async def _try_manual_plot_fallback(user_text: str, tools, stream_msg: cl.Messag
 
         fallback_text = callbacks["build_river_network_brief"](river_observation, river_name)
         fallback_text = callbacks["append_followup_if_needed"](fallback_text, user_text)
-        cl.user_session.set("has_chart_generated", True)
         fallback_text = _prepend_thinking_summary(fallback_text, user_text, has_chart=True)
         await callbacks["stream_text_to_message"](fallback_text, stream_msg=stream_msg)
         return True
@@ -2793,7 +2789,6 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
                     f"如需具体数值或单站详情，可继续问“各子流域面雨量对比”或“最大雨强出现在哪里”。"
                 )
                 text = callbacks["append_followup_if_needed"](text, user_text)
-                cl.user_session.set("has_chart_generated", True)
                 await _emit_fast_path_result(
                     text,
                     thinking_msg,
