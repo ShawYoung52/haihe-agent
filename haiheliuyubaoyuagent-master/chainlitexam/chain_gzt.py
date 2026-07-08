@@ -36,6 +36,13 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from prompts import WEATHER_ASSISTANT_PROMPT
+
+try:
+    from prompts import THINKING_PROMPT, FAST_PATH_THINKING_PROMPT
+except Exception:
+    THINKING_PROMPT = ""
+    FAST_PATH_THINKING_PROMPT = ""
+
 from message_orchestrator import process_message, _sanitize_display_text
 from external_skill_tools import build_external_skill_tools
 from tools.rain_analysis import build_rain_analysis_tools
@@ -813,6 +820,32 @@ async def astream_planner_think(chain, input_dict, reasoning_step, config: Runna
             print(f"[astream_planner_think] 第 {attempt + 1} 次调用超时，准备重试...")
             await asyncio.sleep(1)
     raise last_exc
+
+
+async def _process_thinking_stream(chain, input_dict, reasoning_step, config):
+    """流式调用 thinking chain，将模型自然语言思考实时追加到 ReasoningStep。"""
+    content_buf = ""
+    async for chunk in chain.astream(input_dict, config=config):
+        token = getattr(chunk, "content", None)
+        if token:
+            content_buf += token
+            await reasoning_step.append(token)
+    return content_buf.strip()
+
+
+async def astream_thinking_to_reasoning(thinking_chain, input_dict, reasoning_step, config: RunnableConfig | None = None):
+    """生成并流式展示深度思考，带 30 秒超时。"""
+    try:
+        return await asyncio.wait_for(
+            _process_thinking_stream(thinking_chain, input_dict, reasoning_step, config),
+            timeout=30,
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        await reasoning_step.line("\n\n（思考生成超时，继续为您查询数据...）")
+        return ""
+    except Exception as e:
+        await reasoning_step.line(f"\n\n（思考生成遇到异常：{str(e)[:100]}，继续为您查询数据...）")
+        return ""
 
 async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None, chunk_size: int = 32, delay_ms: float | None = None):
     """
@@ -3581,6 +3614,7 @@ async def on_message(message: cl.Message):
         "make_followup_question": _make_followup_question,
         "ainvoke_chain": ainvoke_chain,
         "astream_planner_think": astream_planner_think,
+        "astream_thinking_to_reasoning": astream_thinking_to_reasoning,
         "astream_answer_chain_to_message": astream_answer_chain_to_message,
         "should_force_admin_units_reply": _should_force_admin_units_reply,
         "should_force_partition_table_reply": _should_force_partition_table_reply,
