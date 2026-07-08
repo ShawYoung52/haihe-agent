@@ -404,7 +404,7 @@ class DecisionWeatherQAService:
         self.callbacks = callbacks
         self.status_msg = None
 
-    async def try_handle(self, user_text: str, messages: list) -> bool:
+    async def try_handle(self, user_text: str, messages: list, reasoning: ReasoningStep | None = None) -> bool:
         if not user_text or not _decision_weather_prefilter(user_text):
             return False
         poi_tool = _find_tool(self.tools, "search_poi")
@@ -471,7 +471,9 @@ class DecisionWeatherQAService:
             )
 
             await self._update_step(step, status_msg, f"📍 正在查询位置：{location_name} ...")
-            poi_raw = await poi_tool.ainvoke({"keyword": location_name, "size": 5})
+            poi_raw = await _invoke_tool_for_fast_path(
+                poi_tool.name, poi_tool, {"keyword": location_name, "size": 5}, user_text
+            )
             poi_payload = _unwrap_tool_observation(poi_raw)
             poi = _decision_pick_first_poi(poi_payload if isinstance(poi_payload, dict) else {})
             if not poi:
@@ -517,7 +519,9 @@ class DecisionWeatherQAService:
             print(f"[DecisionWeather] query_rolling_forecast args: {json.dumps(forecast_args, ensure_ascii=False)}")
 
             await self._update_step(step, status_msg, "🛰️ 正在调用滚动预报数据...")
-            forecast_raw = await forecast_tool.ainvoke(forecast_args)
+            forecast_raw = await _invoke_tool_for_fast_path(
+                forecast_tool.name, forecast_tool, forecast_args, user_text
+            )
             forecast_payload = _unwrap_tool_observation(forecast_raw)
             if not isinstance(forecast_payload, dict) or forecast_payload.get("api_code") not in (None, "200", 200):
                 print(f"[DecisionWeather] forecast raw payload: {forecast_payload}")
@@ -650,8 +654,13 @@ class DecisionWeatherQAService:
 
 async def _try_decision_weather_fast_path(user_text: str, answer_chain, tools, messages, callbacks) -> bool:
     service = DecisionWeatherQAService(answer_chain=answer_chain, tools=tools, callbacks=callbacks)
+    reasoning = await _show_business_reasoning(
+        "查询具体点位决策天气",
+        ["点位天气预报数据"],
+        "将给出该点位的天气影响评估",
+    )
     try:
-        return await service.try_handle(user_text, messages)
+        return await service.try_handle(user_text, messages, reasoning=reasoning)
     except Exception as exc:
         print(f"[DecisionWeather] fast path 失败，回退通用流程：{exc}")
 
@@ -662,6 +671,8 @@ async def _try_decision_weather_fast_path(user_text: str, answer_chain, tools, m
             except Exception:
                 pass
         return False
+    finally:
+        await reasoning.close()
 
 
 WARNING_TOOL_NAMES = {
@@ -1242,6 +1253,11 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
         return False
 
     thinking_msg = await _show_thinking("🧭 正在判断预警接口，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "查询天津气象预警信息",
+        ["预警数据"],
+        "将整理预警清单、核心结论与防范建议",
+    )
     bundles = []
     try:
         route = await _route_warning_tools(answer_chain, user_text, callbacks)
@@ -1253,6 +1269,7 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
             return False
 
         display_names = "、".join(TOOL_DISPLAY_NAMES.get(name, name) for name, _ in selected_tools)
+        await reasoning.stage("📡 查询数据", "将查询以下数据：" + display_names)
         thinking_msg.content = f"🔔 正在调用{display_names}..."
         await thinking_msg.update()
 
@@ -1266,7 +1283,9 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
                 print(f"[WarningFastPath] 调用 {name} 参数: {json.dumps(args, ensure_ascii=False)}")
                 step.output += f"📡 正在调用{TOOL_DISPLAY_NAMES.get(name, name)}...\n"
                 await step.update()
-                result = await asyncio.wait_for(tool.ainvoke(args), timeout=30)
+                result = await asyncio.wait_for(
+                    _invoke_tool_for_fast_path(name, tool, args, user_text), timeout=30
+                )
                 bundles.append(_build_warning_bundle(name, result))
                 step.output += f"✅ {TOOL_DISPLAY_NAMES.get(name, name)}查询完成。\n"
                 await step.update()
@@ -1291,6 +1310,8 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
         except Exception:
             pass
         return False
+    finally:
+        await reasoning.close()
 
 
 # 内部数据模式：IP地址、端口、凭据片段等不应出现在用户可见文本中
@@ -1691,6 +1712,32 @@ async def _show_thinking(text: str) -> cl.Message:
     return msg
 
 
+async def _show_business_reasoning(intent_text: str, data_sources: list[str],
+                                   conclusion_hint: str) -> ReasoningStep:
+    """为 fast path 创建一段业务化的思考过程，包含理解问题、查询数据、生成结论三个阶段。"""
+    reasoning = ReasoningStep("🤔 思考过程")
+    await reasoning.__aenter__()
+    await reasoning.stage("🔍 理解问题", f"识别到您的问题意图：{intent_text}")
+    await reasoning.stage("📡 查询数据", "将查询以下数据：" + "、".join(data_sources))
+    await reasoning.stage("✍️ 生成结论", conclusion_hint)
+    return reasoning
+
+
+async def _invoke_tool_for_fast_path(tool_name: str, tool, tool_args, user_text: str):
+    """Fast path 中统一调用工具并记录 [TOOL_TIMING]。"""
+    session_id = cl.user_session.get("id") or ""
+    start = time.time()
+    try:
+        result = await tool.ainvoke(tool_args)
+        elapsed = time.time() - start
+        TimingLogger.log_tool(session_id, user_text, tool_name, elapsed, status="ok")
+        return result
+    except Exception as e:
+        elapsed = time.time() - start
+        TimingLogger.log_tool(session_id, user_text, tool_name, elapsed, status="fail")
+        raise
+
+
 async def _emit_fast_path_result(
     text: str,
     thinking_msg: cl.Message,
@@ -1749,17 +1796,27 @@ async def _handle_fast_path_error(
     return False
 
 
-async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, reasoning: ReasoningStep | None = None) -> bool:
     if not callbacks["need_river_plot"](user_text):
         return False
+
+    if reasoning is None:
+        reasoning = await _show_business_reasoning(
+            "绘制河网可视化图",
+            ["河网水系数据", "行政区划底图数据"],
+            "将绘制河网图并叠加行政区划底图",
+        )
 
     try:
         river_tool = _find_tool(tools, "get_river_network_for_plot")
         if not river_tool:
+            await reasoning.close()
             return False
 
         river_name = callbacks["extract_river_name"](user_text)
-        river_observation = await river_tool.ainvoke({"start_river": river_name})
+        river_observation = await _invoke_tool_for_fast_path(
+            river_tool.name, river_tool, {"start_river": river_name}, user_text
+        )
         await _render_river_plot_with_overlay(tools, river_observation, river_name, callbacks)
 
         brief = callbacks["build_river_network_brief"](river_observation, river_name)
@@ -1773,6 +1830,9 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks) 
     except Exception as e:
         print(f"河网快路径失败，回退到通用流程：{e}")
         return False
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
 
 
 def _need_affected_river_network_by_rainfall(user_text: str) -> bool:
@@ -1837,12 +1897,18 @@ async def _try_affected_river_network_by_rainfall_fast_path(
         return False
 
     thinking_msg = None
+    reasoning = None
     try:
         tool = _find_tool(tools, "get_affected_river_network_by_rainfall")
         if not tool:
             return False
 
         thinking_msg = await _show_thinking("正在分析暴雨影响河系并绘制专题图...")
+        reasoning = await _show_business_reasoning(
+            "分析暴雨影响河系并绘制专题图",
+            ["降雨实况数据", "河网水系数据"],
+            "将绘制暴雨影响河系专题图并给出文字分析",
+        )
 
         time_str = _detect_rainfall_time(user_text)
         start_time = ""
@@ -1859,13 +1925,18 @@ async def _try_affected_river_network_by_rainfall_fast_path(
             if any(k in user_text for k in future_keywords):
                 return False
 
-        result = await tool.ainvoke({
-            "time_str": time_str,
-            "start_time": start_time,
-            "end_time": end_time,
-            "rainfall_threshold_mm": 50.0,
-            "include_background": True,
-        })
+        result = await _invoke_tool_for_fast_path(
+            "get_affected_river_network_by_rainfall",
+            tool,
+            {
+                "time_str": time_str,
+                "start_time": start_time,
+                "end_time": end_time,
+                "rainfall_threshold_mm": 50.0,
+                "include_background": True,
+            },
+            user_text,
+        )
 
         # 兼容 MCP 工具返回的 list/text/dict/ToolMessage 多种包装
         result_data = result
@@ -1956,6 +2027,9 @@ async def _try_affected_river_network_by_rainfall_fast_path(
             except Exception:
                 pass
         return False
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
 
 
 async def _try_manual_plot_fallback(user_text: str, tools, stream_msg: cl.Message, callbacks) -> bool:
@@ -2126,6 +2200,11 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
     # 发送"正在思考"提示
     thinking_msg = cl.Message(content="🔍 我正在思考，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "分析指定时段降雨特征",
+        ["实况降雨站点数据"],
+        "将统计降雨分布、极值、持续时间等特征",
+    )
 
     try:
         # 设置超时，防止后端卡死
@@ -2133,7 +2212,10 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
         if start_time and end_time:
             invoke_args["start_time"] = start_time
             invoke_args["end_time"] = end_time
-        result = await asyncio.wait_for(tool.ainvoke(invoke_args), timeout=30)
+        result = await asyncio.wait_for(
+            _invoke_tool_for_fast_path(tool.name, tool, invoke_args, user_text),
+            timeout=30,
+        )
         data = _unwrap_tool_observation(result)
 
         # 如果查询含"全市"，将数据过滤为仅天津市站点
@@ -2295,6 +2377,8 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
         # 返回 False，让主 planner 尝试其他工具/路径回答用户问题
         # （例如用面雨量分布图来展示昨日降雨情况）
         return False
+    finally:
+        await reasoning.close()
 
 
 # 工具名 -> 业务可读名称映射，供思考过程和工具步骤展示使用
@@ -2551,8 +2635,14 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
     if not tool:
         return False
 
+    reasoning = None
     print(f"\n=== 降雨分布图快速路径 ===")
     thinking_msg = await _show_thinking("🔍 正在生成降水实况图，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "生成海河流域降水实况分布图",
+        ["实况降雨站点数据"],
+        "将生成降雨分布图并简要说明时间范围和分区",
+    )
 
     try:
         now = datetime.now()
@@ -2621,7 +2711,7 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
                 interval = int((end_dt - begin_dt).total_seconds() / 3600)
 
         args = {"beginTime": beginTime, "endTime": endTime, "interval": max(interval, 1)}
-        result = await tool.ainvoke(args)
+        result = await _invoke_tool_for_fast_path("get_station_rainfall_real_img", tool, args, user_text)
         await thinking_msg.remove()
 
         # 显示图片
@@ -2685,6 +2775,9 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
         print(f"降雨分布图快速路径失败，回退到通用流程：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
 
 
 async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -2706,6 +2799,11 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
     print(f"\n=== 城市平均降雨量快速路径：{city} ===")
     thinking_msg = cl.Message(content="🔍 正在查询实况降雨数据，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "查询城市平均降雨量",
+        ["城市面雨量数据"],
+        "将给出各城市平均降雨量排名或对比",
+    )
 
     try:
         now = datetime.now()
@@ -2716,7 +2814,9 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
         end_s = now.strftime("%Y%m%d%H%M%S")
 
         result = await asyncio.wait_for(
-            tool.ainvoke({"time_str": time_str, "start_time": start_s, "end_time": end_s}),
+            _invoke_tool_for_fast_path(
+                tool.name, tool, {"time_str": time_str, "start_time": start_s, "end_time": end_s}, user_text
+            ),
             timeout=30,
         )
         await thinking_msg.remove()
@@ -2778,6 +2878,8 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
         print(f"城市平均降雨量快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -2799,6 +2901,11 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
     print(f"\n=== 今天降雨快速路径 ===")
     thinking_msg = cl.Message(content="🔍 正在查询今日降雨数据，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "查询今日降雨情况",
+        ["实况降雨数据", "预报降雨数据"],
+        "将分时段说明今日已下和将下的降雨",
+    )
 
     try:
         now = datetime.now()
@@ -2817,7 +2924,12 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
             obs_end_s = now.strftime("%Y%m%d%H%M%S")
 
         obs_result = await asyncio.wait_for(
-            tool.ainvoke({"time_str": now.strftime("%Y%m%d%H%M%S"), "start_time": obs_start_s, "end_time": obs_end_s}),
+            _invoke_tool_for_fast_path(
+                tool.name,
+                tool,
+                {"time_str": now.strftime("%Y%m%d%H%M%S"), "start_time": obs_start_s, "end_time": obs_end_s},
+                user_text,
+            ),
             timeout=30,
         )
         obs_data = obs_result
@@ -2835,7 +2947,12 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
                 fc_end_dt = split_dt + timedelta(hours=24)
                 fc_period = f"{split_dt.strftime('%Y-%m-%d %H:%M')} ~ {fc_end_dt.strftime('%Y-%m-%d %H:%M')}"
                 fc_result = await asyncio.wait_for(
-                    fc_tool.ainvoke({"city_name": "天津市", "start_time": start_fc, "forecast_hours": 24}),
+                    _invoke_tool_for_fast_path(
+                        fc_tool.name,
+                        fc_tool,
+                        {"city_name": "天津市", "start_time": start_fc, "forecast_hours": 24},
+                        user_text,
+                    ),
                     timeout=15,
                 )
                 fc_data = fc_result
@@ -2922,6 +3039,8 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
         print(f"今天降雨快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -2941,6 +3060,11 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
     print(f"\n=== 今日累计降雨时长快速路径 ===")
     thinking_msg = cl.Message(content="🔍 正在统计今日降雨时长，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "统计今日降雨时长",
+        ["实况降雨站点数据"],
+        "将统计今日各站累计降雨时长",
+    )
 
     try:
         now = datetime.now()
@@ -2948,11 +3072,16 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
         period_hours = max(now.hour, 1)  # 已过小时数，最少1h
 
         result = await asyncio.wait_for(
-            tool.ainvoke({
-                "time_str": now.strftime("%Y%m%d%H%M%S"),
-                "start_time": today_start.strftime("%Y%m%d%H%M%S"),
-                "end_time": now.strftime("%Y%m%d%H%M%S"),
-            }),
+            _invoke_tool_for_fast_path(
+                tool.name,
+                tool,
+                {
+                    "time_str": now.strftime("%Y%m%d%H%M%S"),
+                    "start_time": today_start.strftime("%Y%m%d%H%M%S"),
+                    "end_time": now.strftime("%Y%m%d%H%M%S"),
+                },
+                user_text,
+            ),
             timeout=30,
         )
         await thinking_msg.remove()
@@ -3014,6 +3143,8 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
         print(f"今日降雨时长快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -3032,6 +3163,11 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
     print(f"\n=== 未来一周预报快速路径 ===")
     thinking_msg = cl.Message(content="🔍 正在查询未来一周天气预报，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "查询未来一周天气预报",
+        ["ECMWF AIFS 预报数据"],
+        "将给出未来一周天气趋势与重点关注",
+    )
 
     try:
         now = datetime.now()
@@ -3044,7 +3180,12 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
             day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
             try:
                 r = await asyncio.wait_for(
-                    tool.ainvoke({"city_name": "天津市", "start_time": day_str, "forecast_hours": 24}),
+                    _invoke_tool_for_fast_path(
+                        tool.name,
+                        tool,
+                        {"city_name": "天津市", "start_time": day_str, "forecast_hours": 24},
+                        user_text,
+                    ),
                     timeout=15,
                 )
                 rd = r
@@ -3083,6 +3224,8 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
         print(f"未来一周预报快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -3116,6 +3259,11 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
     print(f"\n=== 强降雨检查快速路径 ===")
     thinking_msg = cl.Message(content="🔍 正在检查近期降雨情况，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "检查未来是否会出现强降雨",
+        ["预报降雨数据"],
+        "将给出强降雨出现时段、区域与强度判断",
+    )
 
     try:
         now = datetime.now()
@@ -3125,7 +3273,9 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
         end_s = now.strftime("%Y%m%d%H%M%S")
 
         result = await asyncio.wait_for(
-            obs_tool.ainvoke({"time_str": time_str, "start_time": start_s, "end_time": end_s}),
+            _invoke_tool_for_fast_path(
+                obs_tool.name, obs_tool, {"time_str": time_str, "start_time": start_s, "end_time": end_s}, user_text
+            ),
             timeout=30,
         )
         await thinking_msg.remove()
@@ -3171,6 +3321,8 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
         print(f"强降雨检查快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 _BASIN_REP_CITIES = ["北京", "天津", "石家庄", "保定", "唐山", "沧州"]
@@ -3229,13 +3381,23 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
 
     print(f"\n=== 海河流域天气快速路径：{label}（{date_label}）===")
     thinking_msg = await _show_thinking(f"🔍 正在查询海河流域代表城市{label}降雨预报，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "查询海河流域整体天气",
+        ["流域天气预报数据"],
+        "将给出海河流域今明后天气概况",
+    )
 
     try:
         rows = []
         for city in _BASIN_REP_CITIES:
             try:
                 r = await asyncio.wait_for(
-                    fc_tool.ainvoke({"city_name": city, "start_time": day_str, "forecast_hours": 24}),
+                    _invoke_tool_for_fast_path(
+                        fc_tool.name,
+                        fc_tool,
+                        {"city_name": city, "start_time": day_str, "forecast_hours": 24},
+                        user_text,
+                    ),
                     timeout=15,
                 )
                 rd = r
@@ -3311,6 +3473,8 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
         print(f"海河流域天气快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -3381,6 +3545,11 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
 
     print(f"\n=== 周末{'活动' if is_basin_scope else '天气'}快速路径：{[d[0] for d in days]} ===")
     thinking_msg = await _show_thinking("🔍 正在查询周末降雨预报，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "获取周末户外活动天气建议",
+        ["周末天气预报数据"],
+        "将给出周末天气适合度与活动建议",
+    )
 
     try:
         day_results = {}
@@ -3392,7 +3561,12 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
             for city in cities:
                 try:
                     r = await asyncio.wait_for(
-                        fc_tool.ainvoke({"city_name": city, "start_time": day_str, "forecast_hours": 24}),
+                        _invoke_tool_for_fast_path(
+                            fc_tool.name,
+                            fc_tool,
+                            {"city_name": city, "start_time": day_str, "forecast_hours": 24},
+                            user_text,
+                        ),
                         timeout=15,
                     )
                     rd = r
@@ -3475,6 +3649,8 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
         print(f"周末活动快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 _KNOWN_WATER_LEVEL_RIVERS = ["大清河", "子牙河", "永定河", "北三河", "漳卫南运河", "徒骇马颊河", "黑龙港", "滦河", "潮白河", "蓟运河", "海河干流"]
@@ -3510,10 +3686,17 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
 
     print(f"\n=== 水位快速路径：{river_name} ===")
     thinking_msg = await _show_thinking(f"🔍 正在查询{river_name}水位情况，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "查询河网水位",
+        ["河网水位数据"],
+        "将给出关键站点水位信息",
+    )
 
     try:
         result = await asyncio.wait_for(
-            tool.ainvoke({"river_name": river_name, "data_type": "river"}),
+            _invoke_tool_for_fast_path(
+                tool.name, tool, {"river_name": river_name, "data_type": "river"}, user_text
+            ),
             timeout=30,
         )
         print(f"[水位快速路径] 原始结果类型={type(result)}, 内容={result}")
@@ -3524,6 +3707,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         print(f"[水位快速路径] 解包后类型={type(data)}, 内容={data}")
 
         if not isinstance(data, dict):
+            await reasoning.close()
             await _emit_fast_path_result(
                 "水位数据格式异常，无法生成表格。", thinking_msg, messages, user_text
             )
@@ -3541,11 +3725,13 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
                 friendly = "水位查询服务鉴权失败，请联系管理员检查服务配置。"
             else:
                 friendly = "水位查询服务暂时不可用，请稍后重试。"
+            await reasoning.close()
             await _emit_fast_path_result(friendly, thinking_msg, messages, user_text)
             return True
 
         records = data.get("records", [])
         if not isinstance(records, list) or not records:
+            await reasoning.close()
             await _emit_fast_path_result(
                 f"当前未查询到{river_name}相关站点水位数据。", thinking_msg, messages, user_text
             )
@@ -3588,6 +3774,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         text = _sanitize_display_text(text)
         print(f"[水位快速路径] 最终输出文本=\n{text}")
 
+        await reasoning.close()
         await thinking_msg.remove()
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
@@ -3596,6 +3783,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         return True
 
     except asyncio.TimeoutError:
+        await reasoning.close()
         await _emit_fast_path_result(
             "⏱️ 水位查询超时，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -3604,10 +3792,14 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
 
         print(f"[水位快速路径] 异常：{e}")
         traceback.print_exc()
+        await reasoning.close()
         await _emit_fast_path_result(
             "水位查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
         return True
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
 
 
 async def _try_general_weather_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -3687,15 +3879,25 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
         print(f"\n=== 通用天气快速路径（今天实况）===")
         thinking_msg = cl.Message(content="🔍 正在查询今日实况天气，请稍候...")
         await thinking_msg.send()
+        reasoning = await _show_business_reasoning(
+            "查询通用天气",
+            ["天气预报数据"],
+            "将给出天气概况与变化趋势",
+        )
 
         try:
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             result = await asyncio.wait_for(
-                tool.ainvoke({
-                    "time_str": now.strftime("%Y%m%d%H%M%S"),
-                    "start_time": today_start.strftime("%Y%m%d%H%M%S"),
-                    "end_time": now.strftime("%Y%m%d%H%M%S"),
-                }),
+                _invoke_tool_for_fast_path(
+                    tool.name,
+                    tool,
+                    {
+                        "time_str": now.strftime("%Y%m%d%H%M%S"),
+                        "start_time": today_start.strftime("%Y%m%d%H%M%S"),
+                        "end_time": now.strftime("%Y%m%d%H%M%S"),
+                    },
+                    user_text,
+                ),
                 timeout=30,
             )
             await thinking_msg.remove()
@@ -3732,6 +3934,8 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
             print(f"通用天气快速路径（今天）失败：{e}")
             await thinking_msg.remove()
             return False
+        finally:
+            await reasoning.close()
 
     # 明天/后天/未来N天 → 预报
     fc_tool = _find_tool(tools, "get_city_rainfall_time_range")
@@ -3752,6 +3956,11 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
     print(f"\n=== 通用天气快速路径（预报 {days_to_query} 天）===")
     thinking_msg = cl.Message(content=f"🔍 正在查询未来 {len(days_to_query)} 天天气预报，请稍候...")
     await thinking_msg.send()
+    reasoning = await _show_business_reasoning(
+        "查询通用天气",
+        ["天气预报数据"],
+        "将给出天气概况与变化趋势",
+    )
 
     try:
         rows = []
@@ -3760,7 +3969,12 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
             day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
             try:
                 r = await asyncio.wait_for(
-                    fc_tool.ainvoke({"city_name": "天津市", "start_time": day_str, "forecast_hours": 24}),
+                    _invoke_tool_for_fast_path(
+                        fc_tool.name,
+                        fc_tool,
+                        {"city_name": "天津市", "start_time": day_str, "forecast_hours": 24},
+                        user_text,
+                    ),
                     timeout=15,
                 )
                 rd = r
@@ -3810,6 +4024,8 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
         print(f"通用天气快速路径（预报）失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 # 子流域 → 代表性城市（用于未来天气预报，因流域级预报工具暂缺）
@@ -3889,6 +4105,11 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
     cities = _SUBBASIN_REP_CITIES[subbasin]
     print(f"\n=== 子流域预报快速路径：{subbasin}，代表城市 {cities}，{days} 天 ===")
     thinking_msg = await _show_thinking(f"🔍 正在查询{subbasin}代表城市未来{days}天降雨预报，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "查询子流域未来天气预报",
+        ["子流域预报数据"],
+        "将给出指定子流域未来几天天气预报",
+    )
 
     try:
         now = datetime.now()
@@ -3902,7 +4123,12 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
             for city in cities:
                 try:
                     r = await asyncio.wait_for(
-                        fc_tool.ainvoke({"city_name": city, "start_time": day_str, "forecast_hours": 24}),
+                        _invoke_tool_for_fast_path(
+                            fc_tool.name,
+                            fc_tool,
+                            {"city_name": city, "start_time": day_str, "forecast_hours": 24},
+                            user_text,
+                        ),
                         timeout=15,
                     )
                     rd = r
@@ -3959,6 +4185,8 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
         print(f"子流域预报快速路径失败：{e}")
         await thinking_msg.remove()
         return False
+    finally:
+        await reasoning.close()
 
 
 async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -4038,6 +4266,11 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
     hours, time_range, time_label, explicit_time_range = _parse_areal_rainfall_time(t)
     print(f"\n=== 面雨量快速路径：{time_label} ===")
     thinking_msg = await _show_thinking("🔍 正在查询各子流域面雨量数据，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "查询流域面雨量",
+        ["面雨量数据"],
+        "将给出流域面雨量统计与对比",
+    )
 
     _HOURS_SENTINEL = object()
 
@@ -4049,7 +4282,10 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         elif hours is not None:
             args["hours"] = hours
         # 长时段查询给更宽裕的超时，避免 168h 等大数据量请求被 30s 截断
-        result = await asyncio.wait_for(tool.ainvoke(args), timeout=timeout)
+        result = await asyncio.wait_for(
+            _invoke_tool_for_fast_path(tool.name, tool, args, user_text),
+            timeout=timeout,
+        )
         return _unwrap_tool_observation(result)
 
     def _has_error(data) -> tuple[bool, str]:
@@ -4204,6 +4440,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
                     raise
 
         if data is None:
+            await reasoning.close()
             await _emit_fast_path_result(
                 "⏱️ 面雨量查询超时，请稍后重试。", thinking_msg, messages, user_text
             )
@@ -4258,9 +4495,11 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
             if not text:
                 text = f"所选时段（{time_label}）暂无有效面雨量数据，请稍后重试。"
 
+        await reasoning.close()
         await _emit_fast_path_result(text, thinking_msg, messages, user_text)
         return True
     except asyncio.TimeoutError:
+        await reasoning.close()
         await _emit_fast_path_result(
             "⏱️ 面雨量查询超时，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -4269,10 +4508,14 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         print(f"面雨量快速路径失败：{e}")
 
         traceback.print_exc()
+        await reasoning.close()
         await _emit_fast_path_result(
             "面雨量查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
         return True
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
 
 
 async def _try_emergency_response_fast_path(user_text: str, tools, messages, callbacks) -> bool:
@@ -4287,16 +4530,24 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
 
     print(f"\n=== 防汛应急响应快速路径：times={times} ===")
     thinking_msg = await _show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
+    reasoning = await _show_business_reasoning(
+        "查询防汛应急响应信息",
+        ["防汛应急响应数据"],
+        "将给出应急响应级别与相关信息",
+    )
 
     try:
         result = await asyncio.wait_for(
-            tool.ainvoke({"times": times, "basin_codes": "HHLY"}),
+            _invoke_tool_for_fast_path(
+                tool.name, tool, {"times": times, "basin_codes": "HHLY"}, user_text
+            ),
             timeout=60,
         )
 
         data = _unwrap_tool_observation(result)
 
         if not isinstance(data, dict):
+            await reasoning.close()
             await _emit_fast_path_result(
                 "应急响应判定结果格式异常，无法生成回答。", thinking_msg, messages, user_text
             )
@@ -4308,6 +4559,7 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
             friendly = "当前无法获取应急响应判定数据，请稍后重试。"
             if "no record" in raw_err.lower() or "无记录" in raw_err or "暂无数据" in raw_err:
                 friendly = f"未查询到 {times[:4]}年{times[4:6]}月{times[6:8]}日 {times[8:10]}:{times[10:12]} 的应急响应判定数据，可能该时刻无有效分钟降水资料。"
+            await reasoning.close()
             await _emit_fast_path_result(friendly, thinking_msg, messages, user_text)
             return True
 
@@ -4347,9 +4599,11 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
             lines.append("")
 
         lines.append("\n数据来源：天擎分钟降水实况")
+        await reasoning.close()
         await _emit_fast_path_result("\n".join(lines), thinking_msg, messages, user_text)
         return True
     except asyncio.TimeoutError:
+        await reasoning.close()
         await _emit_fast_path_result(
             "⏱️ 应急响应判定查询超时，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -4358,10 +4612,14 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
         print(f"防汛应急响应快速路径失败：{e}")
 
         traceback.print_exc()
+        await reasoning.close()
         await _emit_fast_path_result(
             "应急响应判定查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
         return True
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
 
 
 async def process_message(message: cl.Message, planner_chain, answer_chain, tools, messages, callbacks):
