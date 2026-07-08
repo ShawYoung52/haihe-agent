@@ -1,12 +1,21 @@
 import io
 import json
 import re
+import time
 import asyncio
 import os
 import hashlib
 import threading
 from datetime import datetime
 from urllib.parse import quote_plus
+
+try:
+    from timing_logger import TimingLogger
+except Exception:
+    class TimingLogger:
+        @staticmethod
+        def log_tool(*args, **kwargs):
+            pass
 
 import psycopg2
 import psycopg2.pool
@@ -763,36 +772,30 @@ async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None)
 
 
 async def _process_planner_stream(chain, input_dict, reasoning_step, config):
-    """流式处理 planner 输出：所有 token 实时展示为思考过程。
-
-    使用 chain.astream() 获取 AIMessageChunk，兼容各版本 langchain-core。
-    当模型输出文本内容时（如"我需要查询天津降雨..."），逐字展示；
-    当模型直接输出工具调用时（content 为空），后续由 process_message 显示工具名称。
-    """
+    """流式处理 planner 输出：token 实时展示为思考过程，tool_calls 从最终 chunk 获取。"""
     content_buf = ""
     tool_calls_data = []
-    has_streamed = False
 
     async for chunk in chain.astream(input_dict, config=config):
         token = getattr(chunk, "content", None)
         if token:
             content_buf += token
             await reasoning_step.append(token)
-            has_streamed = True
-
+        # langchain 内部累积 tool_call_chunks，最终 chunk 的 .tool_calls 为完整列表
         tc = getattr(chunk, "tool_calls", None)
         if tc:
             tool_calls_data = tc
 
-        # 累积 tool_call_chunks（某些版本用这个字段）
-        tcc = getattr(chunk, "tool_call_chunks", None)
-        if tcc and not tool_calls_data:
-            pass  # tool_call_chunks 由 langchain 内部累积，最终在最后一个 chunk 出现完整 tool_calls
+    if not content_buf and not tool_calls_data:
+        print("[planner_stream] WARNING: 流式输出为空，模型可能未正确响应")
 
-    print(f"[planner_stream] streamed={has_streamed} content_len={len(content_buf)} tool_calls={len(tool_calls_data)}")
-    msg = AIMessage(content=content_buf.strip() if content_buf else "")
+    print(f"[planner_stream] content_len={len(content_buf)} tool_calls={len(tool_calls_data)}")
+    msg = AIMessage(content=content_buf.strip())
     if tool_calls_data:
-        msg.tool_calls = tool_calls_data
+        try:
+            msg.tool_calls = tool_calls_data
+        except (AttributeError, ValueError):
+            object.__setattr__(msg, "tool_calls", tool_calls_data)
     return msg
 
 
@@ -2420,7 +2423,7 @@ def _extract_river_name(user_text: str) -> str:
     return "全流域"
 
 
-async def _build_admin_overlay_for_plot(tools, river_observation):
+async def _build_admin_overlay_for_plot(tools, river_observation, user_text: str = ""):
     """根据河网结果自动计算 bbox 并拉取行政区划底图。"""
     admin_tool = next((t for t in tools if t.name == "get_admin_division_for_plot"), None)
     if not admin_tool:
@@ -2443,7 +2446,17 @@ async def _build_admin_overlay_for_plot(tools, river_observation):
     if not bbox:
         return None
 
-    return await admin_tool.ainvoke(_kwargs_for_admin_division_plot(bbox))
+    session_id = cl.user_session.get("id") or ""
+    start = time.time()
+    try:
+        result = await admin_tool.ainvoke(_kwargs_for_admin_division_plot(bbox))
+        elapsed = time.time() - start
+        TimingLogger.log_tool(session_id, user_text, "get_admin_division_for_plot", elapsed, status="ok")
+        return result
+    except Exception as e:
+        elapsed = time.time() - start
+        TimingLogger.log_tool(session_id, user_text, "get_admin_division_for_plot", elapsed, status="fail")
+        raise
 
 
 def _tool_observation_to_text(observation):

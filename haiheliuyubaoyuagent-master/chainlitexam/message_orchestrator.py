@@ -1696,8 +1696,8 @@ async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step, use
             raise
 
 
-async def _render_river_plot_with_overlay(tools, river_observation, river_name: str, callbacks):
-    admin_observation = await callbacks["build_admin_overlay_for_plot"](tools, river_observation)
+async def _render_river_plot_with_overlay(tools, river_observation, river_name: str, callbacks, user_text: str = ""):
+    admin_observation = await callbacks["build_admin_overlay_for_plot"](tools, river_observation, user_text)
     await callbacks["render_and_send_plot"](
         river_observation,
         title_suffix=river_name,
@@ -1817,7 +1817,7 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
         river_observation = await _invoke_tool_for_fast_path(
             river_tool.name, river_tool, {"start_river": river_name}, user_text
         )
-        await _render_river_plot_with_overlay(tools, river_observation, river_name, callbacks)
+        await _render_river_plot_with_overlay(tools, river_observation, river_name, callbacks, user_text)
 
         brief = callbacks["build_river_network_brief"](river_observation, river_name)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
@@ -1999,7 +1999,7 @@ async def _try_affected_river_network_by_rainfall_fast_path(
         if segments or stations:
             admin_observation = None
             if segments:
-                admin_observation = await callbacks["build_admin_overlay_for_plot"](tools, segments)
+                admin_observation = await callbacks["build_admin_overlay_for_plot"](tools, segments, user_text)
             await callbacks["render_and_send_plot"](
                 segments,
                 title_suffix=result_data.get("time_range_readable", time_str),
@@ -2040,7 +2040,7 @@ async def _try_manual_plot_fallback(user_text: str, tools, stream_msg: cl.Messag
 
         river_name = callbacks["extract_river_name"](user_text)
         river_observation = await river_tool.ainvoke({"start_river": river_name})
-        await _render_river_plot_with_overlay(tools, river_observation, river_name, callbacks)
+        await _render_river_plot_with_overlay(tools, river_observation, river_name, callbacks, user_text)
 
         if stream_msg.content.strip():
             await stream_msg.remove()
@@ -2543,7 +2543,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     elif tool_name == "get_river_network_for_plot":
                         river_name = tool_args.get("start_river", "全流域")
                         try:
-                            await _render_river_plot_with_overlay(tools, observation, river_name, callbacks)
+                            await _render_river_plot_with_overlay(tools, observation, river_name, callbacks, user_text)
                         except Exception as e:
                             print(f"加载行政区划底图失败：{e}")
                             await callbacks["render_and_send_plot"](observation, title_suffix=river_name, admin_raw_result=None)
