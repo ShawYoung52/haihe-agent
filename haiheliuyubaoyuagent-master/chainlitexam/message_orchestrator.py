@@ -13,11 +13,12 @@ from typing import Any
 from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
 
 try:
-    from prompts import WARNING_ROUTE_PROMPT, WARNING_SUMMARY_PROMPT, THINKING_PROMPT
+    from prompts import WARNING_ROUTE_PROMPT, WARNING_SUMMARY_PROMPT, THINKING_PROMPT, FAST_PATH_THINKING_PROMPT
 except Exception:
     WARNING_ROUTE_PROMPT = ""
     WARNING_SUMMARY_PROMPT = ""
     THINKING_PROMPT = ""
+    FAST_PATH_THINKING_PROMPT = ""
 
 try:
     from timing_logger import TimingLogger
@@ -664,13 +665,18 @@ class DecisionWeatherQAService:
         return getattr(result, "content", None) or str(result)
 
 
-async def _try_decision_weather_fast_path(user_text: str, answer_chain, tools, messages, callbacks) -> bool:
+async def _try_decision_weather_fast_path(user_text: str, thinking_chain, answer_chain, tools, messages, callbacks) -> bool:
     service = DecisionWeatherQAService(answer_chain=answer_chain, tools=tools, callbacks=callbacks)
     reasoning = await _show_business_reasoning(
         "查询具体点位决策天气",
         ["点位天气预报数据"],
         "将给出该点位的天气影响评估",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询具体点位决策天气", ["点位天气预报数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
     try:
         return await service.try_handle(user_text, messages, reasoning=reasoning)
     except Exception as exc:
@@ -1260,7 +1266,7 @@ def _assemble_warning_final_answer(llm_text: str, table_text: str, content_text:
     return "\n\n".join(section for section in sections if section).strip()
 
 
-async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messages, callbacks) -> bool:
+async def _try_warning_fact_fast_path(user_text: str, thinking_chain, answer_chain, tools, messages, callbacks) -> bool:
     if not _is_warning_fact_query(user_text):
         return False
 
@@ -1270,6 +1276,11 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
         ["预警数据"],
         "将整理预警清单、核心结论与防范建议",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询天津气象预警信息", ["预警数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
     bundles = []
     try:
         route = await _route_warning_tools(answer_chain, user_text, callbacks)
@@ -1736,6 +1747,29 @@ async def _show_business_reasoning(intent_text: str, data_sources: list[str],
     return reasoning
 
 
+async def generate_fast_path_thinking(
+    thinking_chain,
+    user_text: str,
+    intent_text: str,
+    data_sources: list[str],
+) -> str:
+    """为 fast path 生成一段自然语言深度思考。"""
+    prompt = FAST_PATH_THINKING_PROMPT.format(
+        current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        user_query=user_text,
+        intent=intent_text,
+        data_sources="、".join(data_sources),
+    )
+    try:
+        result = await thinking_chain.ainvoke({
+            "system_message": prompt,
+            "messages": [],
+        })
+        return getattr(result, "content", "") or ""
+    except Exception:
+        return ""
+
+
 def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
     """根据用户问题生成一句业务化前缀，放在最终回答开头。"""
     if not query:
@@ -1856,7 +1890,7 @@ async def _handle_fast_path_error(
     return False
 
 
-async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, reasoning: ReasoningStep | None = None) -> bool:
+async def _try_river_plot_fast_path(user_text: str, thinking_chain, tools, messages, callbacks, reasoning: ReasoningStep | None = None) -> bool:
     if not callbacks["need_river_plot"](user_text):
         return False
 
@@ -1866,6 +1900,11 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
             ["河网水系数据", "行政区划底图数据"],
             "将绘制河网图并叠加行政区划底图",
         )
+        thinking_text = await generate_fast_path_thinking(
+            thinking_chain, user_text, "绘制河网可视化图", ["河网水系数据", "行政区划底图数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
 
     thinking_msg = await _show_thinking("正在绘制河网可视化图，请稍候...")
     try:
@@ -1946,7 +1985,7 @@ def _build_affected_river_network_brief(result_data: dict, user_text: str) -> st
 
 
 async def _try_affected_river_network_by_rainfall_fast_path(
-    user_text: str, tools, messages, callbacks
+    user_text: str, thinking_chain, tools, messages, callbacks
 ) -> bool:
     """暴雨影响河系快速路径：调用聚合工具并高亮渲染河网专题图"""
     if not _need_affected_river_network_by_rainfall(user_text):
@@ -1980,6 +2019,11 @@ async def _try_affected_river_network_by_rainfall_fast_path(
             ["降雨实况数据", "河网水系数据"],
             "将绘制暴雨影响河系专题图并给出文字分析",
         )
+        thinking_text = await generate_fast_path_thinking(
+            thinking_chain, user_text, "分析暴雨影响河系并绘制专题图", ["降雨实况数据", "河网水系数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
 
         result = await _invoke_tool_for_fast_path(
             "get_affected_river_network_by_rainfall",
@@ -2228,7 +2272,7 @@ def _build_rainfall_time_window(user_text: str, time_str: str) -> tuple[str | No
     return None, None
 
 
-async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """降雨分析快速路径：在 LLM 拒绝之前直接调用降雨分析工具"""
     tool = _find_rainfall_tool(tools)
     if not tool:
@@ -2255,6 +2299,11 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
         ["实况降雨站点数据"],
         "将统计降雨分布、极值、持续时间等特征",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "分析指定时段降雨特征", ["实况降雨站点数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         # 设置超时，防止后端卡死
@@ -2671,7 +2720,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     return forced_final_text, ree, warning_bundles
 
 
-async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """降雨分布图快速路径：直接调用 get_station_rainfall_real_img 并展示图片+文字说明"""
     if not user_text:
         return False
@@ -2697,6 +2746,11 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
         ["实况降雨站点数据"],
         "将生成降雨分布图并简要说明时间范围和分区",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "生成海河流域降水实况分布图", ["实况降雨站点数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -2834,7 +2888,7 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
             await reasoning.close()
 
 
-async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """全市平均降雨量快速路径：调用 analyze_rainfall_by_time 获取天擎实况数据"""
     if not user_text:
         return False
@@ -2858,6 +2912,11 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
         ["城市面雨量数据"],
         "将给出各城市平均降雨量排名或对比",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询城市平均降雨量", ["城市面雨量数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -2937,7 +2996,7 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
         await reasoning.close()
 
 
-async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """今天降雨快速路径：今天0点~现在用实况，现在~明天0点用预报"""
     if not user_text:
         return False
@@ -2961,6 +3020,11 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
         ["实况降雨数据", "预报降雨数据"],
         "将分时段说明今日已下和将下的降雨",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询今日降雨情况", ["实况降雨数据", "预报降雨数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3099,7 +3163,7 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
         await reasoning.close()
 
 
-async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """今日累计降雨时长快速路径"""
     if not user_text:
         return False
@@ -3121,6 +3185,11 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
         ["实况降雨站点数据"],
         "将统计今日各站累计降雨时长",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "统计今日降雨时长", ["实况降雨站点数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3204,7 +3273,7 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
         await reasoning.close()
 
 
-async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """未来一周天气预报快速路径"""
     if not user_text:
         return False
@@ -3225,6 +3294,11 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
         ["ECMWF AIFS 预报数据"],
         "将给出未来一周天气趋势与重点关注",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询未来一周天气预报", ["ECMWF AIFS 预报数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3286,7 +3360,7 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
         await reasoning.close()
 
 
-async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """近期是否有强降雨/暴雨快速路径"""
     if not user_text:
         return False
@@ -3322,6 +3396,11 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
         ["实况降雨数据"],
         "将给出近72小时强降雨出现时段、区域与强度判断",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "检查近期是否出现强降雨", ["实况降雨数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3387,7 +3466,7 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
 _BASIN_REP_CITIES = ["北京", "天津", "石家庄", "保定", "唐山", "沧州"]
 
 
-async def _try_basin_weather_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """
     海河流域整体天气快速路径：
     例如"今天海河流域天气如何""明天海河天气怎么样"，固定查流域代表城市 24h 降雨预报，
@@ -3445,6 +3524,11 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
         ["流域天气预报数据"],
         "将给出海河流域今明后天气概况",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询海河流域整体天气", ["流域天气预报数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         rows = []
@@ -3537,7 +3621,7 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
         await reasoning.close()
 
 
-async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """
     周末户外活动建议快速路径：
     例如"周末适合户外活动吗""周六能出去玩吗"，查周六日降雨预报并给出活动建议。
@@ -3610,6 +3694,11 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
         ["周末天气预报数据"],
         "将给出周末天气适合度与活动建议",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "获取周末户外活动天气建议", ["周末天气预报数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         day_results = {}
@@ -3729,7 +3818,7 @@ def _extract_river_name_for_water_level(user_text: str) -> str:
     return m.group(1) if m else ""
 
 
-async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """水位查询快速路径：直接调用 query_water_level 并输出规范表格，避免模型自行生成畸形表格。"""
     if not user_text:
         return False
@@ -3752,6 +3841,11 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         ["河网水位数据"],
         "将给出关键站点水位信息",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询河网水位", ["河网水位数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         result = await asyncio.wait_for(
@@ -3858,7 +3952,7 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
             await reasoning.close()
 
 
-async def _try_general_weather_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """
     通用天气快速路径：
     - "今天/当前海河流域会下雨吗/有雨吗/降雨情况" → 走本地/后端降雨分析实况
@@ -3940,6 +4034,11 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
             ["天气预报数据"],
             "将给出天气概况与变化趋势",
         )
+        thinking_text = await generate_fast_path_thinking(
+            thinking_chain, user_text, "查询通用天气", ["天气预报数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
 
         try:
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -4018,6 +4117,11 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
         ["天气预报数据"],
         "将给出天气概况与变化趋势",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询通用天气", ["天气预报数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         rows = []
@@ -4119,7 +4223,7 @@ def _weather_judgment(avg_mm) -> str:
         return "暴雨及以上"
 
 
-async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """
     子流域未来天气预报快速路径：
     例如"大清河流域未来三天天气"，用该流域的代表城市逐日查 24h 预报，汇总成表。
@@ -4168,6 +4272,11 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
         ["子流域预报数据"],
         "将给出指定子流域未来几天天气预报",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询子流域未来天气预报", ["子流域预报数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -4248,7 +4357,7 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
         await reasoning.close()
 
 
-async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """面雨量快速路径：各子流域面雨量对比、哪个河系降雨最多/最少"""
     if not user_text:
         return False
@@ -4330,6 +4439,11 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         ["面雨量数据"],
         "将给出流域面雨量统计与对比",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询流域面雨量", ["面雨量数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     _HOURS_SENTINEL = object()
 
@@ -4573,7 +4687,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
             await reasoning.close()
 
 
-async def _try_emergency_response_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """防汛应急响应判定快速路径：直接调用 evaluate_haihe_emergency_response。"""
     matched, times = _extract_emergency_response_time(user_text)
     if not matched:
@@ -4590,6 +4704,11 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
         ["防汛应急响应数据"],
         "将给出应急响应级别与相关信息",
     )
+    thinking_text = await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询防汛应急响应信息", ["防汛应急响应数据"]
+    )
+    if thinking_text:
+        await reasoning.line(thinking_text)
 
     try:
         result = await asyncio.wait_for(
@@ -4681,94 +4800,94 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     cl.user_session.set("has_chart_generated", False)
 
     # 降雨分布图快速路径（优先判断，避免误入河网路径）
-    if await _try_rainfall_img_fast_path(message.content, tools, messages, callbacks):
+    if await _try_rainfall_img_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 防汛应急响应判定快速路径
-    if await _try_emergency_response_fast_path(message.content, tools, messages, callbacks):
+    if await _try_emergency_response_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 暴雨影响河系专题图快速路径（比通用河网路径更具体，优先判断）
     if await _try_affected_river_network_by_rainfall_fast_path(
-        message.content, tools, messages, callbacks
+        message.content, thinking_chain, tools, messages, callbacks
     ):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 河网图快速路径
-    if await _try_river_plot_fast_path(message.content, tools, messages, callbacks):
+    if await _try_river_plot_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 降雨分析快速路径
-    if await _try_rainfall_analysis_fast_path(message.content, tools, messages, callbacks):
+    if await _try_rainfall_analysis_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 城市平均降雨量快速路径
-    if await _try_city_avg_rainfall_fast_path(message.content, tools, messages, callbacks):
+    if await _try_city_avg_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 预警事实查询快速路径（包含”预警”时先判断接口，再调用工具并混合生成回答）
-    if await _try_warning_fact_fast_path(message.content, answer_chain, tools, messages, callbacks):
+    if await _try_warning_fact_fast_path(message.content, thinking_chain, answer_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 今日累计降雨时长快速路径（比”今天降雨”更具体，优先判断）
-    if await _try_today_rain_duration_fast_path(message.content, tools, messages, callbacks):
+    if await _try_today_rain_duration_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 今天降雨快速路径（分两段：今天0点~现在用实况，现在~明天0点用预报）
-    if await _try_today_rainfall_fast_path(message.content, tools, messages, callbacks):
+    if await _try_today_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 未来一周预报快速路径
-    if await _try_weekly_forecast_fast_path(message.content, tools, messages, callbacks):
+    if await _try_weekly_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 强降雨/暴雨检查快速路径
-    if await _try_heavy_rain_check_fast_path(message.content, tools, messages, callbacks):
+    if await _try_heavy_rain_check_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 子流域未来天气预报快速路径（大清河/子牙河等未来N天天气）
-    if await _try_subbasin_forecast_fast_path(message.content, tools, messages, callbacks):
+    if await _try_subbasin_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 面雨量快速路径（子流域对比、排名）
-    if await _try_basin_areal_rainfall_fast_path(message.content, tools, messages, callbacks):
+    if await _try_basin_areal_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 周末户外活动建议快速路径
-    if await _try_weekend_activity_fast_path(message.content, tools, messages, callbacks):
+    if await _try_weekend_activity_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 海河流域整体天气快速路径（今天/明天/后天海河流域/天津天气如何）
-    if await _try_basin_weather_fast_path(message.content, tools, messages, callbacks):
+    if await _try_basin_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 水位查询快速路径（避免模型生成畸形表格）
-    if await _try_water_level_fast_path(message.content, tools, messages, callbacks):
+    if await _try_water_level_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 通用天气快速路径（今天/明天/后天/未来N天天气）
-    if await _try_general_weather_fast_path(message.content, tools, messages, callbacks):
+    if await _try_general_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
     # 点位决策天气快速路径（具体学校/场馆/单位/设施，需先被以上路径排除后才做 POI 定位）
-    if await _try_decision_weather_fast_path(message.content, answer_chain, tools, messages, callbacks):
+    if await _try_decision_weather_fast_path(message.content, thinking_chain, answer_chain, tools, messages, callbacks):
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
         return
 
