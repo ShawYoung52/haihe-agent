@@ -1814,7 +1814,6 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
     try:
         river_tool = _find_tool(tools, "get_river_network_for_plot")
         if not river_tool:
-            await reasoning.close()
             return False
 
         river_name = callbacks["extract_river_name"](user_text)
