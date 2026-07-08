@@ -656,10 +656,8 @@ git commit -m "feat: add business-readable reasoning to all fast paths"
 在 `_show_business_reasoning` 附近添加：
 
 ```python
-def _build_thinking_summary(query: str, stages: list[str],
-                            tool_display_names: list[str] | None = None,
-                            has_chart: bool = False) -> str:
-    """根据已走过的阶段和工具，生成一句业务化前缀，放在最终回答开头。"""
+def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
+    """根据用户问题和是否有图表，生成一句业务化前缀，放在最终回答开头。"""
     if not query:
         return ""
 
@@ -707,7 +705,7 @@ async def _emit_fast_path_result(
     has_chart: bool = False,
 ):
     await thinking_msg.remove()
-    summary = _build_thinking_summary(user_text, [], has_chart=has_chart)
+    summary = _build_thinking_summary(user_text, has_chart=has_chart)
     final_text = summary + "\n\n" + text if summary else text
     if images:
         await cl.Message(content=final_text, elements=images).send()
@@ -725,7 +723,7 @@ async def _emit_fast_path_result(
 在 `process_message()` 中所有发送最终回答前：
 
 ```python
-summary = _build_thinking_summary(message.content, [], has_chart=是否有图表生成)
+summary = _build_thinking_summary(message.content, has_chart=是否有图表生成)
 text = summary + "\n\n" + text if summary else text
 await callbacks["stream_text_to_message"](text, stream_msg=stream_msg)
 ```
@@ -762,7 +760,8 @@ python tests/test_fast_paths.py
 ```
 
 期望结果：
-- 四个脚本均输出 `All tests passed.`（`test_fast_paths.py` 输出 `Total: 18 fast paths, 18 passed.`）。
+- `test_timing_logger.py`、`test_thinking_summary.py`、`test_reasoning_step.py` 输出 `All tests passed.`。
+- `test_fast_paths.py` 输出 `Total: 18 fast paths, 18 passed.`。
 - 任一脚本非零退出即为失败，需先修复再进入人工验证。
 
 ### Step 8.2: 本地启动服务（人工验证前置条件）
