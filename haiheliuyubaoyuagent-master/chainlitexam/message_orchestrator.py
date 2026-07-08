@@ -13,10 +13,11 @@ from typing import Any
 from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
 
 try:
-    from prompts import WARNING_ROUTE_PROMPT, WARNING_SUMMARY_PROMPT
+    from prompts import WARNING_ROUTE_PROMPT, WARNING_SUMMARY_PROMPT, THINKING_PROMPT
 except Exception:
     WARNING_ROUTE_PROMPT = ""
     WARNING_SUMMARY_PROMPT = ""
+    THINKING_PROMPT = ""
 
 try:
     from timing_logger import TimingLogger
@@ -4671,7 +4672,7 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
             await reasoning.close()
 
 
-async def process_message(message: cl.Message, planner_chain, answer_chain, tools, messages, callbacks):
+async def process_message(message: cl.Message, planner_chain, answer_chain, thinking_chain, tools, messages, callbacks):
     query_start_time = time.time()
     cl.user_session.set("query_start_time", query_start_time)
     session_id = cl.user_session.get("id") or ""
@@ -4781,7 +4782,24 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
 
     reasoning = ReasoningStep("🤔 思考过程")
     await reasoning.__aenter__()
-    await reasoning.stage("🔍 理解问题", "正在分析您的问题，识别需要关注的时间、区域和气象要素...")
+
+    # 生成并展示深度思考
+    try:
+        await callbacks["astream_thinking_to_reasoning"](
+            thinking_chain,
+            {
+                "messages": [],
+                "system_message": THINKING_PROMPT.format(
+                    current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    user_query=message.content,
+                ),
+            },
+            reasoning,
+        )
+    except Exception:
+        pass
+
+    await reasoning.stage("🔍 理解问题", "正在规划数据查询方案...")
 
     try:
         _compress_messages(messages)

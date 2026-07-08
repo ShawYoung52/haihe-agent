@@ -2388,9 +2388,17 @@ async def _init_runtime_session(messages_seed=None):
     ])
     planner_chain = prompt_template | planner_llm.bind_tools(tools)
     answer_chain = prompt_template | answer_llm
+    thinking_chain = (
+        ChatPromptTemplate.from_messages([
+            ("system", "{system_message}"),
+            MessagesPlaceholder(variable_name="messages"),
+        ])
+        | answer_llm
+    )
 
     cl.user_session.set("planner_chain", planner_chain)
     cl.user_session.set("answer_chain", answer_chain)
+    cl.user_session.set("thinking_chain", thinking_chain)
     cl.user_session.set("tools", tools)
     cl.user_session.set("messages", messages_seed if isinstance(messages_seed, list) else [])
 
@@ -3587,14 +3595,16 @@ async def on_chat_resume(thread: ThreadDict):
 async def on_message(message: cl.Message):
     planner_chain = cl.user_session.get("planner_chain")
     answer_chain = cl.user_session.get("answer_chain")
+    thinking_chain = cl.user_session.get("thinking_chain")
     messages = cl.user_session.get("messages")
     tools = cl.user_session.get("tools")
 
     # 兜底：恢复线程或服务热重载后，若运行时对象缺失则即时重建，避免“可看历史但无法继续聊”。
-    if planner_chain is None or answer_chain is None or tools is None:
+    if planner_chain is None or answer_chain is None or thinking_chain is None or tools is None:
         await _init_runtime_session(messages_seed=messages if isinstance(messages, list) else [])
         planner_chain = cl.user_session.get("planner_chain")
         answer_chain = cl.user_session.get("answer_chain")
+        thinking_chain = cl.user_session.get("thinking_chain")
         tools = cl.user_session.get("tools")
         messages = cl.user_session.get("messages")
 
@@ -3631,6 +3641,7 @@ async def on_message(message: cl.Message):
         message=message,
         planner_chain=planner_chain,
         answer_chain=answer_chain,
+        thinking_chain=thinking_chain,
         tools=tools,
         messages=messages,
         callbacks=callbacks,
