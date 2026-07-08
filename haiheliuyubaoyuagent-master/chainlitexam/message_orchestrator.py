@@ -551,6 +551,9 @@ class DecisionWeatherQAService:
             )
 
             await status_msg.remove()
+            summary = _build_thinking_summary(user_text, has_chart=False)
+            if summary:
+                final_text = summary + "\n\n" + final_text
             await self.callbacks["stream_text_to_message"](final_text)
             messages.append(HumanMessage(content=user_text))
             messages.append(AIMessage(content=final_text))
@@ -1299,6 +1302,9 @@ async def _try_warning_fact_fast_path(user_text: str, answer_chain, tools, messa
         final_text = await _generate_warning_hybrid_answer(answer_chain, bundles, user_text, callbacks)
         final_text = _sanitize_display_text(callbacks["append_followup_if_needed"](final_text or "", user_text))
         await thinking_msg.remove()
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            final_text = summary + "\n\n" + final_text
         await callbacks["stream_text_to_message"](final_text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=final_text))
@@ -1727,6 +1733,36 @@ async def _show_business_reasoning(intent_text: str, data_sources: list[str],
     return reasoning
 
 
+def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
+    """根据用户问题生成一句业务化前缀，放在最终回答开头。"""
+    if not query:
+        return ""
+
+    q = query.strip().lower()
+
+    if any(k in q for k in ["降雨分布图", "降水实况图", "面雨量分布图", "实况图", "降雨图", "雨区", "落区"]):
+        base = "已生成海河流域降水实况分布图，说明如下："
+    elif any(k in q for k in ["预警", "警报"]):
+        base = "已查询相关气象预警信息，整理结论如下："
+    elif any(k in q for k in ["河网", "水系", "河流"]):
+        base = "已绘制河网可视化并叠加行政区划底图，分析如下："
+    elif any(k in q for k in ["水位", "水文"]):
+        base = "已查询河网水位数据，整理如下："
+    elif any(k in q for k in ["应急响应", "防汛"]):
+        base = "已查询防汛应急响应信息，结论如下："
+    elif any(k in q for k in ["未来", "预报", "明天", "后天", "周末"]):
+        base = "已结合预报数据完成分析，为您整理结论如下："
+    elif any(k in q for k in ["今天", "今日", "实况", "现在", "当前", "刚才"]):
+        base = "已结合实况观测数据完成分析，为您整理结论如下："
+    else:
+        base = "已理解您的问题，为您解答如下："
+
+    if has_chart:
+        base = base.replace("为您整理结论如下：", "并生成相关图表，结论如下：")
+
+    return base
+
+
 async def _invoke_tool_for_fast_path(tool_name: str, tool, tool_args, user_text: str):
     """Fast path 中统一调用工具并记录 [TOOL_TIMING]。"""
     session_id = cl.user_session.get("id") or ""
@@ -1749,15 +1785,18 @@ async def _emit_fast_path_result(
     user_text: str,
     images: list = None,
     append_followup: bool = True,
+    has_chart: bool = False,
 ):
     """统一 fast path 结果出口：移除提示消息，发送最终结果，追加到对话历史。
     Fast path 自己生成规范文本，不再经过 _sanitize_display_text，避免表格等格式被误修复。"""
     await thinking_msg.remove()
+    summary = _build_thinking_summary(user_text, has_chart=has_chart)
+    final_text = summary + "\n\n" + text if summary else text
     if images:
-        await cl.Message(content=text, elements=images).send()
+        await cl.Message(content=final_text, elements=images).send()
     else:
-        await cl.Message(content=text).send()
-    _save_to_history(user_text, text, messages)
+        await cl.Message(content=final_text).send()
+    _save_to_history(user_text, final_text, messages)
 
 
 def _log_query_exit(query_start_time: float, session_id: str, query_summary: str, status: str = "ok"):
@@ -1824,6 +1863,10 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
 
         brief = callbacks["build_river_network_brief"](river_observation, river_name)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
+        cl.user_session.set("has_chart_generated", True)
+        summary = _build_thinking_summary(user_text, has_chart=True)
+        if summary:
+            brief = summary + "\n\n" + brief
         await callbacks["stream_text_to_message"](brief)
 
         messages.append(HumanMessage(content=user_text))
@@ -2013,6 +2056,10 @@ async def _try_affected_river_network_by_rainfall_fast_path(
 
         brief = _build_affected_river_network_brief(result_data, user_text)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
+        cl.user_session.set("has_chart_generated", True)
+        summary = _build_thinking_summary(user_text, has_chart=True)
+        if summary:
+            brief = summary + "\n\n" + brief
         await callbacks["stream_text_to_message"](brief)
 
         messages.append(HumanMessage(content=user_text))
@@ -2052,6 +2099,10 @@ async def _try_manual_plot_fallback(user_text: str, tools, stream_msg: cl.Messag
 
         fallback_text = callbacks["build_river_network_brief"](river_observation, river_name)
         fallback_text = callbacks["append_followup_if_needed"](fallback_text, user_text)
+        cl.user_session.set("has_chart_generated", True)
+        summary = _build_thinking_summary(user_text, has_chart=True)
+        if summary:
+            fallback_text = summary + "\n\n" + fallback_text
         await callbacks["stream_text_to_message"](fallback_text, stream_msg=stream_msg)
         return True
     except Exception as e:
@@ -2357,6 +2408,9 @@ async def _try_rainfall_analysis_fast_path(user_text: str, tools, messages, call
 
         # 移除"思考中"消息，直接发送完整消息（避免流式切片破坏 Markdown 表格）
         await thinking_msg.remove()
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await cl.Message(content=text).send()
 
         messages.append(HumanMessage(content=user_text))
@@ -2551,6 +2605,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                             print(f"加载行政区划底图失败：{e}")
                             await callbacks["render_and_send_plot"](observation, title_suffix=river_name, admin_raw_result=None)
 
+                        cl.user_session.set("has_chart_generated", True)
                         observation_text = (
                             f"（系统消息：已成功在前端为用户绘制了 {river_name} 的"
                             f"河网可视化图，并叠加行政区划底图。不要输出坐标数据，请继续用自然语言回答分析结果）"
@@ -2574,6 +2629,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                 end_time = data.get("endTime", "")
                                 range_type = data.get("range", "9")
                                 title = f"九分区面雨量分布图（{begin_time} ~ {end_time}）"
+                                cl.user_session.set("has_chart_generated", True)
                                 await cl.Message(
                                     content=f"📊 已生成{title}：",
                                     elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
@@ -2594,6 +2650,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     elif tool_name.startswith("historical_weather_"):
                         img_msgs, observation_text = _extract_historical_weather_images(observation)
                         if img_msgs:
+                            cl.user_session.set("has_chart_generated", True)
                             await cl.Message(content="📊 图表已生成：", elements=img_msgs).send()
                     else:
                         observation_text = callbacks["tool_observation_to_text"](observation)
@@ -2745,6 +2802,10 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
                     f"颜色越深表示该分区累计雨量越大。"
                     f"如需具体数值或单站详情，可继续问“各子流域面雨量对比”或“最大雨强出现在哪里”。"
                 )
+                summary = _build_thinking_summary(user_text, has_chart=True)
+                if summary:
+                    caption = summary + "\n\n" + caption
+                cl.user_session.set("has_chart_generated", True)
                 await cl.Message(
                     content=caption,
                     elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
@@ -2863,6 +2924,9 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, tools, messages, call
         else:
             text = f"当前{city}无有效实况降雨数据。"
 
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3024,6 +3088,9 @@ async def _try_today_rainfall_fast_path(user_text: str, tools, messages, callbac
         else:
             text = "今日实况降雨数据暂无，预报数据暂不可用。"
 
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3128,6 +3195,9 @@ async def _try_today_rain_duration_fast_path(user_text: str, tools, messages, ca
         else:
             text = "今日降雨数据暂无。"
 
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3217,6 +3287,9 @@ async def _try_weekly_forecast_fast_path(user_text: str, tools, messages, callba
         else:
             text = "暂无未来一周预报数据。"
 
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3314,6 +3387,9 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
         else:
             text = "近期降雨数据暂不可用。"
 
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3459,6 +3535,9 @@ async def _try_basin_weather_fast_path(user_text: str, tools, messages, callback
 
         text = "".join(lines)
         text = callbacks.get("append_followup_if_needed", lambda txt, u: txt)(text, user_text)
+        preface = _build_thinking_summary(user_text, has_chart=False)
+        if preface:
+            text = preface + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3635,6 +3714,9 @@ async def _try_weekend_activity_fast_path(user_text: str, tools, messages, callb
             text = "".join(lines)
             text += "**说明**：以上为天津 24 小时降雨量预报（ECMWF AIFS），临近出行前请关注最新预报。"
         text = callbacks.get("append_followup_if_needed", lambda txt, u: txt)(text, user_text)
+        preface = _build_thinking_summary(user_text, has_chart=False)
+        if preface:
+            text = preface + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3775,6 +3857,9 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         print(f"[水位快速路径] 最终输出文本=\n{text}")
 
         await thinking_msg.remove()
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -3915,6 +4000,9 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
             else:
                 text = "今日海河流域暂无有效降雨数据。"
 
+            summary = _build_thinking_summary(user_text, has_chart=False)
+            if summary:
+                text = summary + "\n\n" + text
             await callbacks["stream_text_to_message"](text)
             messages.append(HumanMessage(content=user_text))
             messages.append(AIMessage(content=text))
@@ -4005,6 +4093,9 @@ async def _try_general_weather_fast_path(user_text: str, tools, messages, callba
         else:
             text = "暂无未来天气预报数据。"
 
+        summary = _build_thinking_summary(user_text, has_chart=False)
+        if summary:
+            text = summary + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -4165,6 +4256,9 @@ async def _try_subbasin_forecast_fast_path(user_text: str, tools, messages, call
             text = f"{_clean_table_cell(subbasin)}未来{days}天预报数据暂不可用。"
 
         text = callbacks.get("append_followup_if_needed", lambda txt, u: txt)(text, user_text)
+        preface = _build_thinking_summary(user_text, has_chart=False)
+        if preface:
+            text = preface + "\n\n" + text
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
         messages.append(AIMessage(content=text))
@@ -4616,6 +4710,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
     session_id = cl.user_session.get("id") or ""
     query_summary = message.content
     cl.user_session.set("query_timing_logged", False)
+    cl.user_session.set("has_chart_generated", False)
 
     # 降雨分布图快速路径（优先判断，避免误入河网路径）
     if await _try_rainfall_img_fast_path(message.content, tools, messages, callbacks):
@@ -4778,6 +4873,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             await reasoning.close()
             await thinking_msg.remove()
             text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
+            has_chart = cl.user_session.get("has_chart_generated", False) or False
+            summary = _build_thinking_summary(message.content, has_chart=has_chart)
+            if summary:
+                text = summary + "\n\n" + text
             await callbacks["stream_text_to_message"](text, stream_msg=stream_msg)
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
@@ -4789,6 +4888,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             _compress_messages(messages)
             await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
             await thinking_msg.remove()
+            has_chart = cl.user_session.get("has_chart_generated", False) or False
+            summary = _build_thinking_summary(message.content, has_chart=has_chart)
+            if summary:
+                stream_msg.content = summary + "\n\n"
+                await stream_msg.update()
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                 timeout=60,
@@ -4805,7 +4909,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             _log_query_exit(query_start_time, session_id, query_summary, "fail")
             return
         text = _sanitize_display_text(callbacks["append_followup_if_needed"](text or "", message.content))
+        if summary:
+            text = summary + "\n\n" + text
         if text:
+            stream_msg.content = text
+            await stream_msg.update()
             messages.append(AIMessage(content=text))
         cl.user_session.set("messages", messages)
         _log_query_exit(query_start_time, session_id, query_summary, "ok")
@@ -4837,6 +4945,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
         if forced_final_text:
             await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
             await thinking_msg.remove()
+            has_chart = cl.user_session.get("has_chart_generated", False) or False
+            summary = _build_thinking_summary(message.content, has_chart=has_chart)
+            if summary:
+                forced_final_text = summary + "\n\n" + forced_final_text
             await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
             await reasoning.close()
             messages.append(AIMessage(content=forced_final_text))
@@ -4881,6 +4993,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                     final_text = "【核心结论】\n未检索到符合条件的预警记录。"
 
             await thinking_msg.remove()
+            has_chart = cl.user_session.get("has_chart_generated", False) or False
+            summary = _build_thinking_summary(message.content, has_chart=has_chart)
+            if summary:
+                final_text = summary + "\n\n" + final_text
             await callbacks["stream_text_to_message"](final_text, stream_msg=stream_msg)
             messages.append(AIMessage(content=final_text))
             cl.user_session.set("messages", messages)
@@ -4922,6 +5038,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                     await thinking_msg.update()
                     await thinking_msg.remove()
                     text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
+                    has_chart = cl.user_session.get("has_chart_generated", False) or False
+                    summary = _build_thinking_summary(message.content, has_chart=has_chart)
+                    if summary:
+                        text = summary + "\n\n" + text
                     await callbacks["stream_text_to_message"](text, stream_msg=stream_msg)
                     messages.append(AIMessage(content=text))
                     print("\n=== 复用 Planner 回答，退出循环 ===\n")
@@ -4934,6 +5054,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                     thinking_msg.content = "✍️ 正在整理回答..."
                     await thinking_msg.update()
                     await thinking_msg.remove()
+                    has_chart = cl.user_session.get("has_chart_generated", False) or False
+                    summary = _build_thinking_summary(message.content, has_chart=has_chart)
+                    if summary:
+                        stream_msg.content = summary + "\n\n"
+                        await stream_msg.update()
                     text = await asyncio.wait_for(
                         callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                         timeout=60,
@@ -4946,7 +5071,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
                     # 不 break，继续走循环外兜底
                 else:
                     text = _sanitize_display_text(callbacks["append_followup_if_needed"](text or "", message.content))
+                    if summary:
+                        text = summary + "\n\n" + text
                     if text:
+                        stream_msg.content = text
+                        await stream_msg.update()
                         messages.append(AIMessage(content=text))
                     print("\n=== 回答器已生成最终回答，退出循环 ===\n")
                     answer_generated = True
@@ -4982,6 +5111,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             if not reasoning._closed:
                 await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
             await thinking_msg.remove()
+            has_chart = cl.user_session.get("has_chart_generated", False) or False
+            summary = _build_thinking_summary(message.content, has_chart=has_chart)
+            if summary:
+                stream_msg.content = summary + "\n\n"
+                await stream_msg.update()
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                 timeout=60,
@@ -4996,6 +5130,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, tool
             return
         if text:
             text = callbacks["append_followup_if_needed"](text, message.content)
+            if summary:
+                text = summary + "\n\n" + text
+            stream_msg.content = text
+            await stream_msg.update()
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
 
