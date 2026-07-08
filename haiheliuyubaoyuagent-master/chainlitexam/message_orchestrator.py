@@ -54,6 +54,7 @@ class ReasoningStep:
         self.step.show_input = "markdown"
         self.step.input = ""
         self.step.output = ""
+        self.step.collapsed = False  # 初始展开
         await self.step.send()
         return self
 
@@ -105,6 +106,7 @@ class ReasoningStep:
         if self.step is not None and not self._closed:
             self._closed = True
             self.step.output = self._buffer or "思考完成"
+            self.step.collapsed = True  # 思考结束时折叠
             await self.step.update()
 
 
