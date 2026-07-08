@@ -1771,11 +1771,19 @@ async def generate_fast_path_thinking(
         data_sources="、".join(data_sources),
     )
     try:
-        result = await thinking_chain.ainvoke({
-            "system_message": prompt,
-            "messages": [],
-        })
-        return getattr(result, "content", "") or ""
+        result = await asyncio.wait_for(
+            thinking_chain.ainvoke({
+                "system_message": prompt,
+                "messages": [],
+            }),
+            timeout=10,
+        )
+        thinking_text = getattr(result, "content", "") or ""
+        if thinking_text:
+            thinking_text = thinking_text.strip()
+            if len(thinking_text) > 300:
+                thinking_text = thinking_text[:300] + "..."
+        return thinking_text
     except Exception:
         return ""
 
@@ -1860,6 +1868,18 @@ async def _emit_fast_path_result(
     else:
         await cl.Message(content=final_text).send()
     _save_to_history(user_text, final_text, messages)
+
+
+def _log_query_exit(query_start_time: float, session_id: str, query_summary: str, status: str = "ok"):
+    if cl.user_session.get("query_timing_logged"):
+        return
+    try:
+        total_elapsed = time.time() - query_start_time
+        TimingLogger.log_query(session_id, query_summary, total_elapsed, status=status)
+    except Exception:
+        pass
+    finally:
+        cl.user_session.set("query_timing_logged", True)
 
 
 async def _handle_fast_path_error(
