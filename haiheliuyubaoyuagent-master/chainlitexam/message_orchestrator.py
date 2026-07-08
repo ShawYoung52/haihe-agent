@@ -30,6 +30,10 @@ except Exception:
         def log_query(*args, **kwargs):
             pass
 
+        @staticmethod
+        def _safe_summary(text, max_len=40):
+            return str(text)[:max_len] if text else ""
+
 
 class ReasoningStep:
     """
@@ -1903,13 +1907,6 @@ async def _try_affected_river_network_by_rainfall_fast_path(
         if not tool:
             return False
 
-        thinking_msg = await _show_thinking("正在分析暴雨影响河系并绘制专题图...")
-        reasoning = await _show_business_reasoning(
-            "分析暴雨影响河系并绘制专题图",
-            ["降雨实况数据", "河网水系数据"],
-            "将绘制暴雨影响河系专题图并给出文字分析",
-        )
-
         time_str = _detect_rainfall_time(user_text)
         start_time = ""
         end_time = ""
@@ -1924,6 +1921,13 @@ async def _try_affected_river_network_by_rainfall_fast_path(
             future_keywords = ["明天", "明日", "后天", "未来", "今后", "接下来"]
             if any(k in user_text for k in future_keywords):
                 return False
+
+        thinking_msg = await _show_thinking("正在分析暴雨影响河系并绘制专题图...")
+        reasoning = await _show_business_reasoning(
+            "分析暴雨影响河系并绘制专题图",
+            ["降雨实况数据", "河网水系数据"],
+            "将绘制暴雨影响河系专题图并给出文字分析",
+        )
 
         result = await _invoke_tool_for_fast_path(
             "get_affected_river_network_by_rainfall",
@@ -2039,7 +2043,7 @@ async def _try_manual_plot_fallback(user_text: str, tools, stream_msg: cl.Messag
             return False
 
         river_name = callbacks["extract_river_name"](user_text)
-        river_observation = await river_tool.ainvoke({"start_river": river_name})
+        river_observation = await _invoke_tool_for_fast_path("get_river_network_for_plot", river_tool, {"start_river": river_name}, user_text)
         await _render_river_plot_with_overlay(tools, river_observation, river_name, callbacks, user_text)
 
         if stream_msg.content.strip():
@@ -3707,7 +3711,6 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         print(f"[水位快速路径] 解包后类型={type(data)}, 内容={data}")
 
         if not isinstance(data, dict):
-            await reasoning.close()
             await _emit_fast_path_result(
                 "水位数据格式异常，无法生成表格。", thinking_msg, messages, user_text
             )
@@ -3725,13 +3728,11 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
                 friendly = "水位查询服务鉴权失败，请联系管理员检查服务配置。"
             else:
                 friendly = "水位查询服务暂时不可用，请稍后重试。"
-            await reasoning.close()
             await _emit_fast_path_result(friendly, thinking_msg, messages, user_text)
             return True
 
         records = data.get("records", [])
         if not isinstance(records, list) or not records:
-            await reasoning.close()
             await _emit_fast_path_result(
                 f"当前未查询到{river_name}相关站点水位数据。", thinking_msg, messages, user_text
             )
@@ -3774,7 +3775,6 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         text = _sanitize_display_text(text)
         print(f"[水位快速路径] 最终输出文本=\n{text}")
 
-        await reasoning.close()
         await thinking_msg.remove()
         await callbacks["stream_text_to_message"](text)
         messages.append(HumanMessage(content=user_text))
@@ -3783,7 +3783,6 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
         return True
 
     except asyncio.TimeoutError:
-        await reasoning.close()
         await _emit_fast_path_result(
             "⏱️ 水位查询超时，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -3792,7 +3791,6 @@ async def _try_water_level_fast_path(user_text: str, tools, messages, callbacks)
 
         print(f"[水位快速路径] 异常：{e}")
         traceback.print_exc()
-        await reasoning.close()
         await _emit_fast_path_result(
             "水位查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -4440,7 +4438,6 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
                     raise
 
         if data is None:
-            await reasoning.close()
             await _emit_fast_path_result(
                 "⏱️ 面雨量查询超时，请稍后重试。", thinking_msg, messages, user_text
             )
@@ -4495,11 +4492,9 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
             if not text:
                 text = f"所选时段（{time_label}）暂无有效面雨量数据，请稍后重试。"
 
-        await reasoning.close()
         await _emit_fast_path_result(text, thinking_msg, messages, user_text)
         return True
     except asyncio.TimeoutError:
-        await reasoning.close()
         await _emit_fast_path_result(
             "⏱️ 面雨量查询超时，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -4508,7 +4503,6 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, tools, messages, c
         print(f"面雨量快速路径失败：{e}")
 
         traceback.print_exc()
-        await reasoning.close()
         await _emit_fast_path_result(
             "面雨量查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -4547,7 +4541,6 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
         data = _unwrap_tool_observation(result)
 
         if not isinstance(data, dict):
-            await reasoning.close()
             await _emit_fast_path_result(
                 "应急响应判定结果格式异常，无法生成回答。", thinking_msg, messages, user_text
             )
@@ -4559,7 +4552,6 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
             friendly = "当前无法获取应急响应判定数据，请稍后重试。"
             if "no record" in raw_err.lower() or "无记录" in raw_err or "暂无数据" in raw_err:
                 friendly = f"未查询到 {times[:4]}年{times[4:6]}月{times[6:8]}日 {times[8:10]}:{times[10:12]} 的应急响应判定数据，可能该时刻无有效分钟降水资料。"
-            await reasoning.close()
             await _emit_fast_path_result(friendly, thinking_msg, messages, user_text)
             return True
 
@@ -4599,11 +4591,9 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
             lines.append("")
 
         lines.append("\n数据来源：天擎分钟降水实况")
-        await reasoning.close()
         await _emit_fast_path_result("\n".join(lines), thinking_msg, messages, user_text)
         return True
     except asyncio.TimeoutError:
-        await reasoning.close()
         await _emit_fast_path_result(
             "⏱️ 应急响应判定查询超时，请稍后重试。", thinking_msg, messages, user_text
         )
@@ -4612,7 +4602,6 @@ async def _try_emergency_response_fast_path(user_text: str, tools, messages, cal
         print(f"防汛应急响应快速路径失败：{e}")
 
         traceback.print_exc()
-        await reasoning.close()
         await _emit_fast_path_result(
             "应急响应判定查询遇到异常，请稍后重试。", thinking_msg, messages, user_text
         )
