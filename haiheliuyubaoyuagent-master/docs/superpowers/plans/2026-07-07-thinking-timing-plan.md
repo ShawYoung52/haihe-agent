@@ -784,7 +784,7 @@ python tests/test_fast_paths.py
 | 8.3.4 | Planner 路径阶段 | 输入：`未来三天海河流域降雨如何` | 思考 Step 中出现 4 个阶段（理解问题→查询数据→评估结果→生成结论） | | |
 | 8.3.5 | Planner 路径计时 | 输入：`未来三天海河流域降雨如何` | 每个工具调用打印 `[TOOL_TIMING]`，最终打印 `[QUERY_TIMING]` | | |
 | 8.3.6 | Planner 路径前缀 | 输入：`未来三天海河流域降雨如何` | 回答开头包含"预报数据"的总结句 | | |
-| 8.3.7 | 失败/超时场景 | 断开 MCP server 或调小工具超时后输入任意天气查询 | `[TOOL_TIMING] status=fail`、`[QUERY_TIMING] status=fail` 正常打印；前端不崩溃并给出友好提示；思考 Step 正常关闭 | | |
+| 8.3.7 | 失败/超时场景 | 1. 关闭或断开 MCP server（停止 `haihe-weather-analyzer-mcp/server.py`）。<br>2. 在 Chainlit 输入：`天津未来三天降雨如何`。<br>3. 观察控制台与前端响应。 | `[TOOL_TIMING] status=fail`、`[QUERY_TIMING] status=fail` 正常打印；前端不崩溃并给出友好提示；思考 Step 正常关闭 | | |
 | 8.3.8 | 静态检查 | 运行 `python tests/test_fast_paths.py` | 18 个 fast path 全部 PASS | | |
 
 ### Step 8.4: 人工验证通过标准

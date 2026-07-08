@@ -6,15 +6,21 @@ with a lightweight ``MockStep`` before importing ``message_orchestrator``.
 
 import asyncio
 import sys
-import types
 from pathlib import Path
 
 # Make ``import chainlitexam`` work when running this script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# Install minimal stubs for optional dependencies.
+from chainlitexam.tests.stubs import ensure_stubs
 
-class MockStep:
-    """Lightweight stand-in for ``chainlit.Step``."""
+ensure_stubs()
+
+import chainlit
+
+
+class MockStep(chainlit.Step):
+    """Lightweight stand-in for ``chainlit.Step`` with resettable state."""
 
     _instances: list["MockStep"] = []
 
@@ -39,31 +45,8 @@ class MockStep:
         cls._instances.clear()
 
 
-# Mock optional dependencies before importing message_orchestrator.
-if "chainlit" not in sys.modules:
-    chainlit = types.ModuleType("chainlit")
-    chainlit.Step = MockStep
-    chainlit.Message = type(
-        "Message", (), {"send": lambda self: None, "remove": lambda self: None}
-    )
-    chainlit.user_session = types.SimpleNamespace(
-        get=lambda *a, **k: None, set=lambda *a, **k: None
-    )
-    sys.modules["chainlit"] = chainlit
-else:
-    import chainlit
-
-    chainlit.Step = MockStep
-
-if "langchain_core.messages" not in sys.modules:
-    lcms = types.ModuleType("langchain_core.messages")
-    for name in ("ToolMessage", "HumanMessage", "AIMessage"):
-        setattr(lcms, name, type(name, (), {}))
-    sys.modules["langchain_core.messages"] = lcms
-    sys.modules["langchain_core"] = types.ModuleType("langchain_core")
-
-if "httpx" not in sys.modules:
-    sys.modules["httpx"] = types.ModuleType("httpx")
+# Ensure message_orchestrator uses our mock when it imports chainlit.Step.
+chainlit.Step = MockStep
 
 from chainlitexam.message_orchestrator import ReasoningStep, _show_business_reasoning
 
@@ -80,6 +63,54 @@ async def test_show_business_reasoning_creates_three_stages():
     assert names[1] == "🔍 理解问题"
     assert names[2] == "📡 查询数据"
     assert names[3] == "✍️ 生成结论"
+
+
+async def test_stage_parent_id_relationships():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+    await reasoning.stage("子阶段1", "详情1")
+    await reasoning.stage("子阶段2", "详情2")
+
+    assert len(MockStep._instances) == 3
+    parent = MockStep._instances[0]
+    child1 = MockStep._instances[1]
+    child2 = MockStep._instances[2]
+
+    assert parent.id is not None
+    assert child1.parent_id == parent.id
+    assert child2.parent_id == parent.id
+
+    await reasoning.close()
+
+
+async def test_append_and_line_buffer_accumulation():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+
+    await reasoning.append("第一行")
+    await reasoning.line("第二行")
+    await reasoning.append("第三行")
+
+    # Without an active sub-stage, text accumulates in the parent buffer.
+    assert reasoning._buffer == "第一行第二行\n第三行"
+    assert reasoning.step.output == reasoning._buffer
+
+    await reasoning.close()
+
+
+async def test_append_updates_current_stage():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+    await reasoning.stage("当前阶段", "初始")
+    await reasoning.append("追加内容")
+
+    assert reasoning._current_stage is not None
+    assert reasoning._current_stage.output == "初始追加内容"
+
+    await reasoning.close()
 
 
 async def test_reasoning_step_close_idempotent():
@@ -103,8 +134,50 @@ async def test_stage_after_close_returns_none():
     assert result is None
 
 
+async def test_aexit_closes_on_exception():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+    assert reasoning._closed is False
+
+    class TestException(Exception):
+        pass
+
+    try:
+        async with reasoning:
+            raise TestException("boom")
+    except TestException:
+        pass
+
+    assert reasoning._closed is True
+
+
+async def test_aexit_preserves_original_exception():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+
+    class TestException(Exception):
+        pass
+
+    raised = False
+    try:
+        async with reasoning:
+            raise TestException("boom")
+    except TestException as e:
+        raised = True
+        assert str(e) == "boom"
+
+    assert raised
+
+
 if __name__ == "__main__":
     asyncio.run(test_show_business_reasoning_creates_three_stages())
+    asyncio.run(test_stage_parent_id_relationships())
+    asyncio.run(test_append_and_line_buffer_accumulation())
+    asyncio.run(test_append_updates_current_stage())
     asyncio.run(test_reasoning_step_close_idempotent())
     asyncio.run(test_stage_after_close_returns_none())
+    asyncio.run(test_aexit_closes_on_exception())
+    asyncio.run(test_aexit_preserves_original_exception())
     print("All tests passed.")
