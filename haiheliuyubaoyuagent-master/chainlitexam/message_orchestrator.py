@@ -1850,6 +1850,7 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
             "将绘制河网图并叠加行政区划底图",
         )
 
+    thinking_msg = await _show_thinking("正在绘制河网可视化图，请稍候...")
     try:
         river_tool = _find_tool(tools, "get_river_network_for_plot")
         if not river_tool:
@@ -1864,14 +1865,7 @@ async def _try_river_plot_fast_path(user_text: str, tools, messages, callbacks, 
         brief = callbacks["build_river_network_brief"](river_observation, river_name)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
         cl.user_session.set("has_chart_generated", True)
-        summary = _build_thinking_summary(user_text, has_chart=True)
-        if summary:
-            brief = summary + "\n\n" + brief
-        await callbacks["stream_text_to_message"](brief)
-
-        messages.append(HumanMessage(content=user_text))
-        messages.append(AIMessage(content=brief))
-        cl.user_session.set("messages", messages)
+        await _emit_fast_path_result(brief, thinking_msg, messages, user_text, has_chart=True)
         return True
     except Exception as e:
         print(f"河网快路径失败，回退到通用流程：{e}")
@@ -2057,17 +2051,7 @@ async def _try_affected_river_network_by_rainfall_fast_path(
         brief = _build_affected_river_network_brief(result_data, user_text)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
         cl.user_session.set("has_chart_generated", True)
-        summary = _build_thinking_summary(user_text, has_chart=True)
-        if summary:
-            brief = summary + "\n\n" + brief
-        await callbacks["stream_text_to_message"](brief)
-
-        messages.append(HumanMessage(content=user_text))
-        messages.append(AIMessage(content=brief))
-        cl.user_session.set("messages", messages)
-
-        if thinking_msg:
-            await thinking_msg.remove()
+        await _emit_fast_path_result(brief, thinking_msg, messages, user_text, has_chart=True)
         return True
     except Exception as e:
         print(f"暴雨影响河系快速路径失败，回退到通用流程：{e}")
@@ -2772,8 +2756,6 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
 
         args = {"beginTime": beginTime, "endTime": endTime, "interval": max(interval, 1)}
         result = await _invoke_tool_for_fast_path("get_station_rainfall_real_img", tool, args, user_text)
-        await thinking_msg.remove()
-
         # 显示图片
         data = result
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
@@ -2794,26 +2776,23 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
                 rng = data.get("range", "9")
                 rng_desc = {"9": "九", "11": "十一", "77": "七十七"}.get(str(rng), str(rng))
 
-                # 构造图文结合的回答：图片 + 文字说明放在同一条消息
-                caption = (
-                    f"## 海河流域{rng_desc}分区面雨量分布\n\n"
+                title = f"海河流域{rng_desc}分区面雨量分布"
+                await cl.Message(
+                    content=f"📊 已生成{title}",
+                    elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
+                ).send()
+
+                text = (
                     f"**统计时段**：{bt} ~ {et}（北京时）\n\n"
                     f"上图展示了海河流域各{rng_desc}分区的累计面雨量空间分布，"
                     f"颜色越深表示该分区累计雨量越大。"
                     f"如需具体数值或单站详情，可继续问“各子流域面雨量对比”或“最大雨强出现在哪里”。"
                 )
-                summary = _build_thinking_summary(user_text, has_chart=True)
-                if summary:
-                    caption = summary + "\n\n" + caption
+                text = callbacks["append_followup_if_needed"](text, user_text)
                 cl.user_session.set("has_chart_generated", True)
-                await cl.Message(
-                    content=caption,
-                    elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
-                ).send()
-                answer = callbacks["append_followup_if_needed"](caption, user_text)
-                messages.append(HumanMessage(content=user_text))
-                messages.append(AIMessage(content=answer))
-                cl.user_session.set("messages", messages)
+                await _emit_fast_path_result(
+                    text, thinking_msg, messages, user_text, has_chart=True
+                )
                 return True
             except Exception as decode_err:
                 print(f"base64解码失败：{decode_err}")
