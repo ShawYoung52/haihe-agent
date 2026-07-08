@@ -475,6 +475,8 @@ class DecisionWeatherQAService:
             )
 
             await self._update_step(step, status_msg, f"📍 正在查询位置：{location_name} ...")
+            if reasoning:
+                await reasoning.stage("📍 定位点位", f"正在查询位置：{location_name} ...")
             poi_raw = await _invoke_tool_for_fast_path(
                 poi_tool.name, poi_tool, {"keyword": location_name, "size": 5}, user_text
             )
@@ -523,6 +525,8 @@ class DecisionWeatherQAService:
             print(f"[DecisionWeather] query_rolling_forecast args: {json.dumps(forecast_args, ensure_ascii=False)}")
 
             await self._update_step(step, status_msg, "🛰️ 正在调用滚动预报数据...")
+            if reasoning:
+                await reasoning.stage("🛰️ 查询滚动预报", "正在调用滚动预报数据...")
             forecast_raw = await _invoke_tool_for_fast_path(
                 forecast_tool.name, forecast_tool, forecast_args, user_text
             )
@@ -2623,7 +2627,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                 ).send()
                                 observation_text = (
                                     f"（系统消息：已成功在前端为用户绘制了{title}。"
-                                    f"区间{range}分区。不要输出坐标数据，请继续用自然语言简要说明时间范围和分区类型）"
+                                    f"区间{range_type}分区。不要输出坐标数据，请继续用自然语言简要说明时间范围和分区类型）"
                                 )
                             except Exception as decode_err:
                                 print(f"base64解码失败：{decode_err}")
@@ -3311,9 +3315,9 @@ async def _try_heavy_rain_check_fast_path(user_text: str, tools, messages, callb
     thinking_msg = cl.Message(content="🔍 正在检查近期降雨情况，请稍候...")
     await thinking_msg.send()
     reasoning = await _show_business_reasoning(
-        "检查未来是否会出现强降雨",
-        ["预报降雨数据"],
-        "将给出强降雨出现时段、区域与强度判断",
+        "检查近期是否出现强降雨",
+        ["实况降雨数据"],
+        "将给出近72小时强降雨出现时段、区域与强度判断",
     )
 
     try:
