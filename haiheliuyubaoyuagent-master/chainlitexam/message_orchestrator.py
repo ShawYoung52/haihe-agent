@@ -2777,12 +2777,9 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
                 rng_desc = {"9": "九", "11": "十一", "77": "七十七"}.get(str(rng), str(rng))
 
                 title = f"海河流域{rng_desc}分区面雨量分布"
-                await cl.Message(
-                    content=f"📊 已生成{title}",
-                    elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
-                ).send()
 
                 text = (
+                    f"📊 已生成{title}。\n\n"
                     f"**统计时段**：{bt} ~ {et}（北京时）\n\n"
                     f"上图展示了海河流域各{rng_desc}分区的累计面雨量空间分布，"
                     f"颜色越深表示该分区累计雨量越大。"
@@ -2791,7 +2788,12 @@ async def _try_rainfall_img_fast_path(user_text: str, tools, messages, callbacks
                 text = callbacks["append_followup_if_needed"](text, user_text)
                 cl.user_session.set("has_chart_generated", True)
                 await _emit_fast_path_result(
-                    text, thinking_msg, messages, user_text, has_chart=True
+                    text,
+                    thinking_msg,
+                    messages,
+                    user_text,
+                    images=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
+                    has_chart=True,
                 )
                 return True
             except Exception as decode_err:
