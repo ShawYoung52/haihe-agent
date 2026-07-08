@@ -31,6 +31,7 @@ class MockStep(chainlit.Step):
         self.input = ""
         self.output = ""
         self.show_input = ""
+        self.collapsed = None
         self.id = kwargs.get("id") or f"mock-step-{len(MockStep._instances)}"
         MockStep._instances.append(self)
 
@@ -171,6 +172,24 @@ async def test_aexit_preserves_original_exception():
     assert raised
 
 
+async def test_step_initially_expanded():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+    assert reasoning.step is not None
+    assert reasoning.step.collapsed is False
+    await reasoning.close()
+
+
+async def test_step_collapses_on_close():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+    await reasoning.close()
+    assert reasoning.step is not None
+    assert reasoning.step.collapsed is True
+
+
 if __name__ == "__main__":
     asyncio.run(test_show_business_reasoning_creates_three_stages())
     asyncio.run(test_stage_parent_id_relationships())
@@ -180,4 +199,6 @@ if __name__ == "__main__":
     asyncio.run(test_stage_after_close_returns_none())
     asyncio.run(test_aexit_closes_on_exception())
     asyncio.run(test_aexit_preserves_original_exception())
+    asyncio.run(test_step_initially_expanded())
+    asyncio.run(test_step_collapses_on_close())
     print("All tests passed.")

@@ -48,6 +48,31 @@ def _is_reasoning_close_call(node: ast.AST) -> bool:
     return False
 
 
+def _is_generate_fast_path_thinking_call(node: ast.AST) -> bool:
+    """Match ``generate_fast_path_thinking(...)``."""
+    if isinstance(node, ast.Await):
+        return _is_generate_fast_path_thinking_call(node.value)
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "generate_fast_path_thinking":
+            return True
+    return False
+
+
+def _uses_thinking_chain(func: ast.AsyncFunctionDef) -> bool:
+    """Return True if the function accepts and references ``thinking_chain``."""
+    has_arg = any(
+        arg.arg == "thinking_chain"
+        for arg in func.args.args + func.args.posonlyargs + func.args.kwonlyargs
+    )
+    if not has_arg:
+        return False
+    return any(
+        isinstance(node, ast.Name) and node.id == "thinking_chain"
+        for node in ast.walk(func)
+    )
+
+
 def _statement_has_close(stmt: ast.stmt) -> bool:
     return any(_is_reasoning_close_call(n) for n in ast.walk(stmt))
 
@@ -149,8 +174,11 @@ def check_fast_paths() -> bool:
             _is_show_business_reasoning_call(node) for node in ast.walk(func)
         )
         returns_covered = _block_covers_returns(func.body)
+        has_thinking = any(
+            _is_generate_fast_path_thinking_call(node) for node in ast.walk(func)
+        ) or _uses_thinking_chain(func)
 
-        ok = has_reasoning_call and returns_covered
+        ok = has_reasoning_call and returns_covered and has_thinking
         if not ok:
             all_ok = False
 
@@ -160,13 +188,15 @@ def check_fast_paths() -> bool:
                 "ok": ok,
                 "has_reasoning_call": has_reasoning_call,
                 "returns_covered": returns_covered,
+                "has_thinking": has_thinking,
             }
         )
         status = "PASS" if ok else "FAIL"
         print(
             f"[{status}] {func.name}: "
             f"reasoning_call={has_reasoning_call}, "
-            f"returns_covered={returns_covered}"
+            f"returns_covered={returns_covered}, "
+            f"thinking={has_thinking}"
         )
 
     passed = sum(r["ok"] for r in results)
