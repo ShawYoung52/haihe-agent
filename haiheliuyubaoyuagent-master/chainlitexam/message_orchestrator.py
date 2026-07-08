@@ -682,11 +682,9 @@ async def _try_decision_weather_fast_path(user_text: str, thinking_chain, answer
         ["点位天气预报数据"],
         "将给出该点位的天气影响评估",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询具体点位决策天气", ["点位天气预报数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询具体点位决策天气", ["点位天气预报数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
     try:
         return await service.try_handle(user_text, messages, reasoning=reasoning)
     except Exception as exc:
@@ -1286,11 +1284,9 @@ async def _try_warning_fact_fast_path(user_text: str, thinking_chain, answer_cha
         ["预警数据"],
         "将整理预警清单、核心结论与防范建议",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询天津气象预警信息", ["预警数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询天津气象预警信息", ["预警数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
     bundles = []
     try:
         route = await _route_warning_tools(answer_chain, user_text, callbacks)
@@ -1763,32 +1759,34 @@ async def generate_fast_path_thinking(
     user_text: str,
     intent_text: str,
     data_sources: list[str],
-) -> str:
-    """为 fast path 生成一段自然语言深度思考。"""
-    print(f"[THINKING_FAST] generating thinking for intent='{intent_text}'")
+    reasoning: ReasoningStep,
+) -> None:
+    """为 fast path 流式生成并追加自然语言深度思考。"""
     prompt = FAST_PATH_THINKING_PROMPT.format(
         current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
         user_query=user_text,
         intent=intent_text,
         data_sources="、".join(data_sources),
     )
+    print(f"[THINKING_FAST] streaming thinking for intent='{intent_text}'")
+
+    async def _stream():
+        async for chunk in thinking_chain.astream({
+            "system_message": prompt,
+            "messages": [HumanMessage(content=user_text)],
+        }):
+            token = getattr(chunk, "content", None)
+            if token:
+                await reasoning.append(token)
+
     try:
-        result = await asyncio.wait_for(
-            thinking_chain.ainvoke({
-                "system_message": prompt,
-                "messages": [HumanMessage(content=user_text)],
-            }),
-            timeout=10,
-        )
-        thinking_text = getattr(result, "content", "") or ""
-        if thinking_text:
-            thinking_text = thinking_text.strip()
-            if len(thinking_text) > 300:
-                thinking_text = thinking_text[:300] + "..."
-        return thinking_text
+        await asyncio.wait_for(_stream(), timeout=30)
+    except (asyncio.TimeoutError, TimeoutError):
+        await reasoning.line("\n\n（思考生成超时，继续为您查询数据...）")
+        print(f"[THINKING_FAST] timeout for '{user_text[:30]}...'")
     except Exception as e:
+        await reasoning.line(f"\n\n（思考生成遇到异常：{str(e)[:100]}，继续为您查询数据...）")
         print(f"[THINKING_FAST] error for '{user_text[:30]}...': {e}")
-        return ""
 
 
 def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
@@ -1930,11 +1928,9 @@ async def _try_river_plot_fast_path(user_text: str, thinking_chain, tools, messa
             ["河网水系数据", "行政区划底图数据"],
             "将绘制河网图并叠加行政区划底图",
         )
-        thinking_text = await generate_fast_path_thinking(
-            thinking_chain, user_text, "绘制河网可视化图", ["河网水系数据", "行政区划底图数据"]
+        await generate_fast_path_thinking(
+            thinking_chain, user_text, "绘制河网可视化图", ["河网水系数据", "行政区划底图数据"], reasoning
         )
-        if thinking_text:
-            await reasoning.line(thinking_text)
 
     thinking_msg = await _show_thinking("正在绘制河网可视化图，请稍候...")
     try:
@@ -2049,11 +2045,9 @@ async def _try_affected_river_network_by_rainfall_fast_path(
             ["降雨实况数据", "河网水系数据"],
             "将绘制暴雨影响河系专题图并给出文字分析",
         )
-        thinking_text = await generate_fast_path_thinking(
-            thinking_chain, user_text, "分析暴雨影响河系并绘制专题图", ["降雨实况数据", "河网水系数据"]
+        await generate_fast_path_thinking(
+            thinking_chain, user_text, "分析暴雨影响河系并绘制专题图", ["降雨实况数据", "河网水系数据"], reasoning
         )
-        if thinking_text:
-            await reasoning.line(thinking_text)
 
         result = await _invoke_tool_for_fast_path(
             "get_affected_river_network_by_rainfall",
@@ -2330,11 +2324,9 @@ async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools
         ["实况降雨站点数据"],
         "将统计降雨分布、极值、持续时间等特征",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "分析指定时段降雨特征", ["实况降雨站点数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "分析指定时段降雨特征", ["实况降雨站点数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         # 设置超时，防止后端卡死
@@ -2779,11 +2771,9 @@ async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, mes
         ["实况降雨站点数据"],
         "将生成降雨分布图并简要说明时间范围和分区",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "生成海河流域降水实况分布图", ["实况降雨站点数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "生成海河流域降水实况分布图", ["实况降雨站点数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -2947,11 +2937,9 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
         ["城市面雨量数据"],
         "将给出各城市平均降雨量排名或对比",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询城市平均降雨量", ["城市面雨量数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询城市平均降雨量", ["城市面雨量数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3057,11 +3045,9 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
         ["实况降雨数据", "预报降雨数据"],
         "将分时段说明今日已下和将下的降雨",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询今日降雨情况", ["实况降雨数据", "预报降雨数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询今日降雨情况", ["实况降雨数据", "预报降雨数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3224,11 +3210,9 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
         ["实况降雨站点数据"],
         "将统计今日各站累计降雨时长",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "统计今日降雨时长", ["实况降雨站点数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "统计今日降雨时长", ["实况降雨站点数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3335,11 +3319,9 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, 
         ["ECMWF AIFS 预报数据"],
         "将给出未来一周天气趋势与重点关注",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询未来一周天气预报", ["ECMWF AIFS 预报数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询未来一周天气预报", ["ECMWF AIFS 预报数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3438,11 +3420,9 @@ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools,
         ["实况降雨数据"],
         "将给出近72小时强降雨出现时段、区域与强度判断",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "检查近期是否出现强降雨", ["实况降雨数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "检查近期是否出现强降雨", ["实况降雨数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -3567,11 +3547,9 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
         ["流域天气预报数据"],
         "将给出海河流域今明后天气概况",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询海河流域整体天气", ["流域天气预报数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询海河流域整体天气", ["流域天气预报数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         rows = []
@@ -3739,11 +3717,9 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
         ["周末天气预报数据"],
         "将给出周末天气适合度与活动建议",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "获取周末户外活动天气建议", ["周末天气预报数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "获取周末户外活动天气建议", ["周末天气预报数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         day_results = {}
@@ -3888,11 +3864,9 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
         ["河网水位数据"],
         "将给出关键站点水位信息",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询河网水位", ["河网水位数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询河网水位", ["河网水位数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         result = await asyncio.wait_for(
@@ -4082,11 +4056,9 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
             ["天气预报数据"],
             "将给出天气概况与变化趋势",
         )
-        thinking_text = await generate_fast_path_thinking(
-            thinking_chain, user_text, "查询通用天气", ["天气预报数据"]
+        await generate_fast_path_thinking(
+            thinking_chain, user_text, "查询通用天气", ["天气预报数据"], reasoning
         )
-        if thinking_text:
-            await reasoning.line(thinking_text)
 
         try:
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -4165,11 +4137,9 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
         ["天气预报数据"],
         "将给出天气概况与变化趋势",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询通用天气", ["天气预报数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询通用天气", ["天气预报数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         rows = []
@@ -4322,11 +4292,9 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
         ["子流域预报数据"],
         "将给出指定子流域未来几天天气预报",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询子流域未来天气预报", ["子流域预报数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询子流域未来天气预报", ["子流域预报数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         now = datetime.now()
@@ -4491,11 +4459,9 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
         ["面雨量数据"],
         "将给出流域面雨量统计与对比",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询流域面雨量", ["面雨量数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询流域面雨量", ["面雨量数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     _HOURS_SENTINEL = object()
 
@@ -4756,11 +4722,9 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
         ["防汛应急响应数据"],
         "将给出应急响应级别与相关信息",
     )
-    thinking_text = await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询防汛应急响应信息", ["防汛应急响应数据"]
+    await generate_fast_path_thinking(
+        thinking_chain, user_text, "查询防汛应急响应信息", ["防汛应急响应数据"], reasoning
     )
-    if thinking_text:
-        await reasoning.line(thinking_text)
 
     try:
         result = await asyncio.wait_for(
