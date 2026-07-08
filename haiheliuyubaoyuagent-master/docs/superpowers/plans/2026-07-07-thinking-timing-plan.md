@@ -744,65 +744,60 @@ git commit -m "feat: add one-sentence business summary before each answer"
 ## Task 8: 集成测试
 
 **Files:**
-- Test: 本地启动 Chainlit 进行人工验证
+- `chainlitexam/tests/test_timing_logger.py` — 计时日志格式与失败场景
+- `chainlitexam/tests/test_thinking_summary.py` — 回答前缀生成
+- `chainlitexam/tests/test_reasoning_step.py` — ReasoningStep 单元测试
+- `chainlitexam/tests/test_fast_paths.py` — fast path 静态检查
 
-### Step 8.1: 启动服务
+### Step 8.1: 自动测试脚本
 
-```bash
-cd haihe-weather-analyzer-mcp
-python server.py
-```
-
-另开一个终端：
+在仓库根目录执行：
 
 ```bash
 cd chainlitexam
-chainlit run chain_gzt.py
+python tests/test_timing_logger.py
+python tests/test_thinking_summary.py
+python tests/test_reasoning_step.py
+python tests/test_fast_paths.py
 ```
 
-### Step 8.2: 测试 fast path
+期望结果：
+- 四个脚本均输出 `All tests passed.`（`test_fast_paths.py` 输出 `Total: 18 fast paths, 18 passed.`）。
+- 任一脚本非零退出即为失败，需先修复再进入人工验证。
 
-在 Chainlit 前端输入：
+### Step 8.2: 本地启动服务（人工验证前置条件）
 
-```
-海河流域降雨分布图
-```
+| 项目 | 要求 |
+|---|---|
+| 环境 | Python 3.10+，已安装项目依赖 |
+| 启动 MCP server | `cd haihe-weather-analyzer-mcp && python server.py` |
+| 启动 Chainlit | 另开终端：`cd chainlitexam && chainlit run chain_gzt.py` |
+| 访问地址 | 浏览器打开 Chainlit 启动后输出的本地 URL |
 
-验收：
-- 出现"🤔 思考过程"可折叠 Step；
-- 展开后看到"🔍 理解问题 / 📡 查询数据 / ✍️ 生成结论"；
-- 最终回答开头有一句"已生成海河流域降水实况分布图，说明如下："；
-- 后端控制台出现 `[TOOL_TIMING]` 和 `[QUERY_TIMING]`。
+### Step 8.3: 人工验证用例与签列表
 
-### Step 8.3: 测试 planner 路径
+| 编号 | 用例 | 输入/操作 | 期望结果 | 实际结果 | 签名 |
+|---|---|---|---|---|---|
+| 8.3.1 | Fast path 思考过程 | 输入：`海河流域降雨分布图` | 出现"🤔 思考过程"可折叠 Step；展开后看到"🔍 理解问题 / 📡 查询数据 / ✍️ 生成结论" | | |
+| 8.3.2 | Fast path 回答前缀 | 输入：`海河流域降雨分布图` | 最终回答开头为"已生成海河流域降水实况分布图，说明如下：" | | |
+| 8.3.3 | Fast path 计时日志 | 输入：`海河流域降雨分布图` | 后端控制台出现 `[TOOL_TIMING] ... elapsed=X.XXs status=ok` 和 `[QUERY_TIMING] ... total_elapsed=X.XXs status=ok` | | |
+| 8.3.4 | Planner 路径阶段 | 输入：`未来三天海河流域降雨如何` | 思考 Step 中出现 4 个阶段（理解问题→查询数据→评估结果→生成结论） | | |
+| 8.3.5 | Planner 路径计时 | 输入：`未来三天海河流域降雨如何` | 每个工具调用打印 `[TOOL_TIMING]`，最终打印 `[QUERY_TIMING]` | | |
+| 8.3.6 | Planner 路径前缀 | 输入：`未来三天海河流域降雨如何` | 回答开头包含"预报数据"的总结句 | | |
+| 8.3.7 | 失败/超时场景 | 断开 MCP server 或调小工具超时后输入任意天气查询 | `[TOOL_TIMING] status=fail`、`[QUERY_TIMING] status=fail` 正常打印；前端不崩溃并给出友好提示；思考 Step 正常关闭 | | |
+| 8.3.8 | 静态检查 | 运行 `python tests/test_fast_paths.py` | 18 个 fast path 全部 PASS | | |
 
-输入：
+### Step 8.4: 人工验证通过标准
 
-```
-未来三天海河流域降雨如何
-```
-
-验收：
-- 思考 Step 中出现 4 个阶段；
-- 每个工具调用都打印 `[TOOL_TIMING]`；
-- 最终打印 `[QUERY_TIMING]`；
-- 回答开头有总结句。
-
-### Step 8.4: 测试失败/超时场景
-
-可通过断开 MCP server 或把工具超时调小模拟失败。
-
-验收：
-- `[TOOL_TIMING] status=fail` 正常打印；
-- `[QUERY_TIMING] status=fail` 正常打印；
-- 前端不崩溃，有友好提示；
-- 思考 Step 正常关闭。
+- 自动测试脚本全部通过。
+- 上述 8 条人工用例全部勾选"通过"。
+- 未发现新的异常日志或前端报错。
 
 ### Step 8.5: Commit（仅当测试通过）
 
 ```bash
-git add chainlitexam/message_orchestrator.py
-git commit -m "test: verify reasoning phases and timing logs end-to-end"
+git add chainlitexam/tests/ docs/superpowers/plans/2026-07-07-thinking-timing-plan.md chainlitexam/timing_logger.py
+git commit -m "test: enhance integration test coverage for reasoning and timing"
 ```
 
 ---

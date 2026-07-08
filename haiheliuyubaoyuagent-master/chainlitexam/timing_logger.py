@@ -38,7 +38,7 @@ class TimingLogger:
         status = status or "ok"
         print(
             f"[TOOL_TIMING] session={session_id} query=\"{query_summary}\" "
-            f"tool={tool_name} elapsed={elapsed}s status={status}"
+            f"tool={tool_name} elapsed={elapsed:.2f}s status={status}"
         )
 
     @staticmethod
@@ -54,5 +54,5 @@ class TimingLogger:
         status = status or "ok"
         print(
             f"[QUERY_TIMING] session={session_id} query=\"{query_summary}\" "
-            f"total_elapsed={total_elapsed}s status={status}"
+            f"total_elapsed={total_elapsed:.2f}s status={status}"
         )

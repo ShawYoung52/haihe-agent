@@ -1,8 +1,13 @@
 """Tests for chainlitexam.timing_logger."""
 
 import io
+import re
 import sys
 from contextlib import redirect_stdout
+from pathlib import Path
+
+# Make ``import chainlitexam`` work when running this script directly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from chainlitexam.timing_logger import TimingLogger
 
@@ -71,9 +76,38 @@ def test_small_max_len():
     assert TimingLogger._safe_summary("hello", max_len=0) == ""
 
 
+def test_log_tool_fail_status():
+    output = _capture_stdout(
+        TimingLogger.log_tool,
+        session_id="sess-789",
+        query_summary="测试失败场景",
+        tool_name="failing_tool",
+        elapsed=2.0,
+        status="fail",
+    )
+    assert "[TOOL_TIMING]" in output
+    assert "status=fail" in output
+
+
+def test_elapsed_format():
+    output = _capture_stdout(
+        TimingLogger.log_tool,
+        session_id="sess-format",
+        query_summary="验证小数位",
+        tool_name="format_tool",
+        elapsed=1.23456,
+        status="ok",
+    )
+    assert "elapsed=1.23s" in output
+    # 必须恰好两位小数
+    assert re.search(r"elapsed=\d+\.\d{2}s", output) is not None
+
+
 if __name__ == "__main__":
     test_log_tool_format()
     test_log_query_format()
+    test_log_tool_fail_status()
+    test_elapsed_format()
     test_summary_truncation()
     test_none_summary()
     test_empty_summary()
