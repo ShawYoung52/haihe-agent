@@ -130,7 +130,7 @@ def install_rainstorm_impact_time_fast_path() -> bool:
     if getattr(mo, _MARKER, False):
         return True
 
-    async def patched(user_text: str, tools, messages, callbacks) -> bool:
+    async def patched(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
         if not _need_affected_river_network_by_rainfall(user_text):
             return False
         tool = mo._find_tool(tools, "get_affected_river_network_by_rainfall")
@@ -148,6 +148,19 @@ def install_rainstorm_impact_time_fast_path() -> bool:
             end_time = now.strftime("%Y%m%d%H%M%S")
             start_time = (now - timedelta(hours=24)).strftime("%Y%m%d%H%M%S")
             time_str = end_time
+
+        reasoning = await mo._show_business_reasoning(
+            "分析暴雨影响河系并绘制专题图",
+            ["降雨实况数据", "河网水系数据"],
+            "将绘制暴雨影响河系专题图并给出文字分析"
+        )
+        thinking_text = await mo.generate_fast_path_thinking(
+            thinking_chain, user_text,
+            "分析暴雨影响河系并绘制专题图",
+            ["降雨实况数据", "河网水系数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
 
         thinking_msg = await mo._show_thinking("正在分析暴雨影响河系并绘制专题图...")
         try:
@@ -199,6 +212,7 @@ def install_rainstorm_impact_time_fast_path() -> bool:
 
             brief = _build_brief(mo, result_data, user_text)
             brief = callbacks["append_followup_if_needed"](brief, user_text)
+            await mo._maybe_close_reasoning(reasoning)
             await callbacks["stream_text_to_message"](brief)
 
             messages.append(HumanMessage(content=user_text))
@@ -213,6 +227,9 @@ def install_rainstorm_impact_time_fast_path() -> bool:
             except Exception:
                 pass
             return False
+        finally:
+            if reasoning is not None:
+                await reasoning.close()
 
     mo._try_affected_river_network_by_rainfall_fast_path = patched
     setattr(mo, _MARKER, True)

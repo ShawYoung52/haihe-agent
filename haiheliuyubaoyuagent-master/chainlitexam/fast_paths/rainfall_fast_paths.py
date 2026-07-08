@@ -439,34 +439,74 @@ def install_all_fast_paths() -> None:
     if not getattr(mo, _MARKER_AREAL, False):
         original_areal = getattr(mo, "_try_basin_areal_rainfall_fast_path", None)
         if callable(original_areal):
-            async def patched_areal(user_text: str, tools, messages, callbacks) -> bool:
+            async def patched_areal(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
+                reasoning = None
                 try:
                     if _is_last_month_areal(user_text):
                         time_range, label, month = _previous_month_range()
+                        reasoning = await mo._show_business_reasoning(
+                            "查询上个月海河9分区面雨量",
+                            ["面雨量数据"],
+                            "将给出各分区面雨量排名与对比"
+                        )
+                        thinking_text = await mo.generate_fast_path_thinking(
+                            thinking_chain, user_text,
+                            "查询上个月海河9分区面雨量",
+                            ["面雨量数据"]
+                        )
+                        if thinking_text:
+                            await reasoning.line(thinking_text)
                         msg = await mo._show_thinking("🔍 正在查询上个月海河9分区面雨量数据，请稍候...")
                         data = await _call_areal_tool(mo, tools, time_range, use_last_month=True)
-                        await mo._emit_fast_path_result(_format_last_month(mo, data, label, month), msg, messages, user_text)
+                        await mo._emit_fast_path_result(_format_last_month(mo, data, label, month), msg, messages, user_text, reasoning=reasoning)
                         return True
                     if _is_subbasin_max(user_text):
                         time_range, label = _today_like_window(user_text)
+                        reasoning = await mo._show_business_reasoning(
+                            "查询子流域降雨量排名",
+                            ["面雨量数据"],
+                            "将给出降雨最多的子流域及分区排名"
+                        )
+                        thinking_text = await mo.generate_fast_path_thinking(
+                            thinking_chain, user_text,
+                            "查询子流域降雨量排名",
+                            ["面雨量数据"]
+                        )
+                        if thinking_text:
+                            await reasoning.line(thinking_text)
                         msg = await mo._show_thinking("🔍 正在查询子流域降雨量，请稍候...")
                         data = await _call_areal_tool(mo, tools, time_range)
-                        await mo._emit_fast_path_result(_format_subbasin_max(mo, data, label), msg, messages, user_text)
+                        await mo._emit_fast_path_result(_format_subbasin_max(mo, data, label), msg, messages, user_text, reasoning=reasoning)
                         return True
                     if _is_year_to_date(user_text):
                         time_range, label = _year_to_date_window()
+                        reasoning = await mo._show_business_reasoning(
+                            "查询今年以来海河9分区累计降雨量",
+                            ["面雨量数据"],
+                            "将给出今年以来各分区累计降雨量排名"
+                        )
+                        thinking_text = await mo.generate_fast_path_thinking(
+                            thinking_chain, user_text,
+                            "查询今年以来海河9分区累计降雨量",
+                            ["面雨量数据"]
+                        )
+                        if thinking_text:
+                            await reasoning.line(thinking_text)
                         msg = await mo._show_thinking("🔍 正在查询今年以来海河9分区累计降雨量，请稍候...")
                         data = await _call_year_to_date_tool(mo, tools, time_range)
-                        await mo._emit_fast_path_result(_format_year_to_date(mo, data, label), msg, messages, user_text)
+                        await mo._emit_fast_path_result(_format_year_to_date(mo, data, label), msg, messages, user_text, reasoning=reasoning)
                         return True
                 except asyncio.TimeoutError:
-                    await mo._emit_fast_path_result("⏱️ 降雨量查询超时，请稍后重试。", locals().get("msg", None), messages, user_text)
+                    await mo._emit_fast_path_result("⏱️ 降雨量查询超时，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
                     return True
                 except Exception as exc:
                     print(f"[rainfall_fast_paths] 面雨量快速路径失败：{exc}")
-                    await mo._emit_fast_path_result("降雨量查询遇到异常，请稍后重试。", locals().get("msg", None), messages, user_text)
+                    await mo._emit_fast_path_result("降雨量查询遇到异常，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
                     return True
-                return await original_areal(user_text, tools, messages, callbacks)
+                finally:
+                    if reasoning is not None:
+                        await reasoning.close()
+                return await original_areal(user_text, thinking_chain, tools, messages, callbacks)
             mo._try_basin_areal_rainfall_fast_path = patched_areal
             setattr(mo, _MARKER_AREAL, True)
             print("[rainfall_fast_paths] 已安装：面雨量/分区类快速路径")
@@ -474,40 +514,80 @@ def install_all_fast_paths() -> None:
     if not getattr(mo, _MARKER_STATION, False):
         original_station = getattr(mo, "_try_rainfall_analysis_fast_path", None)
         if callable(original_station):
-            async def patched_station(user_text: str, tools, messages, callbacks) -> bool:
+            async def patched_station(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
+                reasoning = None
                 try:
                     if _is_last_year_max_daily(user_text):
                         tool = mo._find_tool(tools, "query_last_year_max_daily_rainfall")
                         if tool:
+                            reasoning = await mo._show_business_reasoning(
+                                "查询去年最大日降雨量",
+                                ["日降雨量数据"],
+                                "将给出去年海河流域最大日降雨量及站点信息"
+                            )
+                            thinking_text = await mo.generate_fast_path_thinking(
+                                thinking_chain, user_text,
+                                "查询去年最大日降雨量",
+                                ["日降雨量数据"]
+                            )
+                            if thinking_text:
+                                await reasoning.line(thinking_text)
                             msg = await mo._show_thinking("🔍 正在查询去年最大日降雨量，请稍候...")
                             data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"top_n": 10, "allow_slow_fallback": False}), timeout=75))
-                            await mo._emit_fast_path_result(_format_last_year(mo, data), msg, messages, user_text)
+                            await mo._emit_fast_path_result(_format_last_year(mo, data), msg, messages, user_text, reasoning=reasoning)
                             return True
                     if _is_historical_same_period(user_text):
                         tool = mo._find_tool(tools, "query_historical_same_period_avg_rainfall")
                         if tool:
                             start, end, label = _reference_window(user_text)
+                            reasoning = await mo._show_business_reasoning(
+                                "查询历史同期平均降雨量",
+                                ["历史降雨量数据"],
+                                "将给出历史同期平均降雨量及年际对比"
+                            )
+                            thinking_text = await mo.generate_fast_path_thinking(
+                                thinking_chain, user_text,
+                                "查询历史同期平均降雨量",
+                                ["历史降雨量数据"]
+                            )
+                            if thinking_text:
+                                await reasoning.line(thinking_text)
                             msg = await mo._show_thinking("🔍 正在查询历史同期平均降雨量，请稍候...")
                             data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"reference_start_time": start, "reference_end_time": end, "years": _parse_year_count(user_text)}), timeout=90))
-                            await mo._emit_fast_path_result(_format_historical(mo, data, label), msg, messages, user_text)
+                            await mo._emit_fast_path_result(_format_historical(mo, data, label), msg, messages, user_text, reasoning=reasoning)
                             return True
                     if _is_max_station(user_text):
                         tool = mo._find_tool(tools, "local_analyze_rainfall_by_time") or mo._find_tool(tools, "analyze_rainfall_by_time")
                         if tool:
                             time_range, label = _today_like_window(user_text)
                             start, end = time_range.strip("[]").split(",")
+                            reasoning = await mo._show_business_reasoning(
+                                "查询自动站最大雨量",
+                                ["实况降雨站点数据"],
+                                "将给出雨量最大的自动站及排名信息"
+                            )
+                            thinking_text = await mo.generate_fast_path_thinking(
+                                thinking_chain, user_text,
+                                "查询自动站最大雨量",
+                                ["实况降雨站点数据"]
+                            )
+                            if thinking_text:
+                                await reasoning.line(thinking_text)
                             msg = await mo._show_thinking("🔍 正在查询自动站最大雨量，请稍候...")
                             data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"time_str": end, "start_time": start, "end_time": end}), timeout=45))
-                            await mo._emit_fast_path_result(_format_max_station(mo, data, label), msg, messages, user_text)
+                            await mo._emit_fast_path_result(_format_max_station(mo, data, label), msg, messages, user_text, reasoning=reasoning)
                             return True
                 except asyncio.TimeoutError:
-                    await mo._emit_fast_path_result("⏱️ 降雨分析查询超时，请稍后重试。", locals().get("msg", None), messages, user_text)
+                    await mo._emit_fast_path_result("⏱️ 降雨分析查询超时，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
                     return True
                 except Exception as exc:
                     print(f"[rainfall_fast_paths] 自动站/历史统计快速路径失败：{exc}")
-                    await mo._emit_fast_path_result("降雨分析查询遇到异常，请稍后重试。", locals().get("msg", None), messages, user_text)
+                    await mo._emit_fast_path_result("降雨分析查询遇到异常，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
                     return True
-                return await original_station(user_text, tools, messages, callbacks)
+                finally:
+                    if reasoning is not None:
+                        await reasoning.close()
+                return await original_station(user_text, thinking_chain, tools, messages, callbacks)
             mo._try_rainfall_analysis_fast_path = patched_station
             setattr(mo, _MARKER_STATION, True)
             print("[rainfall_fast_paths] 已安装：自动站/历史统计类快速路径")

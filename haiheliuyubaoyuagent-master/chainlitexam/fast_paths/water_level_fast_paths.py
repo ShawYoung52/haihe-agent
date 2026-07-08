@@ -222,13 +222,26 @@ def install_water_level_fast_paths() -> bool:
         print("[water_level_fast_paths] 未找到原水位快速路径，跳过")
         return False
 
-    async def patched_water_level_fast_path(user_text: str, tools, messages, callbacks) -> bool:
+    async def patched_water_level_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
         if not _should_use_water_level_rise_path(user_text):
-            return await original(user_text, tools, messages, callbacks)
+            return await original(user_text, thinking_chain, tools, messages, callbacks)
 
         tool = mo._find_tool(tools, "query_water_level")
         if not tool:
-            return await original(user_text, tools, messages, callbacks)
+            return await original(user_text, thinking_chain, tools, messages, callbacks)
+
+        reasoning = await mo._show_business_reasoning(
+            "查询主要河流水位上涨趋势",
+            ["河网水位数据"],
+            "将判断哪些河流出现明显上涨并给出站点详情"
+        )
+        thinking_text = await mo.generate_fast_path_thinking(
+            thinking_chain, user_text,
+            "查询主要河流水位上涨趋势",
+            ["河网水位数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
 
         thinking_msg = await mo._show_thinking("🔍 正在查询主要河流水位上涨趋势，请稍候...")
         try:
@@ -243,15 +256,18 @@ def install_water_level_fast_paths() -> bool:
                 else:
                     failed.append(river)
             text = _format_water_level_rise_result(mo, all_rows, failed)
-            await mo._emit_fast_path_result(text, thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result(text, thinking_msg, messages, user_text, reasoning=reasoning)
             return True
         except asyncio.TimeoutError:
-            await mo._emit_fast_path_result("⏱️ 水位上涨趋势查询超时，请稍后重试。", thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result("⏱️ 水位上涨趋势查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
             return True
         except Exception as exc:
             print(f"[water_level_fast_paths] 水位上涨趋势快速路径失败：{exc}")
-            await mo._emit_fast_path_result("水位上涨趋势查询遇到异常，请稍后重试。", thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result("水位上涨趋势查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
             return True
+        finally:
+            if reasoning is not None:
+                await reasoning.close()
 
     mo._try_water_level_fast_path = patched_water_level_fast_path
     setattr(mo, _MODULE_MARKER, True)

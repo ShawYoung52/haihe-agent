@@ -151,17 +151,34 @@ def install_emergency_response_fast_path() -> bool:
     if getattr(mo, _MARKER, False):
         return True
 
-    async def patched(user_text: str, tools, messages, callbacks) -> bool:
+    async def patched(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
         matched, raw_times = mo._extract_emergency_response_time(user_text)
         if not matched:
             return False
         times = _apply_daypart_hour(user_text, raw_times)
 
         print(f"\n=== 本地防汛应急响应快速路径：raw_times={raw_times}, times={times} ===")
-        thinking_msg = await mo._show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
-        data = await _query_emergency_response_locally(times)
-        await mo._emit_fast_path_result(_format_response(data, times), thinking_msg, messages, user_text)
-        return True
+        reasoning = await mo._show_business_reasoning(
+            "查询防汛应急响应判定信息",
+            ["防汛应急响应判定数据"],
+            "将给出应急响应级别与判定依据"
+        )
+        thinking_text = await mo.generate_fast_path_thinking(
+            thinking_chain, user_text,
+            "查询防汛应急响应判定信息",
+            ["防汛应急响应判定数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
+
+        try:
+            thinking_msg = await mo._show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
+            data = await _query_emergency_response_locally(times)
+            await mo._emit_fast_path_result(_format_response(data, times), thinking_msg, messages, user_text, reasoning=reasoning)
+            return True
+        finally:
+            if reasoning is not None:
+                await reasoning.close()
 
     mo._try_emergency_response_fast_path = patched
     setattr(mo, _MARKER, True)

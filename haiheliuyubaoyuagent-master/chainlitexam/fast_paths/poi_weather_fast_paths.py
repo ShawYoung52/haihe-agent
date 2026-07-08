@@ -110,27 +110,44 @@ def install_poi_weather_fast_paths() -> bool:
     if not callable(original):
         return False
 
-    async def patched(user_text: str, tools, messages, callbacks) -> bool:
+    async def patched(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
         if not _is_poi_weather_question(user_text):
-            return await original(user_text, tools, messages, callbacks)
+            return await original(user_text, thinking_chain, tools, messages, callbacks)
         kw = _keyword(user_text)
         if not kw or kw in {"天气", "实况", "观测站"}:
-            return await original(user_text, tools, messages, callbacks)
+            return await original(user_text, thinking_chain, tools, messages, callbacks)
         tool = mo._find_tool(tools, "query_poi_nearest_observation")
         if not tool:
-            return await original(user_text, tools, messages, callbacks)
+            return await original(user_text, thinking_chain, tools, messages, callbacks)
+
+        reasoning = await mo._show_business_reasoning(
+            "查询 POI 最近观测站实况",
+            ["POI 最近观测站实况数据"],
+            "将给出该点最近观测站的实况天气信息"
+        )
+        thinking_text = await mo.generate_fast_path_thinking(
+            thinking_chain, user_text,
+            "查询 POI 最近观测站实况",
+            ["POI 最近观测站实况数据"]
+        )
+        if thinking_text:
+            await reasoning.line(thinking_text)
+
         thinking_msg = await mo._show_thinking(f"🔍 正在查询{kw}附近最近观测站实况，请稍候...")
         try:
             data = _unwrap(await asyncio.wait_for(tool.ainvoke({"keyword": kw}), timeout=60))
-            await mo._emit_fast_path_result(_format(mo, data), thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result(_format(mo, data), thinking_msg, messages, user_text, reasoning=reasoning)
             return True
         except asyncio.TimeoutError:
-            await mo._emit_fast_path_result("⏱️ POI 最近观测站实况查询超时，请稍后重试。", thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result("⏱️ POI 最近观测站实况查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
             return True
         except Exception as exc:
             print(f"[poi_weather_fast_paths] 查询失败：{exc}")
-            await mo._emit_fast_path_result("POI 最近观测站实况查询遇到异常，请稍后重试。", thinking_msg, messages, user_text)
+            await mo._emit_fast_path_result("POI 最近观测站实况查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
             return True
+        finally:
+            if reasoning is not None:
+                await reasoning.close()
 
     mo._try_general_weather_fast_path = patched
     setattr(mo, _MARKER, True)
