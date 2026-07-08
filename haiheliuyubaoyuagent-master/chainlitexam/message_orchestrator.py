@@ -1821,7 +1821,12 @@ def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
         base = "已理解您的问题，为您解答如下："
 
     if has_chart:
-        base = base.replace("如下：", "并生成相关图表，如下：")
+        base = base.replace("，说明如下：", "，并生成相关图表，说明如下：")
+        base = base.replace("，分析如下：", "，并生成相关图表，分析如下：")
+        base = base.replace("，整理如下：", "，并生成相关图表，整理如下：")
+        base = base.replace("，结论如下：", "，并生成相关图表，结论如下：")
+        base = base.replace("，为您解答如下：", "，并生成相关图表，为您解答如下：")
+        base = base.replace("，为您整理结论如下：", "，并生成相关图表，为您整理结论如下：")
 
     return base
 
