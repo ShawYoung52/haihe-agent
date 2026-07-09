@@ -64,3 +64,16 @@ This project uses the superpowers plugin for disciplined development:
 - **Before merging**: invoke `code-review` to find risks, `superpowers:finishing-a-development-branch` for proper cleanup
 - **For bug fixes**: invoke `superpowers:systematic-debugging`
 - **Specs directory**: `docs/superpowers/specs/`
+
+## Feature Flags
+
+### `ENABLE_FAST_PATHS`
+
+- **Default:** `false`
+- **Behavior when `false`:** All fast-path pre-routing is disabled. Every user query flows through the planner LLM + tool loop.
+- **Behavior when `true`:** Legacy behavior. The 18 hard-coded fast paths and the monkeypatch installers in `fast_paths/` are active.
+- **How to enable:** Start the server with the environment variable set:
+  ```bash
+  ENABLE_FAST_PATHS=true chainlit run chain_gzt.py
+  ```
+- **Why it exists:** The fast paths use keyword matching that causes frequent mis-routing. This flag lets the team gradually validate planner-only behavior before permanently removing the fast-path code.
