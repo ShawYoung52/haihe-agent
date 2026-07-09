@@ -28,7 +28,6 @@ def _load_impact_builder():
 
     return build_rainstorm_impact_thematic_map
 
-
 def _resolve_graph_path(base_tools) -> str | None:
     graph_path = base_tools.config.get("paths", "graph", fallback="")
     if not graph_path:
