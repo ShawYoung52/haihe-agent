@@ -1,67 +1,66 @@
-# Task Plan: 问答智能体开发
+# Task Plan: 修复 Chainlit 实时思考前端不可见
 
-**更新时间:** 2026-07-07
-**状态:** complete
+**创建时间:** 2026-07-08
+**当前阶段:** Phase 2
 
-## 已完成任务
+## Goal
+让海河流域气象智能体在 Chainlit 前端像 DeepSeek 一样实时展示“思考过程”可折叠块，而不是只输出最终答案。
 
-### Task 1: 快速路径冲突修复 ✓
-- 周末快速路径放宽流域限制
-- DecisionWeather 调度位置修正（pos 8 → pos 18）
-- 17 路径触发条件审计，修复 3 个关键冲突
-- prefilter 时间词排除、general_weather 周末关键词排除
+## Current Phase
+Phase 2: Planning & Structure
 
-### Task 2: 思考过程实时流式展示 ✓
-- planner_llm streaming=False → True
-- 新增 `astream_planner_think()` + `_process_planner_stream()`
-- 所有 token 实时流到 ReasoningStep → DeepSeek 风格逐字展示
-- 60s 超时 + 重试
-- Pydantic v2 tool_calls=None 修复
-- 清理 `<think>` 标签解析器死代码、`_extract_think_content` 死代码
+## Phases
 
-### Task 3: 代码审查 + 清理 + 验证 ✓
-- code-review（low）：3 发现 → 已修复
-- simplify（--fix）：超时重试、死代码删除
-- MCP server 导入路径修复（4 文件）
-- UTF-8 BOM 全项目清理（19 文件）
+### Phase 1: Requirements & Discovery
+- [x] 复现用户问题：日志显示思考生成成功，但前端无展示
+- [x] 检查 `ReasoningStep` 与 Chainlit `cl.Step` 的使用方式
+- [x] 检查 `.chainlit/config.toml` 中 `cot` 配置
+- [x] 确认 Chainlit 默认 UI 对 `type="llm"` step 及嵌套 stage 的展示规则
+- **Status:** complete
 
-### Task 4: Bug 修复 ✓
-- AIMessage tool_calls=None → Pydantic v2 拒绝（def32c4）
-- 流式思考空展示 → 去掉 `<think>` 标签依赖，全部流式输出（bbfcb5b）
+### Phase 2: Planning & Structure
+- [x] 确定根因：`ReasoningStep.append` 把 token 写进嵌套子 stage，父 step output 为空
+- [x] 确定修复方案：让 `append` 始终刷新父 step output；`stage` 仅作为业务阶段标题追加到父 output
+- [x] 更新测试断言以匹配新行为
+- **Status:** complete
 
-## 最终调度顺序
-```
- 1. rainfall_img
- 2. emergency_response
- 3. affected_river_network
- 4. river_plot
- 5. rainfall_analysis
- 6. city_avg_rainfall
- 7. warning_fact
- 8. rain_duration
- 9. today_rainfall
-10. weekly_forecast
-11. heavy_rain_check
-12. subbasin_forecast
-13. basin_areal_rainfall
-14. weekend_activity       ← 新增非流域分支
-15. basin_weather
-16. water_level
-17. general_weather
-18. decision_weather       ← 从 pos 8 移至此
-```
+### Phase 3: Implementation
+- [x] 修改 `message_orchestrator.py` 中的 `ReasoningStep`
+- [x] 调整 `stage()` / `append()` / `close()` 行为
+- [x] 确保 planner 与 fast path 的思考流都落到可见 output
+- **Status:** complete
 
-## 提交历史
-```
-bbfcb5b fix: stream all tokens as thinking, remove broken think-tag parser
-def32c4 fix: AIMessage tool_calls=None rejected by Pydantic v2
-284b682 fix: MCP server import path corrections
-7a4b98e fix: add timeout+retry to astream_planner_think, remove dead code
-dfc57f7 feat: real-time streaming think process display (DeepSeek-style)
-4d25ebb docs: finalize weekend routing fix task plan
-be7ab4b fix: reorder fast path dispatch to prevent DecisionWeather from preempting weather queries
-1a7cca0 docs: comprehensive fast path conflict audit results
-b87cb8c fix: add '雨' to weekend weather intent keywords
-70ba6ee fix: weekend fast path too restrictive, missed non-basin weather queries
-8e272e9 fix: remove UTF-8 BOM from 19 Python files causing SyntaxError
-```
+### Phase 4: Testing & Verification
+- [x] 运行 `test_reasoning_step.py`
+- [x] 运行 `test_thinking.py` / `test_thinking_summary.py` / `test_fast_paths.py`
+- [x] 红绿回归验证：还原旧代码后新测试失败，恢复修复后通过
+- [x] 启动 Chainlit 最小示例 + Playwright 验证 UI：可看到“已使用 🤔 思考过程”折叠块及思考内容
+- **Status:** complete
+
+### Phase 5: Code Review & Completion
+- [x] 使用 `code-review` 技能检查改动（9 角度扫描 + 关键问题已处理）
+- [x] 使用 `superpowers:verification-before-completion` 确认验证结果
+- [x] 提交/总结
+- **Status:** complete
+
+## Key Questions
+1. Chainlit 默认 UI 是否能展示 `type="llm"` 且 output 非空的 step？ → `cot=full` 时应可展示
+2. 为什么当前前端看不到？ → token 被写入嵌套子 stage，父 step output 为空
+3. 是否需要切换 step type 为 `"tool"`？ → 先保持 `"llm"`，`cot=full` 已启用；若仍不可见再评估
+
+## Decisions Made
+| Decision | Rationale |
+|----------|-----------|
+| 让父 `cl.Step.output` 始终承载完整思考文本 | Chainlit UI 默认只渲染父 step 的 output；子 stage 在当前 CoT 视图下不可见 |
+| `stage()` 改为向父 output 追加阶段标题 | 保留业务阶段语义，同时让用户在可折叠块里看到阶段切换 |
+| 保留 `type="llm"` | 语义正确，且 `.chainlit/config.toml` 已设置 `cot="full"` |
+
+## Errors Encountered
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| - | - | - |
+
+## Notes
+- 根因文件：`chainlitexam/message_orchestrator.py` 中 `ReasoningStep` 类
+- 关键方法：`append()` 在 `_current_stage` 存在时只更新子 stage；`close()` 时父 output 可能为 "思考完成"
+- 下游回调：`chainlitexam/chain_gzt.py` 的 `_process_thinking_stream` / `_process_planner_stream` 调用 `reasoning_step.append(token)`
