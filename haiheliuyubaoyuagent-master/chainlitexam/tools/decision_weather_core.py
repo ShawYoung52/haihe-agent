@@ -134,7 +134,7 @@ def _decision_weather_prefilter(user_text: str) -> bool:
     institution_suffixes = [
         "学校", "大学", "学院", "医院", "场馆", "中心", "公园", "酒店", "大厦",
         "广场", "机场", "车站", "码头", "景区", "园区", "小区", "村", "镇",
-        "街道", "乡", "区", "县", "市", "省",
+        "街道", "乡",
     ]
     has_indicator = any(k in t for k in location_indicators)
     has_institution = any(s in t for s in institution_suffixes)
