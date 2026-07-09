@@ -1,14 +1,21 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from utils.config import DB_CONFIG
 
-try:
-    from fast_paths import install_all_fast_paths
+ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").lower() in ("1", "true", "yes")
 
-    install_all_fast_paths()
-except Exception as exc:
-    print(f"[utils.db] fast path routes init failed: {exc}")
+if ENABLE_FAST_PATHS:
+    try:
+        from fast_paths import install_all_fast_paths
+
+        install_all_fast_paths()
+    except Exception as exc:
+        print(f"[utils.db] fast path routes init failed: {exc}")
+else:
+    print("[utils.db] fast paths are disabled (ENABLE_FAST_PATHS is not set)")
 
 engine = create_engine(
     f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
