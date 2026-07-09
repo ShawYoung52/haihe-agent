@@ -6,6 +6,7 @@ import base64
 import traceback
 import asyncio
 import math
+import uuid
 import httpx
 import chainlit as cl
 from datetime import datetime, timedelta
@@ -36,12 +37,16 @@ except Exception:
         def _safe_summary(text, max_len=40):
             return str(text)[:max_len] if text else ""
 
+ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").lower() in ("1", "true", "yes")
+"""Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM."""
+
 
 class ReasoningStep:
     """
     DeepSeek 式实时思考步骤：在 Chainlit 界面展示可展开的推理过程。
     通过 append/update 实时刷新，让业务人员看到系统每一步在做什么。
-    支持业务化子阶段（stage），便于按"理解问题-查询数据-评估结果-生成结论"组织。
+    业务阶段（stage）以 Markdown 标题形式直接写入父 step output，
+    避免创建嵌套子 stage 导致前端重复渲染。
     """
 
     def __init__(self, name: str = "🤔 思考过程"):
@@ -49,16 +54,29 @@ class ReasoningStep:
         self.step: cl.Step | None = None
         self._buffer: str = ""
         self._closed: bool = False
-        self._current_stage: cl.Step | None = None
+        self._step_supports_stream: bool | None = None
 
     async def __aenter__(self):
-        self.step = cl.Step(name=self.name, type="llm")
+        # 把思考步骤挂到当前 run 下面，否则 parent_id=None 会被当成 root step，Chainlit CoT 不渲染
+        parent_id = None
+        try:
+            current_run = cl.context.current_run
+            if current_run is not None:
+                parent_id = current_run.id
+        except Exception as exc:
+            print(f"[ReasoningStep] 无法获取 current_run，回退到 root step：{exc}")
+
+        # 重置状态以支持实例重用；如果旧 step 未关闭，保留旧引用但不再写入
+        self._closed = False
+        self._buffer = ""
+        self._step_supports_stream = None
+        self.step = cl.Step(name=self.name, type="llm", parent_id=parent_id)
         self.step.show_input = "markdown"
         self.step.input = ""
         self.step.output = ""
-        self.step.collapsed = False  # 初始展开
+        self.step.default_open = True  # 初始展开，让用户直接看到思考过程
         await self.step.send()
-        print(f"[ReasoningStep] created: collapsed={self.step.collapsed}")
+        print(f"[ReasoningStep] created: parent_id={self.step.parent_id} default_open={self.step.default_open}")
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -72,30 +90,34 @@ class ReasoningStep:
             print(f"[ReasoningStep] close failed during exception handling: {close_err}")
 
     async def stage(self, title: str, detail: str = ""):
-        """开启一个业务化子阶段，前一个阶段会自动保留。"""
+        """在父 step output 中追加一个业务化阶段标题，避免创建嵌套子 stage 造成重复渲染。"""
         if self._closed:
-            return None
+            return
         if self.step is None:
-            return None
-        if self._current_stage is not None:
-            await self._current_stage.update()
-        self._current_stage = cl.Step(name=title, parent_id=self.step.id, type="tool")
-        self._current_stage.show_input = "markdown"
-        self._current_stage.input = ""
-        self._current_stage.output = detail or ""
-        await self._current_stage.send()
-        return self._current_stage
+            return
+
+        header = f"\n\n**{title}**"
+        if detail:
+            header += f"\n{detail}"
+        header += "\n"
+        self._buffer += header
+        self.step.output = self._buffer
+        await self.step.update()
 
     async def append(self, text: str):
-        if self._closed or self.step is None:
+        if self._closed or self.step is None or not text:
             return
-        if not text:
-            return
-        if self._current_stage is not None:
-            self._current_stage.output += text
-            await self._current_stage.update()
-        elif self.step is not None:
-            self._buffer += text
+
+        # 所有 token 都必须落到父 step output，Chainlit 的 CoT 视图以父 step output 为展示主体
+        self._buffer += text
+        if self._step_supports_stream is None:
+            self._step_supports_stream = hasattr(self.step, "stream_token")
+
+        if self._step_supports_stream:
+            await self.step.stream_token(text)
+            # 部分 Chainlit 版本/子类可能不通过 stream_token 回写 output，显式同步保证可见
+            self.step.output = self._buffer
+        else:
             self.step.output = self._buffer
             await self.step.update()
 
@@ -103,14 +125,12 @@ class ReasoningStep:
         await self.append(text + "\n")
 
     async def close(self):
-        if self._current_stage is not None:
-            await self._current_stage.update()
-            self._current_stage = None
-        if self.step is not None and not self._closed:
-            self._closed = True
-            self.step.output = self._buffer or "思考完成"
-            self.step.collapsed = True  # 思考结束时折叠
-            await self.step.update()
+        if self.step is None or self._closed:
+            return
+        self._closed = True
+        self.step.output = self._buffer or "思考完成"
+        self.step.default_open = True
+        await self.step.update()
 
 
 async def _maybe_close_reasoning(reasoning: ReasoningStep | None):
@@ -118,6 +138,15 @@ async def _maybe_close_reasoning(reasoning: ReasoningStep | None):
     if reasoning is not None and not reasoning._closed:
         await reasoning.close()
 
+
+async def _safe_remove_chainlit_element(element) -> None:
+    """安全移除 Chainlit UI 元素，忽略不存在或已移除时的异常。"""
+    if element is None:
+        return
+    try:
+        await element.remove()
+    except Exception:
+        pass
 
 
 def _compress_messages(messages: list, max_tool_len: int = 500, max_ai_len: int = 1500):
@@ -331,7 +360,18 @@ def _decision_weather_prefilter(user_text: str) -> bool:
         "天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风", "能见度",
         "雾", "霾", "预报", "暴雨", "雷阵雨", "适合", "户外",
     ]
-    return any(k in t for k in weather_keywords)
+    if not any(k in t for k in weather_keywords):
+        return False
+    # 必须出现地点/机构意图，避免"今天天气怎么样"这类普通区域预报触发 LLM 抽槽
+    location_indicators = ["在", "去", "到", "位于", "附近", "周边", "旁边", "距", "距离"]
+    institution_suffixes = [
+        "学校", "大学", "学院", "医院", "场馆", "中心", "公园", "酒店", "大厦",
+        "广场", "机场", "车站", "码头", "景区", "园区", "小区", "村", "镇",
+        "街道", "乡", "区", "县", "市", "省",
+    ]
+    has_indicator = any(k in t for k in location_indicators)
+    has_institution = any(s in t for s in institution_suffixes)
+    return has_indicator or has_institution
 
 
 def _decision_pick_first_poi(poi_payload: dict) -> dict | None:
@@ -676,29 +716,42 @@ class DecisionWeatherQAService:
 
 
 async def _try_decision_weather_fast_path(user_text: str, thinking_chain, answer_chain, tools, messages, callbacks) -> bool:
+    # 先过前置过滤器，不匹配就直接跳过，避免创建无关的 reasoning 块
+    if not _decision_weather_prefilter(user_text):
+        return False
+
     service = DecisionWeatherQAService(answer_chain=answer_chain, tools=tools, callbacks=callbacks)
+    intent = "查询具体点位决策天气"
+    data_sources = ["点位天气预报数据"]
     reasoning = await _show_business_reasoning(
-        "查询具体点位决策天气",
-        ["点位天气预报数据"],
+        intent,
+        data_sources,
         "将给出该点位的天气影响评估",
     )
     await generate_fast_path_thinking(
-        thinking_chain, user_text, "查询具体点位决策天气", ["点位天气预报数据"], reasoning
+        thinking_chain, user_text, intent, data_sources, reasoning
     )
+    handled = False
+    exc_occurred = False
     try:
-        return await service.try_handle(user_text, messages, reasoning=reasoning)
+        handled = await service.try_handle(user_text, messages, reasoning=reasoning)
+        return handled
     except Exception as exc:
+        exc_occurred = True
         print(f"[DecisionWeather] fast path 失败，回退通用流程：{exc}")
-
         traceback.print_exc()
-        if service.status_msg is not None:
-            try:
-                await service.status_msg.remove()
-            except Exception:
-                pass
+        await _safe_remove_chainlit_element(service.status_msg)
+        # 异常时保留 reasoning 内容，让用户看到失败前的思考过程
+        await reasoning.line(f"\n\n（点位天气查询遇到异常：{str(exc)[:100]}，回退通用流程...）")
+        await reasoning.close()
         return False
     finally:
-        await reasoning.close()
+        if not exc_occurred:
+            if handled:
+                await reasoning.close()
+            else:
+                # 没有真正处理当前问题，把已经创建的思考步骤移除，避免答非所问
+                await _safe_remove_chainlit_element(reasoning.step)
 
 
 WARNING_TOOL_NAMES = {
@@ -1598,41 +1651,92 @@ def _extract_json_tool_calls(content: str) -> list[dict]:
     return calls
 
 
+def _normalize_tool_call(tc, index: int) -> dict | None:
+    """把可能是 dict、Pydantic ToolCall 或其他可序列化对象的 tool_call 统一转成 dict。"""
+    raw = tc
+    if not isinstance(tc, dict):
+        if hasattr(tc, "model_dump"):
+            raw = tc.model_dump()
+        elif hasattr(tc, "__dict__"):
+            raw = tc.__dict__
+        else:
+            print(f"[工具调用解析] 跳过不可识别的 tool_call: {tc}")
+            return None
+
+    name = raw.get("name") or ""
+    args = raw.get("args")
+    tid = raw.get("id")
+
+    if not isinstance(tid, str) or not tid:
+        tid = f"tool_call_{index}_{str(uuid.uuid4())[:8]}"
+    if not isinstance(name, str):
+        name = str(name)
+    if not isinstance(args, dict):
+        if hasattr(args, "model_dump"):
+            args = args.model_dump()
+        elif hasattr(args, "__dict__"):
+            args = args.__dict__
+        else:
+            args = {}
+    if not name.strip():
+        print(f"[工具调用解析] 忽略无 name 的 tool_call: {raw}")
+        return None
+
+    return {
+        "id": tid,
+        "name": name,
+        "args": args,
+        "type": raw.get("type", "tool_call"),
+    }
+
+
+def _set_tool_calls(msg, calls: list[dict]) -> None:
+    """安全地设置消息对象的 tool_calls 属性，兼容不同 LangChain 消息实现。"""
+    if hasattr(msg, "tool_calls") and msg.tool_calls is not None:
+        msg.tool_calls = calls
+    else:
+        object.__setattr__(msg, "tool_calls", calls)
+
+
+def _clean_tool_calls_from_content(content: str, is_json: bool) -> str:
+    """从 content 中移除已提取的工具调用文本，避免把原始调用文本展示给用户。"""
+    if is_json:
+        cleaned = re.sub(r"<tool_code\s*>.*?</\s*tool_code\s*>", "", content, flags=re.DOTALL).strip()
+        return re.sub(r"json\s*\[\s*\{.*?\}\s*\]", "", cleaned, flags=re.DOTALL).strip()
+    return re.sub(r"\s*<tool_call\s*>.*?</\s*tool_call\s*>", "", content, flags=re.DOTALL).strip()
+
+
 def _ensure_tool_calls_from_content(planner_msg):
     """
     若模型把工具调用以 XML 或 JSON 形式写在 content 里（而非标准 tool_calls），
-    解析出来并填到 planner_msg.tool_calls，保证后续工具执行逻辑能走通。
+    解析出来并填到 planner_msg.tool_calls；同时规范化已有 tool_calls，
+    补全缺失的 id、过滤无 name 的无效调用，避免后续 ToolMessage/Pydantic 校验失败。
     """
     try:
         existing = getattr(planner_msg, "tool_calls", None) or []
-        if existing:
-            return planner_msg
 
-        content = getattr(planner_msg, "content", None) or ""
-        extracted_calls = _extract_xml_tool_calls(content)
-        is_json = False
-        if not extracted_calls:
-            extracted_calls = _extract_json_tool_calls(content)
-            is_json = bool(extracted_calls)
+        if not existing:
+            content = getattr(planner_msg, "content", None) or ""
+            extracted_calls = _extract_xml_tool_calls(content)
+            is_json = False
+            if not extracted_calls:
+                extracted_calls = _extract_json_tool_calls(content)
+                is_json = bool(extracted_calls)
 
-        if extracted_calls:
-            print(f"[工具调用解析] 从 {'JSON' if is_json else 'XML'} 中提取到 {len(extracted_calls)} 个工具调用：{extracted_calls}")
-            # 不同 LangChain 消息对象对 tool_calls 的赋值方式不同
-            if hasattr(planner_msg, "tool_calls") and planner_msg.tool_calls is not None:
-                planner_msg.tool_calls = extracted_calls
-            else:
-                object.__setattr__(planner_msg, "tool_calls", extracted_calls)
-            # 清空 content 中的工具调用文本，避免把原始工具调用文本展示给用户
-            if is_json:
-                cleaned = re.sub(r"<tool_code\s*>.*?</\s*tool_code\s*>", "", content, flags=re.DOTALL).strip()
-                cleaned = re.sub(r"json\s*\[\s*\{.*?\}\s*\]", "", cleaned, flags=re.DOTALL).strip()
-            else:
-                cleaned = re.sub(r"\s*<tool_call\s*>.*?</\s*tool_call\s*>", "", content, flags=re.DOTALL).strip()
-            planner_msg.content = cleaned or ""
-            print(f"[工具调用解析] 清理后 content：{planner_msg.content!r}")
+            if extracted_calls:
+                print(f"[工具调用解析] 从 {'JSON' if is_json else 'XML'} 中提取到 {len(extracted_calls)} 个工具调用：{extracted_calls}")
+                _set_tool_calls(planner_msg, extracted_calls)
+                planner_msg.content = _clean_tool_calls_from_content(content, is_json) or ""
+                print(f"[工具调用解析] 清理后 content：{planner_msg.content!r}")
+                existing = planner_msg.tool_calls
+
+        normalized = [_normalize_tool_call(tc, i) for i, tc in enumerate(existing)]
+        normalized = [tc for tc in normalized if tc is not None]
+        if normalized != existing:
+            print(f"[工具调用解析] 规范化后 tool_calls: {normalized}")
+            _set_tool_calls(planner_msg, normalized)
     except Exception as e:
         print(f"[工具调用解析] 失败，跳过：{e}")
-
         traceback.print_exc()
     return planner_msg
 
@@ -4815,97 +4919,101 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     cl.user_session.set("query_timing_logged", False)
     cl.user_session.set("has_chart_generated", False)
 
-    # 降雨分布图快速路径（优先判断，避免误入河网路径）
-    if await _try_rainfall_img_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+    if ENABLE_FAST_PATHS:
+        # 降雨分布图快速路径（优先判断，避免误入河网路径）
+        if await _try_rainfall_img_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 防汛应急响应判定快速路径
-    if await _try_emergency_response_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 防汛应急响应判定快速路径
+        if await _try_emergency_response_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 暴雨影响河系专题图快速路径（比通用河网路径更具体，优先判断）
-    if await _try_affected_river_network_by_rainfall_fast_path(
-        message.content, thinking_chain, tools, messages, callbacks
-    ):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 暴雨影响河系专题图快速路径（比通用河网路径更具体，优先判断）
+        if await _try_affected_river_network_by_rainfall_fast_path(
+            message.content, thinking_chain, tools, messages, callbacks
+        ):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 河网图快速路径
-    if await _try_river_plot_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 河网图快速路径
+        if await _try_river_plot_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 降雨分析快速路径
-    if await _try_rainfall_analysis_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 降雨分析快速路径
+        if await _try_rainfall_analysis_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 城市平均降雨量快速路径
-    if await _try_city_avg_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 城市平均降雨量快速路径
+        if await _try_city_avg_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 预警事实查询快速路径（包含”预警”时先判断接口，再调用工具并混合生成回答）
-    if await _try_warning_fact_fast_path(message.content, thinking_chain, answer_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 预警事实查询快速路径（包含”预警”时先判断接口，再调用工具并混合生成回答）
+        if await _try_warning_fact_fast_path(message.content, thinking_chain, answer_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 今日累计降雨时长快速路径（比”今天降雨”更具体，优先判断）
-    if await _try_today_rain_duration_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 今日累计降雨时长快速路径（比”今天降雨”更具体，优先判断）
+        if await _try_today_rain_duration_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 今天降雨快速路径（分两段：今天0点~现在用实况，现在~明天0点用预报）
-    if await _try_today_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 今天降雨快速路径（分两段：今天0点~现在用实况，现在~明天0点用预报）
+        if await _try_today_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 未来一周预报快速路径
-    if await _try_weekly_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 未来一周预报快速路径
+        if await _try_weekly_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 强降雨/暴雨检查快速路径
-    if await _try_heavy_rain_check_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 强降雨/暴雨检查快速路径
+        if await _try_heavy_rain_check_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 子流域未来天气预报快速路径（大清河/子牙河等未来N天天气）
-    if await _try_subbasin_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 子流域未来天气预报快速路径（大清河/子牙河等未来N天天气）
+        if await _try_subbasin_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 面雨量快速路径（子流域对比、排名）
-    if await _try_basin_areal_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 面雨量快速路径（子流域对比、排名）
+        if await _try_basin_areal_rainfall_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 周末户外活动建议快速路径
-    if await _try_weekend_activity_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 周末户外活动建议快速路径
+        if await _try_weekend_activity_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 海河流域整体天气快速路径（今天/明天/后天海河流域/天津天气如何）
-    if await _try_basin_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 海河流域整体天气快速路径（今天/明天/后天海河流域/天津天气如何）
+        if await _try_basin_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 水位查询快速路径（避免模型生成畸形表格）
-    if await _try_water_level_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 水位查询快速路径（避免模型生成畸形表格）
+        if await _try_water_level_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 通用天气快速路径（今天/明天/后天/未来N天天气）
-    if await _try_general_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 通用天气快速路径（今天/明天/后天/未来N天天气）
+        if await _try_general_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
 
-    # 点位决策天气快速路径（具体学校/场馆/单位/设施，需先被以上路径排除后才做 POI 定位）
-    if await _try_decision_weather_fast_path(message.content, thinking_chain, answer_chain, tools, messages, callbacks):
-        _log_query_exit(query_start_time, session_id, query_summary, "ok")
-        return
+        # 点位决策天气快速路径（具体学校/场馆/单位/设施，需先被以上路径排除后才做 POI 定位）
+        if await _try_decision_weather_fast_path(message.content, thinking_chain, answer_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
+
+    if not ENABLE_FAST_PATHS:
+        print(f"[process_message] fast paths disabled; routing to planner LLM: {message.content[:80]!r}")
 
     messages.append(HumanMessage(content=message.content))
     cl.user_session.set("last_query", message.content)
