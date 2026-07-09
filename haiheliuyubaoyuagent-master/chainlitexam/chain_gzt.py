@@ -46,6 +46,7 @@ except Exception:
 from message_orchestrator import process_message, _sanitize_display_text
 from external_skill_tools import build_external_skill_tools
 from tools.rain_analysis import build_rain_analysis_tools
+from tools.decision_weather import build_decision_weather_tools
 
 app = FastAPI(title="海河流域应急响应判定 REST API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -2381,7 +2382,6 @@ async def _init_runtime_session(messages_seed=None):
 
     tools = await load_sse_tools()
     tools = tools + build_external_skill_tools() + build_rain_analysis_tools()
-    print(f"✅ 本地工具已合并，当前工具列表：{[t.name for t in tools]}")
     weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     today_str = datetime.now().strftime("%Y年%m月%d日")
     weekday_str = weekday_map[datetime.now().weekday()]
@@ -2390,8 +2390,12 @@ async def _init_runtime_session(messages_seed=None):
         ("system", f"{prompt_prefix}{WEATHER_ASSISTANT_PROMPT}"),
         MessagesPlaceholder(variable_name="messages"),
     ])
-    planner_chain = prompt_template | planner_llm.bind_tools(tools)
     answer_chain = prompt_template | answer_llm
+    callbacks = {"ainvoke_chain": ainvoke_chain}
+    decision_weather_tools = build_decision_weather_tools(answer_chain, tools, callbacks)
+    tools = tools + decision_weather_tools
+    print(f"✅ 本地工具已合并，当前工具列表：{[t.name for t in tools]}")
+    planner_chain = prompt_template | planner_llm.bind_tools(tools)
     thinking_chain = (
         ChatPromptTemplate.from_messages([
             ("system", "{system_message}"),
