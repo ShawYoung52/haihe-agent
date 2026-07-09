@@ -5,7 +5,8 @@ from sqlalchemy.orm import sessionmaker
 
 from utils.config import DB_CONFIG
 
-ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").lower() in ("1", "true", "yes")
+# Keep in sync with message_orchestrator.py. Defined locally to avoid importing that heavy module at db init time.
+ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
 
 if ENABLE_FAST_PATHS:
     try:

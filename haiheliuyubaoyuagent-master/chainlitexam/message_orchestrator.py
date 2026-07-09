@@ -37,8 +37,8 @@ except Exception:
         def _safe_summary(text, max_len=40):
             return str(text)[:max_len] if text else ""
 
-ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").lower() in ("1", "true", "yes")
-"""Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM."""
+# Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
+ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
 
 
 class ReasoningStep:
@@ -5012,7 +5012,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             _log_query_exit(query_start_time, session_id, query_summary, "ok")
             return
 
-    if not ENABLE_FAST_PATHS:
+    else:
         print(f"[process_message] fast paths disabled; routing to planner LLM: {message.content[:80]!r}")
 
     messages.append(HumanMessage(content=message.content))
