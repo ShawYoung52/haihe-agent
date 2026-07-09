@@ -1,7 +1,10 @@
 """Tests for message_orchestrator feature-flag behavior."""
 
+import importlib
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -12,18 +15,20 @@ ensure_stubs()
 import chainlitexam.message_orchestrator as mo
 
 
-def test_enable_fast_paths_defaults_to_false():
-    # The constant is evaluated at import time from the environment.
-    # In normal test runs no env var is set, so it should be False.
+def test_enable_fast_paths_defaults_to_false(monkeypatch):
+    """ENABLE_FAST_PATHS reflects the ENABLE_FAST_PATHS environment variable at import time."""
+    monkeypatch.setenv("ENABLE_FAST_PATHS", "false")
+    importlib.reload(mo)
     assert mo.ENABLE_FAST_PATHS is False
 
-
-import pytest
+    monkeypatch.setenv("ENABLE_FAST_PATHS", "true")
+    importlib.reload(mo)
+    assert mo.ENABLE_FAST_PATHS is True
 
 
 @pytest.mark.asyncio
 async def test_process_message_skips_fast_paths_when_disabled(monkeypatch):
-    """When ENABLE_FAST_PATHS is False, no _try_*_fast_path function is awaited."""
+    """When ENABLE_FAST_PATHS is False, no _try_*_fast_path function is awaited and process_message returns normally."""
     monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
 
     called = []
@@ -37,44 +42,46 @@ async def test_process_message_skips_fast_paths_when_disabled(monkeypatch):
         if name.startswith("_try_") and name.endswith("_fast_path") and callable(getattr(mo, name)):
             monkeypatch.setattr(mo, name, fake_fast_path)
 
-    # Minimal mock message; we only care that fast paths are skipped.
     class FakeMessage:
         content = "测试查询"
+
+    class FakePlannerMsg:
+        content = "这是一个测试回答。"
+        tool_calls = []
+
+    async def fake_astream_planner_think(*args, **kwargs):
+        return FakePlannerMsg()
 
     async def noop_async(*args, **kwargs):
         return None
 
-    class FakeChain:
-        async def ainvoke(self, *args, **kwargs):
-            return type("Response", (), {"content": "", "tool_calls": []})()
+    class FakeMessageObj:
+        content = ""
+        send = noop_async
+        remove = noop_async
+        update = noop_async
 
     callbacks = {
+        "astream_planner_think": fake_astream_planner_think,
+        "need_river_plot": lambda message: False,
         "astream_thinking_to_reasoning": noop_async,
-        "astream_planner_think": lambda *args, **kwargs: type(
-            "Response", (), {"content": "", "tool_calls": []}
-        )(),
-        "need_river_plot": lambda text: False,
         "append_followup_if_needed": lambda text, query: text,
         "stream_text_to_message": noop_async,
-        "astream_answer_chain_to_message": lambda *args, **kwargs: "",
+        "astream_answer_chain_to_message": lambda *a, **k: "",
     }
 
     monkeypatch.setattr(mo, "_show_thinking", lambda text: None)
-    monkeypatch.setattr(mo.cl, "Message", lambda **kwargs: type("M", (), {"send": noop_async, "remove": noop_async, "update": noop_async})())
+    monkeypatch.setattr(mo.cl, "Message", lambda **kwargs: FakeMessageObj())
 
-    # We expect the function to eventually hit the planner path and raise or return.
-    # The exact outcome is not important; the important assertion is that no fast path was called.
-    try:
-        await mo.process_message(
-            FakeMessage(),
-            planner_chain=FakeChain(),
-            answer_chain=FakeChain(),
-            thinking_chain=FakeChain(),
-            tools=[],
-            messages=[],
-            callbacks=callbacks,
-        )
-    except Exception:
-        pass
+    result = await mo.process_message(
+        FakeMessage(),
+        planner_chain=None,
+        answer_chain=None,
+        thinking_chain=None,
+        tools=[],
+        messages=[],
+        callbacks=callbacks,
+    )
 
     assert called == [], f"Expected no fast-path calls when disabled, got {called}"
+    assert result is None
