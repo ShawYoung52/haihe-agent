@@ -314,11 +314,18 @@ def _is_historical_same_period(text: str) -> bool:
 
 def _is_max_station(text: str) -> bool:
     t = text or ""
+    # 如果查询明确提到"自动站/站点"等，优先按站点维度处理，不再因为"子流域"等词排除
+    has_station_keyword = any(k in t for k in ("自动站", "站点", "气象站", "监测站", "雨量站"))
+    if not has_station_keyword:
+        return (
+            any(k in t for k in ("雨量", "降雨", "降水"))
+            and any(k in t for k in ("最大", "最多", "最高", "第一", "排第一", "最大的是", "哪个"))
+            and not any(k in t for k in ("面雨量", "分区", "子流域", "流域平均", "去年最大日降雨", "最大日降雨量", "去年", "前年", "上年", "上一年", "上个月", "上月", "上周", "历史", "全年", "整年"))
+        )
     return (
-        any(k in t for k in ("自动站", "站点", "气象站", "监测站", "雨量站"))
-        and any(k in t for k in ("雨量", "降雨", "降水"))
+        any(k in t for k in ("雨量", "降雨", "降水"))
         and any(k in t for k in ("最大", "最多", "最高", "第一", "排第一", "最大的是", "哪个"))
-        and not any(k in t for k in ("面雨量", "分区", "子流域", "流域平均", "去年最大日降雨", "最大日降雨量", "去年", "前年", "上年", "上一年", "上个月", "上月", "上周", "历史", "全年", "整年"))
+        and not any(k in t for k in ("面雨量", "流域平均", "去年最大日降雨", "最大日降雨量", "去年", "前年", "上年", "上一年", "上个月", "上月", "上周", "历史", "全年", "整年"))
     )
 
 

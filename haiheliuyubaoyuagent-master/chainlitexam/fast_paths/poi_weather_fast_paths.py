@@ -34,7 +34,9 @@ def _is_poi_weather_question(text: str) -> bool:
     t = text or ""
     if any(k in t for k in ("未来", "预报", "明天", "后天", "一周")):
         return False
-    return any(k in t for k in ("天气", "观测站", "观测值", "实况", "最近站")) and len(t.strip()) >= 4
+    # 必须有明确的 POI/观测站意图，避免"今天天气怎么样"这类普通区域预报被误判
+    poi_indicators = ("观测站", "观测值", "最近站", "附近", "周边", "实况")
+    return any(k in t for k in poi_indicators) and len(t.strip()) >= 4
 
 
 def _keyword(text: str) -> str:

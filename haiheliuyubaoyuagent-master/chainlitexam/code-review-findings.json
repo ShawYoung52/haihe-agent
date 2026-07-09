@@ -1,44 +1,107 @@
 [
   {
     "file": "chainlitexam/message_orchestrator.py",
+    "line": 1,
+    "summary": "uuid module used for tool_call id generation but never imported, causing NameError.",
+    "failure_scenario": "Planner returns a tool_call without an id; _ensure_tool_calls_from_content hits uuid.uuid4(), raises NameError, caught by broad except, leaving malformed tool_calls that break downstream ToolMessage construction.",
+    "status": "fixed"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 1692,
+    "summary": "Broad except in _ensure_tool_calls_from_content swallows all normalization failures and returns the message unchanged.",
+    "failure_scenario": "Missing uuid import or any normalization error is logged but silently ignored; caller proceeds with invalid tool_calls, making root cause hard to diagnose and leading to later Pydantic ValidationError.",
+    "status": "accepted"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 1663,
+    "summary": "Normalization loop skipped any tool_call that is not a plain dict, dropping Pydantic ToolCall objects.",
+    "failure_scenario": "LangChain/pydantic ToolCall model instances in planner_msg.tool_calls were filtered out, normalized became empty, and planner_msg.tool_calls was overwritten to [], breaking tool execution.",
+    "status": "fixed"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 1676,
+    "summary": "Non-dict args were replaced with an empty dict, dropping structured argument objects.",
+    "failure_scenario": "A tool_call with args set to a Pydantic BaseModel had its arguments silently rewritten to {}, causing the tool to be invoked with no parameters.",
+    "status": "fixed"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 55,
+    "summary": "ReasoningStep.__aenter__ created a new cl.Step but did not reset _closed or _buffer, so reusing an instance after close leaked the old step.",
+    "failure_scenario": "A caller reuses a ReasoningStep that was previously closed; _closed is still True, so stage()/append() return early and the new step remains empty.",
+    "status": "fixed"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 719,
+    "summary": "On exception path, _try_decision_weather_fast_path removes the reasoning step instead of closing it, discarding streamed reasoning context.",
+    "failure_scenario": "service.try_handle raises after generate_fast_path_thinking has streamed content into reasoning; the finally block calls reasoning.step.remove(), so the user never sees the partial reasoning that explains the failure.",
+    "status": "fixed"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 724,
+    "summary": "_try_decision_weather_fast_path removes the reasoning step on every handled=False path, not only exceptions.",
+    "failure_scenario": "User receives a clarification question or 'POI not found' reply but the reasoning step that produced it is removed, so the UI reasoning trail is lost for normal non-error outcomes.",
+    "status": "accepted"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 59,
+    "summary": "__aenter__ silently swallows any exception from cl.context.current_run and falls back to parent_id=None, which Chainlit CoT does not render.",
+    "failure_scenario": "In contexts where current_run is unavailable (custom builds, background tasks), the reasoning step becomes a root step and is invisible in the CoT view, with no warning logged.",
+    "status": "fixed"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
+    "line": 1805,
+    "summary": "_show_business_reasoning returns a ReasoningStep that has already been manually __aenter__ed, breaking the context-manager setup/teardown contract.",
+    "failure_scenario": "Any caller that forgets to manually close/remove the returned reasoning leaks a Chainlit step; the helper cannot safely be used with async with because it would re-enter and orphan the first step.",
+    "status": "accepted"
+  },
+  {
+    "file": "chainlitexam/tests/test_reasoning_step.py",
+    "line": 225,
+    "summary": "test_step_remains_expanded_after_close asserts the step stays open after close, encoding the non-collapsing behavior as the intended contract.",
+    "failure_scenario": "Any future attempt to restore fold-on-close behavior will fail CI, preventing the UX regression from being fixed without also rewriting this test.",
+    "status": "accepted"
+  },
+  {
+    "file": "chainlitexam/message_orchestrator.py",
     "line": 4333,
     "summary": "DecisionWeather 在周末/流域天气路径前拦截所有含'天气'关键词的查询，LLM 可能误判为 POI 查询",
-    "failure_scenario": "查询'本周末天气如何'→_decision_weather_prefilter('天气')匹配→调用LLM提取is_decision_weather→LLM误判'本周末如何'为地点→search_poi搜到'周末'→返回观测站数据。DecisionWeather(pos 8)在weekend_activity(pos 15)、basin_weather(pos 16)、general_weather(pos 18)之前执行。修复：将DecisionWeather移到通用天气路径之后，或在prefilter中排除时间词。"
+    "failure_scenario": "查询'本周末天气如何'→_decision_weather_prefilter('天气')匹配→调用LLM提取is_decision_weather→LLM误判'本周末如何'为地点→search_poi搜到'周末'→返回观测站数据。DecisionWeather(pos 8)在weekend_activity(pos 15)、basin_weather(pos 16)、general_weather(pos 18)之前执行。",
+    "status": "mitigated"
   },
   {
     "file": "chainlitexam/message_orchestrator.py",
     "line": 282,
     "summary": "DecisionWeather prefilter 只做关键词匹配无意图验证，浪费 LLM 调用且误拦截概率高",
-    "failure_scenario": "任何含'天气''降雨''预报''暴雨'的查询（如'今天天气''海河流域暴雨'）都触发DecisionWeather→调用LLM提取is_decision_weather→即使LLM正确拒绝，也已浪费一次LLM调用。建议增加POI意图前置判断：必须有机构/地名模式（如'XX学校''XX场馆'）才进入LLM判断。"
+    "failure_scenario": "任何含'天气''降雨''预报''暴雨'的查询（如'今天天气''海河流域暴雨'）都触发DecisionWeather→调用LLM提取is_decision_weather→即使LLM正确拒绝，也已浪费一次LLM调用。",
+    "status": "fixed"
   },
   {
     "file": "chainlitexam/message_orchestrator.py",
     "line": 4340,
     "summary": "'暴雨'关键词同时触发5个快速路径（affected_river/decision_weather/heavy_rain_check/basin_weather/general_weather），顺序保护但中场拦截风险高",
-    "failure_scenario": "'近期有暴雨吗'→affected_river(需要'暴雨影响'+'河流'→不匹配)→decision_weather(prefilter匹配'暴雨')→调用LLM判断→可能误判→search_poi。正确路径应为heavy_rain_check(pos 12)，但因decision_weather在pos 8提前拦截。"
+    "failure_scenario": "'近期有暴雨吗'→affected_river(需要'暴雨影响'+'河流'→不匹配)→decision_weather(prefilter匹配'暴雨')→调用LLM判断→可能误判→search_poi。正确路径应为heavy_rain_check(pos 12)，但因decision_weather在pos 8提前拦截。",
+    "status": "mitigated"
   },
   {
     "file": "chainlitexam/fast_paths/poi_weather_fast_paths.py",
     "line": 33,
     "summary": "POI天气快速路径拦截_general_weather_fast_path 时过于宽泛，仅需'实况'或'天气'+长度≥4",
-    "failure_scenario": "查询'今天天气如何'→_try_general_weather_fast_path→内含poi_weather_fast_paths的_is_poi_weather_question检查→'天气'在文本+len≥4→触发POI定位→可能返回错误的观测站数据而非天气预报。"
+    "failure_scenario": "查询'今天天气如何'→_try_general_weather_fast_path→内含poi_weather_fast_paths的_is_poi_weather_question检查→'天气'在文本+len≥4→触发POI定位→可能返回错误的观测站数据而非天气预报。",
+    "status": "fixed"
   },
   {
     "file": "chainlitexam/fast_paths/rainfall_fast_paths.py",
     "line": 315,
     "summary": "_is_max_station 和 _try_basin_areal_rainfall_fast_path 对'站点'关键词互斥但排除逻辑不一致",
-    "failure_scenario": "'哪个站点降雨量最大'→_try_basin_areal_rainfall_fast_path检查到'站点'关键词→触发站点排除返回False→正确落到_is_max_station。但'子流域自动站雨量'同时含'子流域'(应basin_areal)和'自动站'(应max_station)→basin_areal被'自动站'排除→max_station被'子流域'排除→双重排除掉到Planner LLM。"
-  },
-  {
-    "file": "chainlitexam/message_orchestrator.py",
-    "line": 4346,
-    "summary": "_try_weekly_forecast_fast_path 仅覆盖'一周天气''7天天气'等精确短语，未覆盖'未来几天'等变体",
-    "failure_scenario": "查询'未来几天的天气怎么样'→weekly_forecast关键词不匹配→所有快速路径失败→落到Planner LLM→LLM可能误调其他工具而非正确执行滚动预报。"
-  },
-  {
-    "file": "chainlitexam/message_orchestrator.py",
-    "line": 4362,
-    "summary": "周末快速路径新增的非流域分支与 basin_weather 和 general_weather 的天津天气查询职责重叠",
-    "failure_scenario": "'天津周末天气'→weekend_activity(天津+周末天气)→basin_weather(需'海河流域'→不匹配)→general_weather(需要'下雨'/'降雨'等→'天气'不匹配general_weather关键词)→剩weekend_activity处理。但如果未来有人改general_weather使'天气'不再被排除，则两个路径会竞争同一查询。建议明确职责边界。"
+    "failure_scenario": "'哪个站点降雨量最大'→_try_basin_areal_rainfall_fast_path检查到'站点'关键词→触发站点排除返回False→正确落到_is_max_station。但'子流域自动站雨量'同时含'子流域'(应basin_areal)和'自动站'(应max_station)→basin_areal被'自动站'排除→max_station被'子流域'排除→双重排除掉到Planner LLM。",
+    "status": "fixed"
   }
 ]
