@@ -21,6 +21,19 @@ ENV/
 .chainlit/.files/
 .files/
 
+# Frontend build artifacts
+chainlitexam/frontend/
+chainlitexam/frontendAgent/
+chainlitexam/frontendWeb/
+
+# MCP / tool runtime data
+haihe-weather-analyzer-mcp/fsdownload/
+haihe-weather-analyzer-mcp/scene_exports/
+haihe-weather-analyzer-mcp/tj/
+
+# Playwright MCP
+.playwright-mcp/
+
 # Test / cache
 .pytest_cache/
 .mypy_cache/
