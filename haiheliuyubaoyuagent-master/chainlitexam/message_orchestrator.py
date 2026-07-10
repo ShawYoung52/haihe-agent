@@ -1056,12 +1056,12 @@ async def _try_warning_fact_fast_path(user_text: str, thinking_chain, answer_cha
     if not _is_warning_fact_query(user_text):
         return False
 
-    thinking_msg = await _show_thinking("🧭 正在判断预警接口，请稍候...")
     reasoning = await _show_business_reasoning(
         "查询天津气象预警信息",
         ["预警数据"],
         "将整理预警清单、核心结论与防范建议",
     )
+    await reasoning.stage("📡 查询数据", "正在判断预警接口...")
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询天津气象预警信息", ["预警数据"], reasoning
     )
@@ -1072,13 +1072,10 @@ async def _try_warning_fact_fast_path(user_text: str, thinking_chain, answer_cha
         selected_tools = [(name, _find_tool(tools, name)) for name in tool_names]
         selected_tools = [(name, tool) for name, tool in selected_tools if tool is not None]
         if not selected_tools:
-            await thinking_msg.remove()
             return False
 
         display_names = "、".join(TOOL_DISPLAY_NAMES.get(name, name) for name, _ in selected_tools)
-        await reasoning.stage("📡 查询数据", "将查询以下数据：" + display_names)
-        thinking_msg.content = f"🔔 正在调用{display_names}..."
-        await thinking_msg.update()
+        await reasoning.stage("📡 查询数据", f"正在调用{display_names}...")
 
         async with cl.Step(name="预警信息查询", type="tool") as step:
             step.show_input = False
@@ -1097,11 +1094,9 @@ async def _try_warning_fact_fast_path(user_text: str, thinking_chain, answer_cha
                 step.output += f"✅ {TOOL_DISPLAY_NAMES.get(name, name)}查询完成。\n"
                 await step.update()
 
-        thinking_msg.content = "✍️ 正在生成回答..."
-        await thinking_msg.update()
+        await reasoning.stage("📡 查询数据", "正在生成回答...")
         final_text = await _generate_warning_hybrid_answer(answer_chain, bundles, user_text, callbacks)
         final_text = _sanitize_display_text(callbacks["append_followup_if_needed"](final_text or "", user_text))
-        await thinking_msg.remove()
         final_text = _prepend_thinking_summary(final_text, user_text, has_chart=False)
         await _maybe_close_reasoning(reasoning)
         await callbacks["stream_text_to_message"](final_text)
@@ -1110,14 +1105,10 @@ async def _try_warning_fact_fast_path(user_text: str, thinking_chain, answer_cha
         cl.user_session.set("messages", messages)
         return True
     except asyncio.TimeoutError:
-        return await _handle_fast_path_error("预警信息", thinking_msg, messages, user_text, reasoning=reasoning)
+        return await _handle_fast_path_error("预警信息", messages, user_text, reasoning=reasoning)
     except Exception as exc:
         print(f"[WarningFastPath] 失败，回退通用流程：{exc}")
         traceback.print_exc()
-        try:
-            await thinking_msg.remove()
-        except Exception:
-            pass
         return False
     finally:
         await reasoning.close()
@@ -1565,13 +1556,6 @@ async def _render_river_plot_with_overlay(tools, river_observation, river_name: 
     )
 
 
-async def _show_thinking(text: str) -> cl.Message:
-    """发送并返回一条"正在思考/查询"提示消息，供 fast path 统一使用。"""
-    msg = cl.Message(content=text)
-    await msg.send()
-    return msg
-
-
 async def _show_business_reasoning(intent_text: str, data_sources: list[str],
                                    conclusion_hint: str) -> ReasoningStep:
     """为 fast path 创建一段业务化的思考过程，包含理解问题、查询数据、生成结论三个阶段。"""
@@ -1683,7 +1667,6 @@ async def _invoke_tool_for_fast_path(tool_name: str, tool, tool_args, user_text:
 
 async def _emit_fast_path_result(
     text: str,
-    thinking_msg: cl.Message,
     messages: list,
     user_text: str,
     images: list = None,
@@ -1691,12 +1674,11 @@ async def _emit_fast_path_result(
     has_chart: bool = False,
     reasoning: ReasoningStep | None = None,
 ):
-    """统一 fast path 结果出口：先折叠思考步骤，再移除提示消息并发送最终结果，追加到对话历史。
+    """统一 fast path 结果出口：先折叠思考步骤，再发送最终结果，追加到对话历史。
     Fast path 自己生成规范文本，不再经过 _sanitize_display_text，避免表格等格式被误修复。"""
     if has_chart:
         cl.user_session.set("has_chart_generated", True)
     await _maybe_close_reasoning(reasoning)
-    await thinking_msg.remove()
     final_text = _prepend_thinking_summary(text, user_text, has_chart=has_chart)
     if images:
         await cl.Message(content=final_text, elements=images).send()
@@ -1719,7 +1701,6 @@ def _log_query_exit(query_start_time: float, session_id: str, query_summary: str
 
 async def _handle_fast_path_error(
     tag: str,
-    thinking_msg: cl.Message,
     messages: list,
     user_text: str,
     exc: Exception | None = None,
@@ -1729,10 +1710,6 @@ async def _handle_fast_path_error(
     session_id = cl.user_session.get("id") or ""
     query_summary = user_text or ""
     query_start_time = cl.user_session.get("query_start_time")
-    try:
-        await thinking_msg.remove()
-    except Exception:
-        pass
     await _maybe_close_reasoning(reasoning)
     if exc is None:
         print(f"[{tag}] 查询超时")
@@ -1761,7 +1738,7 @@ async def _try_river_plot_fast_path(user_text: str, thinking_chain, tools, messa
             thinking_chain, user_text, "绘制河网可视化图", ["河网水系数据", "行政区划底图数据"], reasoning
         )
 
-    thinking_msg = await _show_thinking("正在绘制河网可视化图，请稍候...")
+    await reasoning.stage("📡 查询数据", "正在绘制河网可视化图，请稍候...")
     try:
         river_tool = _find_tool(tools, "get_river_network_for_plot")
         if not river_tool:
@@ -1775,7 +1752,7 @@ async def _try_river_plot_fast_path(user_text: str, thinking_chain, tools, messa
 
         brief = callbacks["build_river_network_brief"](river_observation, river_name)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
-        await _emit_fast_path_result(brief, thinking_msg, messages, user_text, has_chart=True, reasoning=reasoning)
+        await _emit_fast_path_result(brief, messages, user_text, has_chart=True, reasoning=reasoning)
         return True
     except Exception as e:
         print(f"河网快路径失败，回退到通用流程：{e}")
@@ -1846,7 +1823,6 @@ async def _try_affected_river_network_by_rainfall_fast_path(
     if not _need_affected_river_network_by_rainfall(user_text):
         return False
 
-    thinking_msg = None
     reasoning = None
     try:
         tool = _find_tool(tools, "get_affected_river_network_by_rainfall")
@@ -1868,12 +1844,12 @@ async def _try_affected_river_network_by_rainfall_fast_path(
             if any(k in user_text for k in future_keywords):
                 return False
 
-        thinking_msg = await _show_thinking("正在分析暴雨影响河系并绘制专题图...")
         reasoning = await _show_business_reasoning(
             "分析暴雨影响河系并绘制专题图",
             ["降雨实况数据", "河网水系数据"],
             "将绘制暴雨影响河系专题图并给出文字分析",
         )
+        await reasoning.stage("📡 查询数据", "正在分析暴雨影响河系并绘制专题图...")
         await generate_fast_path_thinking(
             thinking_chain, user_text, "分析暴雨影响河系并绘制专题图", ["降雨实况数据", "河网水系数据"], reasoning
         )
@@ -1952,15 +1928,10 @@ async def _try_affected_river_network_by_rainfall_fast_path(
 
         brief = _build_affected_river_network_brief(result_data, user_text)
         brief = callbacks["append_followup_if_needed"](brief, user_text)
-        await _emit_fast_path_result(brief, thinking_msg, messages, user_text, has_chart=True, reasoning=reasoning)
+        await _emit_fast_path_result(brief, messages, user_text, has_chart=True, reasoning=reasoning)
         return True
     except Exception as e:
         print(f"暴雨影响河系快速路径失败，回退到通用流程：{e}")
-        if thinking_msg:
-            try:
-                await thinking_msg.remove()
-            except Exception:
-                pass
         return False
     finally:
         if reasoning is not None:
@@ -2135,13 +2106,12 @@ async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools
     print(f"\n=== 降雨分析快速路径：检测到时间 {time_str}，窗口 {start_time} ~ {end_time} ===")
 
     # 发送"正在思考"提示
-    thinking_msg = cl.Message(content="🔍 我正在思考，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "分析指定时段降雨特征",
         ["实况降雨站点数据"],
         "将统计降雨分布、极值、持续时间等特征",
     )
+    await reasoning.stage("📡 查询数据", "我正在思考，请稍候...")
     await generate_fast_path_thinking(
         thinking_chain, user_text, "分析指定时段降雨特征", ["实况降雨站点数据"], reasoning
     )
@@ -2292,8 +2262,6 @@ async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools
         text = re.sub(r"<[^>]+>", "", text)
         text = callbacks.get("append_followup_if_needed", lambda t, u: t)(text, user_text)
 
-        # 移除"思考中"消息，直接发送完整消息（避免流式切片破坏 Markdown 表格）
-        await thinking_msg.remove()
         text = _prepend_thinking_summary(text, user_text, has_chart=False)
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content=text).send()
@@ -2305,7 +2273,6 @@ async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools
 
     except asyncio.TimeoutError:
         print(f"降雨分析快速路径超时（30秒）")
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 降雨数据查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -2316,7 +2283,6 @@ async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools
 
         print(f"[降雨分析快速路径] 失败：{e}")
         traceback.print_exc()
-        await thinking_msg.remove()
         # 返回 False，让主 planner 尝试其他工具/路径回答用户问题
         # （例如用面雨量分布图来展示昨日降雨情况）
         return False
@@ -2579,12 +2545,12 @@ async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, mes
 
     reasoning = None
     print(f"\n=== 降雨分布图快速路径 ===")
-    thinking_msg = await _show_thinking("🔍 正在生成降水实况图，请稍候...")
     reasoning = await _show_business_reasoning(
         "生成海河流域降水实况分布图",
         ["实况降雨站点数据"],
         "将生成降雨分布图并简要说明时间范围和分区",
     )
+    await reasoning.stage("📡 查询数据", "正在生成降水实况图，请稍候...")
     await generate_fast_path_thinking(
         thinking_chain, user_text, "生成海河流域降水实况分布图", ["实况降雨站点数据"], reasoning
     )
@@ -2684,7 +2650,6 @@ async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, mes
                 text = callbacks["append_followup_if_needed"](text, user_text)
                 await _emit_fast_path_result(
                     text,
-                    thinking_msg,
                     messages,
                     user_text,
                     images=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
@@ -2715,7 +2680,6 @@ async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, mes
 
     except Exception as e:
         print(f"降雨分布图快速路径失败，回退到通用流程：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         if reasoning is not None:
@@ -2739,8 +2703,6 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
     city = "天津市"
 
     print(f"\n=== 城市平均降雨量快速路径：{city} ===")
-    thinking_msg = cl.Message(content="🔍 正在查询实况降雨数据，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "查询城市平均降雨量",
         ["城市面雨量数据"],
@@ -2749,6 +2711,7 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询城市平均降雨量", ["城市面雨量数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在查询实况降雨数据...")
 
     try:
         now = datetime.now()
@@ -2764,7 +2727,6 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
             ),
             timeout=30,
         )
-        await thinking_msg.remove()
         data = _unwrap_tool_result(result)
 
         if isinstance(data, dict) and data.get("total_stations", 0) > 0:
@@ -2810,7 +2772,6 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
 
     except asyncio.TimeoutError:
         print("城市降雨量查询超时")
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -2819,7 +2780,6 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
         return True
     except Exception as e:
         print(f"城市平均降雨量快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -2842,8 +2802,6 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
         return False
 
     print(f"\n=== 今天降雨快速路径 ===")
-    thinking_msg = cl.Message(content="🔍 正在查询今日降雨数据，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "查询今日降雨情况",
         ["实况降雨数据", "预报降雨数据"],
@@ -2852,6 +2810,7 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询今日降雨情况", ["实况降雨数据", "预报降雨数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在查询今日降雨数据...")
 
     try:
         now = datetime.now()
@@ -2921,8 +2880,6 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
             except Exception as fce:
                 print(f"今天预报查询失败：{fce}")
 
-        await thinking_msg.remove()
-
         # 3. 组装输出：实况与预报分段展示，任一 available 都要展示
         obs_text = ""
         if isinstance(obs_data, dict) and obs_data.get("total_stations", 0) > 0:
@@ -2967,7 +2924,6 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
 
     except asyncio.TimeoutError:
         print("今天降雨查询超时")
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -2976,7 +2932,6 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
         return True
     except Exception as e:
         print(f"今天降雨快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -2997,8 +2952,6 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
         return False
 
     print(f"\n=== 今日累计降雨时长快速路径 ===")
-    thinking_msg = cl.Message(content="🔍 正在统计今日降雨时长，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "统计今日降雨时长",
         ["实况降雨站点数据"],
@@ -3007,6 +2960,7 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
     await generate_fast_path_thinking(
         thinking_chain, user_text, "统计今日降雨时长", ["实况降雨站点数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在统计今日降雨时长...")
 
     try:
         now = datetime.now()
@@ -3026,7 +2980,6 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
             ),
             timeout=30,
         )
-        await thinking_msg.remove()
         data = _unwrap_tool_result(result)
 
         if isinstance(data, dict) and data.get("total_stations", 0) > 0:
@@ -3072,7 +3025,6 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
 
     except asyncio.TimeoutError:
         print("降雨时长查询超时")
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -3081,7 +3033,6 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
         return True
     except Exception as e:
         print(f"今日降雨时长快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -3101,8 +3052,6 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, 
         return False
 
     print(f"\n=== 未来一周预报快速路径 ===")
-    thinking_msg = cl.Message(content="🔍 正在查询未来一周天气预报，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "查询未来一周天气预报",
         ["ECMWF AIFS 预报数据"],
@@ -3111,6 +3060,7 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, 
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询未来一周天气预报", ["ECMWF AIFS 预报数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在查询未来一周天气预报...")
 
     try:
         now = datetime.now()
@@ -3140,8 +3090,6 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, 
                 rows.append((day_dt.strftime("%m/%d"), "无数据", "—"))
             await asyncio.sleep(0.3)
 
-        await thinking_msg.remove()
-
         if rows:
             lines = [f"## 天津市未来一周预报\n\n"]
             lines.append("| 日期 | 平均雨量(mm) | 最大雨量(mm) |\n| :--- | :--- | :--- |\n")
@@ -3162,7 +3110,6 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, 
 
     except Exception as e:
         print(f"未来一周预报快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -3197,8 +3144,6 @@ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools,
         return False
 
     print(f"\n=== 强降雨检查快速路径 ===")
-    thinking_msg = cl.Message(content="🔍 正在检查近期降雨情况，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "检查近期是否出现强降雨",
         ["实况降雨数据"],
@@ -3207,6 +3152,7 @@ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools,
     await generate_fast_path_thinking(
         thinking_chain, user_text, "检查近期是否出现强降雨", ["实况降雨数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在检查近期降雨情况...")
 
     try:
         now = datetime.now()
@@ -3221,7 +3167,6 @@ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools,
             ),
             timeout=30,
         )
-        await thinking_msg.remove()
         data = result
         data = _unwrap_tool_result(result)
 
@@ -3264,7 +3209,6 @@ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools,
 
     except Exception as e:
         print(f"强降雨检查快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -3325,7 +3269,6 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
     date_label = day_dt.strftime("%m月%d日")
 
     print(f"\n=== 海河流域天气快速路径：{label}（{date_label}）===")
-    thinking_msg = await _show_thinking(f"🔍 正在查询海河流域代表城市{label}降雨预报，请稍候...")
     reasoning = await _show_business_reasoning(
         "查询海河流域整体天气",
         ["流域天气预报数据"],
@@ -3334,6 +3277,7 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询海河流域整体天气", ["流域天气预报数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", f"正在查询海河流域代表城市{label}降雨预报...")
 
     try:
         rows = []
@@ -3363,8 +3307,6 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
                 print(f"[海河流域天气] {city} 查询失败：{e}")
                 rows.append({"city": city, "avg": "—", "max": "—", "min": "—", "judgment": "查询失败"})
             await asyncio.sleep(0.1)
-
-        await thinking_msg.remove()
 
         valid = [r for r in rows if isinstance(r["avg"], (int, float))]
         max_avg = max((float(r["avg"]) for r in valid), default=0.0)
@@ -3408,7 +3350,6 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
         return True
 
     except asyncio.TimeoutError:
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 预报查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -3417,7 +3358,6 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
         return True
     except Exception as e:
         print(f"海河流域天气快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -3490,7 +3430,6 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
         cities = ["天津市"]
 
     print(f"\n=== 周末{'活动' if is_basin_scope else '天气'}快速路径：{[d[0] for d in days]} ===")
-    thinking_msg = await _show_thinking("🔍 正在查询周末降雨预报，请稍候...")
     reasoning = await _show_business_reasoning(
         "获取周末户外活动天气建议",
         ["周末天气预报数据"],
@@ -3499,6 +3438,7 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
     await generate_fast_path_thinking(
         thinking_chain, user_text, "获取周末户外活动天气建议", ["周末天气预报数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在查询周末降雨预报...")
 
     try:
         day_results = {}
@@ -3533,8 +3473,6 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
                     city_rows.append({"city": city, "avg": "—", "max": "—", "judgment": "查询失败"})
                 await asyncio.sleep(0.1)
             day_results[day_label] = {"date": date_label, "rows": city_rows}
-
-        await thinking_msg.remove()
 
         # 生成输出：流域范围 → 活动建议；非流域 → 天气预报
         if is_basin_scope:
@@ -3585,7 +3523,6 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
         return True
 
     except asyncio.TimeoutError:
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 预报查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -3594,7 +3531,6 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
         return True
     except Exception as e:
         print(f"周末活动快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -3632,7 +3568,6 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
         return False
 
     print(f"\n=== 水位快速路径：{river_name} ===")
-    thinking_msg = await _show_thinking(f"🔍 正在查询{river_name}水位情况，请稍候...")
     reasoning = await _show_business_reasoning(
         "查询河网水位",
         ["河网水位数据"],
@@ -3641,6 +3576,7 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询河网水位", ["河网水位数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", f"正在查询{river_name}水位情况...")
 
     try:
         result = await asyncio.wait_for(
@@ -3658,7 +3594,7 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
 
         if not isinstance(data, dict):
             await _emit_fast_path_result(
-                "水位数据格式异常，无法生成表格。", thinking_msg, messages, user_text, reasoning=reasoning
+                "水位数据格式异常，无法生成表格。", messages, user_text, reasoning=reasoning
             )
             return True
 
@@ -3674,13 +3610,13 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
                 friendly = "水位查询服务鉴权失败，请联系管理员检查服务配置。"
             else:
                 friendly = "水位查询服务暂时不可用，请稍后重试。"
-            await _emit_fast_path_result(friendly, thinking_msg, messages, user_text, reasoning=reasoning)
+            await _emit_fast_path_result(friendly, messages, user_text, reasoning=reasoning)
             return True
 
         records = data.get("records", [])
         if not isinstance(records, list) or not records:
             await _emit_fast_path_result(
-                f"当前未查询到{river_name}相关站点水位数据。", thinking_msg, messages, user_text, reasoning=reasoning
+                f"当前未查询到{river_name}相关站点水位数据。", messages, user_text, reasoning=reasoning
             )
             return True
         now_str = datetime.now().strftime("%Y年%m月%d日%H:%M")
@@ -3721,7 +3657,6 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
         text = _sanitize_display_text(text)
         print(f"[水位快速路径] 最终输出文本=\n{text}")
 
-        await thinking_msg.remove()
         text = _prepend_thinking_summary(text, user_text, has_chart=False)
         await _maybe_close_reasoning(reasoning)
         await callbacks["stream_text_to_message"](text)
@@ -3732,7 +3667,7 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
 
     except asyncio.TimeoutError:
         await _emit_fast_path_result(
-            "⏱️ 水位查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+            "⏱️ 水位查询超时，请稍后重试。", messages, user_text, reasoning=reasoning
         )
         return True
     except Exception as e:
@@ -3740,7 +3675,7 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
         print(f"[水位快速路径] 异常：{e}")
         traceback.print_exc()
         await _emit_fast_path_result(
-            "水位查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+            "水位查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning
         )
         return True
     finally:
@@ -3823,8 +3758,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
         if not tool:
             return False
         print(f"\n=== 通用天气快速路径（今天实况）===")
-        thinking_msg = cl.Message(content="🔍 正在查询今日实况天气，请稍候...")
-        await thinking_msg.send()
         reasoning = await _show_business_reasoning(
             "查询通用天气",
             ["天气预报数据"],
@@ -3833,6 +3766,7 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
         await generate_fast_path_thinking(
             thinking_chain, user_text, "查询通用天气", ["天气预报数据"], reasoning
         )
+        await reasoning.stage("📡 查询数据", "正在查询今日实况天气...")
 
         try:
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -3849,7 +3783,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
                 ),
                 timeout=30,
             )
-            await thinking_msg.remove()
             data = _unwrap_tool_result(result)
 
             if isinstance(data, dict) and data.get("total_stations", 0) > 0:
@@ -3868,13 +3801,13 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
                 text = "今日海河流域暂无有效降雨数据。"
 
             text = _prepend_thinking_summary(text, user_text, has_chart=False)
+            await _maybe_close_reasoning(reasoning)
             await callbacks["stream_text_to_message"](text)
             messages.append(HumanMessage(content=user_text))
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
             return True
         except asyncio.TimeoutError:
-            await thinking_msg.remove()
             await cl.Message(content="⏱️ 查询超时，请稍后重试。").send()
             messages.append(HumanMessage(content=user_text))
             messages.append(AIMessage(content="查询超时，请稍后重试。"))
@@ -3882,7 +3815,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
             return True
         except Exception as e:
             print(f"通用天气快速路径（今天）失败：{e}")
-            await thinking_msg.remove()
             return False
         finally:
             await reasoning.close()
@@ -3904,8 +3836,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
         return False
 
     print(f"\n=== 通用天气快速路径（预报 {days_to_query} 天）===")
-    thinking_msg = cl.Message(content=f"🔍 正在查询未来 {len(days_to_query)} 天天气预报，请稍候...")
-    await thinking_msg.send()
     reasoning = await _show_business_reasoning(
         "查询通用天气",
         ["天气预报数据"],
@@ -3914,6 +3844,7 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询通用天气", ["天气预报数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", f"正在查询未来 {len(days_to_query)} 天天气预报...")
 
     try:
         rows = []
@@ -3942,8 +3873,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
                 rows.append((day_dt.strftime("%m月%d日"), "无数据", "—", "—"))
             await asyncio.sleep(0.1)
 
-        await thinking_msg.remove()
-
         if rows:
             lines = ["## 海河流域未来天气预报（天津市代表站）\n\n"]
             lines.append("以天津市为代表站，预报未来降雨情况：\n\n")
@@ -3964,7 +3893,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
         cl.user_session.set("messages", messages)
         return True
     except asyncio.TimeoutError:
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 预报查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -3973,7 +3901,6 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
         return True
     except Exception as e:
         print(f"通用天气快速路径（预报）失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -4055,7 +3982,6 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
 
     cities = _SUBBASIN_REP_CITIES[subbasin]
     print(f"\n=== 子流域预报快速路径：{subbasin}，代表城市 {cities}，{days} 天 ===")
-    thinking_msg = await _show_thinking(f"🔍 正在查询{subbasin}代表城市未来{days}天降雨预报，请稍候...")
     reasoning = await _show_business_reasoning(
         "查询子流域未来天气预报",
         ["子流域预报数据"],
@@ -4064,6 +3990,7 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询子流域未来天气预报", ["子流域预报数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", f"正在查询{subbasin}代表城市未来{days}天降雨预报...")
 
     try:
         now = datetime.now()
@@ -4102,8 +4029,6 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
                     rows.append({"city": city, "date": date_label, "avg": "—", "max": "—", "min": "—", "judgment": "查询失败"})
                 await asyncio.sleep(0.1)
 
-        await thinking_msg.remove()
-
         if rows:
             lines = [f"## {_clean_table_cell(subbasin)}未来{days}天降雨预报\n\n"]
             lines.append(f"基于 ECMWF AIFS 模式 24 小时降雨量预报，以**{'、'.join(cities)}**为代表城市，反映{_clean_table_cell(subbasin)}未来{days}天降雨趋势：\n\n")
@@ -4126,7 +4051,6 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
         return True
 
     except asyncio.TimeoutError:
-        await thinking_msg.remove()
         await _maybe_close_reasoning(reasoning)
         await cl.Message(content="⏱️ 预报查询超时，请稍后重试。").send()
         messages.append(HumanMessage(content=user_text))
@@ -4135,7 +4059,6 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
         return True
     except Exception as e:
         print(f"子流域预报快速路径失败：{e}")
-        await thinking_msg.remove()
         return False
     finally:
         await reasoning.close()
@@ -4217,7 +4140,6 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
 
     hours, time_range, time_label, explicit_time_range = _parse_areal_rainfall_time(t)
     print(f"\n=== 面雨量快速路径：{time_label} ===")
-    thinking_msg = await _show_thinking("🔍 正在查询各子流域面雨量数据，请稍候...")
     reasoning = await _show_business_reasoning(
         "查询流域面雨量",
         ["面雨量数据"],
@@ -4226,6 +4148,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询流域面雨量", ["面雨量数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在查询各子流域面雨量数据...")
 
     _HOURS_SENTINEL = object()
 
@@ -4396,7 +4319,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
 
         if data is None:
             await _emit_fast_path_result(
-                "⏱️ 面雨量查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+                "⏱️ 面雨量查询超时，请稍后重试。", messages, user_text, reasoning=reasoning
             )
             return True
 
@@ -4449,11 +4372,11 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
             if not text:
                 text = f"所选时段（{time_label}）暂无有效面雨量数据，请稍后重试。"
 
-        await _emit_fast_path_result(text, thinking_msg, messages, user_text, reasoning=reasoning)
+        await _emit_fast_path_result(text, messages, user_text, reasoning=reasoning)
         return True
     except asyncio.TimeoutError:
         await _emit_fast_path_result(
-            "⏱️ 面雨量查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+            "⏱️ 面雨量查询超时，请稍后重试。", messages, user_text, reasoning=reasoning
         )
         return True
     except Exception as e:
@@ -4461,7 +4384,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
 
         traceback.print_exc()
         await _emit_fast_path_result(
-            "面雨量查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+            "面雨量查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning
         )
         return True
     finally:
@@ -4480,7 +4403,6 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
         return False
 
     print(f"\n=== 防汛应急响应快速路径：times={times} ===")
-    thinking_msg = await _show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
     reasoning = await _show_business_reasoning(
         "查询防汛应急响应信息",
         ["防汛应急响应数据"],
@@ -4489,6 +4411,7 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
     await generate_fast_path_thinking(
         thinking_chain, user_text, "查询防汛应急响应信息", ["防汛应急响应数据"], reasoning
     )
+    await reasoning.stage("📡 查询数据", "正在查询防汛应急响应判定结果...")
 
     try:
         result = await asyncio.wait_for(
@@ -4502,7 +4425,7 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
 
         if not isinstance(data, dict):
             await _emit_fast_path_result(
-                "应急响应判定结果格式异常，无法生成回答。", thinking_msg, messages, user_text, reasoning=reasoning
+                "应急响应判定结果格式异常，无法生成回答。", messages, user_text, reasoning=reasoning
             )
             return True
 
@@ -4512,7 +4435,7 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
             friendly = "当前无法获取应急响应判定数据，请稍后重试。"
             if "no record" in raw_err.lower() or "无记录" in raw_err or "暂无数据" in raw_err:
                 friendly = f"未查询到 {times[:4]}年{times[4:6]}月{times[6:8]}日 {times[8:10]}:{times[10:12]} 的应急响应判定数据，可能该时刻无有效分钟降水资料。"
-            await _emit_fast_path_result(friendly, thinking_msg, messages, user_text, reasoning=reasoning)
+            await _emit_fast_path_result(friendly, messages, user_text, reasoning=reasoning)
             return True
 
         triggered = data.get("triggered") or data.get("reached")
@@ -4551,11 +4474,11 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
             lines.append("")
 
         lines.append("\n数据来源：天擎分钟降水实况")
-        await _emit_fast_path_result("\n".join(lines), thinking_msg, messages, user_text, reasoning=reasoning)
+        await _emit_fast_path_result("\n".join(lines), messages, user_text, reasoning=reasoning)
         return True
     except asyncio.TimeoutError:
         await _emit_fast_path_result(
-            "⏱️ 应急响应判定查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+            "⏱️ 应急响应判定查询超时，请稍后重试。", messages, user_text, reasoning=reasoning
         )
         return True
     except Exception as e:
@@ -4563,7 +4486,7 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
 
         traceback.print_exc()
         await _emit_fast_path_result(
-            "应急响应判定查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning
+            "应急响应判定查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning
         )
         return True
     finally:
@@ -4677,8 +4600,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     messages.append(HumanMessage(content=message.content))
     cl.user_session.set("last_query", message.content)
-    thinking_msg = cl.Message(content="🧭 正在分析问题，请稍候...")
-    await thinking_msg.send()
 
     stream_msg = cl.Message(content="")
     await stream_msg.send()
@@ -4729,12 +4650,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
         )
         await reasoning.stage("📡 查询数据", f"需要查询以下数据：{tool_names_display}（共 {tool_count} 项）")
-        thinking_msg.content = f"🔧 正在查询 {tool_count} 项数据，请稍候..."
-        await thinking_msg.update()
+        await reasoning.stage("📡 查询数据", f"正在查询 {tool_count} 项数据，请稍候...")
     else:
         await reasoning.stage("✍️ 生成结论", "已掌握足够信息，直接为您整理回答。")
-        thinking_msg.content = "✍️ 正在整理回答..."
-        await thinking_msg.update()
+        await reasoning.stage("✍️ 生成结论", "正在整理回答...")
 
     print(f"\n=== 第一次 Planner 调用结果 ===")
     print(f"Planner Message: {planner_msg}")
@@ -4761,7 +4680,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         if cleaned_planner_content.strip():
             await reasoning.stage("✍️ 生成结论", "正在为您整理分析结论...")
             await reasoning.close()
-            await thinking_msg.remove()
             text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
@@ -4775,7 +4693,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         try:
             _compress_messages(messages)
             await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             stream_msg.content = _prepend_thinking_summary(stream_msg.content, message.content, has_chart=has_chart)
             if stream_msg.content:
@@ -4822,8 +4739,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
         )
         await reasoning.stage("📡 查询数据", f"补充查询更多数据：{tool_names_display}")
-        thinking_msg.content = f"🔧 第 {iteration} 轮补充查询中..."
-        await thinking_msg.update()
+        await reasoning.stage("📡 查询数据", f"第 {iteration} 轮补充查询中...")
 
         forced_final_text, ree, warning_bundles = await _run_tool_round(
             planner_msg, tools, messages, message.content, iteration, callbacks
@@ -4833,7 +4749,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         if forced_final_text:
             await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             forced_final_text = _prepend_thinking_summary(forced_final_text, message.content, has_chart=has_chart)
             await _maybe_close_reasoning(reasoning)
@@ -4846,8 +4761,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         if warning_bundles:
             await reasoning.stage("✅ 评估结果", "预警数据已获取完整，正在整理预警清单并生成防范建议...")
-            thinking_msg.content = "✍️ 正在生成回答..."
-            await thinking_msg.update()
+            await reasoning.stage("✍️ 生成结论", "正在生成回答...")
             try:
                 final_text = await _generate_warning_hybrid_answer(
                     answer_chain, warning_bundles, message.content, callbacks
@@ -4879,7 +4793,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 else:
                     final_text = "【核心结论】\n未检索到符合条件的预警记录。"
 
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             final_text = _prepend_thinking_summary(final_text, message.content, has_chart=has_chart)
             await callbacks["stream_text_to_message"](final_text, stream_msg=stream_msg)
@@ -4891,8 +4804,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             break
 
         await reasoning.stage("✅ 评估结果", "已获取数据，正在判断能否完整回答您的问题...")
-        thinking_msg.content = "🧭 正在评估是否需要补充查询..."
-        await thinking_msg.update()
+        await reasoning.stage("✅ 评估结果", "正在评估是否需要补充查询...")
 
         print(f"\n=== 第 {iteration} 轮 Planner 调用前 ===")
         print(f"Messages 数量：{len(messages)}")
@@ -4919,9 +4831,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     # 二轮 planner 已生成完整回答，直接复用，避免 answer_chain 超时/格式异常
                     await reasoning.stage("✍️ 生成结论", "正在整理回答...")
                     await reasoning.close()
-                    thinking_msg.content = "✍️ 正在整理回答..."
-                    await thinking_msg.update()
-                    await thinking_msg.remove()
                     text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
                     has_chart = cl.user_session.get("has_chart_generated", False) or False
                     text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
@@ -4934,9 +4843,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 try:
                     _compress_messages(messages)
                     await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-                    thinking_msg.content = "✍️ 正在整理回答..."
-                    await thinking_msg.update()
-                    await thinking_msg.remove()
                     has_chart = cl.user_session.get("has_chart_generated", False) or False
                     stream_msg.content = _prepend_thinking_summary(stream_msg.content, message.content, has_chart=has_chart)
                     if stream_msg.content:
@@ -4988,14 +4894,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     # 循环结束后若无确定性最终回答且循环内未成功生成回答，才走兜底
     if not forced_final_text and not answer_generated:
         if not stream_msg.content.strip():
-            # 如果 stream_msg 仍为空，保持 thinking_msg 提示
-            thinking_msg.content = "✍️ 正在整理回答..."
-            await thinking_msg.update()
+            await reasoning.stage("✍️ 生成结论", "正在整理回答...")
         try:
             _compress_messages(messages)
             if not reasoning._closed:
                 await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             stream_msg.content = _prepend_thinking_summary(stream_msg.content, message.content, has_chart=has_chart)
             if stream_msg.content:

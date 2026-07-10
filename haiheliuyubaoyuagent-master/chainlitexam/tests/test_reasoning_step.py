@@ -227,13 +227,10 @@ async def test_step_remains_expanded_after_close():
 
 
 async def test_reasoning_step_uses_auto_collapse():
-    """auto_collapse must be passed to the cl.Step constructor, not assigned later."""
     MockStep.reset()
-    reasoning = ReasoningStep("test collapse")
+    reasoning = ReasoningStep()
     await reasoning.__aenter__()
     assert reasoning.step is not None
-    # The mock captures the constructor kwarg; this verifies the argument was
-    # passed at construction time rather than set as an attribute afterwards.
     assert reasoning.step.auto_collapse is True
     await reasoning.close()
 

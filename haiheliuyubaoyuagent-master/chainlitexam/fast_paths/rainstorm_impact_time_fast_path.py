@@ -161,8 +161,8 @@ def install_rainstorm_impact_time_fast_path() -> bool:
         )
         if thinking_text:
             await reasoning.line(thinking_text)
+        await reasoning.stage("📡 查询数据", "正在分析暴雨影响河系并绘制专题图...")
 
-        thinking_msg = await mo._show_thinking("正在分析暴雨影响河系并绘制专题图...")
         try:
             result = await tool.ainvoke({
                 "time_str": time_str,
@@ -218,14 +218,9 @@ def install_rainstorm_impact_time_fast_path() -> bool:
             messages.append(HumanMessage(content=user_text))
             messages.append(AIMessage(content=brief))
             cl.user_session.set("messages", messages)
-            await thinking_msg.remove()
             return True
         except Exception as exc:
             print(f"[rainstorm_impact_time_fast_path] 失败：{exc}")
-            try:
-                await thinking_msg.remove()
-            except Exception:
-                pass
             return False
         finally:
             if reasoning is not None:
