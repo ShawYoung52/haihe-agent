@@ -1565,6 +1565,13 @@ async def _render_river_plot_with_overlay(tools, river_observation, river_name: 
     )
 
 
+async def _show_thinking(text: str) -> cl.Message:
+    """发送并返回一条"正在思考/查询"提示消息，供 fast path 统一使用。"""
+    msg = cl.Message(content=text)
+    await msg.send()
+    return msg
+
+
 async def _show_business_reasoning(intent_text: str, data_sources: list[str],
                                    conclusion_hint: str) -> ReasoningStep:
     """为 fast path 创建一段业务化的思考过程，包含理解问题、查询数据、生成结论三个阶段。"""
