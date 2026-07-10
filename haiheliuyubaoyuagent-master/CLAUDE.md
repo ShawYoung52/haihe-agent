@@ -53,6 +53,8 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - Tool display names are in module-level `TOOL_DISPLAY_NAMES` dict in `message_orchestrator.py`
 - `_invoke_tool_with_tolerance()` returns `(result, elapsed)` tuple — always unpack both values
 - Tool results are unwrapped with `_unwrap_tool_result()` from `chainlitexam/utils/tool_result.py`; do not add new local unwrapping logic
+- Progress indication uses `ReasoningStep.stage()`; do not add new `cl.Message` loading bubbles
+- Reasoning steps auto-collapse after the final answer via `auto_collapse=True`
 - Verification: run `python tests/test_fast_paths.py` for fast-path static checks and `python -m pytest tests/ -v` for the full suite
 - LLM model: Qwen3.6-27B via local OpenAI-compatible proxy at `10.226.188.156:8000/v1/`
 - Internal service addresses: MUSIC `10.226.90.120`, PostgreSQL `10.226.107.130`, RAG `10.226.188.156:8033` — never include these in user-facing output
