@@ -32,6 +32,7 @@ class MockStep(chainlit.Step):
         self.output = ""
         self.show_input = ""
         self.default_open = None
+        self.auto_collapse = kwargs.get("auto_collapse")
         self.id = kwargs.get("id") or f"mock-step-{len(MockStep._instances)}"
         self._streamed_tokens: list[str] = []
         MockStep._instances.append(self)
@@ -225,6 +226,15 @@ async def test_step_remains_expanded_after_close():
     assert reasoning.step.default_open is True
 
 
+async def test_reasoning_step_uses_auto_collapse():
+    MockStep.reset()
+    reasoning = ReasoningStep()
+    await reasoning.__aenter__()
+    assert reasoning.step is not None
+    assert reasoning.step.auto_collapse is True
+    await reasoning.close()
+
+
 if __name__ == "__main__":
     asyncio.run(test_show_business_reasoning_writes_headers_to_parent_output())
     asyncio.run(test_stage_headers_accumulate_in_parent_output())
@@ -238,4 +248,5 @@ if __name__ == "__main__":
     asyncio.run(test_aexit_preserves_original_exception())
     asyncio.run(test_step_initially_expanded())
     asyncio.run(test_step_remains_expanded_after_close())
+    asyncio.run(test_reasoning_step_uses_auto_collapse())
     print("All tests passed.")
