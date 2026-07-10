@@ -783,19 +783,19 @@ async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None)
 
 
 async def _process_planner_stream(chain, input_dict, reasoning_step, config):
-    """流式处理 planner 输出：token 实时展示为思考过程，tool_calls 从最终 chunk 获取。"""
+    """流式处理 planner 输出：token 实时展示为思考过程，tool_calls 从合并后的 chunk 获取。"""
     content_buf = ""
-    tool_calls_data = []
+    acc_chunk = None
 
     async for chunk in chain.astream(input_dict, config=config):
         token = getattr(chunk, "content", None)
         if token:
             content_buf += token
             await reasoning_step.append(token)
-        # langchain 内部累积 tool_call_chunks，最终 chunk 的 .tool_calls 为完整列表
-        tc = getattr(chunk, "tool_calls", None)
-        if tc:
-            tool_calls_data = tc
+        # 累积所有 chunk，利用 AIMessageChunk.__add__ 合并 tool_call_chunks
+        acc_chunk = chunk if acc_chunk is None else acc_chunk + chunk
+
+    tool_calls_data = getattr(acc_chunk, "tool_calls", None) or []
 
     if not content_buf and not tool_calls_data:
         print("[planner_stream] WARNING: 流式输出为空，模型可能未正确响应")
