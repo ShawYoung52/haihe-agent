@@ -4600,8 +4600,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     messages.append(HumanMessage(content=message.content))
     cl.user_session.set("last_query", message.content)
-    thinking_msg = cl.Message(content="🧭 正在分析问题，请稍候...")
-    await thinking_msg.send()
 
     stream_msg = cl.Message(content="")
     await stream_msg.send()
@@ -4652,12 +4650,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
         )
         await reasoning.stage("📡 查询数据", f"需要查询以下数据：{tool_names_display}（共 {tool_count} 项）")
-        thinking_msg.content = f"🔧 正在查询 {tool_count} 项数据，请稍候..."
-        await thinking_msg.update()
+        await reasoning.stage("📡 查询数据", f"正在查询 {tool_count} 项数据，请稍候...")
     else:
         await reasoning.stage("✍️ 生成结论", "已掌握足够信息，直接为您整理回答。")
-        thinking_msg.content = "✍️ 正在整理回答..."
-        await thinking_msg.update()
+        await reasoning.stage("✍️ 生成结论", "正在整理回答...")
 
     print(f"\n=== 第一次 Planner 调用结果 ===")
     print(f"Planner Message: {planner_msg}")
@@ -4684,7 +4680,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         if cleaned_planner_content.strip():
             await reasoning.stage("✍️ 生成结论", "正在为您整理分析结论...")
             await reasoning.close()
-            await thinking_msg.remove()
             text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
@@ -4698,7 +4693,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         try:
             _compress_messages(messages)
             await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             stream_msg.content = _prepend_thinking_summary(stream_msg.content, message.content, has_chart=has_chart)
             if stream_msg.content:
@@ -4745,8 +4739,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             TOOL_DISPLAY_NAMES.get(tc["name"], tc["name"]) for tc in planner_msg.tool_calls
         )
         await reasoning.stage("📡 查询数据", f"补充查询更多数据：{tool_names_display}")
-        thinking_msg.content = f"🔧 第 {iteration} 轮补充查询中..."
-        await thinking_msg.update()
+        await reasoning.stage("📡 查询数据", f"第 {iteration} 轮补充查询中...")
 
         forced_final_text, ree, warning_bundles = await _run_tool_round(
             planner_msg, tools, messages, message.content, iteration, callbacks
@@ -4756,7 +4749,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         if forced_final_text:
             await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             forced_final_text = _prepend_thinking_summary(forced_final_text, message.content, has_chart=has_chart)
             await _maybe_close_reasoning(reasoning)
@@ -4769,8 +4761,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         if warning_bundles:
             await reasoning.stage("✅ 评估结果", "预警数据已获取完整，正在整理预警清单并生成防范建议...")
-            thinking_msg.content = "✍️ 正在生成回答..."
-            await thinking_msg.update()
+            await reasoning.stage("✍️ 生成结论", "正在生成回答...")
             try:
                 final_text = await _generate_warning_hybrid_answer(
                     answer_chain, warning_bundles, message.content, callbacks
@@ -4802,7 +4793,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 else:
                     final_text = "【核心结论】\n未检索到符合条件的预警记录。"
 
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             final_text = _prepend_thinking_summary(final_text, message.content, has_chart=has_chart)
             await callbacks["stream_text_to_message"](final_text, stream_msg=stream_msg)
@@ -4814,8 +4804,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             break
 
         await reasoning.stage("✅ 评估结果", "已获取数据，正在判断能否完整回答您的问题...")
-        thinking_msg.content = "🧭 正在评估是否需要补充查询..."
-        await thinking_msg.update()
+        await reasoning.stage("✅ 评估结果", "正在评估是否需要补充查询...")
 
         print(f"\n=== 第 {iteration} 轮 Planner 调用前 ===")
         print(f"Messages 数量：{len(messages)}")
@@ -4842,9 +4831,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     # 二轮 planner 已生成完整回答，直接复用，避免 answer_chain 超时/格式异常
                     await reasoning.stage("✍️ 生成结论", "正在整理回答...")
                     await reasoning.close()
-                    thinking_msg.content = "✍️ 正在整理回答..."
-                    await thinking_msg.update()
-                    await thinking_msg.remove()
                     text = callbacks["append_followup_if_needed"](cleaned_planner_content, message.content)
                     has_chart = cl.user_session.get("has_chart_generated", False) or False
                     text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
@@ -4857,9 +4843,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 try:
                     _compress_messages(messages)
                     await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-                    thinking_msg.content = "✍️ 正在整理回答..."
-                    await thinking_msg.update()
-                    await thinking_msg.remove()
                     has_chart = cl.user_session.get("has_chart_generated", False) or False
                     stream_msg.content = _prepend_thinking_summary(stream_msg.content, message.content, has_chart=has_chart)
                     if stream_msg.content:
@@ -4911,14 +4894,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     # 循环结束后若无确定性最终回答且循环内未成功生成回答，才走兜底
     if not forced_final_text and not answer_generated:
         if not stream_msg.content.strip():
-            # 如果 stream_msg 仍为空，保持 thinking_msg 提示
-            thinking_msg.content = "✍️ 正在整理回答..."
-            await thinking_msg.update()
+            await reasoning.stage("✍️ 生成结论", "正在整理回答...")
         try:
             _compress_messages(messages)
             if not reasoning._closed:
                 await reasoning.stage("✍️ 生成结论", "正在为您生成分析结论...")
-            await thinking_msg.remove()
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             stream_msg.content = _prepend_thinking_summary(stream_msg.content, message.content, has_chart=has_chart)
             if stream_msg.content:
