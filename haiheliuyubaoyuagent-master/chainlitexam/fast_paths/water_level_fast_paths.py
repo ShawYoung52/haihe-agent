@@ -15,6 +15,8 @@ import json
 import re
 from typing import Any
 
+from utils.tool_result import _safe_cell, _unwrap_tool_result
+
 
 _MODULE_MARKER = "_water_level_rise_fast_path_installed"
 
@@ -25,27 +27,6 @@ _DEFAULT_RIVERS = [
 
 _OBVIOUS_RISE_RATE_MPH = 0.05
 _SLIGHT_RISE_RATE_MPH = 0.0
-
-
-def _unwrap_tool_result(result: Any) -> Any:
-    data = result
-    if hasattr(data, "content"):
-        data = data.content
-    if isinstance(data, list) and data and isinstance(data[0], dict) and "text" in data[0]:
-        data = data[0]["text"]
-    if isinstance(data, str):
-        try:
-            return json.loads(data)
-        except Exception:
-            return data
-    return data
-
-
-def _safe_cell(mo, value: Any) -> str:
-    cleaner = getattr(mo, "_clean_table_cell", None)
-    if callable(cleaner):
-        return cleaner(value)
-    return "" if value is None else str(value).replace("|", "｜").strip()
 
 
 def _should_use_water_level_rise_path(text: str) -> bool:

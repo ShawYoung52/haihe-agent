@@ -36,6 +36,8 @@ except Exception:
         def _safe_summary(text, max_len=40):
             return str(text)[:max_len] if text else ""
 
+from utils.tool_result import _unwrap_tool_result
+
 # Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
 ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
 
@@ -346,7 +348,7 @@ class DecisionWeatherQAService:
             poi_raw = await _invoke_tool_for_fast_path(
                 poi_tool.name, poi_tool, {"keyword": location_name, "size": 5}, user_text
             )
-            poi_payload = _unwrap_tool_observation(poi_raw)
+            poi_payload = _unwrap_tool_result(poi_raw)
             poi = _decision_pick_first_poi(poi_payload if isinstance(poi_payload, dict) else {})
             if not poi:
                 text = f"未检索到“{_clean_table_cell(location_name)}”的可用经纬度信息，请换一个更明确的位置名称。"
@@ -397,7 +399,7 @@ class DecisionWeatherQAService:
             forecast_raw = await _invoke_tool_for_fast_path(
                 forecast_tool.name, forecast_tool, forecast_args, user_text
             )
-            forecast_payload = _unwrap_tool_observation(forecast_raw)
+            forecast_payload = _unwrap_tool_result(forecast_raw)
             if not isinstance(forecast_payload, dict) or forecast_payload.get("api_code") not in (None, "200", 200):
                 print(f"[DecisionWeather] forecast raw payload: {forecast_payload}")
 
@@ -496,22 +498,6 @@ WARNING_TOOL_NAMES = {
 }
 
 
-def _unwrap_tool_observation(observation):
-    """把 MCP/LangChain 工具返回拆成 Python 对象。"""
-    if isinstance(observation, list) and observation and isinstance(observation[0], dict) and "text" in observation[0]:
-        text = observation[0].get("text", "")
-        try:
-            return json.loads(text)
-        except Exception:
-            return text
-    if isinstance(observation, str):
-        try:
-            return json.loads(observation)
-        except Exception:
-            return observation
-    return observation
-
-
 def _save_to_history(user_text: str, assistant_text: str, messages: list):
     """追加用户问题与助手回复到对话历史。"""
     messages.append(HumanMessage(content=user_text))
@@ -548,7 +534,7 @@ def _compact_warning_record_for_table(item) -> dict:
 
 
 def _warning_records_from_payload(tool_name: str, payload) -> list[dict]:
-    data = _unwrap_tool_observation(payload)
+    data = _unwrap_tool_result(payload)
     if not isinstance(data, dict):
         return []
     if tool_name == "get_today_warning_summary":
@@ -1901,20 +1887,9 @@ async def _try_affected_river_network_by_rainfall_fast_path(
         )
 
         # 兼容 MCP 工具返回的 list/text/dict/ToolMessage 多种包装
-        result_data = result
-        if result is None:
+        result_data = _unwrap_tool_result(result)
+        if result_data is None:
             result_data = {}
-        elif hasattr(result, "content"):
-            content = result.content
-            if isinstance(content, str):
-                try:
-                    result_data = json.loads(content)
-                except Exception:
-                    result_data = {"text": content}
-            else:
-                result_data = content
-        else:
-            result_data = _unwrap_tool_observation(result)
         if not isinstance(result_data, dict):
             raise ValueError(f"工具返回格式异常：{type(result_data)}")
 
@@ -2176,7 +2151,7 @@ async def _try_rainfall_analysis_fast_path(user_text: str, thinking_chain, tools
             _invoke_tool_for_fast_path(tool.name, tool, invoke_args, user_text),
             timeout=30,
         )
-        data = _unwrap_tool_observation(result)
+        data = _unwrap_tool_result(result)
 
         # 如果查询含"全市"，将数据过滤为仅天津市站点
         if "全市" in user_text:
@@ -2396,7 +2371,7 @@ def _extract_historical_weather_images(data):
                     pass
 
     if not img_msgs:
-        data = _unwrap_tool_observation(data)
+        data = _unwrap_tool_result(data)
         if isinstance(data, dict):
             for key, val in data.items():
                 if not isinstance(val, str):
@@ -2518,12 +2493,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                             f"河网可视化图，并叠加行政区划底图。不要输出坐标数据，请继续用自然语言回答分析结果）"
                         )
                     elif tool_name == "get_station_rainfall_real_img":
-                        data = observation
-                        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-                            try:
-                                data = json.loads(data[0]["text"])
-                            except Exception:
-                                data = data[0]["text"]
+                        data = _unwrap_tool_result(observation)
                         if isinstance(data, dict) and "base64" in data:
                             b64_str = data["base64"]
                             # 去掉 data:image/...;base64, 前缀（如有）
@@ -2683,12 +2653,7 @@ async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, mes
         args = {"beginTime": beginTime, "endTime": endTime, "interval": max(interval, 1)}
         result = await _invoke_tool_for_fast_path("get_station_rainfall_real_img", tool, args, user_text)
         # 显示图片
-        data = result
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-            try:
-                data = json.loads(data[0]["text"])
-            except Exception:
-                data = data[0]["text"]
+        data = _unwrap_tool_result(result)
 
         if isinstance(data, dict) and "base64" in data:
             b64_str = data["base64"]
@@ -2795,12 +2760,7 @@ async def _try_city_avg_rainfall_fast_path(user_text: str, thinking_chain, tools
             timeout=30,
         )
         await thinking_msg.remove()
-        data = result
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-            try:
-                data = json.loads(data[0]["text"])
-            except Exception:
-                data = data[0]["text"]
+        data = _unwrap_tool_result(result)
 
         if isinstance(data, dict) and data.get("total_stations", 0) > 0:
             # 从 level_analysis 计算全市平均
@@ -2913,12 +2873,7 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
             ),
             timeout=30,
         )
-        obs_data = obs_result
-        if isinstance(obs_result, list) and len(obs_result) > 0 and isinstance(obs_result[0], dict) and "text" in obs_result[0]:
-            try:
-                obs_data = json.loads(obs_result[0]["text"])
-            except Exception:
-                obs_data = obs_result[0]["text"]
+        obs_data = _unwrap_tool_result(obs_result)
 
         # 2. 预报：从分界时次起未来24h
         fc_text = ""
@@ -2936,12 +2891,7 @@ async def _try_today_rainfall_fast_path(user_text: str, thinking_chain, tools, m
                     ),
                     timeout=15,
                 )
-                fc_data = fc_result
-                if isinstance(fc_result, list) and len(fc_result) > 0 and isinstance(fc_result[0], dict) and "text" in fc_result[0]:
-                    try:
-                        fc_data = json.loads(fc_result[0]["text"])
-                    except Exception:
-                        fc_data = fc_result[0]["text"]
+                fc_data = _unwrap_tool_result(fc_result)
                 if isinstance(fc_data, dict) and fc_data.get("average_rainfall_mm") is not None:
                     avg_fc = float(fc_data['average_rainfall_mm'])
                     if avg_fc < 0.1:
@@ -3072,12 +3022,7 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
             timeout=30,
         )
         await thinking_msg.remove()
-        data = result
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and "text" in data[0]:
-            try:
-                data = json.loads(data[0]["text"])
-            except Exception:
-                data = data[0]["text"]
+        data = _unwrap_tool_result(result)
 
         if isinstance(data, dict) and data.get("total_stations", 0) > 0:
             levels = data.get("level_analysis", [])
@@ -3181,12 +3126,7 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, 
                     ),
                     timeout=15,
                 )
-                rd = r
-                if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
-                    try:
-                        rd = json.loads(r[0]["text"])
-                    except Exception:
-                        rd = r[0]["text"]
+                rd = _unwrap_tool_result(r)
                 if isinstance(rd, dict):
                     avg = rd.get("average_rainfall_mm", "-")
                     mx = rd.get("max_rainfall_mm", "-")
@@ -3278,7 +3218,7 @@ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools,
         )
         await thinking_msg.remove()
         data = result
-        data = _unwrap_tool_observation(result)
+        data = _unwrap_tool_result(result)
 
         if isinstance(data, dict):
             max_r = data.get("max_rainfall", 0)
@@ -3403,12 +3343,7 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
                     ),
                     timeout=15,
                 )
-                rd = r
-                if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
-                    try:
-                        rd = json.loads(r[0]["text"])
-                    except Exception:
-                        rd = r[0]["text"]
+                rd = _unwrap_tool_result(r)
                 if isinstance(rd, dict) and rd.get("average_rainfall_mm") is not None:
                     rows.append({
                         "city": city,
@@ -3578,12 +3513,7 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
                         ),
                         timeout=15,
                     )
-                    rd = r
-                    if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
-                        try:
-                            rd = json.loads(r[0]["text"])
-                        except Exception:
-                            rd = r[0]["text"]
+                    rd = _unwrap_tool_result(r)
                     if isinstance(rd, dict) and rd.get("average_rainfall_mm") is not None:
                         city_rows.append({
                             "city": city,
@@ -3717,7 +3647,7 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
         print(f"[水位快速路径] 原始结果类型={type(result)}, 内容={result}")
 
         # 统一解包 MCP 工具返回
-        data = _unwrap_tool_observation(result)
+        data = _unwrap_tool_result(result)
 
         print(f"[水位快速路径] 解包后类型={type(data)}, 内容={data}")
 
@@ -3915,7 +3845,7 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
                 timeout=30,
             )
             await thinking_msg.remove()
-            data = _unwrap_tool_observation(result)
+            data = _unwrap_tool_result(result)
 
             if isinstance(data, dict) and data.get("total_stations", 0) > 0:
                 max_r = data.get("max_rainfall", 0)
@@ -3995,12 +3925,7 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
                     ),
                     timeout=15,
                 )
-                rd = r
-                if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
-                    try:
-                        rd = json.loads(r[0]["text"])
-                    except Exception:
-                        rd = r[0]["text"]
+                rd = _unwrap_tool_result(r)
                 if isinstance(rd, dict):
                     avg = rd.get("average_rainfall_mm", "-")
                     mx = rd.get("max_rainfall_mm", "-")
@@ -4155,12 +4080,7 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
                         ),
                         timeout=15,
                     )
-                    rd = r
-                    if isinstance(r, list) and len(r) > 0 and isinstance(r[0], dict) and "text" in r[0]:
-                        try:
-                            rd = json.loads(r[0]["text"])
-                        except Exception:
-                            rd = r[0]["text"]
+                    rd = _unwrap_tool_result(r)
                     if isinstance(rd, dict) and rd.get("average_rainfall_mm") is not None:
                         rows.append({
                             "city": city,
@@ -4316,7 +4236,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
             _invoke_tool_for_fast_path(tool.name, tool, args, user_text),
             timeout=timeout,
         )
-        return _unwrap_tool_observation(result)
+        return _unwrap_tool_result(result)
 
     def _has_error(data) -> tuple[bool, str]:
         if isinstance(data, list) and data and isinstance(data[0], dict) and "error" in data[0]:
@@ -4573,7 +4493,7 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
             timeout=60,
         )
 
-        data = _unwrap_tool_observation(result)
+        data = _unwrap_tool_result(result)
 
         if not isinstance(data, dict):
             await _emit_fast_path_result(

@@ -23,7 +23,8 @@ from tools.decision_weather_core import (
     _select_decision_fcst_time,
 )
 
-from message_orchestrator import _clean_table_cell, _find_tool, _sanitize_display_text, _unwrap_tool_observation
+from message_orchestrator import _clean_table_cell, _find_tool, _sanitize_display_text
+from utils.tool_result import _unwrap_tool_result
 
 
 def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict) -> list:
@@ -96,7 +97,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             )
 
             poi_raw = await poi_tool.ainvoke({"keyword": location_name, "size": 5})
-            poi_payload = _unwrap_tool_observation(poi_raw)
+            poi_payload = _unwrap_tool_result(poi_raw)
             poi = _decision_pick_first_poi(poi_payload if isinstance(poi_payload, dict) else {})
             if not poi:
                 return f"未检索到“{_clean_table_cell(location_name)}”的可用经纬度信息，请换一个更明确的位置名称。"
@@ -129,7 +130,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             print(f"[DecisionWeatherTool] query_rolling_forecast args: {json.dumps(forecast_args, ensure_ascii=False)}")
 
             forecast_raw = await forecast_tool.ainvoke(forecast_args)
-            forecast_payload = _unwrap_tool_observation(forecast_raw)
+            forecast_payload = _unwrap_tool_result(forecast_raw)
             if not isinstance(forecast_payload, dict) or forecast_payload.get("api_code") not in (None, "200", 200):
                 print(f"[DecisionWeatherTool] forecast raw payload: {forecast_payload}")
 

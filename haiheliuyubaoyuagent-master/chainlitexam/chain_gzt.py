@@ -9,6 +9,8 @@ import threading
 from datetime import datetime
 from urllib.parse import quote_plus
 
+from utils.tool_result import _extract_self_report, _unwrap_tool_result
+
 try:
     from timing_logger import TimingLogger
 except Exception:
@@ -47,6 +49,7 @@ from message_orchestrator import process_message, _sanitize_display_text
 from external_skill_tools import build_external_skill_tools
 from tools.rain_analysis import build_rain_analysis_tools
 from tools.decision_weather import build_decision_weather_tools
+from tools.rainfall_river_impact import build_rainfall_river_impact_tools
 
 app = FastAPI(title="海河流域应急响应判定 REST API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -1232,8 +1235,7 @@ def _extract_admin_unit_rows(raw_result) -> tuple[str, list[dict[str, str]]]:
         return "该河流", []
 
     river_name = str(data.get("river_name") or data.get("name") or "该河流").strip()
-    self_report = data.get("self_report")
-    report = self_report if isinstance(self_report, dict) else data
+    report = _extract_self_report(data)
 
     candidates = []
     for key in ["admin_units", "admin_regions", "administrative_units", "affected_admin_units"]:
@@ -1387,7 +1389,7 @@ def _should_force_partition_table_reply(user_text: str) -> bool:
 
 def _extract_partition_groups(raw_result) -> dict[str, list[dict[str, str]]]:
     data = _unwrap_tool_result(raw_result)
-    report = data.get("self_report") if isinstance(data, dict) and isinstance(data.get("self_report"), dict) else data
+    report = _extract_self_report(data)
     if not isinstance(report, dict):
         return {}
 
@@ -1477,7 +1479,7 @@ async def _enrich_with_impact_time_tool(observation, tool_args, tools, step=None
     if (not river_name) and isinstance(obs_data, dict):
         river_name = (
             _pick_first_text(obs_data, ["river_name", "name", "source_river"])
-            or _pick_first_text(obs_data.get("self_report", {}) if isinstance(obs_data.get("self_report"), dict) else {}, ["river_name", "name"])
+            or _pick_first_text(_extract_self_report(obs_data), ["river_name", "name"])
         )
     if not river_name:
         return observation
@@ -1535,7 +1537,7 @@ async def _enrich_with_impact_time_tool(observation, tool_args, tools, step=None
 
 def _extract_impact_time_window(raw_result) -> str:
     data = _unwrap_tool_result(raw_result)
-    report = data.get("self_report") if isinstance(data, dict) and isinstance(data.get("self_report"), dict) else (data if isinstance(data, dict) else {})
+    report = _extract_self_report(data)
 
     direct_time = _pick_first_text(
         report,
@@ -1582,9 +1584,6 @@ def _extract_downstream_transport_time(raw_result) -> str:
     if not isinstance(data, dict):
         return "待核实"
     impact_data = data.get(IMPACT_TIME_TOOL_RESULT_KEY)
-    if impact_data is None:
-        return "待核实"
-    impact_data = _unwrap_tool_result(impact_data)
     if not isinstance(impact_data, dict):
         return "待核实"
 
@@ -1622,7 +1621,7 @@ def _build_structured_impact_reply(raw_result) -> str:
     river_name, admin_rows = _extract_admin_unit_rows(raw_result)
     groups = _extract_partition_groups(raw_result)
 
-    report = data.get("self_report") if isinstance(data, dict) and isinstance(data.get("self_report"), dict) else (data if isinstance(data, dict) else {})
+    report = _extract_self_report(data)
     downstream_count = _pick_first_text(report, ["downstream_affected_river_count", "downstream_count", "affected_downstream_river_count"])
     if not downstream_count:
         downstream_count = _pick_first_text(data if isinstance(data, dict) else {}, ["downstream_affected_river_count", "downstream_count"])
@@ -1755,39 +1754,6 @@ async def load_sse_tools():
         # 后端 MCP SSE 服务异常（包括 ExceptionGroup），打印错误并退化为无工具模式
         print("❌ 加载 MCP 工具失败：", repr(e))
         return []
-
-
-def _unwrap_tool_result(raw_result):
-    """把 MCP tool 返回结果统一拆成 Python 对象"""
-    if raw_result is None:
-        return None
-
-    if isinstance(raw_result, list) and len(raw_result) > 0 and isinstance(raw_result[0], dict) and "text" in raw_result[0]:
-        text = raw_result[0]["text"]
-        try:
-            return json.loads(text)
-        except Exception as e:
-            print(f"[工具结果解包] JSON 解析失败: {e}")
-            return text
-
-    if isinstance(raw_result, str):
-        try:
-            return json.loads(raw_result)
-        except Exception as e:
-            print(f"[工具结果解包] JSON 解析失败: {e}")
-            return raw_result
-
-    if hasattr(raw_result, "content"):
-        content = raw_result.content
-        if isinstance(content, str):
-            try:
-                return json.loads(content)
-            except Exception as e:
-                print(f"[工具结果解包] 解析 content JSON 失败: {e}")
-                return content
-        return content
-
-    return raw_result
 
 
 def _compact_warning_record(item):
@@ -2393,7 +2359,8 @@ async def _init_runtime_session(messages_seed=None):
     answer_chain = prompt_template | answer_llm
     callbacks = {"ainvoke_chain": ainvoke_chain}
     decision_weather_tools = build_decision_weather_tools(answer_chain, tools, callbacks)
-    tools = tools + decision_weather_tools
+    rainfall_river_impact_tools = build_rainfall_river_impact_tools()
+    tools = tools + decision_weather_tools + rainfall_river_impact_tools
     print(f"✅ 本地工具已合并，当前工具列表：{[t.name for t in tools]}")
     planner_chain = prompt_template | planner_llm.bind_tools(tools)
     thinking_chain = (

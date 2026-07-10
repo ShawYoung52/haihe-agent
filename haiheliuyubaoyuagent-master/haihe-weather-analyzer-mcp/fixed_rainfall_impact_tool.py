@@ -10,14 +10,15 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 TOOL_NAME = "get_affected_river_network_by_rainfall"
 DEFAULT_DIRECT_GRAPH_MATCH_KM = 3.0
 
 
-def _load_impact_builder():
+def _load_impact_builder() -> Callable:
+    """加载外部牵引智能体的暴雨影响河流专题图 builder。"""
     repo_root = Path(__file__).resolve().parents[2]
     core_utils_dir = repo_root / "hhlyqyxt-master" / "utils"
     if not core_utils_dir.exists():
@@ -28,31 +29,13 @@ def _load_impact_builder():
 
     return build_rainstorm_impact_thematic_map
 
-def _resolve_graph_path(base_tools) -> str | None:
-    graph_path = base_tools.config.get("paths", "graph", fallback="")
+
+def _resolve_graph_path(graph_path: str | None) -> str | None:
+    """优先使用有向图 v5 版本，否则回退到原始 graph 路径。"""
     if not graph_path:
         return None
     v5_path = os.path.join(os.path.dirname(graph_path), "river_directed_v5.pkl")
     return v5_path if os.path.isfile(v5_path) else graph_path
-
-
-def _extract_rainstorm_stations(rainfall_result: dict, threshold_mm: float, base_tools) -> tuple[list[dict], set[str], set[str]]:
-    level_to_threshold = {name: low for name, low, _high in base_tools.RAIN_LEVELS}
-    stations: list[dict] = []
-    zone_77_regions: set[str] = set()
-    admin_divisions: set[str] = set()
-
-    for level_item in rainfall_result.get("level_analysis", []) or []:
-        level = level_item.get("level", "")
-        if level_to_threshold.get(level, math.inf) < threshold_mm:
-            continue
-        zone_77_regions.update(str(x).strip() for x in level_item.get("zone_77_regions", []) or [] if x)
-        admin_divisions.update(str(x).strip() for x in level_item.get("admin_divisions", []) or [] if x)
-        for station in level_item.get("stations", []) or []:
-            if _station_reaches_threshold(station, threshold_mm):
-                stations.append(_normalize_station(station, level))
-
-    return stations, zone_77_regions, admin_divisions
 
 
 def _station_reaches_threshold(station: Any, threshold_mm: float) -> bool:
@@ -65,10 +48,11 @@ def _station_reaches_threshold(station: Any, threshold_mm: float) -> bool:
 
 
 def _normalize_station(station: dict, level: str) -> dict:
+    name = station.get("name") or station.get("station_name")
     return {
         "station_id": station.get("station_id"),
-        "station_name": station.get("name") or station.get("station_name"),
-        "name": station.get("name") or station.get("station_name"),
+        "station_name": name,
+        "name": name,
         "lon": station.get("lon"),
         "lat": station.get("lat"),
         "rainfall": station.get("rainfall"),
@@ -77,22 +61,57 @@ def _normalize_station(station: dict, level: str) -> dict:
     }
 
 
-def _unregister_existing_tool(mcp, name: str) -> None:
-    for manager in (mcp, getattr(mcp, "_tool_manager", None), getattr(mcp, "tool_manager", None)):
-        if manager is None:
+def _extract_rainstorm_stations(
+    rainfall_result: dict,
+    threshold_mm: float,
+    rain_levels: list[tuple[str, float, float]],
+) -> tuple[list[dict], set[str], set[str]]:
+    """从降雨分析结果中提取达到阈值的站点及其所属区域。"""
+    level_to_threshold = {name: low for name, low, _high in rain_levels}
+    stations: list[dict] = []
+    zone_77_regions: set[str] = set()
+    admin_divisions: set[str] = set()
+
+    for level_item in rainfall_result.get("level_analysis") or []:
+        level = level_item.get("level", "")
+        if level_to_threshold.get(level, math.inf) < threshold_mm:
             continue
-        remover = getattr(manager, "remove_tool", None)
-        if callable(remover):
-            remover(name)
-            return
-        for attr in ("_tools", "tools"):
-            registry = getattr(manager, attr, None)
-            if isinstance(registry, dict) and name in registry:
-                registry.pop(name)
-                return
+        zone_77_regions.update(
+            str(x).strip() for x in level_item.get("zone_77_regions", []) or [] if x
+        )
+        admin_divisions.update(
+            str(x).strip() for x in level_item.get("admin_divisions", []) or [] if x
+        )
+        for station in level_item.get("stations", []) or []:
+            if _station_reaches_threshold(station, threshold_mm):
+                stations.append(_normalize_station(station, level))
+
+    return stations, zone_77_regions, admin_divisions
 
 
-def _empty_response(rainfall_result: dict, threshold_mm: float, zones: set[str], admins: set[str]) -> dict:
+def _direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
+    features = river_geojson.get("features", []) if isinstance(river_geojson, dict) else []
+    directed_features = [
+        f
+        for f in features
+        if isinstance(f, dict)
+        and (f.get("properties") or {}).get("flow_direction") == "database_geometry_order"
+    ]
+    return {
+        "enabled": bool(features or segments),
+        "field": "flow_direction",
+        "value": "database_geometry_order",
+        "direction_source": "full_v5_original_geometry",
+        "geojson_feature_count": len(features),
+        "directed_geojson_feature_count": len(directed_features),
+        "coordinate_order": "使用 full_v5 数据库原始几何点序，不在问答工具里反转坐标。",
+        "how_to_use": "前端或入库需要方向时，直接按 geometry.coordinates 的点序使用；properties.flow_direction 表示该点序来自数据库原始几何。",
+    }
+
+
+def _empty_response(
+    rainfall_result: dict, threshold_mm: float, zones: set[str], admins: set[str]
+) -> dict:
     time_range = rainfall_result.get("time_range_readable", "")
     return {
         "time_range_readable": time_range,
@@ -109,9 +128,13 @@ def _empty_response(rainfall_result: dict, threshold_mm: float, zones: set[str],
     }
 
 
-def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: float, zones: set[str], admins: set[str]) -> dict:
+def _format_mcp_response(
+    result: dict, rainfall_result: dict, threshold_mm: float, zones: set[str], admins: set[str]
+) -> dict:
     segments = result.get("segments", [])
-    affected_rivers = result.get("affected_rivers") or sorted({str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")})
+    affected_rivers = result.get("affected_rivers") or sorted(
+        {str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")}
+    )
     time_range = rainfall_result.get("time_range_readable", "")
     river_geojson = result.get("river_geojson")
     params = result.get("params", {})
@@ -141,28 +164,63 @@ def _format_mcp_response(result: dict, rainfall_result: dict, threshold_mm: floa
     }
 
 
-def _direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
-    features = river_geojson.get("features", []) if isinstance(river_geojson, dict) else []
-    directed_features = [
-        f for f in features
-        if isinstance(f, dict)
-        and (f.get("properties") or {}).get("flow_direction") == "database_geometry_order"
-    ]
-    return {
-        "enabled": bool(features or segments),
-        "field": "flow_direction",
-        "value": "database_geometry_order",
-        "direction_source": "full_v5_original_geometry",
-        "geojson_feature_count": len(features),
-        "directed_geojson_feature_count": len(directed_features),
-        "coordinate_order": "使用 full_v5 数据库原始几何点序，不在问答工具里反转坐标。",
-        "how_to_use": "前端或入库需要方向时，直接按 geometry.coordinates 的点序使用；properties.flow_direction 表示该点序来自数据库原始几何。",
-    }
+def build_affected_river_network_result(
+    time_str: str,
+    start_time: str,
+    end_time: str,
+    rainfall_threshold_mm: float,
+    max_edges: int,
+    include_background: bool,
+    downstream_km: float,
+    direct_graph_match_km: float,
+    pg_conf: dict,
+    analyze_rainfall_core: Callable,
+    rain_levels: list[tuple[str, float, float]],
+    graph_path: str | None,
+) -> dict:
+    """不依赖 MCP 的核心实现，可被 chainlitexam 本地工具直接调用。"""
+    custom_timerange = f"[{start_time},{end_time}]" if start_time and end_time else ""
+    rainfall_result = analyze_rainfall_core(time_str, pg_conf, custom_timerange)
+    stations, zone_77_regions, admin_divisions = _extract_rainstorm_stations(
+        rainfall_result, rainfall_threshold_mm, rain_levels
+    )
+    if not stations:
+        return _empty_response(rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
+
+    builder = _load_impact_builder()
+    result = builder(
+        stations,
+        pg_conf=pg_conf,
+        graph_path=_resolve_graph_path(graph_path),
+        rainfall_threshold_mm=rainfall_threshold_mm,
+        downstream_km=downstream_km,
+        direct_match_km=direct_graph_match_km,
+        max_segments=max_edges,
+        extra_summary={"time_range_readable": rainfall_result.get("time_range_readable", "")},
+    )
+    return _format_mcp_response(result, rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
+
+
+def _unregister_existing_tool(mcp, name: str) -> None:
+    """尝试从 MCP 工具管理器中移除同名旧工具，避免重复注册。"""
+    for manager in (mcp, getattr(mcp, "_tool_manager", None), getattr(mcp, "tool_manager", None)):
+        if manager is None:
+            continue
+        remover = getattr(manager, "remove_tool", None)
+        if callable(remover):
+            remover(name)
+            return
+        for attr in ("_tools", "tools"):
+            registry = getattr(manager, attr, None)
+            if isinstance(registry, dict) and name in registry:
+                registry.pop(name)
+                return
 
 
 def register_fixed_rainfall_impact_tool(mcp) -> None:
-    """注册暴雨影响河流专题图工具。"""
+    """注册暴雨影响河流专题图工具（MCP 入口）。"""
     _unregister_existing_tool(mcp, TOOL_NAME)
+    import tools as base_tools
 
     @mcp.tool()
     def get_affected_river_network_by_rainfall(
@@ -176,26 +234,19 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
         direct_graph_match_km: float = DEFAULT_DIRECT_GRAPH_MATCH_KM,
     ) -> dict:
         """制作暴雨影响河流专题图数据。"""
-        import tools as base_tools
-
-        pg_conf = base_tools.config["postgres"]
-        custom_timerange = f"[{start_time},{end_time}]" if start_time and end_time else ""
-        rainfall_result = base_tools._analyze_rainfall_core(time_str, pg_conf, custom_timerange)
-        stations, zone_77_regions, admin_divisions = _extract_rainstorm_stations(rainfall_result, rainfall_threshold_mm, base_tools)
-        if not stations:
-            return _empty_response(rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
-
-        builder = _load_impact_builder()
-        result = builder(
-            stations,
-            pg_conf=pg_conf,
-            graph_path=_resolve_graph_path(base_tools),
+        return build_affected_river_network_result(
+            time_str=time_str,
+            start_time=start_time,
+            end_time=end_time,
             rainfall_threshold_mm=rainfall_threshold_mm,
+            max_edges=max_edges,
+            include_background=include_background,
             downstream_km=downstream_km,
-            direct_match_km=direct_graph_match_km,
-            max_segments=max_edges,
-            extra_summary={"time_range_readable": rainfall_result.get("time_range_readable", "")},
+            direct_graph_match_km=direct_graph_match_km,
+            pg_conf=base_tools.config["postgres"],
+            analyze_rainfall_core=base_tools._analyze_rainfall_core,
+            rain_levels=base_tools.RAIN_LEVELS,
+            graph_path=_resolve_graph_path(base_tools.config.get("paths", "graph", fallback="")),
         )
-        return _format_mcp_response(result, rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
 
     logger.info("已注册 %s 工具", TOOL_NAME)

@@ -52,6 +52,8 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - `message_orchestrator.py` recently consolidated lazy imports (`time`, `base64`, `traceback`, `httpx`) to module level — do not re-add inline imports
 - Tool display names are in module-level `TOOL_DISPLAY_NAMES` dict in `message_orchestrator.py`
 - `_invoke_tool_with_tolerance()` returns `(result, elapsed)` tuple — always unpack both values
+- Tool results are unwrapped with `_unwrap_tool_result()` from `chainlitexam/utils/tool_result.py`; do not add new local unwrapping logic
+- Verification: run `python tests/test_fast_paths.py` for fast-path static checks and `python -m pytest tests/ -v` for the full suite
 - LLM model: Qwen3.6-27B via local OpenAI-compatible proxy at `10.226.188.156:8000/v1/`
 - Internal service addresses: MUSIC `10.226.90.120`, PostgreSQL `10.226.107.130`, RAG `10.226.188.156:8033` — never include these in user-facing output
 - Data sources: MUSIC/Tianqing stations (实况), ECMWF AIFS (预报), CMA warnings, PostgreSQL/PostGIS (河网/行政区划), RAG knowledge base
@@ -63,6 +65,7 @@ This project uses the superpowers plugin for disciplined development:
 - **Before marking work done**: invoke `superpowers:verification-before-completion`
 - **Before merging**: invoke `code-review` to find risks, `superpowers:finishing-a-development-branch` for proper cleanup
 - **For bug fixes**: invoke `superpowers:systematic-debugging`
+- **For refactor/cleanup**: invoke `code-review`, then `code-simplifier` agent, then `superpowers:verification-before-completion`, and end with `claude-md-management:revise-claude-md`
 - **Specs directory**: `docs/superpowers/specs/`
 
 ## Feature Flags
