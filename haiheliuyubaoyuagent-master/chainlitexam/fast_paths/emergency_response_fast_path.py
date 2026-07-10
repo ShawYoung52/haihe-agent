@@ -170,11 +170,11 @@ def install_emergency_response_fast_path() -> bool:
         )
         if thinking_text:
             await reasoning.line(thinking_text)
+        await reasoning.stage("📡 查询数据", "正在查询防汛应急响应判定结果...")
 
         try:
-            thinking_msg = await mo._show_thinking("🔍 正在查询防汛应急响应判定结果，请稍候...")
             data = await _query_emergency_response_locally(times)
-            await mo._emit_fast_path_result(_format_response(data, times), thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result(_format_response(data, times), messages, user_text, reasoning=reasoning)
             return True
         finally:
             if reasoning is not None:

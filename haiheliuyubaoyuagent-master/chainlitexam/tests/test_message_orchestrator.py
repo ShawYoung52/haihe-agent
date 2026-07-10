@@ -70,7 +70,6 @@ async def test_process_message_skips_fast_paths_when_disabled(monkeypatch):
         "astream_answer_chain_to_message": lambda *a, **k: "",
     }
 
-    monkeypatch.setattr(mo, "_show_thinking", lambda text: None)
     monkeypatch.setattr(mo.cl, "Message", lambda **kwargs: FakeMessageObj())
 
     result = await mo.process_message(

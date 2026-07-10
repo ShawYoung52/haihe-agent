@@ -134,18 +134,18 @@ def install_poi_weather_fast_paths() -> bool:
         )
         if thinking_text:
             await reasoning.line(thinking_text)
+        await reasoning.stage("📡 查询数据", f"正在查询{kw}附近最近观测站实况...")
 
-        thinking_msg = await mo._show_thinking(f"🔍 正在查询{kw}附近最近观测站实况，请稍候...")
         try:
             data = _unwrap(await asyncio.wait_for(tool.ainvoke({"keyword": kw}), timeout=60))
-            await mo._emit_fast_path_result(_format(mo, data), thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result(_format(mo, data), messages, user_text, reasoning=reasoning)
             return True
         except asyncio.TimeoutError:
-            await mo._emit_fast_path_result("⏱️ POI 最近观测站实况查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result("⏱️ POI 最近观测站实况查询超时，请稍后重试。", messages, user_text, reasoning=reasoning)
             return True
         except Exception as exc:
             print(f"[poi_weather_fast_paths] 查询失败：{exc}")
-            await mo._emit_fast_path_result("POI 最近观测站实况查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result("POI 最近观测站实况查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning)
             return True
         finally:
             if reasoning is not None:

@@ -223,8 +223,8 @@ def install_water_level_fast_paths() -> bool:
         )
         if thinking_text:
             await reasoning.line(thinking_text)
+        await reasoning.stage("📡 查询数据", "正在查询主要河流水位上涨趋势...")
 
-        thinking_msg = await mo._show_thinking("🔍 正在查询主要河流水位上涨趋势，请稍候...")
         try:
             rivers = getattr(mo, "_KNOWN_WATER_LEVEL_RIVERS", None) or _DEFAULT_RIVERS
             sem = asyncio.Semaphore(4)
@@ -237,14 +237,14 @@ def install_water_level_fast_paths() -> bool:
                 else:
                     failed.append(river)
             text = _format_water_level_rise_result(mo, all_rows, failed)
-            await mo._emit_fast_path_result(text, thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result(text, messages, user_text, reasoning=reasoning)
             return True
         except asyncio.TimeoutError:
-            await mo._emit_fast_path_result("⏱️ 水位上涨趋势查询超时，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result("⏱️ 水位上涨趋势查询超时，请稍后重试。", messages, user_text, reasoning=reasoning)
             return True
         except Exception as exc:
             print(f"[water_level_fast_paths] 水位上涨趋势快速路径失败：{exc}")
-            await mo._emit_fast_path_result("水位上涨趋势查询遇到异常，请稍后重试。", thinking_msg, messages, user_text, reasoning=reasoning)
+            await mo._emit_fast_path_result("水位上涨趋势查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning)
             return True
         finally:
             if reasoning is not None:

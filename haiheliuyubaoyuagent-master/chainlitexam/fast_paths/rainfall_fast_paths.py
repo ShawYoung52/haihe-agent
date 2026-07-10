@@ -444,9 +444,9 @@ def install_all_fast_paths() -> None:
                         )
                         if thinking_text:
                             await reasoning.line(thinking_text)
-                        msg = await mo._show_thinking("🔍 正在查询上个月海河9分区面雨量数据，请稍候...")
+                        await reasoning.stage("📡 查询数据", "正在查询上个月海河9分区面雨量数据...")
                         data = await _call_areal_tool(mo, tools, time_range, use_last_month=True)
-                        await mo._emit_fast_path_result(_format_last_month(mo, data, label, month), msg, messages, user_text, reasoning=reasoning)
+                        await mo._emit_fast_path_result(_format_last_month(mo, data, label, month), messages, user_text, reasoning=reasoning)
                         return True
                     if _is_subbasin_max(user_text):
                         time_range, label = _today_like_window(user_text)
@@ -462,9 +462,9 @@ def install_all_fast_paths() -> None:
                         )
                         if thinking_text:
                             await reasoning.line(thinking_text)
-                        msg = await mo._show_thinking("🔍 正在查询子流域降雨量，请稍候...")
+                        await reasoning.stage("📡 查询数据", "正在查询子流域降雨量...")
                         data = await _call_areal_tool(mo, tools, time_range)
-                        await mo._emit_fast_path_result(_format_subbasin_max(mo, data, label), msg, messages, user_text, reasoning=reasoning)
+                        await mo._emit_fast_path_result(_format_subbasin_max(mo, data, label), messages, user_text, reasoning=reasoning)
                         return True
                     if _is_year_to_date(user_text):
                         time_range, label = _year_to_date_window()
@@ -480,16 +480,16 @@ def install_all_fast_paths() -> None:
                         )
                         if thinking_text:
                             await reasoning.line(thinking_text)
-                        msg = await mo._show_thinking("🔍 正在查询今年以来海河9分区累计降雨量，请稍候...")
+                        await reasoning.stage("📡 查询数据", "正在查询今年以来海河9分区累计降雨量...")
                         data = await _call_year_to_date_tool(mo, tools, time_range)
-                        await mo._emit_fast_path_result(_format_year_to_date(mo, data, label), msg, messages, user_text, reasoning=reasoning)
+                        await mo._emit_fast_path_result(_format_year_to_date(mo, data, label), messages, user_text, reasoning=reasoning)
                         return True
                 except asyncio.TimeoutError:
-                    await mo._emit_fast_path_result("⏱️ 降雨量查询超时，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
+                    await mo._emit_fast_path_result("⏱️ 降雨量查询超时，请稍后重试。", messages, user_text, reasoning=reasoning)
                     return True
                 except Exception as exc:
                     print(f"[rainfall_fast_paths] 面雨量快速路径失败：{exc}")
-                    await mo._emit_fast_path_result("降雨量查询遇到异常，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
+                    await mo._emit_fast_path_result("降雨量查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning)
                     return True
                 finally:
                     if reasoning is not None:
@@ -520,9 +520,9 @@ def install_all_fast_paths() -> None:
                             )
                             if thinking_text:
                                 await reasoning.line(thinking_text)
-                            msg = await mo._show_thinking("🔍 正在查询去年最大日降雨量，请稍候...")
+                            await reasoning.stage("📡 查询数据", "正在查询去年最大日降雨量...")
                             data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"top_n": 10, "allow_slow_fallback": False}), timeout=75))
-                            await mo._emit_fast_path_result(_format_last_year(mo, data), msg, messages, user_text, reasoning=reasoning)
+                            await mo._emit_fast_path_result(_format_last_year(mo, data), messages, user_text, reasoning=reasoning)
                             return True
                     if _is_historical_same_period(user_text):
                         tool = mo._find_tool(tools, "query_historical_same_period_avg_rainfall")
@@ -540,9 +540,9 @@ def install_all_fast_paths() -> None:
                             )
                             if thinking_text:
                                 await reasoning.line(thinking_text)
-                            msg = await mo._show_thinking("🔍 正在查询历史同期平均降雨量，请稍候...")
+                            await reasoning.stage("📡 查询数据", "正在查询历史同期平均降雨量...")
                             data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"reference_start_time": start, "reference_end_time": end, "years": _parse_year_count(user_text)}), timeout=90))
-                            await mo._emit_fast_path_result(_format_historical(mo, data, label), msg, messages, user_text, reasoning=reasoning)
+                            await mo._emit_fast_path_result(_format_historical(mo, data, label), messages, user_text, reasoning=reasoning)
                             return True
                     if _is_max_station(user_text):
                         tool = mo._find_tool(tools, "local_analyze_rainfall_by_time") or mo._find_tool(tools, "analyze_rainfall_by_time")
@@ -561,16 +561,16 @@ def install_all_fast_paths() -> None:
                             )
                             if thinking_text:
                                 await reasoning.line(thinking_text)
-                            msg = await mo._show_thinking("🔍 正在查询自动站最大雨量，请稍候...")
+                            await reasoning.stage("📡 查询数据", "正在查询自动站最大雨量...")
                             data = _unwrap_tool_result(await asyncio.wait_for(tool.ainvoke({"time_str": end, "start_time": start, "end_time": end}), timeout=45))
-                            await mo._emit_fast_path_result(_format_max_station(mo, data, label), msg, messages, user_text, reasoning=reasoning)
+                            await mo._emit_fast_path_result(_format_max_station(mo, data, label), messages, user_text, reasoning=reasoning)
                             return True
                 except asyncio.TimeoutError:
-                    await mo._emit_fast_path_result("⏱️ 降雨分析查询超时，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
+                    await mo._emit_fast_path_result("⏱️ 降雨分析查询超时，请稍后重试。", messages, user_text, reasoning=reasoning)
                     return True
                 except Exception as exc:
                     print(f"[rainfall_fast_paths] 自动站/历史统计快速路径失败：{exc}")
-                    await mo._emit_fast_path_result("降雨分析查询遇到异常，请稍后重试。", locals().get("msg", None), messages, user_text, reasoning=reasoning)
+                    await mo._emit_fast_path_result("降雨分析查询遇到异常，请稍后重试。", messages, user_text, reasoning=reasoning)
                     return True
                 finally:
                     if reasoning is not None:
