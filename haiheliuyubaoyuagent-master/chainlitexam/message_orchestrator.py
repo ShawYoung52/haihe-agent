@@ -84,7 +84,12 @@ class ReasoningStep:
         self._closed = False
         self._buffer = ""
         self._step_supports_stream = None
-        self.step = cl.Step(name=self.name, type="llm", parent_id=parent_id)
+        self.step = cl.Step(
+            name=self.name,
+            type="llm",
+            parent_id=parent_id,
+            auto_collapse=True,
+        )
         self.step.show_input = "markdown"
         self.step.input = ""
         self.step.output = ""
