@@ -66,7 +66,7 @@ def build_rainfall_river_impact_tools() -> list:
         max_edges: int = 5000,
         include_background: bool = True,
         downstream_km: float = 50.0,
-        direct_graph_match_km: float = 3.0,
+        direct_graph_match_km: float = 10.0,
     ) -> dict:
         """制作暴雨影响河流专题图数据（本地版本）。
 
@@ -77,7 +77,7 @@ def build_rainfall_river_impact_tools() -> list:
         - max_edges: 最大返回河段数，默认 5000。
         - include_background: 是否包含背景河段（透传给外部 builder）。
         - downstream_km: 下游追踪距离，默认 50km。
-        - direct_graph_match_km: 直接河段匹配距离，默认 3km。
+        - direct_graph_match_km: 直接河段匹配距离，默认 10km。
         """
         try:
             impact_mod, tools_mod = _load_mcp_modules()

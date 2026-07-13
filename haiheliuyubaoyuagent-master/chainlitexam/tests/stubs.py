@@ -37,6 +37,12 @@ def _install_chainlit_stub():
         async def update(self):
             pass
 
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
         @classmethod
         def reset(cls):
             cls._instances.clear()

@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 TOOL_NAME = "get_affected_river_network_by_rainfall"
-DEFAULT_DIRECT_GRAPH_MATCH_KM = 3.0
+DEFAULT_DIRECT_GRAPH_MATCH_KM = 10.0
 
 
 def _load_impact_builder() -> Callable:
@@ -109,59 +109,93 @@ def _direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
     }
 
 
-def _empty_response(
-    rainfall_result: dict, threshold_mm: float, zones: set[str], admins: set[str]
+def _base_response_fields(
+    rainfall_result: dict,
+    threshold_mm: float,
+    zones: set[str],
+    admins: set[str],
+    stations: list[dict],
+    segments: list[dict],
+    river_geojson: dict | None,
+    start_stats: dict,
+    summary: str,
+    affected_rivers: list[str] | None = None,
 ) -> dict:
-    time_range = rainfall_result.get("time_range_readable", "")
+    """构建问答返回结构中的公共字段。"""
     return {
-        "time_range_readable": time_range,
+        "time_range_readable": rainfall_result.get("time_range_readable", ""),
         "rainfall_threshold_mm": threshold_mm,
-        "affected_rivers": [],
         "affected_zone_77_regions": sorted(zones),
         "affected_admin_divisions": sorted(admins),
-        "stations": [],
-        "total_segments": 0,
-        "affected_segments": 0,
-        "segments": [],
-        "direction": _direction_info([], None),
-        "summary": f"统计时段 {time_range} 内，未达到 {threshold_mm}mm 降雨阈值的河系数据。",
+        "stations": stations,
+        "total_segments": len(segments),
+        "affected_segments": len(segments),
+        "segments": segments,
+        "direction": _direction_info(segments, river_geojson),
+        "start_stats": start_stats,
+        "summary": summary,
+        "affected_rivers": affected_rivers or [],
+        "river_geojson": river_geojson,
     }
+
+
+def _empty_response(
+    rainfall_result: dict,
+    threshold_mm: float,
+    zones: set[str],
+    admins: set[str],
+    direct_graph_match_km: float = DEFAULT_DIRECT_GRAPH_MATCH_KM,
+) -> dict:
+    return _base_response_fields(
+        rainfall_result,
+        threshold_mm,
+        zones,
+        admins,
+        stations=[],
+        segments=[],
+        river_geojson=None,
+        start_stats={
+            "downstream_edge_count": 0,
+            "direct_part_match_km": direct_graph_match_km,
+            "downstream_start_stats": {},
+        },
+        summary=(
+            f"统计时段 {rainfall_result.get('time_range_readable', '')} 内，"
+            f"未达到 {threshold_mm}mm 降雨阈值的河系数据。"
+        ),
+    )
 
 
 def _format_mcp_response(
     result: dict, rainfall_result: dict, threshold_mm: float, zones: set[str], admins: set[str]
 ) -> dict:
     segments = result.get("segments", [])
-    affected_rivers = result.get("affected_rivers") or sorted(
-        {str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")}
-    )
-    time_range = rainfall_result.get("time_range_readable", "")
     river_geojson = result.get("river_geojson")
-    params = result.get("params", {})
-    return {
-        "time_range_readable": time_range,
-        "rainfall_threshold_mm": threshold_mm,
-        "affected_rivers": affected_rivers,
-        "affected_zone_77_regions": sorted(zones),
-        "affected_admin_divisions": sorted(admins),
-        "stations": result.get("impact_stations", []),
-        "total_segments": len(segments),
-        "affected_segments": len(segments),
-        "segments": segments,
-        "direction": _direction_info(segments, river_geojson),
-        "start_stats": {
+    downstream_start_stats = result.get("downstream_start_stats", {})
+    affected_rivers = result.get("affected_rivers")
+    if affected_rivers is None:
+        affected_rivers = sorted(
+            {str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")}
+        )
+    return _base_response_fields(
+        rainfall_result,
+        threshold_mm,
+        zones,
+        admins,
+        stations=result.get("impact_stations", []),
+        segments=segments,
+        river_geojson=river_geojson,
+        start_stats={
             "downstream_edge_count": result.get("river_summary", {}).get("downstream_edge_count", 0),
-            "direct_part_match_km": params.get("direct_match_km", DEFAULT_DIRECT_GRAPH_MATCH_KM),
+            "direct_part_match_km": downstream_start_stats.get("direct_match_km", DEFAULT_DIRECT_GRAPH_MATCH_KM),
+            "downstream_start_stats": downstream_start_stats,
         },
-        "river_geojson": river_geojson,
-        "summary": f"统计时段 {time_range} 内，降雨量≥{threshold_mm}mm 的实况站点共影响 {len(affected_rivers)} 条河流。",
-        "rules": {
-            "direct": "ST_Dump(full_v5.geom) 后单线段 ST_DWithin 30km 命中，直接段不截断",
-            "downstream": "从直接影响真实河段匹配到的 pkl 拓扑边向下游追踪 downstream_km，再回 full_v5 匹配真实河段并截断",
-            "direction": "GeoJSON 坐标顺序使用 full_v5 数据库原始几何顺序；properties.flow_direction=database_geometry_order",
-            "dedupe": "直接河段优先，按 objectid + 真实几何去重，避免多条 pkl 边重复映射同一真实河段",
-        },
-    }
+        summary=(
+            f"统计时段 {rainfall_result.get('time_range_readable', '')} 内，"
+            f"降雨量≥{threshold_mm}mm 的实况站点共影响 {len(affected_rivers)} 条河流。"
+        ),
+        affected_rivers=affected_rivers,
+    )
 
 
 def build_affected_river_network_result(
@@ -185,7 +219,9 @@ def build_affected_river_network_result(
         rainfall_result, rainfall_threshold_mm, rain_levels
     )
     if not stations:
-        return _empty_response(rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
+        return _empty_response(
+            rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions, direct_graph_match_km
+        )
 
     builder = _load_impact_builder()
     result = builder(

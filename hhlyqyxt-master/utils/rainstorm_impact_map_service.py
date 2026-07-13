@@ -99,7 +99,7 @@ def _build_rainstorm_context(
     api_time_shift_hours: int | None = None,
     station_buffer_km: float = 30.0,
     downstream_km: float = 50.0,
-    direct_match_km: float = 3.0,
+    direct_match_km: float = 10.0,
     river_table: str = "haihe_river_directed_full_v5",
     schema: str = "public",
     graph_path: str | Path | None = None,

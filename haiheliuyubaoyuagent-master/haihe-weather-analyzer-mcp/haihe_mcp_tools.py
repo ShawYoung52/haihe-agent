@@ -1034,6 +1034,21 @@ def deduplicate_latest_records(records: Sequence[Dict[str, Any]]) -> List[Dict[s
     return list(result.values())
 
 
+def _deduplicate_latest_per_station(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按站点去重，每个站点仅保留时间最新的一条记录。"""
+    latest: Dict[str, Tuple[datetime, Dict[str, Any]]] = {}
+    for r in records:
+        sid = station_id_of(r)
+        if not sid:
+            continue
+        dt = _parse_record_datetime(r)
+        if dt is None:
+            continue
+        if sid not in latest or dt > latest[sid][0]:
+            latest[sid] = (dt, dict(r))
+    return [record for _, record in latest.values()]
+
+
 # ===================== 分钟降水聚合（SURF_CHN_PRE_MIN） =====================
 
 # 分钟降水质量标志可信取值；业务方可通过环境变量覆盖，如 "0,3,4,5"
@@ -1979,14 +1994,10 @@ def _forecast_fetch_core(
 
     levels = [x.strip() for x in str(allowed_station_levels).split(",") if x.strip()]
     client = MusicClient()
-    obs_query_time = parsed_start_time.strftime("%Y%m%d%H0000")
-    station_records = client.get_surf_ele_in_basin_by_time(
-        basin_codes=basin_codes,
-        times=obs_query_time,
-        elements=DEFAULT_OBS_ELEMENTS,
+    station_records = _fetch_observation_records_with_fallback(
+        client, basin_codes, parsed_start_time, levels
     )
-    station_records = filter_records_by_station_levels(station_records, levels)
-    station_records = deduplicate_latest_records(station_records)
+
     total_station_ids = {station_id_of(r) for r in station_records if station_id_of(r)}
     total_count = len(total_station_ids)
     if total_count == 0:
@@ -1999,6 +2010,36 @@ def _forecast_fetch_core(
         "total_station_count": total_count,
         "allowed_station_levels": levels,
     }
+
+
+def _fetch_observation_records_with_fallback(
+    client: MusicClient,
+    basin_codes: str,
+    parsed_start_time: datetime,
+    levels: List[str],
+) -> List[Dict[str, Any]]:
+    """按起报时次查询实况站点；无记录时兜底查询近 6 小时并保留每个站点最新记录。"""
+    obs_query_time = parsed_start_time.strftime("%Y%m%d%H0000")
+    station_records = client.get_surf_ele_in_basin_by_time(
+        basin_codes=basin_codes,
+        times=obs_query_time,
+        elements=DEFAULT_OBS_ELEMENTS,
+    )
+    station_records = filter_records_by_station_levels(station_records, levels)
+    station_records = deduplicate_latest_records(station_records)
+
+    if station_records:
+        return station_records
+
+    fallback_start = parsed_start_time - timedelta(hours=6)
+    time_range = f"[{fallback_start.strftime('%Y%m%d%H%M%S')},{obs_query_time}]"
+    station_records = client.get_surf_ele_in_basin_by_time_range(
+        basin_codes=basin_codes,
+        time_range=time_range,
+        elements=DEFAULT_OBS_ELEMENTS,
+    )
+    station_records = filter_records_by_station_levels(station_records, levels)
+    return _deduplicate_latest_per_station(station_records)
 
 
 def _forecast_filter_core(
@@ -2385,7 +2426,7 @@ def evaluate_emergency_response_core(
     records = _observation_fetch_core(
         basin_codes=basin_codes,
         times=times,
-        elements=DEFAULT_OBS_ELEMENTS,
+        elements=DEFAULT_MIN_PRE_ELEMENTS,
     )
     filtered = _observation_filter_core(records=records, allowed_station_levels=allowed_station_levels)
     evaluation = _observation_evaluate_core(

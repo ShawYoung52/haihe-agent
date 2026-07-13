@@ -12,6 +12,7 @@ from chainlitexam.tests.stubs import ensure_stubs
 
 ensure_stubs()
 
+import chainlit
 import chainlitexam.message_orchestrator as mo
 
 
@@ -84,3 +85,51 @@ async def test_process_message_skips_fast_paths_when_disabled(monkeypatch):
 
     assert called == [], f"Expected no fast-path calls when disabled, got {called}"
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_run_tool_round_failure_records_tool_message_without_generic_error(monkeypatch):
+    """工具在 _run_tool_round 中失败时，不应再向用户发送固定的通用错误消息，
+    而应把失败信息以 ToolMessage 形式交给 planner 自行组织回答。"""
+
+    class FakeTool:
+        name = "evaluate_haihe_forecast_emergency_response"
+
+    class FakePlannerMsg:
+        tool_calls = [
+            {
+                "name": FakeTool.name,
+                "args": {"start_time": "2026-07-13 02:00:00"},
+                "id": "call-1",
+            }
+        ]
+
+    async def fake_invoke_tool_with_tolerance(*args, **kwargs):
+        raise Exception("未找到起报 2026071302 的 12h/24h 预报文件。")
+
+    monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", fake_invoke_tool_with_tolerance)
+    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+
+    sent_messages: list[dict] = []
+    monkeypatch.setattr(mo.cl, "Message", lambda **kwargs: type("CapturingMessage", (), {
+        "send": lambda self: sent_messages.append(kwargs),
+        "remove": lambda self: None,
+        "update": lambda self: None,
+    })())
+
+    callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
+    messages = []
+
+    forced, ree, bundles = await mo._run_tool_round(
+        FakePlannerMsg(), [FakeTool()], messages, "测试", 1, callbacks
+    )
+
+    assert sent_messages == [], f"Expected no generic cl.Message, got {sent_messages}"
+    assert forced is None
+    assert ree is None
+    assert bundles == []
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg.content.startswith(f"工具 {FakeTool.name} 执行失败")
+    assert "该数据暂不可用" in tool_msg.content
+    assert "2026071302" in tool_msg.content

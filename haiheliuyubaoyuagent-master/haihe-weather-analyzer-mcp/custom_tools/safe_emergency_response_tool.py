@@ -7,18 +7,44 @@ UnboundLocalError，前端只能看到“查询遇到异常”。本工具复用
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 from typing import Any
 
 from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_THRESHOLDS_MM
-from haihe_mcp_tools import evaluate_emergency_response_core
+from haihe_mcp_tools import (
+    TIANJIN_TIMEZONE,
+    _normalize_time_param,
+    evaluate_emergency_response_core,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def _default_observation_times(times: str) -> str:
+    """如果调用方未提供 times，默认取当前北京时整点时刻。"""
+    if times and str(times).strip():
+        return _normalize_time_param(times)
+    # 实况资料通常以小时为单元落盘，默认取当前整点
+    now = datetime.now(TIANJIN_TIMEZONE)
+    return now.replace(minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M%S")
+
+
+_IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|\/)[^\s:\"'<>|*?]{3,}")
+
+
+def _scrub_internal_data(text: str) -> str:
+    """移除异常文本中的内部 IP、路径等敏感信息。"""
+    text = _IP_RE.sub("[IP]", text)
+    text = _PATH_RE.sub("[PATH]", text)
+    return text
+
+
 def _error_payload(times: str, basin_codes: str, exc: Exception) -> dict[str, Any]:
-    text = str(exc)
+    text = _scrub_internal_data(str(exc))
     lower = text.lower()
     if "no record" in lower or "无记录" in text or "暂无数据" in text:
         message = "未查询到该时次的应急响应判定数据，可能该时段无有效分钟降水资料。"
@@ -50,10 +76,11 @@ def register_safe_emergency_response_tool(mcp: FastMCP) -> None:
         include_records: bool = False,
     ) -> dict[str, Any]:
         """安全查询海河流域实况应急响应判定结果。"""
+        effective_times = _default_observation_times(times)
         try:
             result = evaluate_emergency_response_core(
                 basin_codes=basin_codes,
-                times=times,
+                times=effective_times,
                 neighbor_km=neighbor_km,
                 sustain_hourly_threshold_mm=sustain_hourly_threshold_mm,
                 allowed_station_levels=allowed_station_levels,
@@ -66,5 +93,5 @@ def register_safe_emergency_response_tool(mcp: FastMCP) -> None:
             result.setdefault("status", "ok")
             return result
         except Exception as exc:
-            logger.exception("[safe_emergency_response] failed times=%s basin_codes=%s", times, basin_codes)
-            return _error_payload(times=times, basin_codes=basin_codes, exc=exc)
+            logger.exception("[safe_emergency_response] failed times=%s basin_codes=%s", effective_times, basin_codes)
+            return _error_payload(times=effective_times, basin_codes=basin_codes, exc=exc)

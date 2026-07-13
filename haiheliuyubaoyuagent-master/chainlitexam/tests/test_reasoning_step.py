@@ -19,23 +19,33 @@ ensure_stubs()
 import chainlit
 
 
-class MockStep(chainlit.Step):
-    """Lightweight stand-in for ``chainlit.Step`` with resettable state."""
+class _BaseMockStep(chainlit.Step):
+    """Shared behavior for mock Chainlit Step implementations."""
 
-    _instances: list["MockStep"] = []
+    _instances: list["_BaseMockStep"] = []
+    _id_prefix: str = "mock-step"
 
-    def __init__(self, **kwargs):
-        self.name = kwargs.get("name", "")
-        self.parent_id = kwargs.get("parent_id")
-        self.type = kwargs.get("type", "")
+    def _init_common(
+        self,
+        *,
+        name: str,
+        type: str,
+        parent_id: str | None,
+        id: str | None,
+        auto_collapse: bool | None = None,
+    ):
+        self.name = name
+        self.parent_id = parent_id
+        self.type = type
         self.input = ""
         self.output = ""
         self.show_input = ""
         self.default_open = None
-        self.auto_collapse = kwargs.get("auto_collapse")
-        self.id = kwargs.get("id") or f"mock-step-{len(MockStep._instances)}"
+        if auto_collapse is not None:
+            self.auto_collapse = auto_collapse
+        self.id = id or f"{self._id_prefix}-{len(self._instances)}"
         self._streamed_tokens: list[str] = []
-        MockStep._instances.append(self)
+        self._instances.append(self)
 
     async def send(self):
         pass
@@ -50,6 +60,54 @@ class MockStep(chainlit.Step):
     @classmethod
     def reset(cls):
         cls._instances.clear()
+
+
+class MockStep(_BaseMockStep):
+    """Lightweight stand-in for a modern ``chainlit.Step`` that accepts ``auto_collapse``."""
+
+    _instances: list["MockStep"] = []
+    _id_prefix = "mock-step"
+
+    def __init__(
+        self,
+        name: str = "",
+        type: str = "",
+        parent_id: str | None = None,
+        auto_collapse: bool | None = None,
+        id: str | None = None,
+        **kwargs,
+    ):
+        self._init_common(
+            name=name,
+            type=type,
+            parent_id=parent_id,
+            id=id,
+            auto_collapse=auto_collapse,
+        )
+
+
+class OldMockStep(_BaseMockStep):
+    """模拟旧版本 Chainlit Step，其构造函数不接受 auto_collapse。"""
+
+    _instances: list["OldMockStep"] = []
+    _id_prefix = "old-mock-step"
+
+    def __init__(
+        self,
+        name: str = "",
+        type: str = "",
+        parent_id: str | None = None,
+        id: str | None = None,
+        **kwargs,
+    ):
+        if "auto_collapse" in kwargs:
+            raise TypeError("Step.__init__() got an unexpected keyword argument 'auto_collapse'")
+        self._init_common(
+            name=name,
+            type=type,
+            parent_id=parent_id,
+            id=id,
+        )
 
 
 # Ensure message_orchestrator uses our mock when it imports chainlit.Step.
@@ -235,6 +293,23 @@ async def test_reasoning_step_uses_auto_collapse():
     await reasoning.close()
 
 
+async def test_reasoning_step_falls_back_without_auto_collapse():
+    """旧版本 Chainlit 不支持 auto_collapse 时，应不崩溃并回退折叠。"""
+    OldMockStep.reset()
+    original_step = chainlit.Step
+    chainlit.Step = OldMockStep
+    try:
+        reasoning = ReasoningStep()
+        await reasoning.__aenter__()
+        assert reasoning.step is not None
+        assert reasoning.step.default_open is True
+        assert not hasattr(reasoning.step, "auto_collapse")
+        await reasoning.close()
+        assert reasoning.step.default_open is False
+    finally:
+        chainlit.Step = original_step
+
+
 if __name__ == "__main__":
     asyncio.run(test_show_business_reasoning_writes_headers_to_parent_output())
     asyncio.run(test_stage_headers_accumulate_in_parent_output())
@@ -249,4 +324,5 @@ if __name__ == "__main__":
     asyncio.run(test_step_initially_expanded())
     asyncio.run(test_step_remains_expanded_after_close())
     asyncio.run(test_reasoning_step_uses_auto_collapse())
+    asyncio.run(test_reasoning_step_falls_back_without_auto_collapse())
     print("All tests passed.")

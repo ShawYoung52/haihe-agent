@@ -1,13 +1,13 @@
 # Task Plan: 修复 Chainlit 实时思考前端不可见
 
 **创建时间:** 2026-07-08
-**当前阶段:** Phase 2
+**当前阶段:** Phase 6
 
 ## Goal
 让海河流域气象智能体在 Chainlit 前端像 DeepSeek 一样实时展示“思考过程”可折叠块，而不是只输出最终答案。
 
 ## Current Phase
-Phase 2: Planning & Structure
+Phase 6: Fix Auto-Collapse After Final Answer
 
 ## Phases
 
@@ -42,6 +42,15 @@ Phase 2: Planning & Structure
 - [x] 使用 `superpowers:verification-before-completion` 确认验证结果
 - [x] 提交/总结
 - **Status:** complete
+
+### Phase 6: Fix Auto-Collapse After Final Answer
+- [x] 定位思考过程未在回答结束后折叠的根因：生产环境 Chainlit 2.9.6 不支持 `auto_collapse`
+- [x] 实施后端的旧版本兼容与运行时警告
+- [x] 简化 `ReasoningStep` 和测试 mock
+- [x] 更新 CLAUDE.md 明确版本要求
+- [x] 运行 code-review、code-simplifier、verification-before-completion
+- [x] 准备 Chainlit 2.11.1 离线升级包及 systemd 安装/回滚脚本
+- **Status:** complete (requires production Chainlit upgrade to >= 2.10.0 for actual UI auto-collapse)
 
 ## Key Questions
 1. Chainlit 默认 UI 是否能展示 `type="llm"` 且 output 非空的 step？ → `cot=full` 时应可展示

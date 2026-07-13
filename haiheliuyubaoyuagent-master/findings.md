@@ -33,10 +33,35 @@
 | `test_step_initially_expanded` / `test_step_collapses_on_close` 使用已废弃的 `collapsed` | 改为断言 `default_open` |
 | Planner 返回空 name / None id 的 tool_call 导致 `ToolMessage` 校验失败 | 在 `_ensure_tool_calls_from_content` 中规范化过滤 |
 
-## Resources
-- `chainlitexam/message_orchestrator.py` — `ReasoningStep` 实现
-- `chainlitexam/chain_gzt.py` — `_process_planner_stream` / `_process_thinking_stream`
-- `chainlitexam/tests/test_reasoning_step.py` — 现有单元测试
-- `.chainlit/config.toml` — `cot = "full"`
-- Chainlit Step docs: https://docs.chainlit.io/api-reference/step-class
-- Chainlit migration/CoT: https://docs.chainlit.io/guides/migration/1.1.300
+## 新发现：思考过程未在回答结束后自动折叠（2026-07-10）
+
+### 现象
+- 后端 TypeError（`Step.__init__() got an unexpected keyword argument 'auto_collapse'`）已修复
+- 但用户反馈：思考过程在最终答案发送后仍然展开，没有自动收起
+
+### 根因分析
+1. `.chainlit/config.toml:180` 显示 `generated_by = "2.9.6"`，说明生产/测试环境运行 Chainlit 2.9.6
+2. `auto_collapse` 参数是 Chainlit 2.10.0（PR #2818）才加入后端 `Step.__init__` 和前端 `Step.tsx` 的
+3. Chainlit 2.9.6 的标准前端 `Step.tsx` 不识别 `autoCollapse` 字段，因此不会自动折叠
+4. `ReasoningStep` 当前实现：
+   - 新版本：传 `auto_collapse=True`，依赖前端自动折叠
+   - 旧版本：回退到 `close()` 时设置 `default_open=False`
+5. 但 `default_open` 只在 Step 组件初始渲染时决定 `openValue`，对已展开的 step 调用 `update()` 设置 `default_open=False` 不会触发前端重新折叠
+6. 因此旧版本 Chainlit 上思考过程会一直保持展开
+
+### 可选方案
+| 方案 | 说明 | 优点 | 缺点 |
+|------|------|------|------|
+| A. 升级 Chainlit 到 >= 2.10.0 | 生产/开发环境都升级 | 原生支持 `auto_collapse`，无需额外代码 | 需要运维配合，可能涉及数据库迁移（2.9.4 需要 `modes` 列） |
+| B. 自定义前端实现折叠 | 在 `frontend/` 或 `frontendAgent/` 中覆盖 Step 组件 | 不依赖 Chainlit 版本 | 需要维护 custom build，可能复杂 |
+| C. 后端在最终答案中折叠思考 | 例如发送一个特殊 step update 让前端重新挂载 | 不升级前端 | 需要改变 React key 或类似技巧，不可靠 |
+
+### 推荐方案
+- **首选方案 A**：升级 Chainlit 到 >= 2.10.0（当前开发环境已是 2.11.1，说明代码已为新版本准备）
+- 同时保留后端对旧版本的兼容（不崩溃），但明确文档说明：自动折叠需要 Chainlit >= 2.10.0
+
+### 资源
+- Chainlit PR #2818: https://github.com/Chainlit/chainlit/pull/2818
+- Chainlit 2.10.0 release: https://github.com/Chainlit/chainlit/releases/tag/2.10.0
+- 本地 Chainlit 2.11.1 源码确认 `Step.__init__` 支持 `auto_collapse`
+- 生产 config.toml 显示 `generated_by = "2.9.6"`

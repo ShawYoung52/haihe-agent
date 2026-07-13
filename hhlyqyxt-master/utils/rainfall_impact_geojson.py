@@ -98,7 +98,7 @@ def build_rainstorm_impact_thematic_map(
     geom_column: str = DEFAULT_GEOM_COLUMN,
     objectid_column: str = DEFAULT_OBJECTID_COLUMN,
     river_name_column: str = DEFAULT_RIVER_NAME_COLUMN,
-    direct_match_km: float = 3.0,
+    direct_match_km: float = 10.0,
     direct_station_top_n: int = 0,
     max_segments: int = 0,
     extra_summary: dict | None = None,
@@ -112,15 +112,16 @@ def build_rainstorm_impact_thematic_map(
     schema, river_table = _resolve_table(pg_conf, schema, river_table)
     rainstorm_stations = _normalize_stations(stations, rainfall_threshold_mm)
     result = _empty_result(
-        rainstorm_stations,
-        rainfall_threshold_mm,
-        station_buffer_km,
-        downstream_km,
-        direct_station_top_n,
-        schema,
-        river_table,
-        graph_path,
-        extra_summary,
+        stations=rainstorm_stations,
+        threshold=rainfall_threshold_mm,
+        buffer_km=station_buffer_km,
+        downstream_km=downstream_km,
+        direct_match_km=direct_match_km,
+        direct_station_top_n=direct_station_top_n,
+        schema=schema,
+        table=river_table,
+        graph_path=graph_path,
+        extra=extra_summary,
     )
     if not rainstorm_stations:
         result["message"] = f"未找到降雨量≥{rainfall_threshold_mm}mm 的站点。"
@@ -142,9 +143,11 @@ def build_rainstorm_impact_thematic_map(
                 station_buffer_km,
                 direct_station_top_n,
             )
-            start_nodes, direct_keys = _find_direct_graph_starts(
+            start_nodes, direct_keys, downstream_start_stats = _find_direct_graph_starts(
+                rainstorm_stations,
                 direct_rows,
                 graph_path,
+                station_buffer_km,
                 direct_match_km,
             )
             downstream_edges = _collect_downstream_edges(start_nodes, graph_path, direct_keys, downstream_km)
@@ -174,6 +177,9 @@ def build_rainstorm_impact_thematic_map(
         "downstream_rivers": _sorted_river_names(downstream_rows),
         "affected_rivers": sorted({s["rivername"] for s in segments if s.get("rivername")}),
         "downstream_edges": downstream_edges,
+        "downstream_start_stats": downstream_start_stats,
+        "impact_stations": rainstorm_stations,
+        "station_geojson": _make_station_geojson(rainstorm_stations),
         "river_summary": {
             "direct_feature_count": _count_features(river_geojson, "direct_buffer"),
             "downstream_edge_count": len(downstream_edges),
@@ -278,11 +284,29 @@ def _open_connection(pg_conf: dict | None, db_connection):
     return engine.raw_connection(), True
 
 
+def _downstream_start_stats(
+    *,
+    direct_part_matched_edge_count: int = 0,
+    station_buffer_fallback_edge_count: int = 0,
+    direct_match_km: float = 0.0,
+    station_buffer_km: float = 0.0,
+) -> dict:
+    return {
+        "direct_part_matched_edge_count": direct_part_matched_edge_count,
+        "station_buffer_fallback_used": station_buffer_fallback_edge_count > 0,
+        "station_buffer_fallback_edge_count": station_buffer_fallback_edge_count,
+        "direct_match_km": float(direct_match_km),
+        "station_buffer_km": float(station_buffer_km),
+    }
+
+
 def _empty_result(
+    *,
     stations: list[dict],
     threshold: float,
     buffer_km: float,
     downstream_km: float,
+    direct_match_km: float,
     direct_station_top_n: int,
     schema: str,
     table: str,
@@ -295,6 +319,7 @@ def _empty_result(
             "rainfall_threshold_mm": float(threshold),
             "station_buffer_km": float(buffer_km),
             "downstream_km": float(downstream_km),
+            "direct_match_km": float(direct_match_km),
             "direct_station_top_n": int(direct_station_top_n or 0),
             "river_table": f"{schema}.{table}",
             "graph_path": str(graph_path or _default_graph_path()),
@@ -305,6 +330,10 @@ def _empty_result(
         "downstream_rivers": [],
         "affected_rivers": [],
         "downstream_edges": [],
+        "downstream_start_stats": _downstream_start_stats(
+            direct_match_km=direct_match_km,
+            station_buffer_km=buffer_km,
+        ),
         "segments": [],
         "river_geojson": {"type": "FeatureCollection", "features": []},
         "river_summary": {
@@ -496,24 +525,86 @@ def _create_downstream_temp(cur, edges: list[dict]) -> None:
     """)
 
 
-def _find_direct_graph_starts(direct_rows: list[dict], graph_path, direct_match_km: float) -> tuple[dict[Any, float], set[str]]:
-    """只从直接影响真实河段匹配到的 pkl 边启动下游追踪。"""
+def _find_direct_graph_starts(
+    stations: list[dict],
+    direct_rows: list[dict],
+    graph_path,
+    station_buffer_km: float,
+    direct_match_km: float,
+) -> tuple[dict[Any, float], set[str], dict]:
+    """从直接影响真实河段匹配到的 pkl 边启动下游追踪。
+
+    阶段一：优先匹配真实直接河段（objectid/name + 几何 proximity），避免把周边
+    不相连河系一并起追。
+    阶段二：若阶段一未匹配到任何 pkl 边，说明当前区域 pkl 与 full_v5 对齐存在
+    偏差，回退到「暴雨站 30km 内 pkl 边」作为起点，保证不出现完全空白。
+    """
     graph = get_graph(graph_path)
     direct_refs = _direct_refs(direct_rows)
-    if not direct_refs:
-        return {}, set()
 
+    starts, direct_keys, direct_part_edge_count = _match_direct_part_edges(
+        graph, direct_refs, direct_match_km
+    )
+    fallback_edge_count = 0
+    if not starts:
+        starts, fallback_edge_count = _match_fallback_edges(
+            graph, stations, station_buffer_km
+        )
+
+    stats = _downstream_start_stats(
+        direct_part_matched_edge_count=direct_part_edge_count,
+        station_buffer_fallback_edge_count=fallback_edge_count,
+        direct_match_km=direct_match_km,
+        station_buffer_km=station_buffer_km,
+    )
+    return starts, direct_keys, stats
+
+
+def _match_direct_part_edges(
+    graph, direct_refs: list[dict], direct_match_km: float
+) -> tuple[dict[Any, float], set[str], int]:
+    """按真实直接河段精确匹配 pkl 边。"""
     starts: dict[Any, float] = {}
     direct_keys: set[str] = set()
-    for u, v, key, attr in iter_graph_edges(graph):
-        p1, p2 = _edge_points(u, v)
-        if p1 is None or p2 is None:
-            continue
+    if not direct_refs:
+        return starts, direct_keys, 0
+
+    for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
         if not _edge_matches_direct_part(attr, p1, p2, direct_refs, direct_match_km):
             continue
         direct_keys.add(_edge_key(u, v, key, attr))
         starts[v] = 0.0
-    return starts, direct_keys
+    return starts, direct_keys, len(direct_keys)
+
+
+def _match_fallback_edges(
+    graph, stations: list[dict], station_buffer_km: float
+) -> tuple[dict[Any, float], int]:
+    """按暴雨站 30km 缓冲区匹配 pkl 边作为下游追踪起点；不计入 direct_keys。"""
+    starts: dict[Any, float] = {}
+    station_points = [
+        (float(s["lon"]), float(s["lat"]))
+        for s in stations
+        if s.get("lon") is not None and s.get("lat") is not None
+    ]
+    if not station_points:
+        return starts, 0
+
+    buffer_km = float(station_buffer_km)
+    fallback_edge_count = 0
+    for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
+        if any(_point_to_segment_km(lon, lat, p1, p2) <= buffer_km for lon, lat in station_points):
+            starts[v] = 0.0
+            fallback_edge_count += 1
+    return starts, fallback_edge_count
+
+
+def _iter_edges_with_points(graph):
+    for u, v, key, attr in iter_graph_edges(graph):
+        p1, p2 = _edge_points(u, v)
+        if p1 is None or p2 is None:
+            continue
+        yield u, v, key, attr, p1, p2
 
 
 def _collect_downstream_edges(starts: dict[Any, float], graph_path, direct_keys: set[str], downstream_km: float) -> list[dict]:

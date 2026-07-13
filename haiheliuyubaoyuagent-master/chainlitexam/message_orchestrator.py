@@ -3,6 +3,7 @@ import json
 import os
 import time
 import base64
+import inspect
 import traceback
 import asyncio
 import uuid
@@ -55,6 +56,14 @@ from tools.decision_weather_core import (
 )
 
 
+def _chainlit_step_accepts_auto_collapse() -> bool:
+    """Return True if the current Chainlit Step accepts an auto_collapse kwarg."""
+    try:
+        return "auto_collapse" in inspect.signature(cl.Step.__init__).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class ReasoningStep:
     """
     DeepSeek 式实时思考步骤：在 Chainlit 界面展示可展开的推理过程。
@@ -63,12 +72,23 @@ class ReasoningStep:
     避免创建嵌套子 stage 导致前端重复渲染。
     """
 
+    _warned_low_version: bool = False
+
     def __init__(self, name: str = "🤔 思考过程"):
         self.name = name
         self.step: cl.Step | None = None
         self._buffer: str = ""
         self._closed: bool = False
-        self._step_supports_stream: bool | None = None
+        self._step_supports_stream: bool = False
+        self._step_accepts_auto_collapse: bool = _chainlit_step_accepts_auto_collapse()
+
+        if not ReasoningStep._warned_low_version and not self._step_accepts_auto_collapse:
+            version = getattr(cl, "__version__", "unknown")
+            print(
+                f"[ReasoningStep] 当前 Chainlit {version} 不支持 auto_collapse，"
+                f"思考过程在回答结束后不会自动折叠；建议升级到 >= 2.10.0"
+            )
+            ReasoningStep._warned_low_version = True
 
     async def __aenter__(self):
         # 把思考步骤挂到当前 run 下面，否则 parent_id=None 会被当成 root step，Chainlit CoT 不渲染
@@ -83,13 +103,15 @@ class ReasoningStep:
         # 重置状态以支持实例重用；如果旧 step 未关闭，保留旧引用但不再写入
         self._closed = False
         self._buffer = ""
-        self._step_supports_stream = None
-        self.step = cl.Step(
-            name=self.name,
-            type="llm",
-            parent_id=parent_id,
-            auto_collapse=True,
-        )
+        step_kwargs = {
+            "name": self.name,
+            "type": "llm",
+            "parent_id": parent_id,
+        }
+        if self._step_accepts_auto_collapse:
+            step_kwargs["auto_collapse"] = True
+        self.step = cl.Step(**step_kwargs)
+        self._step_supports_stream = hasattr(self.step, "stream_token")
         self.step.show_input = "markdown"
         self.step.input = ""
         self.step.output = ""
@@ -129,15 +151,10 @@ class ReasoningStep:
 
         # 所有 token 都必须落到父 step output，Chainlit 的 CoT 视图以父 step output 为展示主体
         self._buffer += text
-        if self._step_supports_stream is None:
-            self._step_supports_stream = hasattr(self.step, "stream_token")
-
         if self._step_supports_stream:
             await self.step.stream_token(text)
-            # 部分 Chainlit 版本/子类可能不通过 stream_token 回写 output，显式同步保证可见
-            self.step.output = self._buffer
-        else:
-            self.step.output = self._buffer
+        self.step.output = self._buffer
+        if not self._step_supports_stream:
             await self.step.update()
 
     async def line(self, text: str):
@@ -148,7 +165,9 @@ class ReasoningStep:
             return
         self._closed = True
         self.step.output = self._buffer or "思考完成"
-        self.step.default_open = True
+        # 旧版本 Chainlit 不支持 auto_collapse，通过 default_open=False 回退折叠
+        if not self._step_accepts_auto_collapse:
+            self.step.default_open = False
         await self.step.update()
 
 
@@ -500,6 +519,11 @@ WARNING_TOOL_NAMES = {
     "get_history_warning_info",
     "get_today_warning_summary",
     "get_national_warning_info",
+}
+
+EMERGENCY_RESPONSE_TOOL_NAMES = {
+    "safe_evaluate_haihe_emergency_response",
+    "evaluate_haihe_forecast_emergency_response",
 }
 
 
@@ -1455,6 +1479,20 @@ def _ensure_tool_calls_from_content(planner_msg):
         print(f"[工具调用解析] 失败，跳过：{e}")
         traceback.print_exc()
     return planner_msg
+
+
+def _tool_call_names(planner_msg) -> set[str]:
+    """Extract tool-call names from a planner message, tolerating dicts and objects."""
+    calls = getattr(planner_msg, "tool_calls", None) or []
+    names: set[str] = set()
+    for tc in calls:
+        if isinstance(tc, dict):
+            name = tc.get("name")
+        else:
+            name = getattr(tc, "name", None)
+        if name:
+            names.add(str(name))
+    return names
 
 
 def _friendly_llm_error_text(err: Exception) -> str:
@@ -2505,11 +2543,15 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
 
                     tool_step.output = f"查询完成（耗时 {tool_elapsed:.1f} 秒）"
                 except Exception as e:
-                    # 控制台保留详细错误，UI 只展示友好提示
-                    print(f"[工具错误] {tool_name}: {e}")
-                    await cl.Message(content="数据查询遇到问题，请稍后重试。").send()
-                    observation_text = _scrub_internal_data(f"工具执行失败：{str(e)}")
-                    tool_step.output = "查询失败"
+                    # 控制台保留详细错误（已脱敏）；不再单独向用户发送通用错误消息，
+                    # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
+                    err_summary = _scrub_internal_data(str(e)) or "未知错误"
+                    print(f"[工具错误] {tool_name}: {err_summary}")
+                    observation_text = (
+                        f"工具 {tool_name} 执行失败（{type(e).__name__}），"
+                        f"该数据暂不可用。错误摘要：{err_summary}"
+                    )
+                    tool_step.output = f"查询失败：{err_summary[:120]}"
 
                 messages.append(
                     ToolMessage(
@@ -4747,6 +4789,13 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         if ree:
             await cl.send_window_message(ree)
 
+        # 若本轮同时调用了应急响应工具，优先让 planner 综合应急判定与预警信息生成回答，
+        # 而不是直接走强制收口或预警专用组装答案。
+        has_emergency_response_tool = not _tool_call_names(planner_msg).isdisjoint(EMERGENCY_RESPONSE_TOOL_NAMES)
+        if forced_final_text and has_emergency_response_tool:
+            print("[process_message] 本轮同时调用应急响应工具，忽略强制收口文本，由 planner 综合生成回答。")
+            forced_final_text = None
+
         if forced_final_text:
             await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
             has_chart = cl.user_session.get("has_chart_generated", False) or False
@@ -4759,7 +4808,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             answer_generated = True
             break
 
-        if warning_bundles:
+        if warning_bundles and not has_emergency_response_tool:
             await reasoning.stage("✅ 评估结果", "预警数据已获取完整，正在整理预警清单并生成防范建议...")
             await reasoning.stage("✍️ 生成结论", "正在生成回答...")
             try:
