@@ -48,10 +48,10 @@ Phase 5: Code Review, Simplification, Memory Update
 - **Status:** complete
 
 ### Phase 6: Commit
-- [ ] 整理 git diff
-- [ ] 按仓库提交规范创建 commit
+- [x] 整理 git diff
+- [x] 按仓库提交规范创建 commit
 - [ ] 推送（如用户要求）
-- **Status:** pending
+- **Status:** complete
 
 ## Key Questions
 1. v6 pkl 文件实际路径是什么？是否仍放在 `Service/river_directed_v6.pkl`？
