@@ -20,7 +20,9 @@ from typing import Any, Iterator
 import pandas as pd
 
 KM_PER_DEG = 111.32
-DEFAULT_RIVER_TABLE = "haihe_river_directed_full_v5"
+DIRECTED_GRAPH_FILENAME = "river_directed_v6.pkl"
+RIVER_TABLE_VERSION = "v6"
+DEFAULT_RIVER_TABLE = f"haihe_river_directed_full_{RIVER_TABLE_VERSION}"
 DEFAULT_GEOM_COLUMN = "geom"
 DEFAULT_OBJECTID_COLUMN = "objectid"
 DEFAULT_RIVER_NAME_COLUMN = "src_name"
@@ -532,71 +534,60 @@ def _find_direct_graph_starts(
     station_buffer_km: float,
     direct_match_km: float,
 ) -> tuple[dict[Any, float], set[str], dict]:
-    """从直接影响真实河段匹配到的 pkl 边启动下游追踪。
+    """暴雨站点 30km 缓冲区内的 pkl 边作为下游追踪起点，并标记命中真实直接河段的边。
 
-    阶段一：优先匹配真实直接河段（objectid/name + 几何 proximity），避免把周边
-    不相连河系一并起追。
-    阶段二：若阶段一未匹配到任何 pkl 边，说明当前区域 pkl 与 full_v5 对齐存在
-    偏差，回退到「暴雨站 30km 内 pkl 边」作为起点，保证不出现完全空白。
+    业务约束以"暴雨站点 30km 缓冲区"作为直接影响范围。若只采用真实直接河段
+    匹配（objectid/name + 几何 proximity）作为起点，会把大量位于缓冲区内、但因
+    pkl/full_v6 对齐偏差而未被精确匹配的河系遗漏，导致下游河段断裂、零散。
+
+    - 阶段一：将暴雨站 30km 缓冲区内的所有 pkl 边作为下游追踪起点。
+    - 阶段二：在全部 pkl 边中识别真实直接河段匹配，用于 `is_direct_graph_edge`
+      标记；若某条直接匹配边因对齐偏差略超 30km 缓冲区，也补充为起点。
+
+    注意：
+    - `direct_station_top_n` 只限制 `_query_direct_rows` 返回的直接河段数量，
+      不影响 30km 缓冲区起点；这是两个不同维度的控制。
+    - `station_buffer_fallback_edge_count` 表示"30km 缓冲区中未被标记为真实直接
+      河段的边数"，并不表示"未找到任何直接匹配"。
     """
     graph = get_graph(graph_path)
     direct_refs = _direct_refs(direct_rows)
 
-    starts, direct_keys, direct_part_edge_count = _match_direct_part_edges(
-        graph, direct_refs, direct_match_km
-    )
-    fallback_edge_count = 0
-    if not starts:
-        starts, fallback_edge_count = _match_fallback_edges(
-            graph, stations, station_buffer_km
-        )
-
-    stats = _downstream_start_stats(
-        direct_part_matched_edge_count=direct_part_edge_count,
-        station_buffer_fallback_edge_count=fallback_edge_count,
-        direct_match_km=direct_match_km,
-        station_buffer_km=station_buffer_km,
-    )
-    return starts, direct_keys, stats
-
-
-def _match_direct_part_edges(
-    graph, direct_refs: list[dict], direct_match_km: float
-) -> tuple[dict[Any, float], set[str], int]:
-    """按真实直接河段精确匹配 pkl 边。"""
-    starts: dict[Any, float] = {}
-    direct_keys: set[str] = set()
-    if not direct_refs:
-        return starts, direct_keys, 0
-
-    for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
-        if not _edge_matches_direct_part(attr, p1, p2, direct_refs, direct_match_km):
-            continue
-        direct_keys.add(_edge_key(u, v, key, attr))
-        starts[v] = 0.0
-    return starts, direct_keys, len(direct_keys)
-
-
-def _match_fallback_edges(
-    graph, stations: list[dict], station_buffer_km: float
-) -> tuple[dict[Any, float], int]:
-    """按暴雨站 30km 缓冲区匹配 pkl 边作为下游追踪起点；不计入 direct_keys。"""
-    starts: dict[Any, float] = {}
     station_points = [
         (float(s["lon"]), float(s["lat"]))
         for s in stations
         if s.get("lon") is not None and s.get("lat") is not None
     ]
-    if not station_points:
-        return starts, 0
-
     buffer_km = float(station_buffer_km)
-    fallback_edge_count = 0
+
+    starts: dict[Any, float] = {}
+    buffer_keys: set[str] = set()
+    direct_keys: set[str] = set()
+
     for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
-        if any(_point_to_segment_km(lon, lat, p1, p2) <= buffer_km for lon, lat in station_points):
+        edge_key = _edge_key(u, v, key, attr)
+        in_buffer = (
+            station_points
+            and any(_point_to_segment_km(lon, lat, p1, p2) <= buffer_km for lon, lat in station_points)
+        )
+        is_direct = _edge_matches_direct_part(attr, p1, p2, direct_refs, direct_match_km)
+
+        if in_buffer or is_direct:
             starts[v] = 0.0
-            fallback_edge_count += 1
-    return starts, fallback_edge_count
+        if in_buffer:
+            buffer_keys.add(edge_key)
+        if is_direct:
+            direct_keys.add(edge_key)
+
+    buffer_only_edge_count = len(buffer_keys - direct_keys)
+
+    stats = _downstream_start_stats(
+        direct_part_matched_edge_count=len(direct_keys),
+        station_buffer_fallback_edge_count=buffer_only_edge_count,
+        direct_match_km=direct_match_km,
+        station_buffer_km=station_buffer_km,
+    )
+    return starts, direct_keys, stats
 
 
 def _iter_edges_with_points(graph):
@@ -690,14 +681,14 @@ def _river_feature(row: dict, impact_type: str) -> dict | None:
         "edge_key": row.get("edge_key"),
         "length_km": round(float(row.get("length_km") or 0.0), 3),
         "flow_direction": "database_geometry_order",
-        "direction_source": "full_v5_original_geometry",
+        "direction_source": f"full_{RIVER_TABLE_VERSION}_original_geometry",
     }
     if impact_type == "direct_buffer":
         props.update({
             "min_station_distance_km": round(float(row.get("min_station_distance_km") or 0.0), 3),
             "trigger_station_count": int(row.get("trigger_station_count") or 0),
             "trigger_stations": row.get("trigger_stations") or [],
-            "geometry_source": "full_v5_direct_30km_uncut",
+            "geometry_source": f"full_{RIVER_TABLE_VERSION}_direct_30km_uncut",
         })
     else:
         props.update({
@@ -709,7 +700,7 @@ def _river_feature(row: dict, impact_type: str) -> dict | None:
             "match_distance_km": _round(row.get("match_distance_km")),
             "topology_from": _point_property(row, "from"),
             "topology_to": _point_property(row, "to"),
-            "geometry_source": "full_v5_downstream_50km_clipped_database_order",
+            "geometry_source": f"full_{RIVER_TABLE_VERSION}_downstream_50km_clipped_database_order",
         })
     return {"type": "Feature", "geometry": geometry, "properties": props}
 
@@ -1001,9 +992,9 @@ def _edge_key(u, v, key, attr: dict) -> str:
 def _default_graph_path() -> str:
     here = Path(__file__).resolve()
     candidates = [
-        here.parents[1] / "Service" / "river_directed_v5.pkl",
+        here.parents[1] / "Service" / DIRECTED_GRAPH_FILENAME,
         here.parents[1] / "Service" / "river_directed_v4_asis.pkl",
-        Path.cwd() / "Service" / "river_directed_v5.pkl",
+        Path.cwd() / "Service" / DIRECTED_GRAPH_FILENAME,
         Path.cwd() / "Service" / "river_directed_v4_asis.pkl",
     ]
     for path in candidates:

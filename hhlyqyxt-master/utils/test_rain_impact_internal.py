@@ -6,7 +6,7 @@
     $env:HHLY_DB_NAME="hhly"
     $env:HHLY_DB_USER="postgres"
     $env:HHLY_DB_PASSWORD="<密码>"
-    $env:HHLY_GRAPH_PATH="E:/tj/line/result/river_directed_v5.pkl"
+    $env:HHLY_GRAPH_PATH="E:/tj/line/result/river_directed_v6.pkl"
     python utils/test_rain_impact_internal.py --csv "C:/Users/.../24hourmindata.csv" --output "C:/Users/.../rain_impact_result.json"
 """
 from __future__ import annotations
@@ -39,8 +39,8 @@ def main():
     parser.add_argument("--db-name", default=os.getenv("HHLY_DB_NAME", "postgres"))
     parser.add_argument("--db-user", default=os.getenv("HHLY_DB_USER", "postgres"))
     parser.add_argument("--db-password", default=os.getenv("HHLY_DB_PASSWORD", "postgres"))
-    parser.add_argument("--graph-path", default=os.getenv("HHLY_GRAPH_PATH", "/home/ev/haiheliuyubaoyuagent/yx-test/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/test-data/river_directed_v5.pkl"))
-    parser.add_argument("--river-table", default="haihe_river_directed_full_v5")
+    parser.add_argument("--graph-path", default=os.getenv("HHLY_GRAPH_PATH", "/home/ev/haiheliuyubaoyuagent/yx-test/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/test-data/river_directed_v6.pkl"))
+    parser.add_argument("--river-table", default=rig.DEFAULT_RIVER_TABLE)
     args = parser.parse_args()
 
     if not args.db_host or not args.db_password:

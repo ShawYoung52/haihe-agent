@@ -2,6 +2,7 @@
 
 from fastmcp import FastMCP
 
+from constants import RIVER_TABLE_FULL
 import fixed_rainfall_impact_tool as rainfall_impact_tool
 from tools import register_tools
 from custom_tools import (
@@ -89,7 +90,7 @@ class HaiheWeatherAnalyzerMCP:
                     "direct": "30km缓冲区只用于判断直接影响，直接河流完整输出",
                     "downstream": "从直接河流下游端点追踪50km，最后一段截断",
                     "direct_match": "直接命中真实河段与pkl边匹配采用10km阈值，对齐牵引智能体",
-                    "geometry": "使用 haihe_river_directed_full_v5 真实河流几何",
+                    "geometry": f"使用 {RIVER_TABLE_FULL} 真实河流几何",
                 },
                 "compatibility_note": "已保留 analyze_rainstorm_impact 等原有调用方式；新增拆分工具用于分阶段调用，前端可按需渐进迁移。",
                 "deprecated_aggregated_tools": [

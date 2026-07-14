@@ -40,10 +40,11 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - `chainlitexam/message_orchestrator.py` — Message routing, fast paths (warning/rainfall/river/weather), planner loop, tool execution, answer generation (~4700 lines)
 - `chainlitexam/prompts.py` — `WEATHER_ASSISTANT_PROMPT` system prompt, warning route/summary prompts
 - `chainlitexam/tools/rainfall_river_impact.py` — Local wrapper for the rainfall-river impact tool
+- `haihe-weather-analyzer-mcp/constants.py` — Shared constants including `DIRECTED_GRAPH_FILENAME` (`river_directed_v6.pkl`) and `RIVER_TABLE_FULL` (`haihe_river_directed_full_v6`); use these instead of hard-coding versioned names
 - `haihe-weather-analyzer-mcp/server.py` — MCP server entry point (SSE transport, default port 3333)
 - `haihe-weather-analyzer-mcp/tools.py` / `haihe_mcp_tools.py` — Tool implementations (rainfall, river network, warnings, emergency response, RAG)
 - `haihe-weather-analyzer-mcp/fixed_rainfall_impact_tool.py` — MCP-side rainfall-river impact result formatter
-- `../hhlyqyxt-master/utils/rainfall_impact_geojson.py` — Traction-agent core algorithm for affected rivers (cross-repo dependency; keep `direct_match_km` defaults in sync)
+- `../hhlyqyxt-master/utils/rainfall_impact_geojson.py` — Traction-agent core algorithm for affected rivers (cross-repo dependency; keep `direct_match_km` defaults and graph/table version constants in sync; imports pandas directly, so ensure pandas is installed). **Algorithm invariant:** downstream tracing starts from all pkl edges within the 30 km station buffer; `direct_match_km` only marks which of those edges are "real direct river segments" (`is_direct_graph_edge`). Do not revert to direct-match-only start selection.
 
 **Fast path order** in `process_message()`: rainfall img → river plot → rainfall analysis → city avg rainfall → rain duration → today rainfall → weekly forecast → heavy rain check → subbasin forecast → basin areal rainfall → weekend activity → basin weather → general weather → water level → emergency response → poi → risk warning → rainstorm impact time → (falls through to planner LLM).
 
@@ -59,13 +60,15 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - Progress indication uses `ReasoningStep.stage()`; do not add new `cl.Message` loading bubbles
 - Reasoning steps auto-collapse after the final answer via `auto_collapse=True` when running Chainlit >= 2.10.0; older versions fall back to `default_open=False` on close
 - Tool failures in `_run_tool_round()` are recorded as `ToolMessage` and surfaced to the planner LLM; do not send standalone `cl.Message` error bubbles for individual tool failures
-- When emergency-response tools (e.g. `safe_evaluate_haihe_emergency_response`) are invoked in the same round as warning tools, skip the warning-only hybrid answer path and let the planner synthesize a response that prioritizes the emergency-response result
+- When emergency-response tools (e.g. `safe_evaluate_haihe_emergency_response`) are invoked in the same round, skip both the warning-only hybrid answer path and any `forced_final_text` short-circuit; let the planner synthesize a response that prioritizes the emergency-response result
 - Verification: run `python tests/test_fast_paths.py` for fast-path static checks and `python -m pytest tests/ -v` for the full suite
 - Tests must run from `chainlitexam/`; running from the repo root causes `ModuleNotFoundError: No module named 'utils'`
 - Bash working directory persists across tool calls; use absolute paths when invoking commands outside `chainlitexam/` (the parent directory name contains spaces)
 - `haihe-weather-analyzer-mcp/server.py` overrides `fixed_rainfall_impact_tool.DEFAULT_DIRECT_GRAPH_MATCH_KM` at runtime and hard-codes the `get_affected_river_network_by_rainfall` description; keep both in sync with `hhlyqyxt-master/utils/rainfall_impact_geojson.py`
+- Versioned river resources are centralized: use `constants.RIVER_TABLE_FULL` / `constants.DIRECTED_GRAPH_FILENAME` in the MCP package, and the module-level constants in `rainfall_impact_geojson.py` in the traction-agent package. When upgrading graph/table versions, update both constants files and `config.ini` together.
 - `safe_evaluate_haihe_emergency_response` defaults empty `times` to the current Beijing hour via `TIANJIN_TIMEZONE`; reuse `haihe_mcp_tools._normalize_time_param` for consistent time handling
-- `fixed_rainfall_impact_tool._empty_response()` must return the same keys as `_format_mcp_response()`, including `river_geojson`, and use the caller-supplied `direct_graph_match_km`
+- `fixed_rainfall_impact_tool._empty_response()` must return the same keys as `_format_mcp_response()`, including `river_geojson` and `rules`, and use the caller-supplied `direct_graph_match_km`
+- The `include_background` parameter in `get_affected_river_network_by_rainfall` / `local_get_affected_river_network_by_rainfall` is accepted but not implemented by the upstream builder; do not forward it until `rainfall_impact_geojson.py` adds support
 - Error text in tool failures and MCP wrappers is scrubbed (IPs/paths removed) before logging or returning to the LLM/user
 - LLM model: Qwen3.6-27B via local OpenAI-compatible proxy at `10.226.188.156:8000/v1/`
 - Internal service addresses: MUSIC `10.226.90.120`, PostgreSQL `10.226.107.130`, RAG `10.226.188.156:8033` — never include these in user-facing output

@@ -5,7 +5,7 @@ r"""代码评审版：24h 降水 -> 直接影响河流 + 下游 50km GeoJSON。
 2. rain_24h >= 50mm 的站点作为触发站；
 3. PostGIS 查询触发站 30km 内真实河段，直接河段不截断；
 4. pkl 拓扑从直接命中边向下游追踪 50km；
-5. 下游边回 full_v5 时按 pkl 边位置匹配最近真实河段，并按 50km 截断。
+5. 下游边回 full_v6 时按 pkl 边位置匹配最近真实河段，并按 50km 截断。
 
 运行：
     cd hhlyqyxt-master
@@ -38,14 +38,14 @@ for item in (CURRENT_DIR, PROJECT_ROOT):
 import rainfall_impact_geojson as rig  # noqa: E402
 
 DEFAULT_CSV_PATH = r"C:\Users\gaozr\Downloads\24hourmindata.csv"
-DEFAULT_GRAPH_PATH = r"E:\tj\line\result\river_directed_v5.pkl"
+DEFAULT_GRAPH_PATH = r"E:\tj\line\result\river_directed_v6.pkl"
 DEFAULT_OUTPUT_DIR = r"C:\Users\gaozr\Downloads\24hourmindata_db_impact_output"
 DEFAULT_DB_HOST = "211.157.132.19"
 DEFAULT_DB_PORT = 48091
 DEFAULT_DB_NAME = "hhly"
 DEFAULT_DB_USER = "postgres"
 DEFAULT_DB_SCHEMA = "public"
-DEFAULT_RIVER_TABLE = "haihe_river_directed_full_v5"
+DEFAULT_RIVER_TABLE = rig.DEFAULT_RIVER_TABLE
 DEFAULT_GEOM_COLUMN = "geom"
 DEFAULT_OBJECTID_COLUMN = "objectid"
 DEFAULT_RIVER_NAME_COLUMN = "src_name"
@@ -448,7 +448,7 @@ def river_feature(row: dict, impact_type: str) -> dict | None:
             "min_station_distance_km": round(float(row.get("min_station_distance_km") or 0.0), 3),
             "trigger_station_count": int(row.get("trigger_station_count") or 0),
             "trigger_stations": row.get("trigger_stations") or [],
-            "geometry_source": "full_v5_dump_part_direct_30km_uncut",
+            "geometry_source": f"full_{rig.RIVER_TABLE_VERSION}_dump_part_direct_30km_uncut",
         })
     else:
         match_distance = row.get("match_distance_km")
@@ -459,7 +459,7 @@ def river_feature(row: dict, impact_type: str) -> dict | None:
             "clip_fraction": row.get("clip_fraction"),
             "is_direct_graph_edge": row.get("is_direct_graph_edge"),
             "match_distance_km": round(float(match_distance), 3) if match_distance is not None else None,
-            "geometry_source": "full_v5_dump_part_downstream_50km_clipped",
+            "geometry_source": f"full_{rig.RIVER_TABLE_VERSION}_dump_part_downstream_50km_clipped",
         })
     return {"type": "Feature", "geometry": geometry, "properties": properties}
 

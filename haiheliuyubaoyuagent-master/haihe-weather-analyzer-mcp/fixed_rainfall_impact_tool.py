@@ -12,9 +12,19 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from constants import DIRECTED_GRAPH_FILENAME, RIVER_TABLE_VERSION
+
 logger = logging.getLogger(__name__)
 TOOL_NAME = "get_affected_river_network_by_rainfall"
 DEFAULT_DIRECT_GRAPH_MATCH_KM = 10.0
+
+# 影响河网计算规则说明，统一在空结果与有结果响应中复用
+IMPACT_RULES = {
+    "direct": f"ST_Dump(full_{RIVER_TABLE_VERSION}.geom) 后单线段 ST_DWithin 30km 命中，直接段不截断",
+    "downstream": f"从暴雨站 30km 缓冲区内的 pkl 拓扑边向下游追踪 downstream_km，再回 full_{RIVER_TABLE_VERSION} 匹配真实河段并截断；其中同时命中真实直接河段的边标记为 is_direct_graph_edge",
+    "direction": f"GeoJSON 坐标顺序使用 full_{RIVER_TABLE_VERSION} 数据库原始几何顺序；properties.flow_direction=database_geometry_order",
+    "dedupe": "直接河段优先，按 objectid + 真实几何去重，避免多条 pkl 边重复映射同一真实河段",
+}
 
 
 def _load_impact_builder() -> Callable:
@@ -31,11 +41,11 @@ def _load_impact_builder() -> Callable:
 
 
 def _resolve_graph_path(graph_path: str | None) -> str | None:
-    """优先使用有向图 v5 版本，否则回退到原始 graph 路径。"""
+    """优先使用有向图 v6 版本，否则回退到原始 graph 路径。"""
     if not graph_path:
         return None
-    v5_path = os.path.join(os.path.dirname(graph_path), "river_directed_v5.pkl")
-    return v5_path if os.path.isfile(v5_path) else graph_path
+    v6_path = os.path.join(os.path.dirname(graph_path), DIRECTED_GRAPH_FILENAME)
+    return v6_path if os.path.isfile(v6_path) else graph_path
 
 
 def _station_reaches_threshold(station: Any, threshold_mm: float) -> bool:
@@ -61,6 +71,10 @@ def _normalize_station(station: dict, level: str) -> dict:
     }
 
 
+def _collect_non_empty_strings(items: list[Any] | None) -> set[str]:
+    return {str(x).strip() for x in items or [] if x}
+
+
 def _extract_rainstorm_stations(
     rainfall_result: dict,
     threshold_mm: float,
@@ -76,12 +90,8 @@ def _extract_rainstorm_stations(
         level = level_item.get("level", "")
         if level_to_threshold.get(level, math.inf) < threshold_mm:
             continue
-        zone_77_regions.update(
-            str(x).strip() for x in level_item.get("zone_77_regions", []) or [] if x
-        )
-        admin_divisions.update(
-            str(x).strip() for x in level_item.get("admin_divisions", []) or [] if x
-        )
+        zone_77_regions.update(_collect_non_empty_strings(level_item.get("zone_77_regions")))
+        admin_divisions.update(_collect_non_empty_strings(level_item.get("admin_divisions")))
         for station in level_item.get("stations", []) or []:
             if _station_reaches_threshold(station, threshold_mm):
                 stations.append(_normalize_station(station, level))
@@ -101,10 +111,10 @@ def _direction_info(segments: list[dict], river_geojson: dict | None) -> dict:
         "enabled": bool(features or segments),
         "field": "flow_direction",
         "value": "database_geometry_order",
-        "direction_source": "full_v5_original_geometry",
+        "direction_source": f"full_{RIVER_TABLE_VERSION}_original_geometry",
         "geojson_feature_count": len(features),
         "directed_geojson_feature_count": len(directed_features),
-        "coordinate_order": "使用 full_v5 数据库原始几何点序，不在问答工具里反转坐标。",
+        "coordinate_order": f"使用 full_{RIVER_TABLE_VERSION} 数据库原始几何点序，不在问答工具里反转坐标。",
         "how_to_use": "前端或入库需要方向时，直接按 geometry.coordinates 的点序使用；properties.flow_direction 表示该点序来自数据库原始几何。",
     }
 
@@ -120,9 +130,10 @@ def _base_response_fields(
     start_stats: dict,
     summary: str,
     affected_rivers: list[str] | None = None,
+    rules: dict | None = None,
 ) -> dict:
     """构建问答返回结构中的公共字段。"""
-    return {
+    response = {
         "time_range_readable": rainfall_result.get("time_range_readable", ""),
         "rainfall_threshold_mm": threshold_mm,
         "affected_zone_77_regions": sorted(zones),
@@ -137,6 +148,9 @@ def _base_response_fields(
         "affected_rivers": affected_rivers or [],
         "river_geojson": river_geojson,
     }
+    if rules is not None:
+        response["rules"] = rules
+    return response
 
 
 def _empty_response(
@@ -157,12 +171,19 @@ def _empty_response(
         start_stats={
             "downstream_edge_count": 0,
             "direct_part_match_km": direct_graph_match_km,
-            "downstream_start_stats": {},
+            "downstream_start_stats": {
+                "direct_match_km": direct_graph_match_km,
+                "station_buffer_km": 30.0,
+                "station_buffer_fallback_used": False,
+                "station_buffer_fallback_edge_count": 0,
+                "direct_part_matched_edge_count": 0,
+            },
         },
         summary=(
             f"统计时段 {rainfall_result.get('time_range_readable', '')} 内，"
             f"未达到 {threshold_mm}mm 降雨阈值的河系数据。"
         ),
+        rules=IMPACT_RULES,
     )
 
 
@@ -195,6 +216,7 @@ def _format_mcp_response(
             f"降雨量≥{threshold_mm}mm 的实况站点共影响 {len(affected_rivers)} 条河流。"
         ),
         affected_rivers=affected_rivers,
+        rules=IMPACT_RULES,
     )
 
 

@@ -24,9 +24,9 @@ from urllib.parse import urlencode
 import requests
 
 try:
-    from .rainfall_impact_geojson import build_rain24h_impact_river_geojson
+    from .rainfall_impact_geojson import build_rain24h_impact_river_geojson, DEFAULT_RIVER_TABLE
 except Exception:  # pragma: no cover
-    from rainfall_impact_geojson import build_rain24h_impact_river_geojson
+    from rainfall_impact_geojson import build_rain24h_impact_river_geojson, DEFAULT_RIVER_TABLE
 
 BASIN_CODE_HAIHE = "HHLY"
 MUSIC_DATA_CODE_HOURLY = "SURF_CHN_MUL_HOR"
@@ -100,7 +100,7 @@ def _build_rainstorm_context(
     station_buffer_km: float = 30.0,
     downstream_km: float = 50.0,
     direct_match_km: float = 10.0,
-    river_table: str = "haihe_river_directed_full_v5",
+    river_table: str = DEFAULT_RIVER_TABLE,
     schema: str = "public",
     graph_path: str | Path | None = None,
 ) -> dict[str, Any]:

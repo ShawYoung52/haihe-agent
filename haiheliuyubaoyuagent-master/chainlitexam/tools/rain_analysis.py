@@ -161,7 +161,7 @@ def _spatial_analysis(level_groups: list[dict]) -> list[dict]:
                         rows = conn.execute(
                             text("""
                                 SELECT DISTINCT river_name
-                                FROM haihe_river_directed_full_v5
+                                FROM haihe_river_directed_full_v6
                                 WHERE ST_DWithin(
                                     geom,
                                     ST_SetSRID(ST_MakePoint(:lon, :lat), 4326),

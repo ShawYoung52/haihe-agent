@@ -1886,6 +1886,7 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
     参数 highlight_rivers：高亮显示的河流名称列表（如 ["永定河", "大清河"]）。
     当传入该列表时，属于列表的河流会用彩色粗线高亮，其余河流退为浅灰背景。
     """
+    RIVER_TABLE_FULL = "haihe_river_directed_full_v6"
     from collections import defaultdict
 
     segments = _unwrap_tool_result(raw_result)
@@ -1938,7 +1939,7 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
         await cl.Message(content=f"⚠️ 河网数据为空，无法绘制（{title_suffix}）。").send()
         return
 
-    # 从数据库 haihe_river_directed_full_v5 查询真实河流几何
+    # 从真实河流全量表查询几何
     import psycopg2
     from psycopg2.extras import RealDictCursor
 
@@ -1957,9 +1958,9 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
 
                 # 先用 objectid 精确匹配（最可靠）
                 if oid:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT ST_AsGeoJSON(geom) as geojson
-                        FROM haihe_river_directed_full_v5
+                        FROM {RIVER_TABLE_FULL}
                         WHERE objectid::text = %s AND geom IS NOT NULL
                         LIMIT 1
                     """, (str(oid),))
@@ -1969,9 +1970,9 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
                         continue
 
                 # 回退 1: 用 from_x/to_x 匹配
-                cur.execute("""
+                cur.execute(f"""
                     SELECT ST_AsGeoJSON(geom) as geojson
-                    FROM haihe_river_directed_full_v5
+                    FROM {RIVER_TABLE_FULL}
                     WHERE ABS(from_x - %s) < 0.01 AND ABS(from_y - %s) < 0.01
                       AND ABS(to_x - %s) < 0.01 AND ABS(to_y - %s) < 0.01
                       AND geom IS NOT NULL
@@ -1982,9 +1983,9 @@ async def render_and_send_plot(raw_result, title_suffix="全流域", admin_raw_r
                     db_paths[(fx, fy, tx, ty)] = row["geojson"]
                 elif r_name:
                     # 回退 2: 用河流名称+位置匹配
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT ST_AsGeoJSON(geom) as geojson
-                        FROM haihe_river_directed_full_v5
+                        FROM {RIVER_TABLE_FULL}
                         WHERE river_name = %s
                           AND geom IS NOT NULL
                           AND ST_DWithin(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326), 0.1)

@@ -25,7 +25,7 @@ import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 
 from haihe_mcp_tools import register_haihe_tools
-from constants import DEFAULT_BASIN_CODES
+from constants import DEFAULT_BASIN_CODES, DIRECTED_GRAPH_FILENAME, RIVER_TABLE_FULL
 from emergency_scenario_client import emergency_http_base_url, fetch_scenario_get
 
 config = configparser.ConfigParser()
@@ -235,10 +235,10 @@ def get_graph(force_reload: bool = False):
     global _GRAPH_CACHE, _GRAPH_CACHE_PATH, _GRAPH_CACHE_MTIME
 
     graph_path = config.get("paths", "graph")
-    # 优先使用 v5 修复版（如果存在）
-    v5_path = os.path.join(os.path.dirname(graph_path), "river_directed_v5.pkl")
-    if os.path.isfile(v5_path):
-        graph_path = v5_path
+    # 优先使用 v6 修复版（如果存在）
+    v6_path = os.path.join(os.path.dirname(graph_path), DIRECTED_GRAPH_FILENAME)
+    if os.path.isfile(v6_path):
+        graph_path = v6_path
     current_mtime = os.path.getmtime(graph_path)
 
     with _GRAPH_LOCK:
@@ -1320,7 +1320,8 @@ def _analyze_rainfall_core(time_str: str, pg_conf: dict, custom_timerange: str =
                             zone_rows = {r["idx"]: r for r in cur.fetchall()}
 
                             # 批量附近河流（站点 30 km 缓冲区）
-                            cur.execute("""
+                            river_table = pg_conf.get("river_table_full", RIVER_TABLE_FULL)
+                            cur.execute(f"""
                                 WITH pts AS (
                                     SELECT row_number() OVER () AS idx,
                                            ST_SetSRID(ST_MakePoint(lon, lat), 4326) AS geom
@@ -1331,7 +1332,7 @@ def _analyze_rainfall_core(time_str: str, pg_conf: dict, custom_timerange: str =
                                        FILTER (WHERE r.river_name IS NOT NULL AND r.river_name != '')
                                        AS rivers
                                 FROM pts p
-                                LEFT JOIN haihe_river_directed_full_v5 r
+                                LEFT JOIN {river_table} r
                                   ON ST_DWithin(r.geom::geography, p.geom::geography, 30000)
                                 GROUP BY p.idx
                             """, (lons, lats))

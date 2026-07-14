@@ -27,6 +27,11 @@ DEFAULT_THRESHOLDS_MM = {
     "extraordinary_24h": 250.0,
 }
 
+# 有向河网拓扑与河网表版本（v5 → v6 迁移后统一入口）
+DIRECTED_GRAPH_FILENAME = "river_directed_v6.pkl"
+RIVER_TABLE_VERSION = "v6"
+RIVER_TABLE_FULL = f"haihe_river_directed_full_{RIVER_TABLE_VERSION}"
+
 
 def _looks_like_nine_zone_codes(basin_codes: str) -> bool:
     """判断 basin_codes 是否为海河九分区编码格式（如 h9_01）。"""

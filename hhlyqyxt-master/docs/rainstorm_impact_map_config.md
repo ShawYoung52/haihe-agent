@@ -19,7 +19,7 @@ from utils import create_rainstorm_impact_map
 result = create_rainstorm_impact_geojson_file(
     start_time="2026-07-02 15:00:00",
     end_time="2026-07-03 15:00:00",
-    graph_path=r"E:\tj\line\result\river_directed_v5.pkl",
+    graph_path=r"E:\tj\line\result\river_directed_v6.pkl",
 )
 
 geojson_url = result["geojson_url"]
@@ -41,7 +41,7 @@ river_impact.geojson
 result = create_rainstorm_impact_map(
     start_time="2026-07-02 15:00:00",
     end_time="2026-07-03 15:00:00",
-    graph_path=r"E:\tj\line\result\river_directed_v5.pkl",
+    graph_path=r"E:\tj\line\result\river_directed_v6.pkl",
 )
 
 map_url = result["map_package_url"]
@@ -120,7 +120,7 @@ MUSIC_API_TIME_SHIFT_HOURS    调 MUSIC 时的时间偏移，当前默认 -8
 调用时传入：
 
 ```python
-graph_path=r"E:\tj\line\result\river_directed_v5.pkl"
+graph_path=r"E:\tj\line\result\river_directed_v6.pkl"
 ```
 
 这是下游 50km 追踪使用的有向河网拓扑。
@@ -131,7 +131,7 @@ graph_path=r"E:\tj\line\result\river_directed_v5.pkl"
 
 ```text
 schema      = public
-river_table = haihe_river_directed_full_v5
+river_table = haihe_river_directed_full_v6
 geom字段    = geom
 ID字段      = objectid
 河名字段    = src_name
@@ -172,7 +172,7 @@ from utils import create_rainstorm_impact_geojson_file
 result = create_rainstorm_impact_geojson_file(
     start_time="2026-07-02 15:00:00",
     end_time="2026-07-03 15:00:00",
-    graph_path=r"E:\tj\line\result\river_directed_v5.pkl",
+    graph_path=r"E:\tj\line\result\river_directed_v6.pkl",
 )
 
 print(result["geojson_url"])

@@ -18,6 +18,8 @@ from fastapi import FastAPI, HTTPException
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
 
+from constants import RIVER_TABLE_FULL
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -110,7 +112,7 @@ def _load_river_graph():
 def _analysis_river_by_name(pg_conf: dict, rivername: str) -> set[str]:
     """查询河流的下游河流（图拓扑 + DB 双重保障）"""
     schema = pg_conf.get("schema", "public")
-    table = pg_conf.get("river_table_full", "haihe_river_directed_full_v5") or "haihe_river_directed_full_v5"
+    table = pg_conf.get("river_table_full", RIVER_TABLE_FULL) or RIVER_TABLE_FULL
     downstream: set[str] = set()
 
     # 1. 尝试直接从数据库 direct_downstream_of_rivers 列读取
@@ -193,6 +195,8 @@ def query_rivers_by_boundary(req: BoundaryRequest):
     if not pg_conf:
         raise HTTPException(500, "缺少 [postgres] 数据库配置")
 
+    river_table = pg_conf.get("river_table_full", RIVER_TABLE_FULL) or RIVER_TABLE_FULL
+
     # 1. 解析边界
     geom = _parse_boundary(req.boundary)
     geojson_str = json.dumps(geom, ensure_ascii=False)
@@ -207,9 +211,9 @@ def query_rivers_by_boundary(req: BoundaryRequest):
         ) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 2. 相交河流
-                cur.execute("""
+                cur.execute(f"""
                     SELECT r.river_name, ST_AsGeoJSON(ST_Collect(r.geom)) AS river_geom, COUNT(*) AS segment_count
-                    FROM haihe_river_directed_full_v5 r
+                    FROM {river_table} r
                     WHERE ST_Intersects(r.geom, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326))
                       AND r.river_name IS NOT NULL AND r.river_name != ''
                     GROUP BY r.river_name ORDER BY r.river_name

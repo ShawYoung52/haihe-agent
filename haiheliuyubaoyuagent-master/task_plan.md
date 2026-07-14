@@ -1,68 +1,68 @@
-# Task Plan: 修复 Chainlit 实时思考前端不可见
+# Task Plan: 有向图 pkl 与数据库表从 v5 升级到 v6
 
-**创建时间:** 2026-07-08
-**当前阶段:** Phase 6
+**创建时间:** 2026-07-14
+**当前阶段:** Phase 5
 
 ## Goal
-让海河流域气象智能体在 Chainlit 前端像 DeepSeek 一样实时展示“思考过程”可折叠块，而不是只输出最终答案。
+将项目代码中所有引用 `river_directed_v5.pkl` 及含 `v5` 版本号的数据库表/字段从 v5 更新为 v6，确保牵引智能体、问答智能体 MCP 工具、本地工具及测试使用一致的最新图版本。
 
 ## Current Phase
-Phase 6: Fix Auto-Collapse After Final Answer
+Phase 5: Code Review, Simplification, Memory Update
 
 ## Phases
 
 ### Phase 1: Requirements & Discovery
-- [x] 复现用户问题：日志显示思考生成成功，但前端无展示
-- [x] 检查 `ReasoningStep` 与 Chainlit `cl.Step` 的使用方式
-- [x] 检查 `.chainlit/config.toml` 中 `cot` 配置
-- [x] 确认 Chainlit 默认 UI 对 `type="llm"` step 及嵌套 stage 的展示规则
+- [x] 全项目搜索 v5 相关引用（文件路径、字符串、配置键、表名）
+- [x] 区分必须升级项与可保留项（如历史 diff 文件、git 提交哈希）
+- [x] 识别跨仓库依赖：`../hhlyqyxt-master/utils/rainfall_impact_geojson.py`、`haihe-weather-analyzer-mcp/server.py`、`haihe-weather-analyzer-mcp/fixed_rainfall_impact_tool.py` 等
+- [x] 确认 v6 文件/表名命名规范（如 `river_directed_v6.pkl`、表名/字段模式）
 - **Status:** complete
 
-### Phase 2: Planning & Structure
-- [x] 确定根因：`ReasoningStep.append` 把 token 写进嵌套子 stage，父 step output 为空
-- [x] 确定修复方案：让 `append` 始终刷新父 step output；`stage` 仅作为业务阶段标题追加到父 output
-- [x] 更新测试断言以匹配新行为
+### Phase 2: Impact Analysis
+- [x] 列出所有需修改文件及对应修改点
+- [x] 评估是否有运行时代码动态构造 v5 字符串
+- [x] 确认配置项、fallback 路径、默认路径是否需要同步
+- [x] 识别测试数据/模拟对象是否需要更新
 - **Status:** complete
 
 ### Phase 3: Implementation
-- [x] 修改 `message_orchestrator.py` 中的 `ReasoningStep`
-- [x] 调整 `stage()` / `append()` / `close()` 行为
-- [x] 确保 planner 与 fast path 的思考流都落到可见 output
+- [x] 更新代码中的 v5 → v6 引用
+- [x] 更新配置文件/默认路径
+- [x] 更新测试与桩代码
+- [x] 保持 `_resolve_graph_path` 等版本选择逻辑与 v6 命名一致
 - **Status:** complete
 
 ### Phase 4: Testing & Verification
-- [x] 运行 `test_reasoning_step.py`
-- [x] 运行 `test_thinking.py` / `test_thinking_summary.py` / `test_fast_paths.py`
-- [x] 红绿回归验证：还原旧代码后新测试失败，恢复修复后通过
-- [x] 启动 Chainlit 最小示例 + Playwright 验证 UI：可看到“已使用 🤔 思考过程”折叠块及思考内容
+- [x] 运行 `pytest ../hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py`
+- [x] 运行 `python tests/test_fast_paths.py`
+- [x] 运行 `cd chainlitexam && pytest tests/ -v`
+- [x] 运行 `py_compile` 检查修改文件语法
+- [ ] 如果本地存在 v6 pkl/数据库，进行端到端冒烟测试
 - **Status:** complete
 
-### Phase 5: Code Review & Completion
-- [x] 使用 `code-review` 技能检查改动（9 角度扫描 + 关键问题已处理）
-- [x] 使用 `superpowers:verification-before-completion` 确认验证结果
-- [x] 提交/总结
+### Phase 5: Code Review, Simplification, Memory Update
+- [x] 使用 code-review / review 技能扫描改动
+- [x] 使用 code-simplifier 清理重复版本号硬编码
+- [x] 使用 superpowers:verification-before-completion 最终验证
+- [x] 更新 CLAUDE.md 与 memory
 - **Status:** complete
 
-### Phase 6: Fix Auto-Collapse After Final Answer
-- [x] 定位思考过程未在回答结束后折叠的根因：生产环境 Chainlit 2.9.6 不支持 `auto_collapse`
-- [x] 实施后端的旧版本兼容与运行时警告
-- [x] 简化 `ReasoningStep` 和测试 mock
-- [x] 更新 CLAUDE.md 明确版本要求
-- [x] 运行 code-review、code-simplifier、verification-before-completion
-- [x] 准备 Chainlit 2.11.1 离线升级包及 systemd 安装/回滚脚本
-- **Status:** complete (requires production Chainlit upgrade to >= 2.10.0 for actual UI auto-collapse)
+### Phase 6: Commit
+- [ ] 整理 git diff
+- [ ] 按仓库提交规范创建 commit
+- [ ] 推送（如用户要求）
+- **Status:** pending
 
 ## Key Questions
-1. Chainlit 默认 UI 是否能展示 `type="llm"` 且 output 非空的 step？ → `cot=full` 时应可展示
-2. 为什么当前前端看不到？ → token 被写入嵌套子 stage，父 step output 为空
-3. 是否需要切换 step type 为 `"tool"`？ → 先保持 `"llm"`，`cot=full` 已启用；若仍不可见再评估
+1. v6 pkl 文件实际路径是什么？是否仍放在 `Service/river_directed_v6.pkl`？
+2. 数据库中受影响的表名/字段有哪些？是否有视图或存储过程引用 v5？
+3. 是否有硬编码的 `v5` 用于非版本语义（如变量名 `full_v5` 是否为数据源标识而非可升级版本号）？
+4. `server.py` 中覆盖的 `DEFAULT_DIRECT_GRAPH_MATCH_KM` 与版本升级是否有关？
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| 让父 `cl.Step.output` 始终承载完整思考文本 | Chainlit UI 默认只渲染父 step 的 output；子 stage 在当前 CoT 视图下不可见 |
-| `stage()` 改为向父 output 追加阶段标题 | 保留业务阶段语义，同时让用户在可折叠块里看到阶段切换 |
-| 保留 `type="llm"` | 语义正确，且 `.chainlit/config.toml` 已设置 `cot="full"` |
+| 待补充 | 待搜索分析后填写 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
@@ -70,6 +70,5 @@ Phase 6: Fix Auto-Collapse After Final Answer
 | - | - | - |
 
 ## Notes
-- 根因文件：`chainlitexam/message_orchestrator.py` 中 `ReasoningStep` 类
-- 关键方法：`append()` 在 `_current_stage` 存在时只更新子 stage；`close()` 时父 output 可能为 "思考完成"
-- 下游回调：`chainlitexam/chain_gzt.py` 的 `_process_thinking_stream` / `_process_planner_stream` 调用 `reasoning_step.append(token)`
+- 起始线索：用户已打开 `haihe-weather-analyzer-mcp/server.py`，可能含 v5 硬编码。
+- 相关记忆：[[rain-impact-river-defaults]] 提到 `_resolve_graph_path` 优先选择同目录 `river_directed_v5.pkl`。
