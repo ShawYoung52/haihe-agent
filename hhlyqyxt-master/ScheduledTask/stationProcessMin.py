@@ -437,6 +437,7 @@ def calcmaxdataseg5min():
             param = dict(lon=row["lan"], lat=row["lat"],overlimit=row["overLimit"],datetime=row["bjDatetime"].strftime("%Y-%m-%d %H:%M:%S"),stationname=row["stationName"],source=row["source"],stationid=row["stationId"], minute_monitor_id=qmm.id)
             session.execute(sql, param)
     session.commit()
+    session.close()
 
     # 应急响应监测入库
     run_emergency_response_monitor(
@@ -444,8 +445,6 @@ def calcmaxdataseg5min():
         datatime=end_time,
         minute_monitor_id=qmm.id,
     )
-
-    session.close()
 
 
 def circleadd5min():

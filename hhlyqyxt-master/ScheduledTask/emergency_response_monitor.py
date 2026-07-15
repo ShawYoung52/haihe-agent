@@ -186,6 +186,10 @@ def run_emergency_response_monitor(
         logger.warning("CSV 文件不存在: %s", csv_path)
         return None
 
+    if pd.read_csv(csv_path).empty:
+        logger.warning("CSV 文件为空: %s", csv_path)
+        return None
+
     stats = compute_emergency_response_stats(csv_path, datatime)
     record = QyEmergencyResponseMonitor(
         minute_monitor_id=minute_monitor_id, **stats
