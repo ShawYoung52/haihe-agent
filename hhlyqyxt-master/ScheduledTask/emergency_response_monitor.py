@@ -28,9 +28,10 @@ TEDABAOYU_LOWER = 250.0
 def _normalize_station_level(value) -> str:
     """将 Station_levl 归一化为 3 位零填充字符串。"""
     try:
-        return str(int(value)).zfill(3)
+        value = int(value)
     except (ValueError, TypeError):
-        return str(value).zfill(3)
+        pass
+    return str(value).zfill(3)
 
 
 def _parse_datatime(datatime: Union[str, datetime]) -> datetime:
@@ -45,16 +46,66 @@ def _parse_datatime(datatime: Union[str, datetime]) -> datetime:
     raise ValueError(f"无法解析 datatime: {datatime}")
 
 
-def compute_emergency_response_stats(csv_path: str, datatime: Union[str, datetime]) -> dict:
+def _read_max_datetime(csv_path: str) -> datetime:
+    """读取 CSV 中最大的 Datetime。"""
+    df = pd.read_csv(csv_path)
+    df["Datetime"] = pd.to_datetime(df["Datetime"])
+    return df["Datetime"].max()
+
+
+def _sum_precip_by_station(df: pd.DataFrame) -> pd.DataFrame:
+    """按站点汇总降水量，返回包含 Station_Id_C 与 PRE 的 DataFrame。"""
+    return df.groupby("Station_Id_C")["PRE"].sum().reset_index()
+
+
+def _count_by_threshold(
+    series: pd.Series, lower: float, upper: Optional[float] = None
+) -> int:
+    """统计满足阈值区间的元素个数。"""
+    if upper is None:
+        return int((series >= lower).sum())
+    return int(((series >= lower) & (series < upper)).sum())
+
+
+def _ratio(count: int, total: int) -> float:
+    """计算占比，total 为 0 时返回 0。"""
+    return round(count / total, 4) if total > 0 else 0.0
+
+
+def _determine_response_level(
+    ratio_12h_baoyu: float,
+    ratio_24h_baoyu: float,
+    ratio_24h_dabaoyu: float,
+    ratio_24h_tedabaoyu: float,
+) -> int:
+    """按优先级确定应急响应级别，数字越小级别越高。"""
+    if ratio_24h_tedabaoyu >= 0.15:
+        return 1
+    if ratio_24h_dabaoyu >= 0.15:
+        return 2
+    if ratio_12h_baoyu >= 0.20:
+        return 3
+    if ratio_24h_baoyu >= 0.20:
+        return 4
+    return 0
+
+
+def compute_emergency_response_stats(
+    csv_path: str, datatime: Optional[Union[str, datetime]] = None
+) -> dict:
     """从 CSV 计算应急响应统计指标。
 
     Args:
         csv_path: 5 分钟降水 CSV 文件路径。
         datatime: 统计结束时间，窗口为 (datatime - 12h/24h, datatime]。
+            为 None 时使用 CSV 中的最大时间。
 
     Returns:
         包含各阈值站点数、占比和响应级别的字典。
     """
+    if datatime is None:
+        datatime = _read_max_datetime(csv_path)
+
     end_time = _parse_datatime(datatime)
     start_12h = end_time - timedelta(hours=12)
     start_24h = end_time - timedelta(hours=24)
@@ -68,58 +119,38 @@ def compute_emergency_response_stats(csv_path: str, datatime: Union[str, datetim
     df = df.dropna(subset=["PRE"])
     df["Station_levl_norm"] = df["Station_levl"].apply(_normalize_station_level)
 
-    # 国家级站点
     national_df = df[df["Station_levl_norm"].isin(NATIONAL_STATION_LEVELS)].copy()
 
-    # 累计每个站点在 24h 窗口内的降水量（12h 窗口为其子集）
     window_24h = national_df[
         (national_df["Datetime"] > start_24h) & (national_df["Datetime"] <= end_time)
     ]
-    sum_pre_24h = (
-        window_24h.groupby("Station_Id_C")["PRE"].sum().reset_index()
-        if not window_24h.empty
-        else pd.DataFrame(columns=["Station_Id_C", "PRE"])
-    )
-
     window_12h = national_df[
         (national_df["Datetime"] > start_12h) & (national_df["Datetime"] <= end_time)
     ]
-    sum_pre_12h = (
-        window_12h.groupby("Station_Id_C")["PRE"].sum().reset_index()
-        if not window_12h.empty
-        else pd.DataFrame(columns=["Station_Id_C", "PRE"])
-    )
+
+    sum_pre_24h = _sum_precip_by_station(window_24h)
+    sum_pre_12h = _sum_precip_by_station(window_12h)
 
     total = len(sum_pre_24h)
 
-    def _count_by_threshold(series: pd.Series, lower: float, upper: Optional[float] = None) -> int:
-        if upper is None:
-            return int((series >= lower).sum())
-        return int(((series >= lower) & (series < upper)).sum())
-
     station_12h_baoyu = _count_by_threshold(sum_pre_12h["PRE"], BAOYU_LOWER, DABAOYU_LOWER)
     station_24h_baoyu = _count_by_threshold(sum_pre_24h["PRE"], BAOYU_LOWER, DABAOYU_LOWER)
-    station_24h_dabaoyu = _count_by_threshold(sum_pre_24h["PRE"], DABAOYU_LOWER, TEDABAOYU_LOWER)
+    station_24h_dabaoyu = _count_by_threshold(
+        sum_pre_24h["PRE"], DABAOYU_LOWER, TEDABAOYU_LOWER
+    )
     station_24h_tedabaoyu = _count_by_threshold(sum_pre_24h["PRE"], TEDABAOYU_LOWER)
-
-    def _ratio(count: int, total: int) -> float:
-        return round(count / total, 4) if total > 0 else 0.0
 
     ratio_12h_baoyu = _ratio(station_12h_baoyu, total)
     ratio_24h_baoyu = _ratio(station_24h_baoyu, total)
     ratio_24h_dabaoyu = _ratio(station_24h_dabaoyu, total)
     ratio_24h_tedabaoyu = _ratio(station_24h_tedabaoyu, total)
 
-    # 响应级别：最高优先级（数字越小级别越高）
-    response_level = 0
-    if ratio_24h_tedabaoyu >= 0.15:
-        response_level = 1
-    elif ratio_24h_dabaoyu >= 0.15:
-        response_level = 2
-    elif ratio_12h_baoyu >= 0.20:
-        response_level = 3
-    elif ratio_24h_baoyu >= 0.20:
-        response_level = 4
+    response_level = _determine_response_level(
+        ratio_12h_baoyu,
+        ratio_24h_baoyu,
+        ratio_24h_dabaoyu,
+        ratio_24h_tedabaoyu,
+    )
 
     return {
         "datatime": end_time,
@@ -155,26 +186,9 @@ def run_emergency_response_monitor(
         logger.warning("CSV 文件不存在: %s", csv_path)
         return None
 
-    if datatime is None:
-        df = pd.read_csv(csv_path)
-        df["Datetime"] = pd.to_datetime(df["Datetime"])
-        datatime = df["Datetime"].max()
-
     stats = compute_emergency_response_stats(csv_path, datatime)
-
     record = QyEmergencyResponseMonitor(
-        datatime=stats["datatime"],
-        minute_monitor_id=minute_monitor_id,
-        total_national_stations=stats["total_national_stations"],
-        station_12h_baoyu=stats["station_12h_baoyu"],
-        ratio_12h_baoyu=stats["ratio_12h_baoyu"],
-        station_24h_baoyu=stats["station_24h_baoyu"],
-        ratio_24h_baoyu=stats["ratio_24h_baoyu"],
-        station_24h_dabaoyu=stats["station_24h_dabaoyu"],
-        ratio_24h_dabaoyu=stats["ratio_24h_dabaoyu"],
-        station_24h_tedabaoyu=stats["station_24h_tedabaoyu"],
-        ratio_24h_tedabaoyu=stats["ratio_24h_tedabaoyu"],
-        response_level=stats["response_level"],
+        minute_monitor_id=minute_monitor_id, **stats
     )
 
     session = Session()
