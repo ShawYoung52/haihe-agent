@@ -1,5 +1,36 @@
 from elasticsearch import Elasticsearch
 from fastapi import APIRouter
+from sqlalchemy import desc
+from typing import Optional
+
+from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
+from utils.db import Session
+
+
+def _serialize_emergency_response(record: QyEmergencyResponseMonitor) -> dict:
+    """将 QyEmergencyResponseMonitor 记录序列化为 API 响应字典。"""
+    return {
+        "id": record.id,
+        "datatime": _format_datetime(record.datatime),
+        "minute_monitor_id": record.minute_monitor_id,
+        "total_national_stations": record.total_national_stations,
+        "station_12h_baoyu": record.station_12h_baoyu,
+        "ratio_12h_baoyu": float(record.ratio_12h_baoyu),
+        "station_24h_baoyu": record.station_24h_baoyu,
+        "ratio_24h_baoyu": float(record.ratio_24h_baoyu),
+        "station_24h_dabaoyu": record.station_24h_dabaoyu,
+        "ratio_24h_dabaoyu": float(record.ratio_24h_dabaoyu),
+        "station_24h_tedabaoyu": record.station_24h_tedabaoyu,
+        "ratio_24h_tedabaoyu": float(record.ratio_24h_tedabaoyu),
+        "response_level": record.response_level,
+        "create_time": _format_datetime(record.create_time),
+    }
+
+
+def _format_datetime(value) -> Optional[str]:
+    """将 datetime 格式化为字符串，None 时返回 None。"""
+    return value.strftime("%Y-%m-%d %H:%M:%S") if value else None
+
 
 toolrouter = APIRouter(
     prefix='/tool',
@@ -198,3 +229,21 @@ def search_poi_by_dis(keyword: str,lon:float,lat:float, size: int = 10,distance:
         "rows": fuzzy_hits if fuzzy_hits else None,
         "hits": fuzzy_hits
     }
+
+
+@toolrouter.get("/emergency-response/latest")
+def get_latest_emergency_response(limit: int = 1):
+    """返回最新的应急响应监测记录。"""
+    limit = max(1, min(limit, 100))
+
+    session = Session()
+    try:
+        rows = (
+            session.query(QyEmergencyResponseMonitor)
+            .order_by(desc(QyEmergencyResponseMonitor.datatime))
+            .limit(limit)
+            .all()
+        )
+        return [_serialize_emergency_response(r) for r in rows]
+    finally:
+        session.close()
