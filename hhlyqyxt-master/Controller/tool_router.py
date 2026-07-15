@@ -1,5 +1,9 @@
 from elasticsearch import Elasticsearch
 from fastapi import APIRouter
+from sqlalchemy import desc
+
+from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
+from utils.db import Session
 
 toolrouter = APIRouter(
     prefix='/tool',
@@ -198,3 +202,40 @@ def search_poi_by_dis(keyword: str,lon:float,lat:float, size: int = 10,distance:
         "rows": fuzzy_hits if fuzzy_hits else None,
         "hits": fuzzy_hits
     }
+
+
+@toolrouter.get("/emergency-response/latest")
+def get_latest_emergency_response(limit: int = 1):
+    """返回最新的应急响应监测记录。"""
+    if limit < 1 or limit > 100:
+        limit = 1
+
+    session = Session()
+    try:
+        rows = (
+            session.query(QyEmergencyResponseMonitor)
+            .order_by(desc(QyEmergencyResponseMonitor.datatime))
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "datatime": r.datatime.strftime("%Y-%m-%d %H:%M:%S") if r.datatime else None,
+                "minute_monitor_id": r.minute_monitor_id,
+                "total_national_stations": r.total_national_stations,
+                "station_12h_baoyu": r.station_12h_baoyu,
+                "ratio_12h_baoyu": float(r.ratio_12h_baoyu),
+                "station_24h_baoyu": r.station_24h_baoyu,
+                "ratio_24h_baoyu": float(r.ratio_24h_baoyu),
+                "station_24h_dabaoyu": r.station_24h_dabaoyu,
+                "ratio_24h_dabaoyu": float(r.ratio_24h_dabaoyu),
+                "station_24h_tedabaoyu": r.station_24h_tedabaoyu,
+                "ratio_24h_tedabaoyu": float(r.ratio_24h_tedabaoyu),
+                "response_level": r.response_level,
+                "create_time": r.create_time.strftime("%Y-%m-%d %H:%M:%S") if r.create_time else None,
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
