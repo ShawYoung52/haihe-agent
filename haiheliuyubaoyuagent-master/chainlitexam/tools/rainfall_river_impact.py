@@ -54,6 +54,37 @@ def _load_mcp_config() -> configparser.ConfigParser:
     return config
 
 
+def _call_affected_river_network(
+    impact_mod: Any,
+    tools_mod: Any,
+    time_str: str,
+    start_time: str,
+    end_time: str,
+    rainfall_threshold_mm: float,
+    max_edges: int,
+    include_background: bool,
+    downstream_km: float,
+    direct_graph_match_km: float,
+) -> dict:
+    config = _load_mcp_config()
+    pg_conf = dict(config["postgres"])
+    graph_path = config.get("paths", "graph", fallback="")
+    return impact_mod.build_affected_river_network_result(
+        time_str=time_str,
+        start_time=start_time,
+        end_time=end_time,
+        rainfall_threshold_mm=rainfall_threshold_mm,
+        max_edges=max_edges,
+        include_background=include_background,
+        downstream_km=downstream_km,
+        direct_graph_match_km=direct_graph_match_km,
+        pg_conf=pg_conf,
+        analyze_rainfall_core=tools_mod._analyze_rainfall_core,
+        rain_levels=tools_mod.RAIN_LEVELS,
+        graph_path=graph_path,
+    )
+
+
 def build_rainfall_river_impact_tools() -> list:
     """返回问答智能体本地暴雨影响河流工具列表。"""
 
@@ -89,10 +120,9 @@ def build_rainfall_river_impact_tools() -> list:
             }
 
         try:
-            config = _load_mcp_config()
-            pg_conf = dict(config["postgres"])
-            graph_path = config.get("paths", "graph", fallback="")
-            return impact_mod.build_affected_river_network_result(
+            return _call_affected_river_network(
+                impact_mod=impact_mod,
+                tools_mod=tools_mod,
                 time_str=time_str,
                 start_time=start_time,
                 end_time=end_time,
@@ -101,10 +131,6 @@ def build_rainfall_river_impact_tools() -> list:
                 include_background=include_background,
                 downstream_km=downstream_km,
                 direct_graph_match_km=direct_graph_match_km,
-                pg_conf=pg_conf,
-                analyze_rainfall_core=tools_mod._analyze_rainfall_core,
-                rain_levels=tools_mod.RAIN_LEVELS,
-                graph_path=graph_path,
             )
         except Exception as exc:
             logger.exception("[RainfallRiverImpact] 调用失败")

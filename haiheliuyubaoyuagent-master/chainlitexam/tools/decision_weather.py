@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from langchain_core.tools import tool
 
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
+    _decision_hourly_window,
     _decision_period_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
@@ -78,7 +80,8 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             if slots.get("need_clarification"):
                 return str(slots.get("clarification_question") or "请补充具体位置和查询时段。").strip()
 
-            normalized = _normalize_decision_weather_slots(slots)
+            hourly_request = _decision_hourly_window(user_text, slots.get("question_type"), datetime.now())
+            normalized = _normalize_decision_weather_slots(slots, hourly_request)
             if normalized.get("error"):
                 return normalized["error"]
 
@@ -138,6 +141,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 forecast_payload if isinstance(forecast_payload, dict) else {},
                 target_start,
                 target_end,
+                hourly_request,
             )
             facts["poi"] = {
                 "name": point_name,
@@ -147,6 +151,8 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             }
             facts["matched_station"] = nearest
             facts["question_type"] = slots.get("question_type") or "general_weather"
+            if hourly_request:
+                facts["question_type"] = hourly_request["mode"]
 
             final_text = await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
             append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)

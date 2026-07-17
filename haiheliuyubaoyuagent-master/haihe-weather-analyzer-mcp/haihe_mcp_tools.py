@@ -2872,7 +2872,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         payload = response.json()
         result_data = payload.get("resultData") or {}
 
-        return {
+        result = {
             "data_source": "天津市气象台滚动预报",
             "forecast_type": "rolling_forecast",
             "query_mode": "point" if point_mode else "region",
@@ -2900,6 +2900,13 @@ def register_haihe_tools(mcp: FastMCP) -> None:
                 locations=locations,
             ),
         }
+        if os.getenv("DEBUG_ROLLING_FORECAST", "").strip().lower() in {"1", "true", "yes", "on"}:
+            print(
+                "[query_rolling_forecast] full result:\n"
+                + json.dumps(result, ensure_ascii=False, default=str, indent=2),
+                flush=True,
+            )
+        return result
 
     @mcp.tool()
     def get_haihe_station_observations(

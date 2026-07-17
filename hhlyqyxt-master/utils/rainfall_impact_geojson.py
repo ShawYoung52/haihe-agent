@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import heapq
 import json
+import logging
 import math
 import os
 import pickle
@@ -20,12 +21,64 @@ from typing import Any, Iterator
 import pandas as pd
 
 KM_PER_DEG = 111.32
+logger = logging.getLogger(__name__)
 DIRECTED_GRAPH_FILENAME = "river_directed_v6.pkl"
 RIVER_TABLE_VERSION = "v6"
 DEFAULT_RIVER_TABLE = f"haihe_river_directed_full_{RIVER_TABLE_VERSION}"
 DEFAULT_GEOM_COLUMN = "geom"
 DEFAULT_OBJECTID_COLUMN = "objectid"
 DEFAULT_RIVER_NAME_COLUMN = "src_name"
+
+# 滦河系在合并后的 pkl/full_v6 中只保存了单字缩写，这里维护 objectid -> 全名的映射。
+# 若 graph 文件同目录存在 `{stem}_luan_names.json`，会以外部文件内容覆盖/扩展本默认映射。
+_DEFAULT_LUAN_NAME_MAPPING: dict[str, str] = {
+    "1": "滦河",
+    "2": "兴州河",
+    "3": "闪电河",
+    "4": "洒河",
+    "5": "洒河",
+    "6": "洋河",
+    "7": "洋河",
+    "8": "东河",
+    "9": "陡河",
+    "10": "二滦河",
+    "11": "大石河",
+    "12": "冷口沙河",
+    "13": "青龙河",
+    "14": "瀑河",
+    "15": "老牛河",
+    "16": "伊逊河",
+    "17": "蚁蚂吐河",
+    "18": "武烈河",
+    "19": "滦河",
+    "20": "小滦河",
+    "21": "柳河",
+}
+
+
+def _load_luan_name_mapping(graph_path: str | os.PathLike | None) -> dict[str, str]:
+    """加载滦河系 objectid -> 全名映射，外部 JSON 优先于内置默认。"""
+    mapping = _DEFAULT_LUAN_NAME_MAPPING.copy()
+    if not graph_path:
+        return mapping
+    try:
+        path = Path(graph_path)
+        json_path = path.parent / f"{path.stem}_luan_names.json"
+        if json_path.is_file():
+            with open(json_path, encoding="utf-8") as f:
+                mapping.update({str(k): str(v) for k, v in json.load(f).items()})
+    except Exception:
+        logger.warning("加载滦河系名称映射文件失败，使用内置默认映射", exc_info=True)
+    return mapping
+
+
+def _apply_luan_names(features: list[dict], mapping: dict[str, str]) -> None:
+    for feature in features:
+        props = feature.get("properties") or {}
+        if not props.get("is_luan"):
+            continue
+        objectid = str(props.get("objectid") or "")
+        props["river_name"] = mapping.get(objectid, _normalize_river_name(props.get("river_name")))
 
 _GRAPH_CACHE = None
 _GRAPH_CACHE_PATH: str | None = None
@@ -167,7 +220,7 @@ def build_rainstorm_impact_thematic_map(
         if should_close:
             conn.close()
 
-    river_geojson = _build_river_geojson(direct_rows, downstream_rows)
+    river_geojson = _build_river_geojson(direct_rows, downstream_rows, graph_path=graph_path)
     segments = geojson_to_plot_segments(river_geojson, rainstorm_stations)
     if max_segments and max_segments > 0:
         segments = segments[:max_segments]
@@ -175,8 +228,8 @@ def build_rainstorm_impact_thematic_map(
     result.update({
         "river_geojson": river_geojson,
         "segments": segments,
-        "direct_rivers": _sorted_river_names(direct_rows),
-        "downstream_rivers": _sorted_river_names(downstream_rows),
+        "direct_rivers": _sorted_feature_river_names(river_geojson, "direct_buffer"),
+        "downstream_rivers": _sorted_feature_river_names(river_geojson, "downstream_50km"),
         "affected_rivers": sorted({s["rivername"] for s in segments if s.get("rivername")}),
         "downstream_edges": downstream_edges,
         "downstream_start_stats": downstream_start_stats,
@@ -351,30 +404,34 @@ def _empty_result(
     return result
 
 
+def _normalize_station(station: dict, threshold_mm: float) -> dict | None:
+    lon = _safe_float(station.get("lon"))
+    lat = _safe_float(station.get("lat"))
+    rainfall = _safe_float(station.get("rain_24h", station.get("rainfall")))
+    if lon is None or lat is None or rainfall is None or rainfall < threshold_mm:
+        return None
+    return {
+        "station_id": station.get("station_id") or station.get("Station_Id_C") or "",
+        "station_name": station.get("station_name") or station.get("name") or "",
+        "lon": lon,
+        "lat": lat,
+        "rain_24h": rainfall,
+        "rainfall": rainfall,
+        "level": station.get("level", ""),
+    }
+
+
 def _normalize_stations(stations: list[dict], threshold_mm: float) -> list[dict]:
-    normalized = []
-    for station in stations or []:
-        lon = _safe_float(station.get("lon"))
-        lat = _safe_float(station.get("lat"))
-        rainfall = _safe_float(station.get("rain_24h", station.get("rainfall")))
-        if lon is None or lat is None or rainfall is None or rainfall < threshold_mm:
-            continue
-        normalized.append({
-            "station_id": station.get("station_id") or station.get("Station_Id_C") or "",
-            "station_name": station.get("station_name") or station.get("name") or "",
-            "lon": lon,
-            "lat": lat,
-            "rain_24h": rainfall,
-            "rainfall": rainfall,
-            "level": station.get("level", ""),
-        })
+    normalized = [
+        s for s in (_normalize_station(st, threshold_mm) for st in stations or []) if s
+    ]
     return sorted(normalized, key=lambda item: item["rain_24h"], reverse=True)
 
 
 def _ensure_river_columns(cur, schema: str, table: str, geom_col: str, objectid_col: str, river_name_col: str) -> None:
     cur.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name=%s", (schema, table))
     columns = {str(row["column_name"]) for row in cur.fetchall()}
-    missing = {geom_col, objectid_col, river_name_col} - columns
+    missing = {geom_col, objectid_col, river_name_col, "is_luan"} - columns
     if missing:
         raise RuntimeError(f"河流表 {schema}.{table} 缺少字段：{sorted(missing)}")
 
@@ -407,15 +464,17 @@ def _query_direct_rows(
     buffer_km: float,
     direct_station_top_n: int,
 ) -> list[dict]:
+    """查询暴雨站点缓冲区内直接命中的河段，按 objectid 聚合为 MultiLineString。"""
     cur.execute(f"""
         WITH river_parts AS (
             SELECT r.{_qi(objectid_col)}::text AS objectid,
                    COALESCE(NULLIF(TRIM(r.{_qi(river_name_col)}::text), ''), '未知') AS river_name,
+                   COALESCE(r.is_luan, false) AS is_luan,
                    (ST_Dump(r.{_qi(geom_col)})).geom AS geom
             FROM {_qi(schema)}.{_qi(table)} r
             WHERE r.{_qi(geom_col)} IS NOT NULL AND NOT ST_IsEmpty(r.{_qi(geom_col)})
         ), station_hits AS (
-            SELECT p.objectid, p.river_name, p.geom,
+            SELECT p.objectid, p.river_name, p.is_luan, p.geom,
                    s.station_id, s.station_name, s.lon, s.lat, s.rain_24h,
                    ST_Distance(p.geom::geography, s.geom::geography) / 1000.0 AS station_distance_km,
                    ROW_NUMBER() OVER (
@@ -428,22 +487,27 @@ def _query_direct_rows(
             SELECT * FROM station_hits
             WHERE %(top_n)s <= 0 OR station_rank <= %(top_n)s
         )
-        SELECT objectid, objectid AS id, river_name,
-               ST_AsGeoJSON(geom) AS geom_json,
-               ST_Length(geom::geography) / 1000.0 AS length_km,
+        SELECT objectid, objectid AS id, river_name, is_luan,
+               ST_AsGeoJSON(ST_Multi(ST_Collect(geom))) AS geom_json,
+               SUM(ST_Length(geom::geography)) / 1000.0 AS length_km,
                MIN(station_distance_km) AS min_station_distance_km,
                COUNT(DISTINCT station_id) AS trigger_station_count,
                jsonb_agg(DISTINCT jsonb_build_object(
                    'station_id',station_id,'station_name',station_name,'lon',lon,'lat',lat,'rain_24h',rain_24h
                )) AS trigger_stations
         FROM selected_hits
-        GROUP BY objectid, river_name, geom
+        GROUP BY objectid, river_name, is_luan
         ORDER BY min_station_distance_km, river_name, objectid
     """, {"buffer_m": float(buffer_km) * 1000.0, "top_n": int(direct_station_top_n or 0)})
     return list(cur.fetchall())
 
 
 def _query_downstream_rows(cur, schema: str, table: str, geom_col: str, objectid_col: str, river_name_col: str, edges: list[dict], buffer_km: float) -> list[dict]:
+    """根据下游追踪边 keys 查询数据库几何，并裁剪到保留长度。
+
+    对于在 full_v6 表中找不到匹配 objectid 几何的下游边，回退使用 pkl 边的直线几何，
+    保证每条有下游的 direct_buffer 都能在输出中看到 50km 下游追踪结果。
+    """
     if not edges:
         return []
     _create_downstream_temp(cur, edges)
@@ -451,42 +515,73 @@ def _query_downstream_rows(cur, schema: str, table: str, geom_col: str, objectid
         WITH river_parts AS (
             SELECT r.{_qi(objectid_col)}::text AS objectid,
                    COALESCE(NULLIF(TRIM(r.{_qi(river_name_col)}::text), ''), '未知') AS db_river_name,
+                   COALESCE(r.is_luan, false) AS is_luan,
                    (ST_Dump(r.{_qi(geom_col)})).geom AS geom
             FROM {_qi(schema)}.{_qi(table)} r
             WHERE r.{_qi(geom_col)} IS NOT NULL AND NOT ST_IsEmpty(r.{_qi(geom_col)})
         ), candidates AS (
-            SELECT e.*, p.db_river_name, ST_LineMerge(p.geom) AS line_geom,
-                   ST_Distance(p.geom::geography, e.pkl_line::geography) / 1000.0 AS match_distance_km
+            SELECT e.edge_key, e.objectid, e.river_name,
+                   e.min_distance_km, e.end_distance_km, e.keep_km, e.clip_fraction,
+                   e.is_direct_graph_edge, e.from_x, e.from_y, e.to_x, e.to_y, e.pkl_line,
+                   p.db_river_name, p.is_luan AS db_is_luan, e.is_luan AS pkl_is_luan, p.geom AS part_geom,
+                   ST_Distance(p.geom::geography, e.pkl_line::geography) / 1000.0 AS match_distance_km,
+                   CASE WHEN p.is_luan = e.is_luan THEN 0 ELSE 1 END AS match_priority
             FROM river_parts p
             JOIN tmp_downstream_edges e ON p.objectid = e.objectid
             WHERE e.pkl_line IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM tmp_rain24h_impact_stations s
-                  WHERE ST_DWithin(p.geom::geography, s.geom::geography, %(buffer_m)s)
-              )
-        ), best_part AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY edge_key ORDER BY match_distance_km) AS rn
+              AND GeometryType(p.geom) = 'LINESTRING'
+        ), evaluated_parts AS (
+            SELECT edge_key, objectid, river_name, db_river_name, db_is_luan, pkl_is_luan,
+                   min_distance_km, end_distance_km, keep_km, clip_fraction, is_direct_graph_edge,
+                   from_x, from_y, to_x, to_y, match_distance_km, match_priority,
+                   part_geom,
+                   ST_Length(part_geom::geography) / 1000.0 AS part_length_km,
+                   ST_LineLocatePoint(part_geom, ST_SetSRID(ST_MakePoint(from_x, from_y),4326)) AS from_frac,
+                   ST_LineLocatePoint(part_geom, ST_SetSRID(ST_MakePoint(to_x, to_y),4326)) AS to_frac
             FROM candidates
-        ), located AS (
+            WHERE match_distance_km <= %(buffer_m)s / 1000.0
+        ), ranked_parts AS (
             SELECT *,
-                   ST_LineLocatePoint(line_geom, ST_SetSRID(ST_MakePoint(from_x, from_y),4326)) AS from_frac,
-                   ST_LineLocatePoint(line_geom, ST_SetSRID(ST_MakePoint(to_x, to_y),4326)) AS to_frac,
-                   ST_Length(line_geom::geography) / 1000.0 AS line_km
-            FROM best_part
-            WHERE rn = 1 AND GeometryType(line_geom) = 'LINESTRING'
+                   CASE
+                       WHEN from_frac IS NOT NULL AND ABS(to_frac - from_frac) > 1e-6
+                       THEN SIGN(to_frac - from_frac)
+                       ELSE 1.0
+                   END AS direction,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY edge_key
+                       ORDER BY
+                           CASE WHEN to_frac IS NOT NULL THEN 0 ELSE 1 END,
+                           CASE WHEN from_frac IS NOT NULL AND ABS(to_frac - from_frac) > 1e-6 THEN 0 ELSE 1 END,
+                           CASE WHEN part_length_km >= keep_km THEN 0 ELSE 1 END,
+                           match_priority,
+                           match_distance_km
+                   ) AS rn
+            FROM evaluated_parts
+            WHERE part_length_km > 0
         ), clipped AS (
-            SELECT edge_key, objectid, COALESCE(NULLIF(TRIM(db_river_name), ''), river_name) AS river_name,
+            SELECT edge_key, objectid, pkl_is_luan AS is_luan,
+                   CASE
+                       WHEN COALESCE(TRIM(db_river_name), '') IN ('', '未知') THEN river_name
+                       ELSE db_river_name
+                   END AS river_name,
                    min_distance_km, end_distance_km, keep_km, clip_fraction, is_direct_graph_edge, match_distance_km,
                    from_x, from_y, to_x, to_y,
                    ST_Multi(ST_LineSubstring(
-                       line_geom,
-                       LEAST(from_frac, GREATEST(0.0, LEAST(1.0, from_frac + CASE WHEN to_frac >= from_frac THEN keep_km / line_km ELSE -keep_km / line_km END))),
-                       GREATEST(from_frac, GREATEST(0.0, LEAST(1.0, from_frac + CASE WHEN to_frac >= from_frac THEN keep_km / line_km ELSE -keep_km / line_km END)))
+                       part_geom,
+                       LEAST(from_frac, target_frac),
+                       GREATEST(from_frac, target_frac)
                    )) AS geom
-            FROM located
-            WHERE line_km > 0
+            FROM (
+                SELECT edge_key, objectid, river_name, db_river_name, pkl_is_luan, part_geom,
+                       min_distance_km, end_distance_km, keep_km, clip_fraction, is_direct_graph_edge,
+                       from_x, from_y, to_x, to_y, match_distance_km,
+                       from_frac, to_frac,
+                       GREATEST(0.0, LEAST(1.0, from_frac + direction * keep_km / part_length_km)) AS target_frac
+                FROM ranked_parts
+                WHERE rn = 1 AND to_frac IS NOT NULL AND part_length_km > 0
+            ) t
         )
-        SELECT edge_key, objectid, objectid AS id, river_name,
+        SELECT edge_key, objectid, objectid AS id, river_name, is_luan,
                min_distance_km AS min_downstream_distance_km,
                end_distance_km AS end_downstream_distance_km,
                keep_km, clip_fraction, is_direct_graph_edge, match_distance_km,
@@ -497,7 +592,46 @@ def _query_downstream_rows(cur, schema: str, table: str, geom_col: str, objectid
         WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom)
         ORDER BY min_distance_km, river_name, edge_key
     """, {"buffer_m": float(buffer_km) * 1000.0})
-    return list(cur.fetchall())
+    rows = list(cur.fetchall())
+    return _fill_unmatched_downstream_edges(rows, edges)
+
+
+def _fill_unmatched_downstream_edges(rows: list[dict], edges: list[dict]) -> list[dict]:
+    matched_keys = {r["edge_key"] for r in rows}
+    unmatched = [e for e in edges if e["edge_key"] not in matched_keys]
+    if not unmatched:
+        return rows
+    logger.info("下游边回退直线几何数量=%d / 总下游边=%d", len(unmatched), len(edges))
+    for e in unmatched:
+        row = _build_fallback_downstream_row(e)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _build_fallback_downstream_row(edge: dict) -> dict | None:
+    fx, fy, tx, ty = edge.get("from_x"), edge.get("from_y"), edge.get("to_x"), edge.get("to_y")
+    if fx is None or fy is None or tx is None or ty is None:
+        return None
+    return {
+        "edge_key": edge["edge_key"],
+        "objectid": edge["objectid"],
+        "id": edge["objectid"],
+        "river_name": edge["river_name"],
+        "is_luan": edge.get("is_luan", False),
+        "min_downstream_distance_km": edge["min_distance_km"],
+        "end_downstream_distance_km": edge["end_distance_km"],
+        "keep_km": edge["keep_km"],
+        "clip_fraction": edge["clip_fraction"],
+        "is_direct_graph_edge": edge["is_direct_graph_edge"],
+        "match_distance_km": None,
+        "from_x": fx,
+        "from_y": fy,
+        "to_x": tx,
+        "to_y": ty,
+        "geom_json": json.dumps({"type": "LineString", "coordinates": [[fx, fy], [tx, ty]]}),
+        "length_km": edge["keep_km"],
+    }
 
 
 def _create_downstream_temp(cur, edges: list[dict]) -> None:
@@ -508,6 +642,7 @@ def _create_downstream_temp(cur, edges: list[dict]) -> None:
             edge_key text, objectid text, river_name text,
             min_distance_km double precision, end_distance_km double precision,
             keep_km double precision, clip_fraction double precision, is_direct_graph_edge boolean,
+            is_luan boolean,
             from_x double precision, from_y double precision, to_x double precision, to_y double precision,
             pkl_line geometry(LineString,4326)
         ) ON COMMIT DROP
@@ -517,14 +652,18 @@ def _create_downstream_temp(cur, edges: list[dict]) -> None:
         fx, fy, tx, ty = e["from_x"], e["from_y"], e["to_x"], e["to_y"]
         rows.append((
             e["edge_key"], e["objectid"], e["river_name"], e["min_distance_km"], e["end_distance_km"],
-            e["keep_km"], e["clip_fraction"], bool(e["is_direct_graph_edge"]),
-            fx, fy, tx, ty, fx, fy, tx, ty, fx, fy, tx, ty,
+            e["keep_km"], e["clip_fraction"], bool(e["is_direct_graph_edge"]), bool(e.get("is_luan")),
+            fx, fy, tx, ty, _line_wkt(fx, fy, tx, ty),
         ))
     execute_values(cur, "INSERT INTO tmp_downstream_edges VALUES %s", rows, template="""
-        (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-         CASE WHEN %s IS NULL OR %s IS NULL OR %s IS NULL OR %s IS NULL THEN NULL
-              ELSE ST_SetSRID(ST_MakeLine(ST_MakePoint(%s,%s), ST_MakePoint(%s,%s)),4326) END)
+        (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,ST_GeomFromText(%s,4326))
     """)
+
+
+def _line_wkt(fx, fy, tx, ty) -> str | None:
+    if fx is None or fy is None or tx is None or ty is None:
+        return None
+    return f"LINESTRING({fx} {fy}, {tx} {ty})"
 
 
 def _find_direct_graph_starts(
@@ -552,7 +691,6 @@ def _find_direct_graph_starts(
     """
     graph = get_graph(graph_path)
     direct_refs = _direct_refs(direct_rows)
-
     station_points = [
         (float(s["lon"]), float(s["lat"]))
         for s in stations
@@ -561,8 +699,8 @@ def _find_direct_graph_starts(
     buffer_km = float(station_buffer_km)
 
     starts: dict[Any, float] = {}
-    buffer_keys: set[str] = set()
     direct_keys: set[str] = set()
+    buffer_only_edge_count = 0
 
     for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
         edge_key = _edge_key(u, v, key, attr)
@@ -574,12 +712,10 @@ def _find_direct_graph_starts(
 
         if in_buffer or is_direct:
             starts[v] = 0.0
-        if in_buffer:
-            buffer_keys.add(edge_key)
         if is_direct:
             direct_keys.add(edge_key)
-
-    buffer_only_edge_count = len(buffer_keys - direct_keys)
+        elif in_buffer:
+            buffer_only_edge_count += 1
 
     stats = _downstream_start_stats(
         direct_part_matched_edge_count=len(direct_keys),
@@ -617,20 +753,32 @@ def _collect_downstream_edges(starts: dict[Any, float], graph_path, direct_keys:
     return sorted(edges.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["edge_key"]))
 
 
-def _save_downstream_edge(edges: dict[str, dict], u, v, key, attr: dict, start_km: float, limit_km: float, direct_keys: set[str]) -> float:
+def _save_downstream_edge(
+    edges: dict[str, dict],
+    u,
+    v,
+    key,
+    attr: dict,
+    start_km: float,
+    limit_km: float,
+    direct_keys: set[str],
+) -> float:
     objectid = _edge_objectid_key(attr)
     river_name = get_edge_river_name(attr)
     length_km = get_edge_length_km(attr)
-    if not objectid or not river_name:
-        return start_km + length_km
-    keep_km = max(min(limit_km - start_km, length_km), 0.0) if length_km > 0 else 0.0
+    end_km = start_km + length_km
+    if not objectid or not river_name or length_km <= 0:
+        return end_km
+
+    keep_km = limit_km - start_km
     if keep_km <= 0:
-        return start_km + length_km
+        return end_km
+    keep_km = min(keep_km, length_km)
 
     edge_key = _edge_key(u, v, key, attr)
     old = edges.get(edge_key)
     if old and old["min_distance_km"] <= start_km:
-        return start_km + length_km
+        return end_km
 
     from_x, from_y = _parse_node_xy(u)
     to_x, to_y = _parse_node_xy(v)
@@ -641,21 +789,26 @@ def _save_downstream_edge(edges: dict[str, dict], u, v, key, attr: dict, start_k
         "min_distance_km": round(float(start_km), 3),
         "end_distance_km": round(float(start_km + keep_km), 3),
         "keep_km": round(float(keep_km), 3),
-        "clip_fraction": round(float(keep_km / length_km), 8) if length_km > 0 else 1.0,
+        "clip_fraction": round(float(keep_km / length_km), 8),
         "is_direct_graph_edge": edge_key in direct_keys,
+        "is_luan": bool(attr.get("is_luan")),
         "from_x": from_x,
         "from_y": from_y,
         "to_x": to_x,
         "to_y": to_y,
     }
-    return start_km + length_km
+    return end_km
 
 
-def _build_river_geojson(direct_rows: list[dict], downstream_rows: list[dict]) -> dict:
-    """生成河流 GeoJSON；直接河段优先，并按真实几何去重。"""
-    features = []
+def _build_river_geojson(direct_rows: list[dict], downstream_rows: list[dict], graph_path=None) -> dict:
+    """生成河流 GeoJSON；直接河段优先，按真实几何去重，并回补水系名称。"""
+    rows_with_type = (
+        [(r, "direct_buffer") for r in direct_rows]
+        + [(r, "downstream_50km") for r in downstream_rows]
+    )
+    features: list[dict] = []
     seen = set()
-    for row, impact_type in [(r, "direct_buffer") for r in direct_rows] + [(r, "downstream_50km") for r in downstream_rows]:
+    for row, impact_type in rows_with_type:
         feature = _river_feature(row, impact_type)
         if not feature:
             continue
@@ -664,8 +817,145 @@ def _build_river_geojson(direct_rows: list[dict], downstream_rows: list[dict]) -
             continue
         seen.add(key)
         features.append(feature)
+
+    if any(_needs_name_enrichment(f) for f in features):
+        name_map = _build_objectid_name_map(graph_path)
+        if name_map:
+            _enrich_unknown_river_names(features, name_map)
+
+    _apply_luan_names(features, _load_luan_name_mapping(graph_path))
+
+    features = _drop_downstream_covered_by_direct(features)
+
     features.sort(key=lambda f: (0 if f["properties"]["impact_type"] == "direct_buffer" else 1, f["properties"].get("river_name") or ""))
     return {"type": "FeatureCollection", "features": features}
+
+
+def _build_objectid_name_map(graph_path) -> dict[str, str]:
+    """从 pkl 有向图中建立 objectid -> 河系名 的映射，用于回填数据库缺失名称。"""
+    try:
+        graph = get_graph(graph_path)
+    except Exception:
+        logger.exception("加载河网拓扑文件失败，无法构建 objectid 名称映射")
+        return {}
+    mapping: dict[str, str] = {}
+    for _u, _v, _k, attr in iter_graph_edges(graph):
+        objectid = _edge_objectid_key(attr)
+        if not objectid:
+            continue
+        name = get_edge_river_name(attr)
+        if not name or name == "未知":
+            continue
+        if mapping.get(objectid) in (None, "未知"):
+            mapping[objectid] = name
+    return mapping
+
+
+def _needs_name_enrichment(feature: dict) -> bool:
+    name = str((feature.get("properties") or {}).get("river_name") or "").strip()
+    return not name or name == "未知"
+
+
+def _enrich_unknown_river_names(features: list[dict], name_map: dict[str, str]) -> None:
+    """将属性中 river_name 为“未知”的要素替换为 pkl 图中的名称。"""
+    for feature in features:
+        props = feature.get("properties") or {}
+        name = str(props.get("river_name") or "").strip()
+        if name and name != "未知":
+            continue
+        objectid = str(props.get("objectid") or "")
+        if objectid and objectid in name_map:
+            props["river_name"] = name_map[objectid]
+
+
+_WATER_BODY_SUFFIXES = frozenset({"河", "江", "湖", "海", "渠", "溪", "涧", "沟", "汊"})
+
+
+def _normalize_river_name(name: Any) -> str:
+    text = str(name or "").strip()
+    if len(text) != 1:
+        return text
+    if text in _WATER_BODY_SUFFIXES:
+        return text
+    if "一" <= text <= "鿿":
+        return f"{text}河"
+    return text
+
+
+def _drop_downstream_covered_by_direct(features: list[dict]) -> list[dict]:
+    """移除几何上被同 objectid 直接河段覆盖的下游河段，减少重复渲染。"""
+    direct_features: list[dict] = []
+    direct_by_objectid: dict[str, list[dict]] = {}
+    downstream_features: list[dict] = []
+    for feature in features:
+        props = feature.get("properties") or {}
+        objectid = str(props.get("objectid") or "")
+        if props.get("impact_type") == "direct_buffer" and objectid:
+            direct_features.append(feature)
+            direct_by_objectid.setdefault(objectid, []).append(feature)
+        else:
+            downstream_features.append(feature)
+
+    if not downstream_features or not direct_by_objectid:
+        return features
+
+    coverage = _build_direct_coverage_index(direct_by_objectid)
+    if not coverage:
+        return features
+
+    kept_downstream = [f for f in downstream_features if not _is_downstream_covered(f, coverage)]
+    return direct_features + kept_downstream
+
+
+def _build_direct_coverage_index(direct_by_objectid: dict[str, list[dict]]) -> dict[str, dict]:
+    """为每个 objectid 构建直接河段的几何索引（prepared covers + union）。"""
+    try:
+        from shapely.geometry import shape
+        from shapely.prepared import prep
+        from shapely.ops import unary_union
+    except Exception:  # pragma: no cover - shapely 为可选依赖
+        logger.warning("shapely 未安装或无法导入，跳过下游河段几何去重")
+        return {}
+
+    coverage: dict[str, dict] = {}
+    for objectid, direct_feats in direct_by_objectid.items():
+        try:
+            geoms = [shape(f.get("geometry") or {}) for f in direct_feats]
+            geoms = [g for g in geoms if not g.is_empty]
+            if not geoms:
+                continue
+            union = unary_union(geoms).buffer(1e-4)
+            coverage[objectid] = {"prepared": prep(union), "union": union}
+        except Exception:
+            logger.warning("准备直接河段几何失败 objectid=%s", objectid, exc_info=True)
+    return coverage
+
+
+def _is_downstream_covered(feature: dict, coverage: dict[str, dict]) -> bool:
+    """判断下游河段是否被同 objectid 的直接河段几何覆盖。"""
+    from shapely.geometry import shape
+
+    props = feature.get("properties") or {}
+    objectid = str(props.get("objectid") or "")
+    cov = coverage.get(objectid)
+    if cov is None:
+        return False
+
+    try:
+        downstream_shape = shape(feature.get("geometry") or {})
+        if downstream_shape.is_empty:
+            return True
+        if cov["prepared"].covers(downstream_shape):
+            return True
+        # 若下游段与直接河段重叠比例超过阈值，也视为重复并丢弃
+        intersection = cov["union"].intersection(downstream_shape)
+        if not intersection.is_empty and downstream_shape.length > 0:
+            overlap_ratio = intersection.length / downstream_shape.length
+            if overlap_ratio >= 0.9:
+                return True
+    except Exception:
+        logger.warning("下游河段几何覆盖判断失败，保留该河段", exc_info=True)
+    return False
 
 
 def _river_feature(row: dict, impact_type: str) -> dict | None:
@@ -682,6 +972,7 @@ def _river_feature(row: dict, impact_type: str) -> dict | None:
         "length_km": round(float(row.get("length_km") or 0.0), 3),
         "flow_direction": "database_geometry_order",
         "direction_source": f"full_{RIVER_TABLE_VERSION}_original_geometry",
+        "is_luan": bool(row.get("is_luan")),
     }
     if impact_type == "direct_buffer":
         props.update({
@@ -869,7 +1160,8 @@ def _parse_node_xy(node: Any) -> tuple[float | None, float | None]:
             return float(x), float(y)
         if isinstance(node, (tuple, list)) and len(node) >= 2:
             return float(node[0]), float(node[1])
-    except Exception:
+    except (TypeError, ValueError):
+        logger.debug("解析节点坐标失败: %s", node)
         return None, None
     return None, None
 
@@ -915,7 +1207,7 @@ def _jsonable(value: Any) -> Any:
         if pd.isna(value):
             return None
     except Exception:
-        pass
+        logger.debug("pd.isna 检查失败，保留原值", exc_info=True)
     return value.item() if hasattr(value, "item") else value
 
 
@@ -934,8 +1226,17 @@ def _round(value: Any, digits: int = 3) -> float | None:
         return None
 
 
-def _sorted_river_names(rows: list[dict]) -> list[str]:
-    return sorted({str(row.get("river_name") or "").strip() for row in rows if row.get("river_name")})
+def _sorted_feature_river_names(river_geojson: dict, impact_type: str) -> list[str]:
+    """从已生成的 GeoJSON 要素中提取指定影响类型的河系名（保证名称回填后一致）。"""
+    names: set[str] = set()
+    for feature in river_geojson.get("features", []) or []:
+        props = feature.get("properties") or {}
+        if props.get("impact_type") != impact_type:
+            continue
+        name = str(props.get("river_name") or "").strip()
+        if name and name != "未知":
+            names.add(name)
+    return sorted(names)
 
 
 def _qi(name: str) -> str:
@@ -974,9 +1275,11 @@ def _edge_objectid_key(attr: dict) -> str:
         return ""
     for key in ("objectid", "OBJECTID", "id", "ID", "gid"):
         value = attr.get(key)
-        if value is None or not str(value).strip():
+        if value is None:
             continue
         text = str(value).strip()
+        if not text:
+            continue
         try:
             number = float(text)
             return str(int(number)) if number.is_integer() else text

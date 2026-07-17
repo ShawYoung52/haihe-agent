@@ -52,6 +52,55 @@
 5. **新增兜底隔离回归测试**：`test_fallback_starts_not_in_direct_keys` 确保兜底阶段不进入 `direct_keys`。
 6. **内网测试反馈：非空结果缺少暴雨站点 JSON**：`build_rainstorm_impact_thematic_map` 的空结果 `_empty_result` 包含 `impact_stations` 和 `station_geojson`，但成功路径的 `result.update()` 遗漏了这两个字段；已补齐，使问答智能体 `fixed_rainfall_impact_tool.py` 能正确返回站点信息。
 
+## Phase 9: New Findings from User Sample Data (2026-07-15)
+
+User provided `E:\fsdownload\rain_impact_result.json` (and `.river.geojson`/`.station.geojson`) with concrete anomalies.
+
+### Data Sample Summary
+- Total river features: 144
+- Direct buffer features: 63 (indices 0–62 plus a few others)
+- Downstream 50km features: 47 (indices 63–144)
+- 23 direct-buffer features and 1 downstream feature have `river_name == "未知"`
+- 29 duplicate groups by `(objectid, name, start, end)` where name/start/end are null for direct-buffer rows
+
+### Issue 1: Missing River Names (`未知`)
+**Evidence:**
+- idx=124 downstream feature has `objectid="2"`, `river_name="未知"`, but its `edge_key` ends with pkl graph name `牤牛河`.
+- idx=91 direct-buffer feature has `objectid="2"` and its name (console-mojibake) matches the same pkl graph name.
+- 22 other direct-buffer features have `river_name="未知"` (e.g., objectids 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 21).
+
+**Root Cause:**
+- `_query_direct_rows` uses `COALESCE(NULLIF(TRIM(r.src_name::text), ''), '未知')` as the only name source.
+- `_query_downstream_rows` uses `COALESCE(NULLIF(TRIM(db_river_name), ''), river_name)` where `river_name` is the pkl graph name. However, `db_river_name` already became the literal string `"未知"` in the `river_parts` CTE, so `NULLIF` does not trigger fallback to the pkl name.
+- The `full_v6` table apparently has empty/missing `src_name` for many objectids, while the pkl graph (`river_directed_v6.pkl`) carries the correct name in `src_name`/`name`/`river_name` attributes.
+
+### Issue 1b: Luan River System Single-Character Names
+**Evidence:**
+- User clarified that the Luan River system was merged later, so `full_v6.river_name` (or `src_name`) for those rivers is stored as a single character that should be read as `X河` (e.g., `青` → `青河`, `东` → `东河`).
+- Re-inspection of the sample GeoJSON found one single-character name `东` (objectid=8, direct_buffer); in other datasets/user DB views, names like `青` appear for Luan tributaries.
+
+**Root Cause:**
+- The builder treats the database `river_name` value literally. It does not expand the Luan River convention of single-character abbreviations into full river names (`X河`).
+
+### Issue 2: Duplicate / Isolated Segments (Yongding River example)
+**Evidence:**
+- `objectid="70"` / `永定河` appears 5 times:
+  - idx=69: direct_buffer, length 144.971 km, triggered by Beijing-area stations
+  - idx=70: direct_buffer, length 21.322 km, triggered by 武清崔黄口 (Tianjin area), 25.3 km from station
+  - idx=128: downstream_50km, keep 22.308 km
+  - idx=129: downstream_50km, keep 50.0 km, `is_direct_graph_edge=true`
+  - idx=130: downstream_50km, keep 27.692 km, `is_direct_graph_edge=true`
+- idx=70 is geographically disconnected from the main Yongding geometry (idx=69/128/129/130), producing an isolated segment.
+- idx=128/130 together cover 0–50 km; idx=129 covers the downstream portion from a separate start node, creating redundant/overlapping-looking pieces of the same objectid.
+
+**Root Cause Hypotheses:**
+1. `_query_direct_rows` uses `ST_Dump(r.geom)` and returns every part of a MultiLineString as a separate feature. If the same `objectid` contains geographically disjoint parts (data quality issue in `full_v6`), each part is emitted, including spurious far-away pieces.
+2. `_find_direct_graph_starts` adds **every** pkl edge within 30 km of a station as a downstream start (distance 0). On long rivers, multiple edges along the same river become independent starts; `_collect_downstream_edges` then traces 50 km downstream from each, producing clipped segments that can overlap or abut in confusing ways.
+3. `_query_downstream_rows` clips each downstream edge independently and does not re-clip at the station-buffer boundary, so downstream segments can extend back into the 30 km direct-buffer zone, visually duplicating direct-buffer features.
+
+### Issue 3: Console / File Encoding
+The geojson file is UTF-8, but the Windows console prints Chinese names as mojibake. Saved JSON/TSV summaries confirm actual content is correct UTF-8; no code change needed for encoding.
+
 ## Known Out-of-Scope Issues
 - `include_background` 参数在 MCP/本地工具中接受但未透传给 `build_rainstorm_impact_thematic_map`（历史遗留，本次未改动）。
 - 兜底策略在阶段一完全空白时启用 30km 站点缓冲区，dense basin 仍可能产生较多起点；当前通过 10km 直接匹配优先降低触发概率，后续可继续根据 `downstream_start_stats` 调优。

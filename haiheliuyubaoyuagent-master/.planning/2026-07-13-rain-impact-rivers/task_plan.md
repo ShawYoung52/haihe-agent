@@ -5,7 +5,7 @@
 **Goal:** 修复牵引智能体中暴雨区域未在十四所GIS显示受影响河流的问题，并同步修复问答智能体对该能力的调用与结果展示。
 
 ## Current Phase
-Phase 9: Downstream Tracking Distance Investigation
+All phases complete.
 
 ## Phases
 
@@ -20,7 +20,7 @@ Phase 9: Downstream Tracking Distance Investigation
 - [x] 追溯暴雨区域到受影响河流的计算逻辑
 - [x] 对比正常场景与异常场景的数据差异
 - [x] 形成明确假设：`_find_direct_graph_starts` 过于严格，pkl/full_v5 对齐偏差导致无下游起点，直接河段稀疏时整体空白
-- **Status:** in_progress
+- **Status:** complete
 
 ### Phase 3: Fix Traction Agent
 - [x] 在 `hhlyqyxt-master/utils` 中实施最小修复
@@ -56,10 +56,10 @@ Phase 9: Downstream Tracking Distance Investigation
 - **Status:** complete
 
 ### Phase 9: Downstream Tracking Distance Investigation
-- [ ] 复现/理解用户感知的下游追踪距离问题
-- [ ] 分析实际输出数据，定位具体问题点
-- [ ] 若确认存在 bug，实施修复并验证
-- **Status:** in_progress
+- [x] 复现/理解用户感知的下游追踪距离问题
+- [x] 分析实际输出数据，定位具体问题点
+- [x] 完成 code-review / code-simplifier / verification / CLAUDE.md / claude-mem 收尾；剩余孤立/重复段属于 pkl/full_v6 数据对齐问题，不在本次代码修复范围
+- **Status:** complete
 
 ## Key Questions
 1. 牵引智能体中“暴雨影响河流”的逻辑在哪几个文件？

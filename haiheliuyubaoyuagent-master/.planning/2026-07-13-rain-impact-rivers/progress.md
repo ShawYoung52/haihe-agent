@@ -59,16 +59,39 @@
   - 更新 `claude-mem`：写入 `rain-impact-river-defaults.md` 并更新 `MEMORY.md` 索引
 
 ## Phase 9: Downstream Tracking Distance Investigation
-- **Status:** in_progress
+- **Status:** complete
 - **Started:** 2026-07-13
+- **Continued:** 2026-07-15
+- **Finalized:** 2026-07-15
 - User concern: 下游追踪逻辑中，若已追踪 20km，下一条应只剩 30km 额度，而不是继续按 50km 计算
-- Preliminary analysis of `E:/fsdownload/rain_impact_result.json.river.geojson`:
-  - 47 downstream features
-  - All `end_downstream_distance_km <= 50.0`
-  - All `end - min ≈ keep_km`
-  - No `keep_km > 50` anomalies
-  - Direct graph edges (is_direct_graph_edge=true) appear in downstream layer with min=0, which may be source of confusion
-- Next: need user to point to specific river/segment that looks wrong, or clarify expected semantics
+- 2026-07-15 user provided concrete sample files at `E:/fsdownload/rain_impact_result.json*`:
+  - Analyzed 144 river features; found 23+1 `river_name="未知"` features and 29 duplicate objectid groups.
+  - Confirmed Yongding River (`objectid="70"`) appears 5 times: 2 direct-buffer parts (one disconnected near Tianjin) + 3 downstream clipped pieces.
+  - Confirmed `objectid="2"` downstream feature lacks name; pkl graph carries `牤牛河` in edge_key.
+- **Fixes implemented:**
+  - `hhlyqyxt-master/utils/rainfall_impact_geojson.py`:
+    - 用 pkl 图按 objectid 建立名称映射，回填 direct/downstream 中 `river_name="未知"` 的要素。
+    - `_query_downstream_rows` SQL 中当 `db_river_name` 为 `"未知"` 时回退到 pkl 图名称。
+    - 下游匹配增加 `match_distance_km <= station_buffer_km` 过滤，剔除 pkl/full_v6 对齐偏差导致的远距离误匹配。
+    - 增加 Shapely 可选依赖：若下游河段几何被同 objectid 直接河段覆盖，则剔除。
+    - `direct_rivers`/`downstream_rivers` 改为从最终 GeoJSON 要素汇总，保证名称回填后一致。
+    - **2026-07-15 补充**：增加 `_normalize_river_name`，将单字河系名（如滦河系的“青”“东”）规范化为“X河”。
+    - **收尾补充**：增加模块 logger；graph-load/geometry 失败时记录日志而不是静默吞掉；名称映射按需构建；无下游段时跳过 Shapely 工作。
+  - `haihe-weather-analyzer-mcp/fixed_rainfall_impact_tool.py`:
+    - 更新 `IMPACT_RULES`，补充 name_fallback、match_filter、downstream_dedupe 说明。
+    - **收尾补充**：`_resolve_graph_path` 处理目录路径和空文件名，避免 `Path.with_name` 抛 `ValueError`；`IMPACT_RULES` 使用 `RIVER_TABLE_VERSION` 常量，不再硬编码 `full_v6`；`_format_mcp_response` 对 `river_summary=None` 做防御。
+  - `hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py`:
+    - 新增 5 个单元测试覆盖名称映射、名称回填、下游去重、汇总名称过滤、整体 GeoJSON 构建。
+    - **收尾补充**：Shapely 依赖的测试使用 `pytest.importorskip("shapely")` 跳过。
+- **Verification:**
+  - 对用户样本 GeoJSON 运行修复逻辑：`river_name="未知"` 从 23 降至 0。
+  - 牵引智能体测试：`utils/tests/test_rainfall_impact_geojson.py` 12/12 通过。
+  - 问答智能体完整测试：`chainlitexam/tests/` 51/51 通过。
+  - Fast path 静态检查：`chainlitexam/tests/test_fast_paths.py` 18/18 通过。
+  - 全部修改文件 `py_compile` 语法检查通过。
+- **Remaining limitations:**
+  - Yongding `objectid="70"` 仍出现 5 次：其中天津附近 21.322 km 段与主河段几何不连通，是 full_v6 表同一 objectid 包含远距 MultiLineString 部分的数据质量问题；下游三段与直接段之间也存在几何间隙，源于 pkl 拓扑与 full_v6 几何对齐偏差。此类“孤立/重复感”需通过数据对齐或拓扑合并进一步解决，本次仅做名称回填与误匹配过滤。
+- **Next:** 无。计划已关闭。
 
 ### Errors
 | Error | Resolution |
@@ -76,6 +99,8 @@
 | 牵引智能体测试环境缺少 pandas/psycopg2 | 在测试文件顶部用 `types.ModuleType` 做最小 stub |
 | 问答智能体测试工具 wrapper 为 async stub | 使用 `_call_tool` 辅助函数兼容 `_ToolWrapper._fn` 与 `StructuredTool.func` |
 | 首次 Write 文件落到 `chainlitexam/chainlitexam/tests` | 移动到正确位置并清理嵌套目录 |
+| 2026-07-15 内网 `AmbiguousColumn` | `_query_downstream_rows` 中 `SELECT e.*, p.is_luan` 导致 `is_luan` 歧义；已改为显式列选择。 |
+| 2026-07-15 内网 objectid=70 异常短河段 | 下游匹配按 `match_distance_km` 只选最近段，导致同一 objectid 的孤立短段被选中；已改为优先选择长度能容纳 `keep_km` 的河段，再按距离排序。 |
 
 ## 5-Question Reboot Check
 | Question | Answer |

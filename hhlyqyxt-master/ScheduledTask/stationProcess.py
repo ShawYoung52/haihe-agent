@@ -322,7 +322,8 @@ def stationmonitorbyhour(timestr):
     for row in max_rows:
         if row["rain_level"] >0 :
             sql = text(
-                'INSERT INTO qy_tj_rain_cnty (lon, lat, time_range, province, city,cnty,admin_code,station_name,station_id,sum_pre,rain_level,hour_monitor_id) VALUES(:lon, :lat, :time_range, :province, :city,:cnty,:admin_code,:station_name,:station_id,:sum_pre,:rain_level,:hour_monitor_id)'
+                # 'INSERT INTO qy_tj_rain_cnty (lon, lat, time_range, province, city,cnty,admin_code,station_name,station_id,sum_pre,rain_level,hour_monitor_id) VALUES(:lon, :lat, :time_range, :province, :city,:cnty,:admin_code,:station_name,:station_id,:sum_pre,:rain_level,:hour_monitor_id)'
+                'INSERT INTO qy_tj_rain_cnty (lon, lat, time_range, province, city,cnty,station_name,station_id,sum_pre,rain_level,hour_monitor_id) VALUES(:lon, :lat, :time_range, :province, :city,:cnty,:station_name,:station_id,:sum_pre,:rain_level,:hour_monitor_id)'
             )
 
             param = dict(
@@ -332,7 +333,7 @@ def stationmonitorbyhour(timestr):
                 province=row["Province"],
                 city=row["City"],
                 cnty=row["Cnty"],
-                admin_code=row["Admin_Code_CHN"],
+                # admin_code=row["Admin_Code_CHN"],
                 station_id=row["Station_Id_C"],
                 station_name=row["Station_Name"],
                 sum_pre=row["SUM_PRE_1h"],
