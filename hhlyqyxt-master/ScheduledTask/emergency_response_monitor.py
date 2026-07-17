@@ -91,7 +91,7 @@ def _determine_response_level(
 
 
 def compute_emergency_response_stats(
-    csv_path: str, datatime: Optional[Union[str, datetime]] = None
+    csv_path: str, datatime: Union[str, datetime, None] = None
 ) -> dict:
     """从 CSV 计算应急响应统计指标。
 
@@ -169,7 +169,7 @@ def compute_emergency_response_stats(
 
 def run_emergency_response_monitor(
     csv_path: str,
-    datatime: Optional[Union[str, datetime]] = None,
+    datatime: Union[str, datetime, None] = None,
     minute_monitor_id: Optional[int] = None,
 ) -> Optional[QyEmergencyResponseMonitor]:
     """计算应急响应指标并写入数据库。
