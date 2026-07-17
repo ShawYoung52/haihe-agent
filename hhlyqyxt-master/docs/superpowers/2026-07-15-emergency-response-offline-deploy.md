@@ -34,7 +34,7 @@ git pull origin main
 ```sql
 CREATE TABLE qy_emergency_response_monitor (
     id SERIAL PRIMARY KEY,
-    datatime TIMESTAMP NOT NULL,
+    datatime TIMESTAMP NOT NULL UNIQUE,
     minute_monitor_id INTEGER,
     total_national_stations INTEGER NOT NULL DEFAULT 0,
     station_12h_baoyu INTEGER NOT NULL DEFAULT 0,
@@ -53,11 +53,41 @@ CREATE INDEX idx_qy_emergency_response_monitor_datatime
     ON qy_emergency_response_monitor(datatime DESC);
 ```
 
-在 PostgreSQL 中执行一次即可。
+`datatime` 的 UNIQUE 约束是结构性幂等保障——即使手动 dry-run 与调度重叠，也不会产生重复行。
+
+### 已建表升级（之前部署过旧版表）
+
+如果服务器上已有不含 UNIQUE 的旧表，执行以下迁移：
+
+```sql
+-- 先清理可能的重复历史数据（如有）
+DELETE FROM qy_emergency_response_monitor a USING qy_emergency_response_monitor b
+WHERE a.id > b.id AND a.datatime = b.datatime;
+
+ALTER TABLE qy_emergency_response_monitor
+    ADD CONSTRAINT qy_emergency_response_monitor_datatime_key UNIQUE (datatime);
+
+CREATE INDEX IF NOT EXISTS idx_qy_emergency_response_monitor_datatime
+    ON qy_emergency_response_monitor(datatime DESC);
+```
 
 ---
 
-## 三、重启 5 分钟调度
+## 三、旧 CSV 兼容（重要）
+
+部署初期，服务器上的 `yangxiao.csv` 可能是旧版生成（无 `Station_levl` 列）。代码已加防御：
+
+- `circleadd5min` 读入时若 CSV 无该列，自动补空串。
+- `emergency_response_monitor.compute_emergency_response_stats` 同样补空串并告警，不抛 KeyError。
+
+但旧数据行在补空串后会被当作非国家站过滤掉，导致 12h/24h 窗口内 `total_national_stations` 偏小。**两个选择**：
+
+- **推荐**：部署后直接删除旧 CSV，让调度重建（首次 `unionmindataby10minuteto24h` 会重灌 24h 数据，需要等待约 24 小时滚满；或手动跑一次该函数重灌）。
+- **可接受**：保留旧 CSV，接受 24 小时过渡期，过渡期内 `response_level` 偏保守。
+
+---
+
+## 四、重启 5 分钟调度
 
 ```bash
 cd /path/to/haiheliuyubaoyuagent-master/hhlyqyxt-master
@@ -72,9 +102,9 @@ nohup python -u -m ScheduledTask.stationProcessMin > stationProcessMin.log 2>&1 
 
 ---
 
-## 四、验证
+## 五、验证
 
-### 4.1 调度是否正常运行
+### 5.1 调度是否正常运行
 
 查看日志：
 
@@ -84,7 +114,7 @@ tail -f stationProcessMin.log
 
 应能看到每个自然 5 分钟周期（00/05/10...）执行一次，无异常。
 
-### 4.2 数据库是否有记录
+### 5.2 数据库是否有记录
 
 等待至少一个 5 分钟后查询：
 
@@ -95,7 +125,7 @@ ORDER BY datatime DESC
 LIMIT 5;
 ```
 
-### 4.3 查询接口是否可用
+### 5.3 查询接口是否可用
 
 ```bash
 curl "http://<服务器IP>:7000/tool/emergency-response/latest?limit=5"
