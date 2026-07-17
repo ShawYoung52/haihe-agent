@@ -94,9 +94,12 @@ def compute_emergency_response_stats(
             为 None 时使用 CSV 中的最大时间。
 
     Returns:
-        包含各阈值站点数、占比和响应级别的字典；CSV 为空时返回 None。
+        包含各阈值站点数、占比和响应级别的字典；CSV 为空或无可解析内容时返回 None。
     """
-    df = pd.read_csv(csv_path)
+    try:
+        df = pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        return None
     if df.empty:
         return None
 
@@ -188,11 +191,7 @@ def run_emergency_response_monitor(
         logger.warning("CSV 文件不存在: %s", csv_path)
         return None
 
-    try:
-        stats = compute_emergency_response_stats(csv_path, datatime)
-    except pd.errors.EmptyDataError:
-        logger.warning("CSV 文件为空: %s", csv_path)
-        return None
+    stats = compute_emergency_response_stats(csv_path, datatime)
     if stats is None:
         logger.warning("CSV 文件为空: %s", csv_path)
         return None
