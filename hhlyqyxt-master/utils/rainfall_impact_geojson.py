@@ -454,6 +454,24 @@ def _create_station_temp(cur, stations: list[dict]) -> None:
     )
 
 
+def _build_edge_lookup(rows: list[dict]) -> dict[tuple[str, float, float, float, float], dict]:
+    """Build a lookup from (objectid, from_x, from_y, to_x, to_y) to a full_v6 row."""
+    lookup: dict[tuple[str, float, float, float, float], dict] = {}
+    for row in rows or []:
+        objectid = str(row.get("objectid") or "")
+        if not objectid:
+            continue
+        key = (
+            objectid,
+            float(row.get("from_x") or 0.0),
+            float(row.get("from_y") or 0.0),
+            float(row.get("to_x") or 0.0),
+            float(row.get("to_y") or 0.0),
+        )
+        lookup[key] = row
+    return lookup
+
+
 def _query_direct_rows(
     cur,
     schema: str,

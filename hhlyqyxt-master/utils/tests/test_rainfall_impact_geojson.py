@@ -33,6 +33,16 @@ if str(UTILS_DIR) not in sys.path:
 import rainfall_impact_geojson as rig
 
 
+def test_build_edge_lookup_maps_row_by_objectid_and_endpoints():
+    rows = [
+        {"objectid": "1", "from_x": 116.0, "from_y": 39.0, "to_x": 116.1, "to_y": 39.1, "river_name": "A"},
+        {"objectid": "1", "from_x": 116.1, "from_y": 39.1, "to_x": 116.2, "to_y": 39.2, "river_name": "B"},
+    ]
+    lookup = rig._build_edge_lookup(rows)
+    assert lookup[("1", 116.0, 39.0, 116.1, 39.1)]["river_name"] == "A"
+    assert lookup[("1", 116.1, 39.1, 116.2, 39.2)]["river_name"] == "B"
+
+
 class _MockMultiDiGraph:
     """最小 networkx MultiDiGraph 替代，满足 _find_direct_graph_starts 需求。"""
 
