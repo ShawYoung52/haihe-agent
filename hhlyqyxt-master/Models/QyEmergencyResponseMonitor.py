@@ -9,7 +9,7 @@ class QyEmergencyResponseMonitor(Base):
     __tablename__ = 'qy_emergency_response_monitor'
 
     id = Column(Integer, primary_key=True)
-    datatime = Column(DateTime, nullable=False)
+    datatime = Column(DateTime, nullable=False, unique=True)
     minute_monitor_id = Column(Integer)
     total_national_stations = Column(Integer, nullable=False, default=0)
     station_12h_baoyu = Column(Integer, nullable=False, default=0)
@@ -32,7 +32,7 @@ class QyEmergencyResponseMonitor(Base):
 """
 CREATE TABLE qy_emergency_response_monitor (
     id SERIAL PRIMARY KEY,
-    datatime TIMESTAMP NOT NULL,
+    datatime TIMESTAMP NOT NULL UNIQUE,
     minute_monitor_id INTEGER,
     total_national_stations INTEGER NOT NULL DEFAULT 0,
     station_12h_baoyu INTEGER NOT NULL DEFAULT 0,
@@ -46,4 +46,7 @@ CREATE TABLE qy_emergency_response_monitor (
     response_level SMALLINT NOT NULL DEFAULT 0,
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX idx_qy_emergency_response_monitor_datatime
+    ON qy_emergency_response_monitor(datatime DESC);
 """

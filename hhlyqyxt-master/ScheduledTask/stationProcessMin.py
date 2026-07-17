@@ -256,7 +256,7 @@ def calcmaxdataseg5min():
 
         result = create_rainstorm_impact_map(
             csv_path=tempfile,
-            graph_path="/home/ev/haiheliuyubaoyuagent/yx-test/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/test-data/river_directed_v5.pkl",
+            graph_path="/home/ev/haiheliuyubaoyuagent/yx-test/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/test-data/river_directed_v6.pkl",
             output_dir="/root/zm_code/rainstorm_impact_output",
             public_base_url="http://10.226.107.130:7000/rainstorm_impact_output",
         )
@@ -437,19 +437,22 @@ def calcmaxdataseg5min():
             param = dict(lon=row["lan"], lat=row["lat"],overlimit=row["overLimit"],datetime=row["bjDatetime"].strftime("%Y-%m-%d %H:%M:%S"),stationname=row["stationName"],source=row["source"],stationid=row["stationId"], minute_monitor_id=qmm.id)
             session.execute(sql, param)
     session.commit()
+    minute_monitor_id = qmm.id
     session.close()
 
     # 应急响应监测入库
     run_emergency_response_monitor(
         csv_path=tempfile,
         datatime=end_time,
-        minute_monitor_id=qmm.id,
+        minute_monitor_id=minute_monitor_id,
     )
 
 
 def circleadd5min():
     df_5min = pd.read_csv(tempfile)
-    df_5min = df_5min[["Station_Id_C","Datetime","PRE","Lat","Lon","City","Station_Name","Cnty","Province","Town"]]
+    if "Station_levl" not in df_5min.columns:
+        df_5min["Station_levl"] = ""
+    df_5min = df_5min[["Station_Id_C","Datetime","PRE","Station_levl","Lat","Lon","City","Station_Name","Cnty","Province","Town"]]
     df_5min["Datetime"] = pd.to_datetime(df_5min["Datetime"], format="%Y-%m-%d %H:%M:%S")
     end_time = df_5min["Datetime"].max()+pd.Timedelta(minutes=5)
     end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")

@@ -46,13 +46,6 @@ def _parse_datatime(datatime: Union[str, datetime]) -> datetime:
     raise ValueError(f"无法解析 datatime: {datatime}")
 
 
-def _read_max_datetime(csv_path: str) -> datetime:
-    """读取 CSV 中最大的 Datetime。"""
-    df = pd.read_csv(csv_path)
-    df["Datetime"] = pd.to_datetime(df["Datetime"])
-    return df["Datetime"].max()
-
-
 def _sum_precip_by_station(df: pd.DataFrame) -> pd.DataFrame:
     """按站点汇总降水量，返回包含 Station_Id_C 与 PRE 的 DataFrame。"""
     return df.groupby("Station_Id_C")["PRE"].sum().reset_index()
@@ -92,7 +85,7 @@ def _determine_response_level(
 
 def compute_emergency_response_stats(
     csv_path: str, datatime: Union[str, datetime, None] = None
-) -> dict:
+) -> Optional[dict]:
     """从 CSV 计算应急响应统计指标。
 
     Args:
@@ -101,17 +94,24 @@ def compute_emergency_response_stats(
             为 None 时使用 CSV 中的最大时间。
 
     Returns:
-        包含各阈值站点数、占比和响应级别的字典。
+        包含各阈值站点数、占比和响应级别的字典；CSV 为空时返回 None。
     """
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return None
+
+    if "Station_levl" not in df.columns:
+        logger.warning("CSV 缺少 Station_levl 列，全部站点按非国家站处理: %s", csv_path)
+        df["Station_levl"] = ""
+
+    df["Datetime"] = pd.to_datetime(df["Datetime"])
     if datatime is None:
-        datatime = _read_max_datetime(csv_path)
+        datatime = df["Datetime"].max()
 
     end_time = _parse_datatime(datatime)
     start_12h = end_time - timedelta(hours=12)
     start_24h = end_time - timedelta(hours=24)
 
-    df = pd.read_csv(csv_path)
-    df["Datetime"] = pd.to_datetime(df["Datetime"])
     df["PRE"] = pd.to_numeric(df["PRE"], errors="coerce")
     # 缺失降水标识：大于 99988 的值视为缺测，按 0 处理
     df.loc[df["PRE"] > 99988, "PRE"] = 0.0
@@ -174,31 +174,41 @@ def run_emergency_response_monitor(
 ) -> Optional[QyEmergencyResponseMonitor]:
     """计算应急响应指标并写入数据库。
 
+    同一 datatime 的记录先删后插，保证数据延迟或追补重跑时不会产生重复行。
+
     Args:
         csv_path: 5 分钟降水 CSV 文件路径。
         datatime: 统计结束时间，默认为 CSV 中最大时间。
         minute_monitor_id: 关联的分钟监测记录 ID。
 
     Returns:
-        写入的 ORM 对象；CSV 不存在时返回 None。
+        写入的 ORM 对象；CSV 不存在或为空时返回 None。
     """
     if not Path(csv_path).exists():
         logger.warning("CSV 文件不存在: %s", csv_path)
         return None
 
-    if pd.read_csv(csv_path).empty:
+    try:
+        stats = compute_emergency_response_stats(csv_path, datatime)
+    except pd.errors.EmptyDataError:
+        logger.warning("CSV 文件为空: %s", csv_path)
+        return None
+    if stats is None:
         logger.warning("CSV 文件为空: %s", csv_path)
         return None
 
-    stats = compute_emergency_response_stats(csv_path, datatime)
     record = QyEmergencyResponseMonitor(
         minute_monitor_id=minute_monitor_id, **stats
     )
 
     session = Session()
     try:
+        session.query(QyEmergencyResponseMonitor).filter(
+            QyEmergencyResponseMonitor.datatime == stats["datatime"]
+        ).delete()
         session.add(record)
         session.commit()
+        session.refresh(record)
         return record
     except Exception:
         session.rollback()

@@ -196,6 +196,47 @@ def test_missing_csv_returns_none_and_warns(caplog):
     assert "不存在" in caplog.text or "missing" in caplog.text.lower()
 
 
+def test_empty_csv_returns_none(tmp_path, caplog):
+    """空 CSV（只有表头）时 compute 与 run 均应返回 None。"""
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_text("Station_Id_C,Datetime,PRE,Station_levl\n", encoding="utf-8")
+
+    assert erm.compute_emergency_response_stats(str(csv_path)) is None
+
+    with caplog.at_level("WARNING", logger="ScheduledTask.emergency_response_monitor"):
+        assert erm.run_emergency_response_monitor(str(csv_path)) is None
+    assert "为空" in caplog.text
+
+
+def test_zero_byte_csv_returns_none(tmp_path, caplog):
+    """0 字节 CSV 触发 EmptyDataError 时 run 应返回 None 而不是抛异常。"""
+    csv_path = tmp_path / "zero.csv"
+    csv_path.write_text("", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="ScheduledTask.emergency_response_monitor"):
+        assert erm.run_emergency_response_monitor(str(csv_path)) is None
+    assert "为空" in caplog.text
+
+
+def test_missing_station_levl_column_treated_as_non_national(tmp_path, caplog):
+    """CSV 缺少 Station_levl 列时不应抛 KeyError，全部站点按非国家站处理并告警。"""
+    csv_path = tmp_path / "no_levl.csv"
+    csv_path.write_text(
+        "Station_Id_C,Datetime,PRE\n"
+        "A,2026-07-15 09:00:00,60.0\n"
+        "B,2026-07-15 09:00:00,10.0\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="ScheduledTask.emergency_response_monitor"):
+        result = erm.compute_emergency_response_stats(str(csv_path), "2026-07-15 10:00:00")
+
+    assert result is not None
+    assert result["total_national_stations"] == 0
+    assert result["response_level"] == 0
+    assert "Station_levl" in caplog.text
+
+
 def test_run_emergency_response_monitor_persists(make_csv, monkeypatch):
     """run_emergency_response_monitor 应将结果持久化到数据库。"""
     csv_path = make_csv(
@@ -215,6 +256,25 @@ def test_run_emergency_response_monitor_persists(make_csv, monkeypatch):
     mock_session.add.assert_called_once_with(result)
     mock_session.commit.assert_called_once()
     mock_session.close.assert_called_once()
+
+
+def test_run_emergency_response_monitor_idempotent_by_datatime(make_csv, monkeypatch):
+    """写入前应先删除同 datatime 旧记录，保证重复执行不产生重复行。"""
+    csv_path = make_csv(
+        [{"Station_Id_C": "A", "Datetime": "2026-07-15 09:00:00", "PRE": 60.0, "Station_levl": "011"}],
+        datatime="2026-07-15 10:00:00",
+    )
+
+    mock_session = MagicMock()
+    mock_session_cls = MagicMock(return_value=mock_session)
+    monkeypatch.setattr(erm, "Session", mock_session_cls)
+
+    result = erm.run_emergency_response_monitor(csv_path, "2026-07-15 10:00:00")
+    assert result is not None
+    mock_session.query.assert_called_once_with(QyEmergencyResponseMonitor)
+    filter_args = mock_session.query.return_value.filter.call_args[0]
+    assert any("datatime" in str(arg) for arg in filter_args)
+    mock_session.query.return_value.filter.return_value.delete.assert_called_once()
 
 
 def test_run_emergency_response_monitor_rolls_back_on_db_error(make_csv, monkeypatch):
