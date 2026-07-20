@@ -483,7 +483,7 @@ get_river_network_for_plot
 - 用户问"流域"时，优先用 `query_basin_areal_rainfall` 获取全流域数据；预报数据只有城市级的，可以说明后以代表城市来回答
 - **数据来源必须如实**：
   - `query_basin_areal_rainfall` → 数据来源：天擎面雨量实况（非预报）
-  - `get_city_rainfall_time_range` → 数据来源：ECMWF AIFS（EC全球模式预报）
+  - `get_city_rainfall_time_range` → 数据来源以工具返回的 `data_resource` 字段为准（汛期数据湖有滚动预报 .nc 时为"滚动预报网格"，无则降级"ECMWF AIFS"）；**禁止硬编码 "ECMWF AIFS"**，必须读取工具返回值
   - `analyze_rainfall_by_time` → 数据来源：天擎自动站
   - **不能编造不存在的来源**，如"天擎面雨量预报系统"不存在
 """

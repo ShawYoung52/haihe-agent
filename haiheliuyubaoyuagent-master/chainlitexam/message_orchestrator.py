@@ -3591,9 +3591,10 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
                         "max": rd.get("max_rainfall_mm", "—"),
                         "min": rd.get("min_rainfall_mm", "—"),
                         "judgment": _weather_judgment(rd.get("average_rainfall_mm")),
+                        "data_resource": rd.get("data_resource", ""),
                     })
                 else:
-                    rows.append({"city": city, "avg": "—", "max": "—", "min": "—", "judgment": "无数据"})
+                    rows.append({"city": city, "avg": "—", "max": "—", "min": "—", "judgment": "无数据", "data_resource": ""})
             except Exception as e:
                 print(f"[海河流域天气] {city} 查询失败：{e}")
                 rows.append({"city": city, "avg": "—", "max": "—", "min": "—", "judgment": "查询失败"})
@@ -3602,6 +3603,8 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
         valid = [r for r in rows if isinstance(r["avg"], (int, float))]
         max_avg = max((float(r["avg"]) for r in valid), default=0.0)
         rainy_cities = [r["city"] for r in valid if float(r["avg"]) >= 0.1]
+        # 数据来源以工具返回的 data_resource 为准（汛期滚动预报 / 平时 EC）
+        data_resource = next((str(r.get("data_resource") or "") for r in rows if r.get("data_resource")), "") or "ECMWF AIFS"
 
         if max_avg < 0.1:
             conclusion = f"预计{label}海河流域代表城市整体无明显降雨。"
@@ -3615,7 +3618,7 @@ async def _try_basin_weather_fast_path(user_text: str, thinking_chain, tools, me
             f"**核心结论**：{conclusion}\n\n",
             "本系统当前主要提供降雨实况监测与预报，以下从降雨角度回答：\n\n",
             f"**预报时效**：{day_str} 起未来 24 小时（北京时）\n",
-            "**数据来源**：ECMWF AIFS（EC 全球模式预报）\n\n",
+            f"**数据来源**：{data_resource}\n\n",
             "| 代表城市 | 平均雨量(mm) | 最大雨量(mm) | 最小雨量(mm) | 降雨趋势 |\n",
             "| :--- | :--- | :--- | :--- | :--- |\n",
         ]
@@ -3756,9 +3759,10 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
                             "avg": rd.get("average_rainfall_mm", "—"),
                             "max": rd.get("max_rainfall_mm", "—"),
                             "judgment": _weather_judgment(rd.get("average_rainfall_mm")),
+                            "data_resource": rd.get("data_resource", ""),
                         })
                     else:
-                        city_rows.append({"city": city, "avg": "—", "max": "—", "judgment": "无数据"})
+                        city_rows.append({"city": city, "avg": "—", "max": "—", "judgment": "无数据", "data_resource": ""})
                 except Exception as e:
                     print(f"[周末活动] {day_label} {city} 查询失败：{e}")
                     city_rows.append({"city": city, "avg": "—", "max": "—", "judgment": "查询失败"})
@@ -3790,8 +3794,18 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
                     lines.append(f"| {r['city']} | {r['avg']} | {r['max']} | {r['judgment']} |\n")
                 lines.append("\n")
             conclusion = "📌 本周末海河流域代表城市整体降雨较弱，比较适合户外活动。" if overall_suitable else "📌 本周末海河流域部分时段有明显降雨，请根据具体日期和区域安排活动。"
+            # 数据来源以工具返回的 data_resource 为准（汛期滚动预报 / 平时 EC）
+            weekend_data_resource = ""
+            for info in day_results.values():
+                for r in info.get("rows", []):
+                    if r.get("data_resource"):
+                        weekend_data_resource = str(r["data_resource"])
+                        break
+                if weekend_data_resource:
+                    break
+            weekend_data_resource = weekend_data_resource or "ECMWF AIFS"
             text = conclusion + "\n\n" + "".join(lines)
-            text += "**说明**：以上为代表城市 24 小时降雨量预报（ECMWF AIFS），具体点位可能有差异；临近出行前请关注最新预报。"
+            text += f"**说明**：以上为代表城市 24 小时降雨量预报（{weekend_data_resource}），具体点位可能有差异；临近出行前请关注最新预报。"
         else:
             lines = ["## 天津周末天气预报\n\n"]
             for day_label, info in day_results.items():
@@ -4157,9 +4171,9 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
                     avg = rd.get("average_rainfall_mm", "-")
                     mx = rd.get("max_rainfall_mm", "-")
                     mn = rd.get("min_rainfall_mm", "-")
-                    rows.append((day_dt.strftime("%m月%d日"), avg, mx, mn))
+                    rows.append((day_dt.strftime("%m月%d日"), avg, mx, mn, rd.get("data_resource", "")))
                 else:
-                    rows.append((day_dt.strftime("%m月%d日"), "无数据", "—", "—"))
+                    rows.append((day_dt.strftime("%m月%d日"), "无数据", "—", "—", ""))
             except Exception:
                 rows.append((day_dt.strftime("%m月%d日"), "无数据", "—", "—"))
             await asyncio.sleep(0.1)
@@ -4169,9 +4183,10 @@ async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, 
             lines.append("以天津市为代表站，预报未来降雨情况：\n\n")
             lines.append("| 日期 | 平均雨量(mm) | 最大雨量(mm) | 最小雨量(mm) |\n")
             lines.append("| :--- | :--- | :--- | :--- |\n")
-            for d, avg, mx, mn in rows:
+            for d, avg, mx, mn, _dr in rows:
                 lines.append(f"| {d} | {avg} | {mx} | {mn} |\n")
-            lines.append("\n**说明**：ECMWF AIFS 预报；以天津市作为海河流域代表站展示整体趋势，具体子流域请咨询对应区域。")
+            genweather_data_resource = next((str(dr) for _, _, _, _, dr in rows if dr), "") or "ECMWF AIFS"
+            lines.append(f"\n**说明**：{genweather_data_resource} 预报；以天津市作为海河流域代表站展示整体趋势，具体子流域请咨询对应区域。")
             text = "".join(lines)
         else:
             text = "暂无未来天气预报数据。"
@@ -4312,17 +4327,19 @@ async def _try_subbasin_forecast_fast_path(user_text: str, thinking_chain, tools
                             "max": rd.get("max_rainfall_mm", "—"),
                             "min": rd.get("min_rainfall_mm", "—"),
                             "judgment": _weather_judgment(rd.get("average_rainfall_mm")),
+                            "data_resource": rd.get("data_resource", ""),
                         })
                     else:
-                        rows.append({"city": city, "date": date_label, "avg": "—", "max": "—", "min": "—", "judgment": "无数据"})
+                        rows.append({"city": city, "date": date_label, "avg": "—", "max": "—", "min": "—", "judgment": "无数据", "data_resource": ""})
                 except Exception as e:
                     print(f"[{subbasin}] {city} {date_label} 预报查询失败：{e}")
                     rows.append({"city": city, "date": date_label, "avg": "—", "max": "—", "min": "—", "judgment": "查询失败"})
                 await asyncio.sleep(0.1)
 
         if rows:
+            subbasin_data_resource = next((str(r.get("data_resource") or "") for r in rows if r.get("data_resource")), "") or "ECMWF AIFS"
             lines = [f"## {_clean_table_cell(subbasin)}未来{days}天降雨预报\n\n"]
-            lines.append(f"基于 ECMWF AIFS 模式 24 小时降雨量预报，以**{'、'.join(cities)}**为代表城市，反映{_clean_table_cell(subbasin)}未来{days}天降雨趋势：\n\n")
+            lines.append(f"基于 {subbasin_data_resource} 24 小时降雨量预报，以**{'、'.join(cities)}**为代表城市，反映{_clean_table_cell(subbasin)}未来{days}天降雨趋势：\n\n")
             lines.append("| 代表城市 | 日期 | 平均雨量(mm) | 最大雨量(mm) | 天气预判 |\n")
             lines.append("| :--- | :--- | :--- | :--- | :--- |\n")
             for r in rows:
