@@ -327,25 +327,26 @@ class TestSampleRollingForecastAtStations:
         assert abs(nearest["54517"] - bilinear["54517"]) < 50.0  # 容差较大，只验证量级
 
 
-# ---------- materialize_rolling_forecast_to_files (needs sample file) ----------
+# ---------- materialize_rolling_forecast_to_files (needs sample file + GDAL) ----------
+
+def _gdal_available() -> bool:
+    try:
+        from osgeo import gdal  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 
 @pytest.mark.skipif(_find_sample_nc() is None, reason="无样本 .nc 文件")
+@pytest.mark.skipif(not _gdal_available(), reason="GDAL 未安装，materialize 写 GeoTIFF 需要 GDAL")
 class TestMaterializeRollingForecastToFiles:
-    def test_writes_one_2d_nc_per_hour(self, tmp_path):
+    def test_writes_one_geotiff_per_hour(self, tmp_path):
         path = _find_sample_nc()
         result = rfg.materialize_rolling_forecast_to_files(path, [12, 24], output_dir=tmp_path)
         assert set(result.keys()) == {"12h", "24h"}
         for key, out_path in result.items():
             assert Path(out_path).exists()
-            # 每个文件应是 2D (lat, lon) 无 time 维
-            import xarray as xr
-            with xr.open_dataset(out_path, engine="netcdf4", decode_times=False) as ds:
-                assert "TP1H" in ds.data_vars
-                assert "time" not in ds["TP1H"].dims
-                assert ds["TP1H"].dims == ("lat", "lon")
-                # lat 必须降序，使 GDAL row 0 = max lat 与 geotransform 对齐
-                lat = ds["lat"].values
-                assert lat[0] > lat[-1], f"lat should be descending, got {lat[0]}..{lat[-1]}"
+            assert out_path.endswith(".tif"), f"应为 GeoTIFF: {out_path}"
 
     def test_skips_hours_not_in_file(self, tmp_path):
         path = _find_sample_nc()
@@ -353,14 +354,32 @@ class TestMaterializeRollingForecastToFiles:
         assert "12h" in result
         assert "999h" not in result  # 999h 不在 time 坐标中，跳过
 
-    def test_materialized_file_reopenable_and_consistent(self, tmp_path):
-        """切片写出的 2D 文件值应与直接从原 .nc 读取的对应时次一致。"""
+    @pytest.mark.skipif(not _gdal_available(), reason="GDAL 未安装，无法验证 GeoTIFF 内容")
+    def test_geotiff_has_correct_geotransform_and_projection(self, tmp_path):
+        """GeoTIFF 应有 WGS84 投影 + 正确 geotransform + 数组垂直翻转（row 0 = max lat）。"""
+        from osgeo import gdal
+        import numpy as np
         import xarray as xr
+
         path = _find_sample_nc()
         result = rfg.materialize_rolling_forecast_to_files(path, [24], output_dir=tmp_path)
         out_path = result["24h"]
-        with xr.open_dataset(out_path, engine="netcdf4", decode_times=False) as ds_out:
-            sliced = ds_out["TP1H"].values
-        with xr.open_dataset(path, engine="netcdf4", decode_times=False) as ds_orig:
-            original = ds_orig["TP1H"].sel(time=24).values
-        assert sliced.shape == original.shape
+        ds = gdal.Open(out_path)
+        assert ds is not None, f"GDAL 无法打开 {out_path}"
+        assert ds.RasterCount == 1
+        gt = ds.GetGeoTransform()
+        # 验证 geotransform：left=110.975, top=43.025, res=0.05
+        assert abs(gt[0] - 110.975) < 0.01, f"GT[0]={gt[0]}"
+        assert abs(gt[3] - 43.025) < 0.01, f"GT[3]={gt[3]}"
+        assert abs(gt[1] - 0.05) < 0.001, f"GT[1]={gt[1]}"
+        assert abs(gt[5] - (-0.05)) < 0.001, f"GT[5]={gt[5]}"
+        proj = ds.GetProjection()
+        assert "4326" in proj, f"投影应为 WGS84 EPSG:4326"
+        # 验证数组：row 0 应对应 max lat（43°），与原 .nc 的 lat[-1] 对齐
+        band = ds.GetRasterBand(1)
+        arr = band.ReadAsArray()
+        with xr.open_dataset(path, engine="netcdf4", decode_times=False) as orig:
+            original = orig["TP1H"].sel(time=24).values
+        # 翻转后 row 0 = original lat[-1]（max lat）
+        np.testing.assert_allclose(arr[0, :], original[-1, :], rtol=1e-5)
+        ds = None

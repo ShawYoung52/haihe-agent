@@ -256,15 +256,17 @@ def materialize_rolling_forecast_to_files(
     *,
     output_dir: str | os.PathLike | None = None,
 ) -> dict[str, str]:
-    """把滚动预报 .nc 的指定时效切片写成独立 2D .nc 文件，兼容 EC 消费方。
+    """把滚动预报 .nc 的指定时效切片写成独立 GeoTIFF（.tif），兼容 EC 消费方。
 
-    返回 `{f"{h}h": temp_nc_path}`；每个 temp 文件含单个 (lat, lon) 二维变量 TP1H，
-    GDAL netCDF 驱动可当作 1 波段栅格打开，与 `ec_forecast_precip_files_by_horizon`
-    返回的 TIF 路径在 `_sample_station_forecast_rain_mm` 中走同一 GDAL 分支。
-    时效不在文件 time 坐标内的条目跳过（不写入）。
+    返回 `{f"{h}h": temp_tif_path}`；每个 temp 文件是单波段 Float32 GeoTIFF，
+    WGS84 投影 + 像元中心→边界 geotransform，与 `ec_forecast_precip_files_by_horizon`
+    返回的 TIF 在 `_sample_station_forecast_rain_mm` / `gdal.Open` 中走完全相同的路径。
+    用 GeoTIFF 而非 .nc 是因为 GDAL netCDF 驱动可能创建子数据集导致 `GetRasterBand(1)`
+    取不到 TP1H；GeoTIFF 单波段无此歧义。时效不在 time 坐标内的条目跳过。
     """
     import tempfile
     import xarray as xr  # 懒导入
+    from osgeo import gdal, osr  # 懒导入
 
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="rolling_fc_")
@@ -273,14 +275,42 @@ def materialize_rolling_forecast_to_files(
     result: dict[str, str] = {}
     ds = xr.open_dataset(nc_path, engine="netcdf4", decode_times=False)
     try:
+        # WGS84 投影（所有波段共用）
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        try:
+            srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        except Exception:
+            pass
+        proj_wkt = srs.ExportToWkt()
+
         for h in hours:
             if h not in ds["time"].values:
                 continue
-            # 翻转 lat 为降序，使 GDAL netCDF 驱动打开时 row 0 = max lat（GDAL 惯例），
-            # 与 geotransform GT[3]=lat_max / GT[5]=-res 对齐，避免 zonal stats 垂直错位。
-            slice_2d = ds["TP1H"].sel(time=h).isel(lat=slice(None, None, -1)).drop_vars("time", errors="ignore")
-            out_path = out_dir / f"tp1h_{h}h.nc"
-            slice_2d.to_netcdf(out_path)
+            tp = ds["TP1H"].sel(time=h).load()
+            lat = tp["lat"].values  # 升序
+            lon = tp["lon"].values  # 升序
+            arr = tp.values.astype("float32")  # (lat, lon) 升序
+            arr = arr[::-1, :]  # 翻转为降序，GDAL row 0 = max lat
+            lon_res = float(lon[1] - lon[0])
+            lat_res = float(lat[1] - lat[0])
+            gt = (
+                float(lon[0]) - lon_res / 2,
+                lon_res,
+                0.0,
+                float(lat[-1]) + lat_res / 2,
+                0.0,
+                -lat_res,
+            )
+            out_path = out_dir / f"tp1h_{h}h.tif"
+            driver = gdal.GetDriverByName("GTiff")
+            out_ds = driver.Create(str(out_path), int(arr.shape[1]), int(arr.shape[0]), 1, gdal.GDT_Float32)
+            out_ds.SetGeoTransform(gt)
+            out_ds.SetProjection(proj_wkt)
+            band = out_ds.GetRasterBand(1)
+            band.WriteArray(arr)
+            band.FlushCache()
+            out_ds = None
             result[f"{h}h"] = str(out_path)
     finally:
         ds.close()
