@@ -18,11 +18,16 @@ from haihe_mcp_tools import (
     DEFAULT_EC_OUTPUT_PATH,
     deduplicate_latest_records,
     ec_forecast_precip_files_by_horizon,
+    ec_forecast_precip_files_by_horizon,
     evaluate_haihe_forecast_emergency_response_core,
     evaluate_observation_response,
     filter_records_by_station_levels,
     safe_float,
     station_id_of,
+)
+from rolling_forecast_grid import (
+    materialize_rolling_forecast_to_files,
+    resolve_forecast_grid_source,
 )
 
 DEFAULT_HAIHE_BASIN_CODES = os.getenv("HAIHE_BASIN_CODES", DEFAULT_BASIN_CODES).strip() or DEFAULT_BASIN_CODES
@@ -323,9 +328,16 @@ def _evaluate_forecast_with_local_station_records(
     local_station_json_path: str,
 ) -> Dict[str, Any]:
     parsed_start = _parse_forecast_start_time(start_time)
-    ec_files = ec_forecast_precip_files_by_horizon(parsed_start, ec_output_path)
-    if not ec_files.get("24h") and not ec_files.get("12h"):
-        raise BusinessException("本地模式下未找到 12h/24h 预报文件，请检查 ec_output_path 与 start_time")
+    # 按数据可用性切换：有滚动预报 .nc 就切片成 2D 文件喂给现有 GDAL 采样器；否则用 EC
+    source_info = resolve_forecast_grid_source(ec_output_path=ec_output_path)
+    if source_info["source"] == "rolling_forecast":
+        ec_files = materialize_rolling_forecast_to_files(source_info["file"], [6, 12, 24])
+        if not ec_files.get("24h") and not ec_files.get("12h"):
+            raise BusinessException("滚动预报文件中无 12h/24h 时效数据")
+    else:
+        ec_files = ec_forecast_precip_files_by_horizon(parsed_start, ec_output_path)
+        if not ec_files.get("24h") and not ec_files.get("12h"):
+            raise BusinessException("本地模式下未找到 12h/24h 预报文件，请检查 ec_output_path 与 start_time")
     station_records = _load_local_station_records(
         start_time=start_time,
         local_station_json_path=local_station_json_path,

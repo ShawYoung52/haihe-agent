@@ -20,6 +20,10 @@ import uuid
 from datetime import datetime, timedelta
 
 from constants import DEFAULT_BASIN_CODES
+from rolling_forecast_grid import (
+    resolve_forecast_grid_source,
+    sample_rolling_forecast_at_stations,
+)
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -313,24 +317,30 @@ def evaluate_forecast(records: list[dict], start_time: str, thresholds: dict = N
     if total == 0:
         return {"triggered": False, "level": None, "message": "无站点数据", "ec_files": {}}
 
-    # 查找 EC 文件
-    ec_files = {}
-    for h in [6, 12, 24]:
-        p = _find_ec_precip_file(start_time, h)
-        if p:
-            ec_files[f"{h}h"] = p
+    # 按数据可用性切换：有滚动预报 .nc 用滚动预报，否则用 EC tif
+    source_info = resolve_forecast_grid_source(ec_output_path=EC_OUTPUT_PATH)
+    ec_files: dict[str, str] = {}
+    rain_data: dict[str, dict[str, float]] = {}
 
-    if not ec_files:
-        return {
-            "triggered": False, "level": None,
-            "message": f"未找到 EC 预报文件: {EC_OUTPUT_PATH}/.../ec_{start_time}_rain_total_*.tif",
-            "ec_files": {},
-        }
-
-    # 采样
-    rain_data = {}
-    for key, path in ec_files.items():
-        rain_data[key] = _sample_forecast_at_stations(records, path)
+    if source_info["source"] == "rolling_forecast":
+        nc_path = source_info["file"]
+        for h in [6, 12, 24]:
+            rain_data[f"{h}h"] = sample_rolling_forecast_at_stations(nc_path, records, h)
+        data_source = f"滚动预报网格（cycle={source_info['cycle']}）"
+    else:
+        for h in [6, 12, 24]:
+            p = _find_ec_precip_file(start_time, h)
+            if p:
+                ec_files[f"{h}h"] = p
+        if not ec_files:
+            return {
+                "triggered": False, "level": None,
+                "message": f"未找到 EC 预报文件: {EC_OUTPUT_PATH}/.../ec_{start_time}_rain_total_*.tif",
+                "ec_files": {},
+            }
+        for key, path in ec_files.items():
+            rain_data[key] = _sample_forecast_at_stations(records, path)
+        data_source = "ECMWF AIFS"
 
     rain6 = rain_data.get("6h", {})
     rain12 = rain_data.get("12h", {})
@@ -350,14 +360,14 @@ def evaluate_forecast(records: list[dict], start_time: str, thresholds: dict = N
         return ratio >= ratio_thresh and sustained
 
     if rain24 and judge(rain24, th["extraordinary_24h"], 0.15, "I"):
-        return {"triggered": True, "level": "I", "message": "满足I级应急响应条件（EC预报-特大暴雨）", "ec_files": ec_files}
+        return {"triggered": True, "level": "I", "message": f"满足I级应急响应条件（{data_source}-特大暴雨）", "ec_files": ec_files}
     if rain24 and judge(rain24, th["severe_rainstorm_24h"], 0.15, "II"):
-        return {"triggered": True, "level": "II", "message": "满足II级应急响应条件（EC预报-大暴雨）", "ec_files": ec_files}
+        return {"triggered": True, "level": "II", "message": f"满足II级应急响应条件（{data_source}-大暴雨）", "ec_files": ec_files}
     if rain12 and judge(rain12, th["rainstorm_12h"], 0.20, "III"):
-        return {"triggered": True, "level": "III", "message": "满足III级应急响应条件（EC预报-暴雨）", "ec_files": ec_files}
+        return {"triggered": True, "level": "III", "message": f"满足III级应急响应条件（{data_source}-暴雨）", "ec_files": ec_files}
     if rain24 and judge(rain24, th["rainstorm_24h"], 0.20, "IV"):
-        return {"triggered": True, "level": "IV", "message": "满足IV级应急响应条件（EC预报-暴雨）", "ec_files": ec_files}
-    return {"triggered": False, "level": None, "message": "未满足 I/II/III/IV 级条件（EC预报）", "ec_files": ec_files}
+        return {"triggered": True, "level": "IV", "message": f"满足IV级应急响应条件（{data_source}-暴雨）", "ec_files": ec_files}
+    return {"triggered": False, "level": None, "message": f"未满足 I/II/III/IV 级条件（{data_source}）", "ec_files": ec_files}
 
 
 # ===================== 事件管理 =====================
