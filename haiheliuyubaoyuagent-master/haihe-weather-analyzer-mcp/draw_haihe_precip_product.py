@@ -102,7 +102,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tiff-file",
         default="",
-        help="指定栅格文件（tif/grib2）；不传则：有 --start-utc 时按 EC 规范文件名查找，否则在 input-dir 取最新",
+        help="指定栅格文件（tif/grib2/.nc）；不传则：有 --start-utc 时按 EC 规范文件名查找，否则在 input-dir 取最新。传 .nc 时按滚动预报处理，用 --lead-hours 作为提取时效",
+    )
+    parser.add_argument(
+        "--rolling-forecast-nc",
+        default="",
+        help="滚动预报 .nc 文件路径；设置后忽略 --tiff-file/--input-dir/--start-utc，用 --lead-hours 作为提取时效",
     )
     parser.add_argument("--basin-vector", required=True, help="海河流域边界文件（shp/geojson）")
     parser.add_argument("--output", default="haihe_precip_product.png", help="输出 PNG 文件路径")
@@ -371,6 +376,54 @@ def _open_raster(path: str) -> RasterData:
     return RasterData(
         array=arr, geotransform=gt, projection_wkt=proj, nodata=nodata, xsize=xsize, ysize=ysize
     )
+
+
+def _open_rolling_forecast_nc(path: str, hour: int) -> RasterData:
+    """从滚动预报 .nc 提取指定时效的 TP1H 2D 场，构造 RasterData 供渲染管线使用。
+
+    NetCDF 结构：TP1H (time, lat, lon)，lat 升序、lon 升序。GDAL 惯例 row 0 = max lat，
+    故对数组做垂直翻转；geotransform 按像元中心约定推算边界。
+    """
+    import xarray as xr  # 懒导入
+    ds = xr.open_dataset(path, engine="netcdf4", decode_times=False)
+    try:
+        if hour not in ds["time"].values:
+            raise ValueError(f"滚动预报 .nc 中无 time={hour} 时效: {path}")
+        tp = ds["TP1H"].sel(time=hour).load()
+    finally:
+        ds.close()
+    lat = tp["lat"].values  # 升序
+    lon = tp["lon"].values  # 升序
+    arr = tp.values.astype(np.float32)  # (lat, lon)
+    arr = arr[::-1, :]  # row 0 = max lat
+    lon_res = float(lon[1] - lon[0])
+    lat_res = float(lat[1] - lat[0])
+    # 像元中心→边界：GT[0] = lon_min - res/2, GT[3] = lat_max + res/2
+    gt = (
+        float(lon[0]) - lon_res / 2,
+        lon_res,
+        0.0,
+        float(lat[-1]) + lat_res / 2,
+        0.0,
+        -lat_res,
+    )
+    return RasterData(
+        array=arr,
+        geotransform=gt,
+        projection_wkt=wgs84_projection_wkt_traditional(),
+        nodata=None,
+        xsize=int(arr.shape[1]),
+        ysize=int(arr.shape[0]),
+    )
+
+
+def _open_raster_or_nc(path: str, hour: Optional[int] = None) -> RasterData:
+    """按文件扩展名分发：.nc 用滚动预报读取器（需 hour），其余用 GDAL。"""
+    if path.lower().endswith(".nc"):
+        if hour is None:
+            raise ValueError("打开 .nc 需要指定 hour 参数")
+        return _open_rolling_forecast_nc(path, hour)
+    return _open_raster(path)
 
 
 def _open_vector_layer(path: str):
@@ -1753,8 +1806,10 @@ def run_draw_haihe_precip_product(
     else:
         t1, t2 = _format_title(start_utc, lead_hours)
     cap3 = "EC AIFS" if title_line3 is None else str(title_line3)
+    if tiff_path.lower().endswith(".nc"):
+        cap3 = "滚动预报" if title_line3 is None else str(title_line3)
 
-    raster = _open_raster(tiff_path)
+    raster = _open_raster_or_nc(tiff_path, hour=lead_hours)
     vds, layer = _open_vector_layer(basin_vector)
     rvds, rlayer = _reproject_vector_to_raster(vds, layer, raster.projection_wkt)
 
@@ -1848,6 +1903,37 @@ def run_draw_haihe_precip_product(
 
 def main():
     args = _parse_args()
+    # 滚动预报 .nc 模式：跳过 EC 文件发现，直接用 .nc + lead-hours
+    rolling_nc = (args.rolling_forecast_nc or "").strip()
+    if rolling_nc:
+        if not os.path.isfile(rolling_nc):
+            raise FileNotFoundError(f"滚动预报 .nc 文件不存在: {rolling_nc}")
+        print(f"[paths] 滚动预报模式: {rolling_nc} hour={args.lead_hours}")
+        run_draw_haihe_precip_product(
+            rolling_nc,
+            args.basin_vector,
+            args.output,
+            args.lead_hours,
+            start_utc_arg=args.start_utc,
+            config=args.config,
+            dpi=args.dpi,
+            font_path=args.font_path,
+            no_admin_overlay=args.no_admin_overlay,
+            admin_level=args.admin_level,
+            admin_max_features=args.admin_max_features,
+            admin_simplify_deg=args.admin_simplify_deg,
+            admin_by_basin=args.admin_by_basin,
+            admin_city_union=args.admin_city_union,
+            admin_metro_prefixes=args.admin_metro_prefixes,
+            force_display_latlon_swap=args.force_display_latlon_swap,
+            admin_query_buffer_ratio=args.admin_query_buffer_ratio,
+            map_basin_padding=args.map_basin_padding,
+            precip_mm_factor=args.precip_mm_factor,
+            theme=args.theme,
+            transparent_background=args.transparent_background,
+            color_scheme=args.color_scheme,
+        )
+        return
     ec_base = (args.input_dir or "").strip()
     su = (args.start_utc or "").strip()
     scan_dir = _resolve_ec_nested_input_dir(ec_base, su) if su else ec_base

@@ -286,38 +286,57 @@ class RainfallAnalyzer:
             # 3. 获取EC数据路径
             ec_output_path = self.config.get('paths', 'ecOutput')
 
-            # 4. 查找时间范围内的降雨tif文件
+            # 4. 按数据可用性切换：有滚动预报 .nc 时切片成 2D .nc，否则查找 EC tif
             rainfall_tifs = []
-            time_str = start_time.strftime("%Y%m%d%H")
-            pattern = f"ec_{time_str}_rain_total_{forecast_hours}h.tif"
-            found_file = None
+            data_resource_label = "ECMWF AIFS"
+            try:
+                from rolling_forecast_grid import (
+                    materialize_rolling_forecast_to_files,
+                    resolve_forecast_grid_source,
+                )
+                source_info = resolve_forecast_grid_source(ec_output_path=ec_output_path)
+            except Exception:
+                source_info = {"source": "ec", "file": None}
+            if source_info.get("source") == "rolling_forecast" and source_info.get("file"):
+                nc_path = source_info["file"]
+                materialized = materialize_rolling_forecast_to_files(nc_path, [forecast_hours])
+                tiff_path = materialized.get(f"{forecast_hours}h")
+                if tiff_path:
+                    rainfall_tifs.append(tiff_path)
+                    data_resource_label = f"滚动预报网格（cycle={source_info.get('cycle')}）"
 
-            # 优先搜索配置路径，搜索不到再搜索 Linux 服务器路径
-            search_roots = [ec_output_path]
-            linux_path = "/home/ev/data/ec/EC_AIFS/output"
-            if os.path.isdir(linux_path) and linux_path != ec_output_path:
-                search_roots.append(linux_path)
-            # 兜底：环境变量 EC_AIFS_ROOT
-            env_root = os.environ.get("EC_AIFS_ROOT", "")
-            if env_root and os.path.isdir(env_root) and env_root not in search_roots:
-                search_roots.append(env_root)
-            # 再兜底：EC_AIFS_ROOT/output
-            env_output = os.path.join(env_root, "output") if env_root else ""
-            if env_output and os.path.isdir(env_output) and env_output not in search_roots:
-                search_roots.append(env_output)
+            if not rainfall_tifs:
+                # EC 路径：按文件名规范查找 tif
+                time_str = start_time.strftime("%Y%m%d%H")
+                pattern = f"ec_{time_str}_rain_total_{forecast_hours}h.tif"
+                found_file = None
 
-            for root_dir in search_roots:
-                if not os.path.isdir(root_dir):
-                    continue
-                for root, dirs, files in os.walk(root_dir):
-                    if pattern in files:
-                        found_file = os.path.join(root, pattern)
-                        break
+                # 优先搜索配置路径，搜索不到再搜索 Linux 服务器路径
+                search_roots = [ec_output_path]
+                linux_path = "/home/ev/data/ec/EC_AIFS/output"
+                if os.path.isdir(linux_path) and linux_path != ec_output_path:
+                    search_roots.append(linux_path)
+                # 兜底：环境变量 EC_AIFS_ROOT
+                env_root = os.environ.get("EC_AIFS_ROOT", "")
+                if env_root and os.path.isdir(env_root) and env_root not in search_roots:
+                    search_roots.append(env_root)
+                # 再兜底：EC_AIFS_ROOT/output
+                env_output = os.path.join(env_root, "output") if env_root else ""
+                if env_output and os.path.isdir(env_output) and env_output not in search_roots:
+                    search_roots.append(env_output)
+
+                for root_dir in search_roots:
+                    if not os.path.isdir(root_dir):
+                        continue
+                    for root, dirs, files in os.walk(root_dir):
+                        if pattern in files:
+                            found_file = os.path.join(root, pattern)
+                            break
+                        if found_file:
+                            break
                     if found_file:
+                        rainfall_tifs.append(found_file)
                         break
-                if found_file:
-                    rainfall_tifs.append(found_file)
-                    break
 
             if not rainfall_tifs:
                 return RainfallCityData(
@@ -328,7 +347,7 @@ class RainfallAnalyzer:
                     max_rainfall_mm=0,
                     min_rainfall_mm=0,
                     processed_files=0,
-                    data_resource="ECMWF AIFS（无预报文件）"
+                    data_resource=data_resource_label + "（无预报文件）"
                 )
 
             # 5. 计算城市边界内的栅格统计信息
@@ -431,7 +450,7 @@ class RainfallAnalyzer:
                 min_rainfall_mm=round(min_rainfall, 2),
                 # total_rainfall_mm=round(total_rainfall, 2),
                 processed_files=len(rainfall_tifs),
-                data_resource="ECMWF AIFS"
+                data_resource=data_resource_label
             )
 
         except Exception as e:
@@ -474,7 +493,7 @@ class RainfallAnalyzer:
                     max_rainfall_mm=round(mx, 2),
                     min_rainfall_mm=round(mn, 2),
                     processed_files=len(rainfall_tifs),
-                    data_resource="ECMWF AIFS"
+                    data_resource=data_resource_label
                 )
             except Exception as e2:
                 logger.error(f"降级统计也失败: {e2}")

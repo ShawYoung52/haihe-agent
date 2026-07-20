@@ -96,6 +96,10 @@ class ForecastProductJob:
     start_time_compact: str = ""
     created_at: str = ""
     finished_at: Optional[str] = None
+    # 汛期滚动预报切换：source="rolling_forecast" 时 rolling_nc_path 指向 .nc，
+    # worker 每个时效用同一 .nc + 不同 hour 调 run_draw_haihe_precip_product。
+    source: str = "ec"  # ec | rolling_forecast
+    rolling_nc_path: Optional[str] = None
 
 
 _jobs_lock = threading.Lock()
@@ -185,7 +189,18 @@ def _run_job(job_id: str) -> None:
         job.items = []
 
     try:
-        meta = collect_ec_forecast_precip_files(job.start_time, job.ec_output_path, job.hours)
+        if job.source == "rolling_forecast" and job.rolling_nc_path:
+            # 滚动预报：单 .nc 覆盖全部时效，各时效复用同一文件
+            from rolling_forecast_grid import resolve_forecast_grid_source as _rfg
+            cycle_info = _rfg(ec_output_path=job.ec_output_path)
+            compact = (cycle_info.get("cycle") or job.start_time.replace("-", "").replace(" ", "").replace(":", ""))[:10]
+            ec_files = {}
+            tiff_path_for_hour = job.rolling_nc_path
+        else:
+            meta = collect_ec_forecast_precip_files(job.start_time, job.ec_output_path, job.hours)
+            compact = str(meta.get("start_time_compact") or "")
+            ec_files = meta.get("ec_files") or {}
+            tiff_path_for_hour = None
     except BusinessException as e:
         with _jobs_lock:
             j = _jobs.get(job_id)
@@ -195,8 +210,6 @@ def _run_job(job_id: str) -> None:
                 j.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return
 
-    compact = str(meta.get("start_time_compact") or "")
-    ec_files = meta.get("ec_files") or {}
     start_utc_arg = compact[:10] if len(compact) >= 10 else compact
 
     out_dir = _cycle_output_dir(compact)
@@ -205,7 +218,10 @@ def _run_job(job_id: str) -> None:
     items: List[Dict[str, Any]] = []
     for h in job.hours:
         key = f"{h}h"
-        tiff_path = ec_files.get(key)
+        if job.source == "rolling_forecast" and tiff_path_for_hour:
+            tiff_path = tiff_path_for_hour  # 单 .nc 文件，各时效复用
+        else:
+            tiff_path = ec_files.get(key)
         png_name = f"haihe_precip_{h}h.png"
         png_path = os.path.join(out_dir, png_name)
         rel_url_path = f"/emergency/forecast/products/png?start_time_compact={compact}&lead_hours={h}"
@@ -306,6 +322,12 @@ def enqueue_forecast_product_job(
     ec_path = (ec_output_path or ec_default).strip() or ec_default
     hrs = tuple(hours) if hours else DEFAULT_PRODUCT_HOURS
 
+    # 按数据可用性切换：有滚动预报 .nc 时优先用滚动预报（汛期），否则 EC
+    from rolling_forecast_grid import resolve_forecast_grid_source
+    source_info = resolve_forecast_grid_source(ec_output_path=ec_path)
+    source = source_info["source"]
+    rolling_nc = source_info.get("file") if source == "rolling_forecast" else None
+
     _ensure_worker()
     job_id = uuid.uuid4().hex
     opts: Optional[Dict[str, Any]] = None
@@ -320,6 +342,8 @@ def enqueue_forecast_product_job(
         basin_vector=os.path.abspath(basin),
         draw_options=opts,
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        source=source,
+        rolling_nc_path=rolling_nc,
     )
     with _jobs_lock:
         _jobs[job_id] = job
