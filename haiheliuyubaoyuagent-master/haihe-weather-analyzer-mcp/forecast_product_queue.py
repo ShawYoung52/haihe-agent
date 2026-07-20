@@ -188,12 +188,11 @@ def _run_job(job_id: str) -> None:
         job.error = None
         job.items = []
 
+    meta: Dict[str, Any] = {}
     try:
         if job.source == "rolling_forecast" and job.rolling_nc_path:
-            # 滚动预报：单 .nc 覆盖全部时效，各时效复用同一文件
-            from rolling_forecast_grid import resolve_forecast_grid_source as _rfg
-            cycle_info = _rfg(ec_output_path=job.ec_output_path)
-            compact = (cycle_info.get("cycle") or job.start_time.replace("-", "").replace(" ", "").replace(":", ""))[:10]
+            # 滚动预报：单 .nc 覆盖全部时效，各时效复用同一文件；cycle 已在 enqueue 时存入 job
+            compact = (job.start_time_compact or job.start_time.replace("-", "").replace(" ", "").replace(":", ""))[:10]
             ec_files = {}
             tiff_path_for_hour = job.rolling_nc_path
         else:
@@ -344,6 +343,8 @@ def enqueue_forecast_product_job(
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         source=source,
         rolling_nc_path=rolling_nc,
+        # 滚动预报时用 cycle 作为 compact；EC 时留空，worker 从 collect_ec_forecast_precip_files 填
+        start_time_compact=(source_info.get("cycle") or "")[:10] if source == "rolling_forecast" else "",
     )
     with _jobs_lock:
         _jobs[job_id] = job

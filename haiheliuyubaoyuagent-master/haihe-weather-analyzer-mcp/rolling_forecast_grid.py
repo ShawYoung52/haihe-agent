@@ -276,7 +276,9 @@ def materialize_rolling_forecast_to_files(
         for h in hours:
             if h not in ds["time"].values:
                 continue
-            slice_2d = ds["TP1H"].sel(time=h).drop_vars("time", errors="ignore")
+            # 翻转 lat 为降序，使 GDAL netCDF 驱动打开时 row 0 = max lat（GDAL 惯例），
+            # 与 geotransform GT[3]=lat_max / GT[5]=-res 对齐，避免 zonal stats 垂直错位。
+            slice_2d = ds["TP1H"].sel(time=h).isel(lat=slice(None, None, -1)).drop_vars("time", errors="ignore")
             out_path = out_dir / f"tp1h_{h}h.nc"
             slice_2d.to_netcdf(out_path)
             result[f"{h}h"] = str(out_path)

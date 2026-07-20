@@ -295,7 +295,8 @@ class RainfallAnalyzer:
                     resolve_forecast_grid_source,
                 )
                 source_info = resolve_forecast_grid_source(ec_output_path=ec_output_path)
-            except Exception:
+            except Exception as e:
+                logger.warning("滚动预报数据源解析失败，降级 EC: %s", e, exc_info=True)
                 source_info = {"source": "ec", "file": None}
             if source_info.get("source") == "rolling_forecast" and source_info.get("file"):
                 nc_path = source_info["file"]

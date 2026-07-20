@@ -343,6 +343,9 @@ class TestMaterializeRollingForecastToFiles:
                 assert "TP1H" in ds.data_vars
                 assert "time" not in ds["TP1H"].dims
                 assert ds["TP1H"].dims == ("lat", "lon")
+                # lat 必须降序，使 GDAL row 0 = max lat 与 geotransform 对齐
+                lat = ds["lat"].values
+                assert lat[0] > lat[-1], f"lat should be descending, got {lat[0]}..{lat[-1]}"
 
     def test_skips_hours_not_in_file(self, tmp_path):
         path = _find_sample_nc()

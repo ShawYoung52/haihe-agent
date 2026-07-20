@@ -1805,9 +1805,8 @@ def run_draw_haihe_precip_product(
         t1, t2 = str(title1), str(title2)
     else:
         t1, t2 = _format_title(start_utc, lead_hours)
-    cap3 = "EC AIFS" if title_line3 is None else str(title_line3)
-    if tiff_path.lower().endswith(".nc"):
-        cap3 = "滚动预报" if title_line3 is None else str(title_line3)
+    default_cap3 = "滚动预报" if tiff_path.lower().endswith(".nc") else "EC AIFS"
+    cap3 = default_cap3 if title_line3 is None else str(title_line3)
 
     raster = _open_raster_or_nc(tiff_path, hour=lead_hours)
     vds, layer = _open_vector_layer(basin_vector)
