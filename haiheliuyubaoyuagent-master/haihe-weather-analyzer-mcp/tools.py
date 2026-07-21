@@ -2436,7 +2436,8 @@ def register_tools(mcp: FastMCP):
         - "XX 市明天有雨吗？"、"天津市周末下雨吗？"（城市降水预报）
         - "XX 市降雨情况如何？"、"北京市降水情况怎样？"（城市降雨情况）
         - "明天 XX 市雨量多少？"、"天津市累计降雨量是多少？"（城市雨量查询）
-        ⚠️ 注意：此工具依赖磁盘上的 EC 预报栅格文件，不是所有时次都有数据。
+        ⚠️ 注意：数据源按可用性自动切换（汛期滚动预报网格 / 平时 EC）。工具返回的 `data_resource`
+        字段标注实际数据源，回答时 **必须引用 data_resource 的值**，禁止硬编码为 "ECMWF AIFS"。
         如果报错"未找到降雨数据文件"，请改用 analyze_rainfall_by_time（天擎实况）或 query_basin_areal_rainfall（面雨量）。
         Args:
             city_name (str): 城市名称（如：天津市、北京市、石家庄市等）
