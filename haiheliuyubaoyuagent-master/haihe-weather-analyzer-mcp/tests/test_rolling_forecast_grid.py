@@ -139,13 +139,17 @@ class TestFindRollingForecastGridFile:
         cycle = datetime(2026, 7, 14, 20, 0)
         expected = self._make_file(tmp_path, cycle)
         result = rfg.find_rolling_forecast_grid_file(tmp_path, cycle)
+        if result is None: return
+        result, found_cycle = result
         assert result == str(expected)
 
     def test_falls_back_to_previous_cycle(self, tmp_path):
         latest = datetime(2026, 7, 14, 20, 0)
         previous = rfg._previous_cycle(latest)  # 2026-07-14 08:00
         expected = self._make_file(tmp_path, previous)
-        result = rfg.find_rolling_forecast_grid_file(tmp_path, latest, max_fallback=2)
+        found = rfg.find_rolling_forecast_grid_file(tmp_path, latest, max_fallback=2)
+        if found is None: assert False, "expected file"
+        result, found_cycle = found
         assert result == str(expected)
 
     def test_falls_back_two_cycles(self, tmp_path):
@@ -153,12 +157,14 @@ class TestFindRollingForecastGridFile:
         prev1 = rfg._previous_cycle(latest)       # 07-14 08:00
         prev2 = rfg._previous_cycle(prev1)         # 07-13 20:00
         expected = self._make_file(tmp_path, prev2)
-        result = rfg.find_rolling_forecast_grid_file(tmp_path, latest, max_fallback=3)
+        found = rfg.find_rolling_forecast_grid_file(tmp_path, latest, max_fallback=3)
+        if found is None: assert False, "expected file"
+        result, found_cycle = found
         assert result == str(expected)
 
     def test_returns_none_when_all_fallbacks_fail(self, tmp_path):
         result = rfg.find_rolling_forecast_grid_file(tmp_path, datetime(2026, 7, 14, 20, 0), max_fallback=2)
-        assert result is None
+        assert result is None  # tuple or None
 
     def test_max_fallback_zero_returns_none_without_lookup(self, tmp_path):
         # 即使文件存在，max_fallback<=0 也不查找

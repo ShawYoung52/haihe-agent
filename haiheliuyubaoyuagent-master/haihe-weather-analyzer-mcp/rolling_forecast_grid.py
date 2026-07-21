@@ -106,12 +106,12 @@ def find_rolling_forecast_grid_file(
     *,
     now: datetime | None = None,
     max_fallback: int = _MAX_CYCLE_FALLBACK,
-) -> str | None:
+) -> tuple[str, datetime] | None:
     """查找最新的滚动预报网格 .nc 文件。
 
     优先用 cycle（若给定），否则按 now 选最新时次；文件不存在时按 12 小时步长回溯，
     最多回溯 max_fallback 个时次。max_fallback<=0 时直接返回 None（不做查找）。
-    返回文件路径或 None。
+    返回 (文件路径, 实际命中的时次) 或 None。
     """
     base = root or DEFAULT_ROLLING_FORECAST_GRID_ROOT
     current = cycle or select_latest_forecast_cycle(now)
@@ -122,8 +122,8 @@ def find_rolling_forecast_grid_file(
         directory = _cycle_directory(base, current)
         path = _pick_latest_file(directory, current)
         if path:
-            logger.info("滚动预报文件命中: %s（搜索根=%s）", path, base)
-            return path
+            logger.info("滚动预报文件命中: %s（cycle=%s 搜索根=%s）", path, current.strftime("%Y%m%d%H%M%S"), base)
+            return path, current
         tried.append(f"{directory}（cycle={current.strftime('%Y%m%d%H')}）")
         current = _previous_cycle(current)
     logger.warning("滚动预报文件未找到，已搜索 %d 个时次: %s", len(tried), "; ".join(tried))
@@ -338,25 +338,26 @@ def resolve_forecast_grid_source(
          "ec_output_path": str | None, "is_flood_season": bool}
     """
     moment = now or datetime.now()
-    cycle = select_latest_forecast_cycle(moment)
-    path = find_rolling_forecast_grid_file(rolling_root, cycle, now=moment)
+    requested_cycle = select_latest_forecast_cycle(moment)
+    found = find_rolling_forecast_grid_file(rolling_root, requested_cycle, now=moment)
     flood = is_flood_season(moment)
-    if path:
-        logger.info("预报网格数据源=滚动预报 cycle=%s file=%s", cycle.strftime("%Y%m%d%H%M%S"), path)
+    if found:
+        path, actual_cycle = found
+        logger.info("预报网格数据源=滚动预报 命中cycle=%s file=%s", actual_cycle.strftime("%Y%m%d%H%M%S"), path)
         return {
             "source": "rolling_forecast",
             "reason": "已找到滚动预报文件" + ("（汛期）" if flood else "（非汛期，仍有数据）"),
             "file": path,
-            "cycle": cycle.strftime("%Y%m%d%H%M%S"),
+            "cycle": actual_cycle.strftime("%Y%m%d%H%M%S"),
             "ec_output_path": ec_output_path,
             "is_flood_season": flood,
         }
-    logger.warning("预报网格数据源=EC（滚动预报未找到）cycle=%s flood=%s rolling_root=%s", cycle.strftime("%Y%m%d%H%M%S"), flood, rolling_root or DEFAULT_ROLLING_FORECAST_GRID_ROOT)
+    logger.warning("预报网格数据源=EC（滚动预报未找到）请求cycle=%s flood=%s rolling_root=%s", requested_cycle.strftime("%Y%m%d%H%M%S"), flood, rolling_root or DEFAULT_ROLLING_FORECAST_GRID_ROOT)
     return {
         "source": "ec",
         "reason": "未找到滚动预报文件，使用 EC" + ("（汛期但数据缺失）" if flood else "（非汛期）"),
         "ec_output_path": ec_output_path,
         "file": None,
-        "cycle": cycle.strftime("%Y%m%d%H%M%S"),
+        "cycle": requested_cycle.strftime("%Y%m%d%H%M%S"),
         "is_flood_season": flood,
     }
