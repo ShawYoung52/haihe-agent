@@ -288,7 +288,7 @@ class RainfallAnalyzer:
 
             # 4. 按数据可用性切换：有滚动预报 .nc 时切片成 2D .nc，否则查找 EC tif
             rainfall_tifs = []
-            data_resource_label = "ECMWF AIFS"
+            data_source_label = "ECMWF AIFS"
             try:
                 from rolling_forecast_grid import (
                     materialize_rolling_forecast_to_files,
@@ -306,7 +306,7 @@ class RainfallAnalyzer:
                 tiff_path = materialized.get(f"{forecast_hours}h")
                 if tiff_path:
                     rainfall_tifs.append(tiff_path)
-                    data_resource_label = f"滚动预报网格（cycle={source_info.get('cycle')}）"
+                    data_source_label = f"滚动预报网格（cycle={source_info.get('cycle')}）"
 
             if not rainfall_tifs:
                 # EC 路径：按文件名规范查找 tif
@@ -350,7 +350,7 @@ class RainfallAnalyzer:
                     max_rainfall_mm=0,
                     min_rainfall_mm=0,
                     processed_files=0,
-                    data_resource=data_resource_label + "（无预报文件）"
+                    data_source=data_source_label + "（无预报文件）"
                 )
 
             # 5. 计算城市边界内的栅格统计信息
@@ -459,7 +459,7 @@ class RainfallAnalyzer:
                 min_rainfall_mm=round(min_rainfall, 2),
                 # total_rainfall_mm=round(total_rainfall, 2),
                 processed_files=len(rainfall_tifs),
-                data_resource=data_resource_label
+                data_source=data_source_label
             )
 
         except Exception as e:
@@ -502,7 +502,7 @@ class RainfallAnalyzer:
                     max_rainfall_mm=round(mx, 2),
                     min_rainfall_mm=round(mn, 2),
                     processed_files=len(rainfall_tifs),
-                    data_resource=data_resource_label
+                    data_source=data_source_label
                 )
             except Exception as e2:
                 logger.error(f"降级统计也失败: {e2}")
