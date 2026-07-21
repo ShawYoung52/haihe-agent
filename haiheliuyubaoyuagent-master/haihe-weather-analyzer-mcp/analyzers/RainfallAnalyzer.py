@@ -295,6 +295,8 @@ class RainfallAnalyzer:
                     resolve_forecast_grid_source,
                 )
                 source_info = resolve_forecast_grid_source(ec_output_path=ec_output_path)
+                logger.info("get_city_rainfall_time_range 数据源=%s cycle=%s file=%s",
+                            source_info.get("source"), source_info.get("cycle"), source_info.get("file"))
             except Exception as e:
                 logger.warning("滚动预报数据源解析失败，降级 EC: %s", e, exc_info=True)
                 source_info = {"source": "ec", "file": None}
