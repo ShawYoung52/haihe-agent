@@ -246,7 +246,7 @@ class RainfallAnalyzer:
         """获取指定城市、指定时间范围内的降雨数据
             读取 城市shp中对应名称的矢量边界 时间范围内ec多个tif数据、栅格累计计算出边界内累计栅格平均降雨量、栅格最大降雨量、栅格最小降雨量
         """
-        from osgeo import gdal, ogr
+        from osgeo import gdal, ogr, osr
         import os
         import numpy as np
 
@@ -380,10 +380,16 @@ class RainfallAnalyzer:
                     mask_ds.SetGeoTransform(geotransform)
                     mask_ds.SetProjection(dataset.GetProjection())
 
-                    # 创建临时图层用于栅格化单个城市
+                    # 创建临时图层用于栅格化单个城市（带空间参考，避免 GDAL 警告）
+                    raster_srs = osr.SpatialReference()
+                    raster_srs.ImportFromWkt(dataset.GetProjection())
+                    try:
+                        raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    except Exception:
+                        pass
                     temp_driver = ogr.GetDriverByName('MEM')
                     temp_datasource = temp_driver.CreateDataSource('temp')
-                    temp_layer = temp_datasource.CreateLayer('temp_layer', geom_type=ogr.wkbPolygon)
+                    temp_layer = temp_datasource.CreateLayer('temp_layer', srs=raster_srs, geom_type=ogr.wkbPolygon)
                     # 复制字段定义
                     layer_defn = layer.GetLayerDefn()
                     for i in range(layer_defn.GetFieldCount()):
