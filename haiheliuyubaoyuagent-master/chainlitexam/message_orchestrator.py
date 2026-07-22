@@ -2343,6 +2343,7 @@ TOOL_DISPLAY_NAMES = {
     "analyze_rainfall_by_time": "降雨量时段分析",
     "get_station_rainfall_real_img": "生成降雨实况分布图",
     "get_city_rainfall_time_range": "查询城市降雨时段",
+    "get_river_system_rainfall_forecast": "查询河系降雨预报",
     "query_rolling_forecast": "查询滚动预报",
     "query_basin_areal_rainfall": "查询流域面雨量",
     "get_effective_warning_info": "查询当前生效预警",

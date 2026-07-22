@@ -13,6 +13,216 @@ from models import (
 logger = logging.getLogger(__name__)
 
 
+def _rainfall_stats_from_values(values, min_exclude_zero: bool = False) -> dict:
+    """从有效降雨像素值计算统计量。"""
+    import numpy as np
+
+    values = np.asarray(values)
+    avg = round(float(values.mean()), 2)
+    max_val = round(float(values.max()), 2)
+    if min_exclude_zero:
+        positive = values[values > 0]
+        min_val = round(float(positive.min()), 2) if positive.size > 0 else 0.0
+    else:
+        min_val = round(float(values.min()), 2)
+    return {
+        "average_rainfall_mm": avg,
+        "max_rainfall_mm": max_val,
+        "min_rainfall_mm": min_val,
+        "valid_count": int(values.size),
+    }
+
+
+def compute_rainfall_stats_for_geometry(
+    geometry,
+    raster_path: str,
+    source_srid: int = 4326,
+    min_exclude_zero: bool = False,
+) -> dict:
+    """计算指定矢量几何在栅格内的降雨统计量。
+
+    Args:
+        geometry: ogr.Geometry 多边形；为空时返回零值。
+        raster_path: 降雨栅格文件路径。
+        source_srid: 边界几何的 SRID，默认 4326。
+        min_exclude_zero: 为 True 时最小值忽略 0（保持城市统计旧行为）。
+
+    Returns:
+        dict: 含 average_rainfall_mm、max_rainfall_mm、min_rainfall_mm、valid_count。
+    """
+    from osgeo import gdal, ogr, osr
+    import numpy as np
+
+    empty = {
+        "average_rainfall_mm": 0.0,
+        "max_rainfall_mm": 0.0,
+        "min_rainfall_mm": 0.0,
+        "valid_count": 0,
+    }
+    if geometry is None or geometry.IsEmpty():
+        return empty
+
+    dataset = gdal.Open(raster_path)
+    if dataset is None:
+        raise ValueError(f"无法打开栅格文件: {raster_path}")
+
+    try:
+        geotransform = dataset.GetGeoTransform()
+        band = dataset.GetRasterBand(1)
+        nodata_value = band.GetNoDataValue()
+        raster_xsize = dataset.RasterXSize
+        raster_ysize = dataset.RasterYSize
+
+        mem_driver = gdal.GetDriverByName("MEM")
+        mask_ds = mem_driver.Create("", raster_xsize, raster_ysize, 1, gdal.GDT_Byte)
+        mask_ds.SetGeoTransform(geotransform)
+        mask_ds.SetProjection(dataset.GetProjection())
+
+        raster_srs = osr.SpatialReference()
+        raster_srs.ImportFromWkt(dataset.GetProjection())
+        try:
+            raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        except Exception:
+            pass
+
+        geom_to_rasterize = geometry.Clone()
+        if source_srid and source_srid != 4326:
+            source_srs = osr.SpatialReference()
+            source_srs.ImportFromEPSG(source_srid)
+            try:
+                source_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            except Exception:
+                pass
+            transform = osr.CoordinateTransformation(source_srs, raster_srs)
+            geom_to_rasterize.Transform(transform)
+
+        temp_driver = ogr.GetDriverByName("MEM")
+        temp_datasource = temp_driver.CreateDataSource("temp")
+        temp_layer = temp_datasource.CreateLayer(
+            "temp_layer", srs=raster_srs, geom_type=ogr.wkbPolygon
+        )
+        layer_defn = temp_layer.GetLayerDefn()
+        temp_feature = ogr.Feature(layer_defn)
+        temp_feature.SetGeometry(geom_to_rasterize)
+        temp_layer.CreateFeature(temp_feature)
+
+        err = gdal.RasterizeLayer(
+            dataset=mask_ds, bands=[1], layer=temp_layer, burn_values=[1]
+        )
+        if err != 0:
+            raise ValueError(f"栅格化边界失败，错误码: {err}")
+
+        mask_array = mask_ds.GetRasterBand(1).ReadAsArray()
+        rainfall_array = band.ReadAsArray()
+
+        nodata_mask = (
+            rainfall_array != nodata_value
+            if nodata_value is not None
+            else True
+        )
+        valid_mask = (mask_array == 1) & nodata_mask & (~np.isnan(rainfall_array))
+        valid_values = rainfall_array[valid_mask]
+    finally:
+        dataset = None
+
+    if valid_values.size == 0:
+        return empty
+    return _rainfall_stats_from_values(valid_values, min_exclude_zero=min_exclude_zero)
+
+
+def compute_rainfall_stats_for_raster(
+    raster_path: str, min_exclude_zero: bool = False
+) -> dict:
+    """计算整张栅格的有效降雨统计量。"""
+    from osgeo import gdal
+    import numpy as np
+
+    dataset = gdal.Open(raster_path)
+    if dataset is None:
+        raise ValueError(f"无法打开栅格文件: {raster_path}")
+
+    try:
+        band = dataset.GetRasterBand(1)
+        nodata_value = band.GetNoDataValue()
+        arr = band.ReadAsArray()
+        valid = arr[~np.isnan(arr)]
+        if nodata_value is not None:
+            valid = valid[valid != nodata_value]
+    finally:
+        dataset = None
+
+    if valid.size == 0:
+        return {
+            "average_rainfall_mm": 0.0,
+            "max_rainfall_mm": 0.0,
+            "min_rainfall_mm": 0.0,
+            "valid_count": 0,
+        }
+    return _rainfall_stats_from_values(valid, min_exclude_zero=min_exclude_zero)
+
+
+def find_ec_forecast_tif(
+    ec_output_path: str, start_time: datetime, forecast_hours: int
+) -> str | None:
+    """在 ec_output_path 中查找匹配时间与时效的 EC AIFS tif 文件。"""
+    import os
+
+    time_str = start_time.strftime("%Y%m%d%H")
+    pattern = f"ec_{time_str}_rain_total_{forecast_hours}h.tif"
+
+    search_roots = [ec_output_path]
+    linux_path = "/home/ev/data/ec/EC_AIFS/output"
+    if os.path.isdir(linux_path) and linux_path != ec_output_path:
+        search_roots.append(linux_path)
+    env_root = os.environ.get("EC_AIFS_ROOT", "")
+    if env_root and os.path.isdir(env_root) and env_root not in search_roots:
+        search_roots.append(env_root)
+    env_output = os.path.join(env_root, "output") if env_root else ""
+    if env_output and os.path.isdir(env_output) and env_output not in search_roots:
+        search_roots.append(env_output)
+
+    for root_dir in search_roots:
+        if not os.path.isdir(root_dir):
+            continue
+        for root, dirs, files in os.walk(root_dir):
+            if pattern in files:
+                return os.path.join(root, pattern)
+    return None
+
+
+def resolve_forecast_raster_path(
+    forecast_hours: int, start_time: datetime, ec_output_path: str
+) -> tuple[str | None, str]:
+    """根据数据可用性选择滚动预报或 EC AIFS 栅格文件。
+
+    Returns:
+        (file_path, data_source_label)
+    """
+    import rolling_forecast_grid
+
+    source_info = rolling_forecast_grid.resolve_forecast_grid_source(
+        ec_output_path=ec_output_path
+    )
+    if source_info.get("source") == "rolling_forecast" and source_info.get("file"):
+        nc_path = source_info["file"]
+        try:
+            materialized = rolling_forecast_grid.materialize_rolling_forecast_to_files(
+                nc_path, [forecast_hours]
+            )
+            tiff_path = materialized.get(f"{forecast_hours}h")
+            if tiff_path:
+                cycle = source_info.get("cycle", "")
+                return tiff_path, f"滚动预报网格（cycle={cycle}）"
+        except Exception as exc:
+            logger.warning("滚动预报切片失败，尝试 EC 兜底: %s", exc)
+
+    ec_path = find_ec_forecast_tif(ec_output_path, start_time, forecast_hours)
+    if ec_path:
+        return ec_path, "ECMWF AIFS"
+
+    return None, "ECMWF AIFS（无可用预报文件）"
+
+
 class RainfallAnalyzer:
     """降雨数据分析器"""
 
@@ -243,105 +453,39 @@ class RainfallAnalyzer:
         return alerts
 
     def get_city_rainfall_time_range(self, city_name, start_time, forecast_hours):
-        """获取指定城市、指定时间范围内的降雨数据
-            读取 城市shp中对应名称的矢量边界 时间范围内ec多个tif数据、栅格累计计算出边界内累计栅格平均降雨量、栅格最大降雨量、栅格最小降雨量
-        """
-        from osgeo import gdal, ogr, osr
+        """获取指定城市、指定时间范围内的降雨数据"""
         import os
-        import numpy as np
+        from osgeo import ogr
 
         datasource = None
-        rainfall_tifs = []
         try:
-            # 1. 获取城市边界shapefile路径
             city_shp_path = self.config.get('paths', 'city_boundary_shp')
-
-            # Linux 兜底路径
             if not os.path.exists(city_shp_path):
                 linux_fallback = "/home/ev/data/vector/city_border_in_haihe.shp"
                 if os.path.exists(linux_fallback):
                     city_shp_path = linux_fallback
-
             if not os.path.exists(city_shp_path):
                 raise FileNotFoundError(f"城市边界shapefile文件不存在: {city_shp_path}")
 
-            # 2. 读取指定城市的矢量边界
             datasource = ogr.Open(city_shp_path)
             if datasource is None:
                 raise Exception(f"无法打开城市边界文件: {city_shp_path}")
 
             layer = datasource.GetLayer()
-
-            # 查找匹配城市名称的要素
             city_feature = None
             for feature in layer:
                 feature_name = feature.GetField("city")
                 if feature_name and city_name.lower() in feature_name.lower():
                     city_feature = feature
                     break
-
             if city_feature is None:
                 raise ValueError(f"未找到城市 '{city_name}' 的边界数据")
 
-            # 3. 获取EC数据路径
             ec_output_path = self.config.get('paths', 'ecOutput')
-
-            # 4. 按数据可用性切换：有滚动预报 .nc 时切片成 2D .nc，否则查找 EC tif
-            rainfall_tifs = []
-            data_source_label = "ECMWF AIFS"
-            try:
-                from rolling_forecast_grid import (
-                    materialize_rolling_forecast_to_files,
-                    resolve_forecast_grid_source,
-                )
-                source_info = resolve_forecast_grid_source(ec_output_path=ec_output_path)
-                logger.info("get_city_rainfall_time_range 数据源=%s cycle=%s file=%s",
-                            source_info.get("source"), source_info.get("cycle"), source_info.get("file"))
-            except Exception as e:
-                logger.warning("滚动预报数据源解析失败，降级 EC: %s", e, exc_info=True)
-                source_info = {"source": "ec", "file": None}
-            if source_info.get("source") == "rolling_forecast" and source_info.get("file"):
-                nc_path = source_info["file"]
-                materialized = materialize_rolling_forecast_to_files(nc_path, [forecast_hours])
-                tiff_path = materialized.get(f"{forecast_hours}h")
-                if tiff_path:
-                    rainfall_tifs.append(tiff_path)
-                    data_source_label = f"滚动预报网格（cycle={source_info.get('cycle')}）"
-
-            if not rainfall_tifs:
-                # EC 路径：按文件名规范查找 tif
-                time_str = start_time.strftime("%Y%m%d%H")
-                pattern = f"ec_{time_str}_rain_total_{forecast_hours}h.tif"
-                found_file = None
-
-                # 优先搜索配置路径，搜索不到再搜索 Linux 服务器路径
-                search_roots = [ec_output_path]
-                linux_path = "/home/ev/data/ec/EC_AIFS/output"
-                if os.path.isdir(linux_path) and linux_path != ec_output_path:
-                    search_roots.append(linux_path)
-                # 兜底：环境变量 EC_AIFS_ROOT
-                env_root = os.environ.get("EC_AIFS_ROOT", "")
-                if env_root and os.path.isdir(env_root) and env_root not in search_roots:
-                    search_roots.append(env_root)
-                # 再兜底：EC_AIFS_ROOT/output
-                env_output = os.path.join(env_root, "output") if env_root else ""
-                if env_output and os.path.isdir(env_output) and env_output not in search_roots:
-                    search_roots.append(env_output)
-
-                for root_dir in search_roots:
-                    if not os.path.isdir(root_dir):
-                        continue
-                    for root, dirs, files in os.walk(root_dir):
-                        if pattern in files:
-                            found_file = os.path.join(root, pattern)
-                            break
-                        if found_file:
-                            break
-                    if found_file:
-                        rainfall_tifs.append(found_file)
-                        break
-
-            if not rainfall_tifs:
+            raster_path, data_source_label = resolve_forecast_raster_path(
+                forecast_hours, start_time, ec_output_path
+            )
+            if not raster_path:
                 return RainfallCityData(
                     city_name=city_name,
                     time_period=f"{start_time.strftime('%Y-%m-%d %H:%M')}未来{forecast_hours}小时",
@@ -350,165 +494,40 @@ class RainfallAnalyzer:
                     max_rainfall_mm=0,
                     min_rainfall_mm=0,
                     processed_files=0,
-                    data_source=data_source_label + "（无预报文件）"
+                    data_source=data_source_label
                 )
 
-            # 5. 计算城市边界内的栅格统计信息
-            all_rainfall_values = []
-
-            for tif_path in rainfall_tifs:
-                try:
-                    # 打开TIFF文件
-                    dataset = gdal.Open(tif_path)
-                    if dataset is None:
-                        continue
-
-                    # 获取地理变换参数
-                    geotransform = dataset.GetGeoTransform()
-                    band = dataset.GetRasterBand(1)
-
-                    # 获取NoData值
-                    nodata_value = band.GetNoDataValue()
-
-                    # 将城市矢量边界转换为栅格掩膜
-                    raster_xsize = dataset.RasterXSize
-                    raster_ysize = dataset.RasterYSize
-
-                    # 创建内存中的掩膜数据集
-                    mem_driver = gdal.GetDriverByName('MEM')
-                    mask_ds = mem_driver.Create('', raster_xsize, raster_ysize, 1, gdal.GDT_Byte)
-                    mask_ds.SetGeoTransform(geotransform)
-                    mask_ds.SetProjection(dataset.GetProjection())
-
-                    # 创建临时图层用于栅格化单个城市（带空间参考，避免 GDAL 警告）
-                    raster_srs = osr.SpatialReference()
-                    raster_srs.ImportFromWkt(dataset.GetProjection())
-                    try:
-                        raster_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-                    except Exception:
-                        pass
-                    temp_driver = ogr.GetDriverByName('MEM')
-                    temp_datasource = temp_driver.CreateDataSource('temp')
-                    temp_layer = temp_datasource.CreateLayer('temp_layer', srs=raster_srs, geom_type=ogr.wkbPolygon)
-                    # 复制字段定义
-                    layer_defn = layer.GetLayerDefn()
-                    for i in range(layer_defn.GetFieldCount()):
-                        field_defn = layer_defn.GetFieldDefn(i)
-                        temp_layer.CreateField(field_defn)
-
-                    # 添加城市要素到临时图层
-                    temp_feature = ogr.Feature(temp_layer.GetLayerDefn())
-                    temp_feature.SetGeometry(city_feature.GetGeometryRef().Clone())
-                    for i in range(city_feature.GetFieldCount()):
-                        temp_feature.SetField(i, city_feature.GetField(i))
-                    temp_layer.CreateFeature(temp_feature)
-
-                    # 栅格化城市边界
-                    # err = gdal.RasterizeLayer(mask_ds, 1, temp_layer, burnValues=[1], options=['ALL_TOUCHED=TRUE'])
-                    err = gdal.RasterizeLayer(dataset=mask_ds, bands=[1], layer=temp_layer, burn_values=[1])
-
-                    if err != 0:
-                        raise Exception(f"栅格化城市边界失败，错误码: {err}")
-
-                    mask_array = mask_ds.GetRasterBand(1).ReadAsArray()
-
-                    # 读取降雨数据
-                    rainfall_array = band.ReadAsArray()
-
-                    # 正确应用城市边界掩膜 - 保留城市内部区域（值为1）
-                    valid_mask = (mask_array == 1) & (rainfall_array != nodata_value) & (~np.isnan(rainfall_array))
-                    masked_rainfall = np.ma.masked_where(~valid_mask, rainfall_array)
-
-                    # 收集有效值
-                    valid_values = masked_rainfall.compressed()
-                    all_rainfall_values.extend(valid_values.tolist())
-
-                    # 清理临时资源
-                    temp_feature = None
-                    temp_layer = None
-                    temp_datasource = None
-                    mask_ds = None
-                    dataset = None
-
-                except Exception as e:
-                    # logger.warning(f"处理文件 {tif_path} 时出错: {str(e)}")
-                    # continue
-                    raise e
-
-            # 6. 计算统计结果
-            if not all_rainfall_values:
-                raise ValueError(f"在城市 {city_name} 边界内未找到有效的降雨数据")
-
-            # 计算统计指标
-            rainfall_array = np.array(all_rainfall_values)
-            avg_rainfall = float(np.mean(rainfall_array))
-            max_rainfall = float(np.max(rainfall_array))
-            min_rainfall = float(np.min(rainfall_array[rainfall_array > 0])) if np.any(rainfall_array > 0) else 0.0
-            total_rainfall = float(np.sum(rainfall_array))
-
-            # 构造结果
-            logger.info(f"城市 {city_name} 降雨统计完成: 平均{avg_rainfall:.2f}mm, "
-                        f"最大{max_rainfall:.2f}mm, 最小{min_rainfall:.2f}mm")
-
-            return RainfallCityData(
-                city_name=city_name,
-                time_period=f"{start_time.strftime('%Y-%m-%d %H:%M')}未来{forecast_hours}小时",
-                total_grid_points=len(all_rainfall_values),
-                average_rainfall_mm=round(avg_rainfall, 2),
-                max_rainfall_mm=round(max_rainfall, 2),
-                min_rainfall_mm=round(min_rainfall, 2),
-                # total_rainfall_mm=round(total_rainfall, 2),
-                processed_files=len(rainfall_tifs),
-                data_source=data_source_label
-            )
-
-        except Exception as e:
-            logger.warning(f"按城市边界统计失败 ({city_name})，降级为全流域统计：{e}")
-
-            # 降级：打开 tif 直接算全流域统计
+            geom = city_feature.GetGeometryRef().Clone()
             try:
-                if not rainfall_tifs:
-                    raise ValueError(f"在时间范围 {start_time}未来{forecast_hours}小时 内未找到降雨数据文件")
-
-                all_rainfall_values = []
-                for tif_path in rainfall_tifs:
-                    dataset = gdal.Open(tif_path)
-                    if dataset is None:
-                        continue
-                    band = dataset.GetRasterBand(1)
-                    nodata = band.GetNoDataValue()
-                    arr = band.ReadAsArray()
-                    valid = arr[~np.isnan(arr)]
-                    if nodata is not None:
-                        valid = valid[valid != nodata]
-                    all_rainfall_values.extend(valid.tolist())
-                    dataset = None
-
-                if not all_rainfall_values:
-                    raise ValueError(f"全流域无有效降雨数据")
-
-                arr = np.array(all_rainfall_values)
-                avg = float(np.mean(arr))
-                mx = float(np.max(arr))
-                mn = float(np.min(arr[arr > 0])) if np.any(arr > 0) else 0.0
-
-                logger.info(f"全流域统计：平均{avg:.2f}mm, 最大{mx:.2f}mm")
-
+                stats = compute_rainfall_stats_for_geometry(
+                    geom, raster_path, source_srid=4326, min_exclude_zero=True
+                )
                 return RainfallCityData(
                     city_name=city_name,
                     time_period=f"{start_time.strftime('%Y-%m-%d %H:%M')}未来{forecast_hours}小时",
-                    total_grid_points=len(all_rainfall_values),
-                    average_rainfall_mm=round(avg, 2),
-                    max_rainfall_mm=round(mx, 2),
-                    min_rainfall_mm=round(mn, 2),
-                    processed_files=len(rainfall_tifs),
+                    total_grid_points=stats["valid_count"],
+                    average_rainfall_mm=stats["average_rainfall_mm"],
+                    max_rainfall_mm=stats["max_rainfall_mm"],
+                    min_rainfall_mm=stats["min_rainfall_mm"],
+                    processed_files=1,
                     data_source=data_source_label
                 )
-            except Exception as e2:
-                logger.error(f"降级统计也失败: {e2}")
-                raise
+            except Exception as e:
+                logger.warning(f"按城市边界统计失败 ({city_name})，降级为全流域统计：{e}")
+                stats = compute_rainfall_stats_for_raster(raster_path, min_exclude_zero=True)
+                if stats["valid_count"] == 0:
+                    raise ValueError(f"全流域无有效降雨数据")
+                return RainfallCityData(
+                    city_name=city_name,
+                    time_period=f"{start_time.strftime('%Y-%m-%d %H:%M')}未来{forecast_hours}小时",
+                    total_grid_points=stats["valid_count"],
+                    average_rainfall_mm=stats["average_rainfall_mm"],
+                    max_rainfall_mm=stats["max_rainfall_mm"],
+                    min_rainfall_mm=stats["min_rainfall_mm"],
+                    processed_files=1,
+                    data_source=data_source_label
+                )
         finally:
-            # 确保文件资源被正确关闭
             if datasource is not None:
                 datasource = None
 

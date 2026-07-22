@@ -27,6 +27,7 @@ from psycopg2.extras import RealDictCursor
 from haihe_mcp_tools import register_haihe_tools
 from constants import DEFAULT_BASIN_CODES, DIRECTED_GRAPH_FILENAME, RIVER_TABLE_FULL
 from emergency_scenario_client import emergency_http_base_url, fetch_scenario_get
+import river_system_forecast as rsf
 
 config = configparser.ConfigParser()
 config.read('config.ini', encoding='utf-8-sig')
@@ -2529,6 +2530,49 @@ def register_tools(mcp: FastMCP):
         except Exception as e:
             # 包装其他异常
             raise BusinessException(f"处理时间参数时发生错误: {str(e)}")
+
+    @mcp.tool()
+    def get_river_system_rainfall_forecast(
+        river_system: str = "",
+        start_time: str = "",
+        forecast_hours: int = 24,
+        zone_type: str = "9",
+    ) -> dict:
+        """
+        获取指定河系/流域的未来降雨预报。
+
+        【使用场景】
+        当用户询问流域或子流域未来天气/降雨时使用，例如：
+        - "海河流域明天天气怎么样？"
+        - "大清河流域未来三天降雨如何？"
+        - "北三河未来24小时有雨吗？"
+
+        工具按分区边界直接裁剪滚动预报/EC 网格，返回各河系平均/最大/最小雨量。
+        城市级细节可另行调用 get_city_rainfall_time_range 补充。
+
+        Args:
+            river_system (str): 河系名称，如"大清河""北三河""海河""全流域"。为空则返回全部分区。
+            start_time (str): 预报起始时间，格式 `YYYY-MM-DD HH:MM:SS`，如 "2026-07-23 02:00:00"。
+            forecast_hours (int): 预报时长（小时），默认 24，最大 240（10 天）。
+            zone_type (str): 分区类型，默认 "9"（海河九分区），支持 "9"/"11"/"77"/"246"/"32"。
+
+        Returns:
+            dict: 含 data_source、fcst_time、forecast_hours、zones 列表；出错时含 error 字段。
+        """
+        try:
+            ec_output_path = config.get("paths", "ecOutput") if config.has_option("paths", "ecOutput") else ""
+            return rsf.get_river_system_rainfall_forecast(
+                river_system=river_system,
+                start_time=start_time,
+                forecast_hours=forecast_hours,
+                zone_type=zone_type,
+                config=dict(config),
+                ec_output_path=ec_output_path,
+            )
+        except BusinessException:
+            raise
+        except Exception as e:
+            raise BusinessException(f"河系降雨预报查询失败: {e}")
 
     @mcp.tool()
     def get_server_time() -> str:
