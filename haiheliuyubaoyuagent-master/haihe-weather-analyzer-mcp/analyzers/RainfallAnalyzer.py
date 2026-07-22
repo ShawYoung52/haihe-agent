@@ -195,6 +195,9 @@ def resolve_forecast_raster_path(
 ) -> tuple[str | None, str]:
     """根据数据可用性选择滚动预报或 EC AIFS 栅格文件。
 
+    滚动预报分支把用户请求的 start_time 换算为相对 cycle 的 lead 小时，
+    并对窗口内各时次 TP1H 求和，与 EC `rain_total_Nh.tif` 的累计口径一致。
+
     Returns:
         (file_path, data_source_label)
     """
@@ -205,16 +208,18 @@ def resolve_forecast_raster_path(
     )
     if source_info.get("source") == "rolling_forecast" and source_info.get("file"):
         nc_path = source_info["file"]
+        cycle = source_info.get("cycle", "")
         try:
-            materialized = rolling_forecast_grid.materialize_rolling_forecast_to_files(
-                nc_path, [forecast_hours]
+            lead_start, lead_end = rolling_forecast_grid.compute_lead_hours(
+                cycle, start_time, forecast_hours
             )
-            tiff_path = materialized.get(f"{forecast_hours}h")
+            tiff_path = rolling_forecast_grid.materialize_rolling_forecast_accumulated(
+                nc_path, lead_start, lead_end
+            )
             if tiff_path:
-                cycle = source_info.get("cycle", "")
                 return tiff_path, f"滚动预报网格（cycle={cycle}）"
         except Exception as exc:
-            logger.warning("滚动预报切片失败，尝试 EC 兜底: %s", exc)
+            logger.warning("滚动预报切片失败，尝试 EC 兜底: %s", exc, exc_info=True)
 
     ec_path = find_ec_forecast_tif(ec_output_path, start_time, forecast_hours)
     if ec_path:

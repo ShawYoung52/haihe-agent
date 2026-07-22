@@ -81,6 +81,23 @@ def test_today_summary():
     assert "实况" in result
 
 
+def test_basin_weather_not_river_network_prefix():
+    """流域天气问题不得误命中河网可视化前缀（"河流" 是 "海河流域" 的子串）。"""
+    for q in ("今天海河流域天气怎么样", "明天海河流域天气怎么样", "大清河流域未来三天降雨"):
+        result = _build_thinking_summary(q)
+        assert not result.startswith("已绘制河网可视化"), f"{q} -> {result}"
+
+
+def test_tomorrow_basin_weather_is_forecast_prefix():
+    result = _build_thinking_summary("明天海河流域天气怎么样")
+    assert "预报" in result
+
+
+def test_standalone_river_word_still_matches_river_network():
+    result = _build_thinking_summary("海河下游河流有哪些")
+    assert "河网" in result
+
+
 def test_empty_query():
     assert _build_thinking_summary("") == ""
 

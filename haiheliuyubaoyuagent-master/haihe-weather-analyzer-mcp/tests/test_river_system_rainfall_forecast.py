@@ -12,6 +12,8 @@ if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
 
 import river_system_forecast as rsf  # noqa: E402
+import rolling_forecast_grid as rfg  # noqa: E402
+from analyzers.RainfallAnalyzer import resolve_forecast_raster_path  # noqa: E402
 
 
 def _gdal_available() -> bool:
@@ -228,3 +230,94 @@ class TestGetRiverSystemRainfallForecast:
         assert isinstance(result, dict)
         assert result.get("zones") == []
         assert "无可用预报文件" in result.get("data_source", "")
+
+
+class TestComputeLeadHours:
+    """滚动预报窗口相对 cycle 的 lead 小时偏移计算。"""
+
+    def test_tomorrow_window_offsets_from_cycle(self):
+        start, end = rfg.compute_lead_hours(
+            "20260722080000", datetime(2026, 7, 23, 0, 0, 0), 24
+        )
+        assert (start, end) == (16, 40)
+
+    def test_past_start_clamps_to_zero(self):
+        start, end = rfg.compute_lead_hours(
+            "20260722080000", datetime(2026, 7, 22, 0, 0, 0), 24
+        )
+        assert (start, end) == (0, 24)
+
+    def test_end_clamps_to_max_lead(self):
+        start, end = rfg.compute_lead_hours(
+            "20260722080000", datetime(2026, 8, 1, 0, 0, 0), 24
+        )
+        assert start == 232 and end == 240
+
+    def test_start_beyond_max_lead_raises(self):
+        with pytest.raises(ValueError):
+            rfg.compute_lead_hours(
+                "20260722080000", datetime(2026, 8, 5, 0, 0, 0), 24
+            )
+
+
+class TestResolveForecastRasterPathRollingAccumulation:
+    """滚动预报分支必须按 start_time 偏移并做窗口累计，否则今天/明天数据相同。"""
+
+    def _patch_source(self, monkeypatch):
+        def fake_resolve_source(**kwargs):
+            return {
+                "source": "rolling_forecast",
+                "file": "/fake/rolling.nc",
+                "cycle": "20260722080000",
+            }
+
+        monkeypatch.setattr(rfg, "resolve_forecast_grid_source", fake_resolve_source)
+
+    def test_uses_lead_offset_and_accumulates_window(self, monkeypatch):
+        self._patch_source(monkeypatch)
+        calls = {}
+
+        def fake_accumulated(nc_path, start_hour, end_hour, **kwargs):
+            calls["args"] = (nc_path, start_hour, end_hour)
+            return "/fake/accum.tif"
+
+        monkeypatch.setattr(rfg, "materialize_rolling_forecast_accumulated", fake_accumulated)
+
+        path, label = resolve_forecast_raster_path(
+            24, datetime(2026, 7, 23, 0, 0, 0), "/fake/ec"
+        )
+        assert path == "/fake/accum.tif"
+        assert calls["args"] == ("/fake/rolling.nc", 16, 40)
+        assert "20260722080000" in label
+
+    def test_today_and_tomorrow_use_different_windows(self, monkeypatch):
+        self._patch_source(monkeypatch)
+        windows = []
+
+        def fake_accumulated(nc_path, start_hour, end_hour, **kwargs):
+            windows.append((start_hour, end_hour))
+            return "/fake/accum.tif"
+
+        monkeypatch.setattr(rfg, "materialize_rolling_forecast_accumulated", fake_accumulated)
+
+        resolve_forecast_raster_path(24, datetime(2026, 7, 22, 8, 0, 0), "/fake/ec")
+        resolve_forecast_raster_path(24, datetime(2026, 7, 23, 8, 0, 0), "/fake/ec")
+        assert windows[0] != windows[1]
+
+    def test_falls_back_to_ec_when_accumulate_fails(self, monkeypatch, tmp_path):
+        self._patch_source(monkeypatch)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("nc corrupt")
+
+        monkeypatch.setattr(rfg, "materialize_rolling_forecast_accumulated", boom)
+
+        ec_dir = tmp_path / "ec"
+        ec_dir.mkdir()
+        (ec_dir / "ec_2026072300_rain_total_24h.tif").write_text("mock")
+
+        path, label = resolve_forecast_raster_path(
+            24, datetime(2026, 7, 23, 0, 0, 0), str(ec_dir)
+        )
+        assert path is not None and path.endswith("ec_2026072300_rain_total_24h.tif")
+        assert label == "ECMWF AIFS"

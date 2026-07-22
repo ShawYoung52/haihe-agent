@@ -1658,7 +1658,10 @@ def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
         base = "已生成海河流域降水实况分布图，说明如下："
     elif any(k in q for k in ["预警", "警报"]):
         base = "已查询相关气象预警信息，整理结论如下："
-    elif any(k in q for k in ["河网", "水系", "河流", "暴雨影响", "河系"]):
+    elif (
+        any(k in q for k in ["河网", "水系", "暴雨影响", "河系"])
+        or re.search(r"河流(?!域)", q)
+    ):
         base = "已绘制河网可视化并叠加行政区划底图，分析如下："
     elif any(k in q for k in ["水位", "水文"]):
         base = "已查询河网水位数据，整理如下："
@@ -1672,7 +1675,7 @@ def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
         base = "已统计降雨时长信息，整理如下："
     elif any(k in q for k in ["雨情", "降雨分析"]):
         base = "已完成降雨分析，说明如下："
-    elif any(k in q for k in ["未来", "预报", "明天", "后天", "周末"]):
+    elif any(k in q for k in ["未来", "预报", "明天", "后天", "周末", "天气"]):
         base = "已结合预报数据完成分析，为您整理结论如下："
     elif any(k in q for k in ["今天", "今日", "实况", "现在", "当前", "刚才"]):
         base = "已结合实况观测数据完成分析，为您整理结论如下："
@@ -1680,12 +1683,7 @@ def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
         base = "已理解您的问题，为您解答如下："
 
     if has_chart:
-        base = base.replace("，说明如下：", "，并生成相关图表，说明如下：")
-        base = base.replace("，分析如下：", "，并生成相关图表，分析如下：")
-        base = base.replace("，整理如下：", "，并生成相关图表，整理如下：")
-        base = base.replace("，结论如下：", "，并生成相关图表，结论如下：")
-        base = base.replace("，为您解答如下：", "，并生成相关图表，为您解答如下：")
-        base = base.replace("，为您整理结论如下：", "，并生成相关图表，为您整理结论如下：")
+        base = base.replace("，", "，并生成相关图表", 1)
 
     return base
 

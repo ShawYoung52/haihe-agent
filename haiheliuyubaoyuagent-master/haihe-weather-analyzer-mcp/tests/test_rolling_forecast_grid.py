@@ -258,6 +258,14 @@ def _find_sample_nc() -> Path | None:
     return None
 
 
+def _gdal_available() -> bool:
+    try:
+        from osgeo import gdal  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 @pytest.mark.skipif(_find_sample_nc() is None, reason="无样本 .nc 文件")
 class TestReadRollingForecastPrecip:
     def test_read_returns_dataarray_with_expected_dims(self):
@@ -333,14 +341,48 @@ class TestSampleRollingForecastAtStations:
         assert abs(nearest["54517"] - bilinear["54517"]) < 50.0  # 容差较大，只验证量级
 
 
-# ---------- materialize_rolling_forecast_to_files (needs sample file + GDAL) ----------
+# ---------- materialize_rolling_forecast_accumulated (needs sample file) ----------
 
-def _gdal_available() -> bool:
-    try:
-        from osgeo import gdal  # noqa: F401
-        return True
-    except ImportError:
-        return False
+
+@pytest.mark.skipif(_find_sample_nc() is None, reason="无样本 .nc 文件")
+@pytest.mark.skipif(not _gdal_available(), reason="GDAL 未安装，materialize 写 GeoTIFF 需要 GDAL")
+class TestMaterializeRollingForecastAccumulated:
+    def test_24h_window_sums_exactly_24_slices(self, tmp_path):
+        """半开区间 [0,24) 应恰好累计 24 个 TP1H 时次，与 read_rolling_forecast_precip 对齐。"""
+        import numpy as np
+        import xarray as xr
+
+        path = _find_sample_nc()
+        out = rfg.materialize_rolling_forecast_accumulated(path, 0, 24, output_dir=tmp_path)
+        assert out is not None
+
+        expected = rfg.read_rolling_forecast_precip(path, start_hour=0, end_hour=23).sum(dim="time", min_count=1)
+        with xr.open_dataset(path, engine="netcdf4", decode_times=False) as ds:
+            assert out.endswith("tp1h_acc_0_24h.tif")
+
+        from osgeo import gdal
+        ds_tif = gdal.Open(out)
+        arr = ds_tif.GetRasterBand(1).ReadAsArray()
+        ds_tif = None
+        # GeoTIFF 垂直翻转：row 0 = max lat = expected lat[-1]
+        np.testing.assert_allclose(arr[0, :], expected.values[-1, :], rtol=1e-5)
+
+    def test_window_without_time_overlap_returns_none(self, tmp_path):
+        path = _find_sample_nc()
+        # 负值分析期存在（-23..-1），但 500..510 完全超出 time 坐标
+        assert rfg.materialize_rolling_forecast_accumulated(path, 500, 524, output_dir=tmp_path) is None
+
+
+# ---------- compute_lead_hours ----------
+
+
+class TestComputeLeadHoursGrid:
+    def test_basic_offset(self):
+        assert rfg.compute_lead_hours("20260722080000", datetime(2026, 7, 23, 0, 0, 0), 24) == (16, 40)
+
+    def test_exact_max_lead_start_raises(self):
+        with pytest.raises(ValueError):
+            rfg.compute_lead_hours("20260722080000", datetime(2026, 8, 1, 8, 0, 0), 24)
 
 
 @pytest.mark.skipif(_find_sample_nc() is None, reason="无样本 .nc 文件")
