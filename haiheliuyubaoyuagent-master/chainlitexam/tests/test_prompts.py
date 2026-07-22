@@ -53,3 +53,16 @@ def test_prompts_rolling_forecast_excludes_basin_for_all_times():
     """query_rolling_forecast 规则须明确：流域问题无论今天/明天/未来都禁止调用。"""
     text = PROMPTS_PATH.read_text(encoding="utf-8")
     assert "无论今天、明天还是未来" in text
+
+
+def test_thinking_prompts_require_scope_consistency():
+    """思考助手 prompt 必须约束地域口径：未提流域不得出现"海河流域"字样。"""
+    import re as _re
+
+    text = PROMPTS_PATH.read_text(encoding="utf-8")
+    for name in ("THINKING_PROMPT", "FAST_PATH_THINKING_PROMPT"):
+        m = _re.search(r"(?<![A-Z_])" + name + r'\s*=\s*"""(.*?)"""', text, _re.S)
+        assert m, f"{name} 未找到"
+        body = m.group(1)
+        assert "地域" in body and "一致" in body, f"{name} 缺少地域一致性约束"
+        assert "不得出现" in body and "海河流域" in body, f"{name} 缺少海河流域字样的禁用条款"
