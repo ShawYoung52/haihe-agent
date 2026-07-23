@@ -4,7 +4,11 @@
 依赖：仅标准库 + 项目自身代码（message_orchestrator 用例需要 chainlit 环境，缺失时自动跳过）。
 
 用法（在 haiheliuyubaoyuagent-master 目录下，用服务器的项目 python）：
-    python scripts/verify_river_propagation_offline.py
+    python scripts/verify_river_propagation_offline.py                     # 单元用例（无需 DB）
+    python scripts/verify_river_propagation_offline.py --csv rain.csv      # CSV→GeoJSON 真实链路（需 DB+pkl）
+    python scripts/verify_river_propagation_offline.py --csv rain.csv --aggregate-only  # 只验证 CSV 聚合
+
+CSV 格式：必须含 Station_Id_C, Datetime, PRE, Lat, Lon 列（可选 City/Station_Name/Cnty/Province/Town）。
 
 退出码：0 = 全部通过；1 = 有用例失败。
 """
@@ -221,10 +225,107 @@ except Exception as exc:  # noqa: BLE001
 
 
 # ---------------------------------------------------------------------------
+# CSV → GeoJSON 真实链路验证（--csv 模式）
+# ---------------------------------------------------------------------------
+
+
+def _load_mcp_pg_and_graph(config_path: Path) -> tuple[dict, str]:
+    """从 MCP config.ini 读取 postgres 连接与河网图路径（优先 v6 有向图）。"""
+    import configparser
+
+    config = configparser.ConfigParser()
+    config.read(config_path, encoding="utf-8-sig")
+    pg_conf = dict(config["postgres"])
+    graph_path = config.get("paths", "graph", fallback="")
+    if graph_path:
+        p = Path(graph_path)
+        v6 = (p / rig.DIRECTED_GRAPH_FILENAME) if (p.is_dir() or not p.name) else p.with_name(rig.DIRECTED_GRAPH_FILENAME)
+        if v6.is_file():
+            graph_path = str(v6)
+    return pg_conf, graph_path
+
+
+def run_csv_pipeline(args) -> int:
+    """读 5 分钟降水 CSV → 聚合 24h → 生成影响河流 GeoJSON 并打印传播时间。"""
+    import json
+
+    print(f"[1/3] 聚合 CSV：{args.csv}")
+    station_df = rig.aggregate_5min_station_pre_to_24h(args.csv)
+    total = len(station_df)
+    heavy = station_df[station_df["rain_24h"] >= args.threshold]
+    print(f"      站点总数={total}，≥{args.threshold}mm 站点数={len(heavy)}，"
+          f"最大 24h 雨量={float(station_df['rain_24h'].max()) if total else 0.0}mm")
+    if total and args.top:
+        print(f"      雨量前 {min(args.top, total)} 站：")
+        for _, row in station_df.head(args.top).iterrows():
+            print(f"        {row['station_id']} {row.get('station_name') or ''} "
+                  f"({row['lon']}, {row['lat']}) {row['rain_24h']}mm")
+    if args.aggregate_only:
+        print("[aggregate-only] 仅聚合 CSV，未访问数据库。")
+        return 0
+
+    print("[2/3] 连接数据库与河网图，生成专题图数据...")
+    pg_conf, graph_path = _load_mcp_pg_and_graph(Path(args.config))
+    result = rig.build_rain24h_impact_river_geojson(
+        args.csv,
+        rain_threshold_mm=args.threshold,
+        pg_conf=pg_conf,
+        graph_path=graph_path,
+        flow_velocity_mps=args.velocity,
+    )
+
+    print("[3/3] 结果汇总")
+    affected = result.get("affected_rivers", [])
+    print(f"      受影响河流 {len(affected)} 条：{'、'.join(affected) if affected else '无'}")
+    propagation = result.get("river_propagation") or {}
+    rivers = propagation.get("rivers") or []
+    if rivers:
+        print(f"      传播时间估算（经验流速 {propagation.get('flow_velocity_mps')} m/s）：")
+        for r in rivers:
+            scope = "下游" if r.get("has_downstream") else "就地河段"
+            print(f"        {r['river_name']}: {r['propagation_distance_km']}km（{scope}）"
+                  f" → {r['arrival_estimate_readable']}")
+    else:
+        print("      无传播时间数据（未达阈值或无受影响河流）。")
+
+    out_path = Path(args.out)
+    payload = {
+        "river_geojson": result.get("river_geojson"),
+        "station_geojson": result.get("station_geojson"),
+        "affected_rivers": affected,
+        "river_propagation": propagation,
+        "params": result.get("params"),
+    }
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"      GeoJSON 已写出：{out_path.resolve()}（可用 QGIS 或前端打开查看）")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
 
+
+def _parse_args(argv):
+    import argparse
+
+    parser = argparse.ArgumentParser(description="暴雨影响河流传播时间离线验证")
+    parser.add_argument("--csv", help="5 分钟站点降水 CSV 路径（提供后走真实链路，不再跑单元用例）")
+    parser.add_argument("--out", default="rain_impact_result.geojson", help="GeoJSON 输出路径")
+    parser.add_argument("--threshold", type=float, default=50.0, help="暴雨阈值 mm（默认 50）")
+    parser.add_argument("--velocity", type=float, default=2.0, help="经验流速 m/s（默认 2.0）")
+    parser.add_argument("--config", default=str(REPO_ROOT / "haihe-weather-analyzer-mcp" / "config.ini"),
+                        help="MCP config.ini 路径（读取数据库连接与河网图路径）")
+    parser.add_argument("--aggregate-only", action="store_true", help="只聚合 CSV，不访问数据库")
+    parser.add_argument("--top", type=int, default=10, help="打印雨量前 N 站（默认 10，0 不打印）")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    cli_args = _parse_args(sys.argv[1:])
+    if cli_args.csv:
+        sys.exit(run_csv_pipeline(cli_args))
+
     failed = 0
     for name, ok, detail in _RESULTS:
         print(f"[{'PASS' if ok else 'FAIL'}] {name}")
