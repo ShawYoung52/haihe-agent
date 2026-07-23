@@ -33,7 +33,6 @@ def _builder_result(**overrides):
 
 def test_resolve_flow_velocity_defaults_and_rejects_negative():
     assert frit._resolve_flow_velocity(0) == 2.0
-    assert frit._resolve_flow_velocity(0.0) == 2.0
     assert frit._resolve_flow_velocity(None) == 2.0
     assert frit._resolve_flow_velocity(3.0) == 3.0
     with pytest.raises(ValueError):
@@ -59,22 +58,24 @@ def test_format_mcp_response_fills_default_block_when_core_lacks_field():
     assert resp["river_propagation"] == {"flow_velocity_mps": 2.0, "rivers": []}
 
 
-def test_build_result_forwards_velocity_to_builder(monkeypatch):
-    captured = {}
+_RAINFALL_RESULT = {
+    "time_range_readable": "t",
+    "level_analysis": [
+        {"level": "暴雨", "stations": [{"name": "s1", "lon": 117.0, "lat": 39.0, "rainfall": 80.0}]}
+    ],
+}
 
-    def fake_builder(stations, **kwargs):
-        captured.update(kwargs)
+
+def _run_build(monkeypatch, captured: dict, **kwargs):
+    """以假 builder 执行 build_affected_river_network_result，捕获透传参数。"""
+
+    def fake_builder(stations, **builder_kwargs):
+        captured.update(builder_kwargs)
         return _builder_result(
-            river_propagation={"flow_velocity_mps": kwargs["flow_velocity_mps"], "rivers": []}
+            river_propagation={"flow_velocity_mps": builder_kwargs["flow_velocity_mps"], "rivers": []}
         )
 
     monkeypatch.setattr(frit, "_load_impact_builder", lambda: fake_builder)
-    rainfall_result = {
-        "time_range_readable": "t",
-        "level_analysis": [
-            {"level": "暴雨", "stations": [{"name": "s1", "lon": 117.0, "lat": 39.0, "rainfall": 80.0}]}
-        ],
-    }
     frit.build_affected_river_network_result(
         time_str="20260723080000",
         start_time="",
@@ -85,40 +86,20 @@ def test_build_result_forwards_velocity_to_builder(monkeypatch):
         downstream_km=50.0,
         direct_graph_match_km=10.0,
         pg_conf={},
-        analyze_rainfall_core=lambda *a, **k: rainfall_result,
+        analyze_rainfall_core=lambda *a, **k: _RAINFALL_RESULT,
         rain_levels=[("暴雨", 50.0, 99.9)],
         graph_path=None,
-        flow_velocity_mps=3.0,
+        **kwargs,
     )
+
+
+def test_build_result_forwards_velocity_to_builder(monkeypatch):
+    captured: dict = {}
+    _run_build(monkeypatch, captured, flow_velocity_mps=3.0)
     assert captured["flow_velocity_mps"] == 3.0
 
 
 def test_build_result_zero_velocity_uses_default(monkeypatch):
-    captured = {}
-
-    def fake_builder(stations, **kwargs):
-        captured.update(kwargs)
-        return _builder_result()
-
-    monkeypatch.setattr(frit, "_load_impact_builder", lambda: fake_builder)
-    rainfall_result = {
-        "time_range_readable": "t",
-        "level_analysis": [
-            {"level": "暴雨", "stations": [{"name": "s1", "lon": 117.0, "lat": 39.0, "rainfall": 80.0}]}
-        ],
-    }
-    frit.build_affected_river_network_result(
-        time_str="20260723080000",
-        start_time="",
-        end_time="",
-        rainfall_threshold_mm=50.0,
-        max_edges=100,
-        include_background=True,
-        downstream_km=50.0,
-        direct_graph_match_km=10.0,
-        pg_conf={},
-        analyze_rainfall_core=lambda *a, **k: rainfall_result,
-        rain_levels=[("暴雨", 50.0, 99.9)],
-        graph_path=None,
-    )
+    captured: dict = {}
+    _run_build(monkeypatch, captured)
     assert captured["flow_velocity_mps"] == 2.0

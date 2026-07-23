@@ -64,6 +64,11 @@ def _resolve_flow_velocity(flow_velocity_mps: float) -> float:
     return value if value > 0 else DEFAULT_FLOW_VELOCITY_MPS
 
 
+def _empty_propagation(flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS) -> dict:
+    """空传播时间块，统一空结果与有结果响应的 river_propagation 结构。"""
+    return {"flow_velocity_mps": float(flow_velocity_mps), "rivers": []}
+
+
 def _station_reaches_threshold(station: Any, threshold_mm: float) -> bool:
     if not isinstance(station, dict):
         return False
@@ -166,8 +171,7 @@ def _base_response_fields(
         "summary": summary,
         "affected_rivers": affected_rivers or [],
         "river_geojson": river_geojson,
-        "river_propagation": river_propagation
-        or {"flow_velocity_mps": DEFAULT_FLOW_VELOCITY_MPS, "rivers": []},
+        "river_propagation": river_propagation or _empty_propagation(),
     }
     if rules is not None:
         response["rules"] = rules
@@ -219,7 +223,7 @@ def _empty_response(
             f"未达到 {threshold_mm}mm 降雨阈值的河系数据。"
         ),
         rules=IMPACT_RULES,
-        river_propagation={"flow_velocity_mps": float(flow_velocity_mps), "rivers": []},
+        river_propagation=_empty_propagation(flow_velocity_mps),
     )
 
 

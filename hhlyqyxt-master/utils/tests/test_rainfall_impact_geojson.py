@@ -695,6 +695,7 @@ def test_build_river_propagation_uses_max_downstream_end_distance():
     assert river["propagation_distance_km"] == 36.0
     assert river["propagation_time_hours"] == 5.0  # 36 / 7.2
     assert river["arrival_estimate_readable"] == "约5.0小时"
+    assert river["has_downstream"] is True
 
 
 def test_build_river_propagation_direct_only_uses_longest_direct_length():
@@ -704,6 +705,7 @@ def test_build_river_propagation_direct_only_uses_longest_direct_length():
     assert river["propagation_distance_km"] == 3.6
     assert river["propagation_time_hours"] == 0.5  # 3.6 / 7.2
     assert river["arrival_estimate_readable"] == "约30分钟"
+    assert river["has_downstream"] is False
 
 
 def test_build_river_propagation_skips_non_finite_and_sorts_desc():
@@ -734,11 +736,6 @@ def test_build_river_propagation_downstream_takes_priority_over_direct():
     river = rig._build_river_propagation(direct, downstream, 2.0)["rivers"][0]
     assert river["propagation_distance_km"] == 5.0
     assert river["has_downstream"] is True
-
-
-def test_build_river_propagation_marks_direct_only_river():
-    river = rig._build_river_propagation({"a": _direct_edge("东河", 3.6)}, [], 2.0)["rivers"][0]
-    assert river["has_downstream"] is False
 
 
 def test_build_river_propagation_hour_boundary_readable():

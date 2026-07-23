@@ -301,14 +301,15 @@ def geojson_to_plot_segments(river_geojson: dict, stations: list[dict] | None = 
     return result
 
 
-def _validate_params(threshold: float, buffer_km: float, downstream_km: float, flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS) -> None:
+def _validate_params(threshold: float, buffer_km: float, downstream_km: float, flow_velocity_mps: float) -> None:
     if threshold < 0:
         raise ValueError("rainfall_threshold_mm 不能为负数")
     if buffer_km <= 0:
         raise ValueError("station_buffer_km 必须大于 0")
     if downstream_km < 0:
         raise ValueError("downstream_km 不能为负数")
-    if not math.isfinite(float(flow_velocity_mps)) or flow_velocity_mps <= 0:
+    velocity = float(flow_velocity_mps)
+    if not math.isfinite(velocity) or velocity <= 0:
         raise ValueError("flow_velocity_mps 必须为大于 0 的有限数值")
 
 
@@ -1239,18 +1240,16 @@ def _build_river_propagation(
     direct_len: dict[str, float] = {}
     downstream_dist: dict[str, float] = {}
 
-    for edge in (direct_edges or {}).values():
-        name = _pick_river_name(edge.get("row"), edge, mapping).strip()
-        length = _safe_float(edge.get("length_km"))
-        if not name or name == "未知" or length is None or not math.isfinite(length) or length <= 0:
-            continue
-        direct_len[name] = max(direct_len.get(name, 0.0), float(length))
-    for edge in downstream_edges or []:
-        name = _pick_river_name(edge.get("row"), edge, mapping).strip()
-        dist = _safe_float(edge.get("end_distance_km"))
-        if not name or name == "未知" or dist is None or not math.isfinite(dist) or dist <= 0:
-            continue
-        downstream_dist[name] = max(downstream_dist.get(name, 0.0), float(dist))
+    for edges, field, acc in (
+        ((direct_edges or {}).values(), "length_km", direct_len),
+        (downstream_edges or [], "end_distance_km", downstream_dist),
+    ):
+        for edge in edges:
+            name = _pick_river_name(edge.get("row"), edge, mapping)
+            value = _safe_float(edge.get(field))
+            if name == "未知" or value is None or value <= 0:
+                continue
+            acc[name] = max(acc.get(name, 0.0), value)
 
     rivers = []
     for name in sorted(set(direct_len) | set(downstream_dist)):

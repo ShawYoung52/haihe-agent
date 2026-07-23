@@ -172,7 +172,7 @@ def test_brief_direct_only_propagation_uses_pass_through_wording():
     result = _impact_result_with_propagation()
     result["river_propagation"]["rivers"][0]["has_downstream"] = False
     brief = mo._build_affected_river_network_brief(result, "暴雨影响哪些河系")
-    assert "洪水通过约需约6.7小时" in brief
+    assert "洪水通过需约6.7小时" in brief
     assert "传播至下游" not in brief
 
 
