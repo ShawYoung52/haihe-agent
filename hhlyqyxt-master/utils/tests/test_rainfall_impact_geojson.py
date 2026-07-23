@@ -752,6 +752,20 @@ def test_build_river_propagation_resolves_luan_single_char_name():
     assert result["rivers"][0]["river_name"] == "滦河"
 
 
+def test_build_river_propagation_downstream_name_uses_full_v6_row():
+    """下游边无 "row"，应经 candidate_rows 查 full_v6 行后命名，与 GeoJSON 口径一致，而非用 pkl river_name。"""
+    candidate_rows = [
+        _candidate_row("1", (0.0, 0.0), (1.0, 0.0), name="新名"),
+    ]
+    # 下游边由 _save_downstream_edge 构造：带 objectid/from_x/to_x，但 river_name 是 pkl 旧名、无 "row"
+    downstream = [{
+        "edge_key": "d1", "objectid": "1", "river_name": "旧名",
+        "end_distance_km": 36.0, "from_x": 0.0, "from_y": 0.0, "to_x": 1.0, "to_y": 0.0,
+    }]
+    result = rig._build_river_propagation({}, downstream, 2.0, candidate_rows=candidate_rows)
+    assert result["rivers"][0]["river_name"] == "新名"  # full_v6 src_name，非 pkl "旧名"
+
+
 def test_empty_result_includes_river_propagation_block():
     result = rig._empty_result(
         stations=[],

@@ -244,6 +244,7 @@ def build_rainstorm_impact_thematic_map(
         "river_propagation": _build_river_propagation(
             direct_edges, downstream_edges, flow_velocity_mps,
             luan_mapping=_load_luan_name_mapping(graph_path),
+            candidate_rows=geometry_rows,
         ),
     })
     return result
@@ -1228,24 +1229,48 @@ def _build_river_propagation(
     downstream_edges: list[dict],
     flow_velocity_mps: float,
     luan_mapping: dict[str, str] | None = None,
+    candidate_rows: list[dict] | None = None,
 ) -> dict:
     """按河流聚合暴雨影响传播时间估算。
 
     口径：下游边取 Dijkstra 累计 end_distance_km 最大值（暴雨入口视为 0km）；
     仅有直接边、无下游边的河流取直接边中最长 length_km（影响就地发生）。
-    河名经 _pick_river_name 解析，与 GeoJSON/affected_rivers 的命名口径一致。
+    河名经 _pick_river_name 解析，与 GeoJSON/affected_rivers 的命名口径一致：
+    下游边由 _save_downstream_edge 构造、不带 full_v6 "row"，需经 full_v6 lookup
+    解析 row（与 _resolve_edge_features 同款），避免滦河单字等命名偏差。
     """
     mapping = luan_mapping or {}
+    lookup = _build_edge_lookup(candidate_rows or [])
+    spatial_lookup = _build_spatial_lookup(candidate_rows or [])
     velocity_kmh = float(flow_velocity_mps) * 3.6
     direct_len: dict[str, float] = {}
     downstream_dist: dict[str, float] = {}
+
+    def _resolve_row(edge: dict):
+        # 直接边已带 full_v6 "row"；下游边按端点键查 full_v6，与 GeoJSON 同口径。
+        # 端点键缺失（如单元测试构造的极简下游边）时回退 None，由 _pick_river_name 走 edge 名。
+        if edge.get("row") is not None:
+            return edge["row"]
+        objectid = edge.get("objectid")
+        from_x, from_y = edge.get("from_x"), edge.get("from_y")
+        to_x, to_y = edge.get("to_x"), edge.get("to_y")
+        if objectid is None or from_x is None or to_x is None:
+            return None
+        row = lookup.get(_edge_lookup_key(objectid, from_x, from_y, to_x, to_y))
+        if row is None:
+            row = lookup.get(_edge_lookup_key(objectid, to_x, to_y, from_x, from_y))
+        if row is None:
+            row = _match_edge_spatially(
+                objectid, (from_x, from_y), (to_x, to_y), spatial_lookup
+            )
+        return row
 
     for edges, field, acc in (
         ((direct_edges or {}).values(), "length_km", direct_len),
         (downstream_edges or [], "end_distance_km", downstream_dist),
     ):
         for edge in edges:
-            name = _pick_river_name(edge.get("row"), edge, mapping)
+            name = _pick_river_name(_resolve_row(edge), edge, mapping)
             value = _safe_float(edge.get(field))
             if name == "未知" or value is None or value <= 0:
                 continue
