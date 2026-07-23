@@ -86,3 +86,16 @@ def test_local_tool_allows_custom_direct_match_km():
     )
     call_kwargs = impact_mod.build_affected_river_network_result.call_args.kwargs
     assert call_kwargs["direct_graph_match_km"] == 15.0
+
+
+def test_local_tool_passes_flow_velocity_default():
+    """未显式传 flow_velocity_mps 时透传 0（由 MCP 层替换为默认 2.0）。"""
+    _, impact_mod = _run_patched_tool(time_str="20250713080000")
+    call_kwargs = impact_mod.build_affected_river_network_result.call_args.kwargs
+    assert call_kwargs["flow_velocity_mps"] == 0.0
+
+
+def test_local_tool_allows_custom_flow_velocity():
+    _, impact_mod = _run_patched_tool(time_str="20250713080000", flow_velocity_mps=3.0)
+    call_kwargs = impact_mod.build_affected_river_network_result.call_args.kwargs
+    assert call_kwargs["flow_velocity_mps"] == 3.0

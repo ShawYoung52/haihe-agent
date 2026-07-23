@@ -65,6 +65,7 @@ def _call_affected_river_network(
     include_background: bool,
     downstream_km: float,
     direct_graph_match_km: float,
+    flow_velocity_mps: float,
 ) -> dict:
     config = _load_mcp_config()
     pg_conf = dict(config["postgres"])
@@ -78,6 +79,7 @@ def _call_affected_river_network(
         include_background=include_background,
         downstream_km=downstream_km,
         direct_graph_match_km=direct_graph_match_km,
+        flow_velocity_mps=flow_velocity_mps,
         pg_conf=pg_conf,
         analyze_rainfall_core=tools_mod._analyze_rainfall_core,
         rain_levels=tools_mod.RAIN_LEVELS,
@@ -98,6 +100,7 @@ def build_rainfall_river_impact_tools() -> list:
         include_background: bool = True,
         downstream_km: float = 50.0,
         direct_graph_match_km: float = 10.0,
+        flow_velocity_mps: float = 0.0,
     ) -> dict:
         """制作暴雨影响河流专题图数据（本地版本）。
 
@@ -109,6 +112,7 @@ def build_rainfall_river_impact_tools() -> list:
         - include_background: 是否包含背景河段（透传给外部 builder）。
         - downstream_km: 下游追踪距离，默认 50km。
         - direct_graph_match_km: 直接河段匹配距离，默认 10km。
+        - flow_velocity_mps: 经验流速 m/s，0 表示默认 2.0。
         """
         try:
             impact_mod, tools_mod = _load_mcp_modules()
@@ -131,6 +135,7 @@ def build_rainfall_river_impact_tools() -> list:
                 include_background=include_background,
                 downstream_km=downstream_km,
                 direct_graph_match_km=direct_graph_match_km,
+                flow_velocity_mps=flow_velocity_mps,
             )
         except Exception as exc:
             logger.exception("[RainfallRiverImpact] 调用失败")
