@@ -538,6 +538,24 @@ def _match_edge_spatially(
     return best_row
 
 
+def _resolve_edge_row(
+    objectid,
+    from_xy,
+    to_xy,
+    lookup: dict[tuple[str, float, float, float, float], dict],
+    spatial_lookup: dict[str, list[dict]],
+) -> dict | None:
+    """按端点键解析 full_v6 行：正向键 -> 反向键 -> 空间兜底。供 GeoJSON 与传播时间命名共用。"""
+    if objectid is None or from_xy is None or to_xy is None:
+        return None
+    row = lookup.get(_edge_lookup_key(objectid, from_xy[0], from_xy[1], to_xy[0], to_xy[1]))
+    if row is None:
+        row = lookup.get(_edge_lookup_key(objectid, to_xy[0], to_xy[1], from_xy[0], from_xy[1]))
+    if row is None:
+        row = _match_edge_spatially(objectid, from_xy, to_xy, spatial_lookup)
+    return row
+
+
 def _query_candidate_edge_rows(
     cur,
     schema: str,
@@ -857,17 +875,13 @@ def _resolve_edge_features(
     features = []
     for edge in edges:
         objectid = edge["objectid"]
-        row = lookup.get(_edge_lookup_key(objectid, edge["from_x"], edge["from_y"], edge["to_x"], edge["to_y"]))
-        if row is None:
-            row = lookup.get(_edge_lookup_key(objectid, edge["to_x"], edge["to_y"], edge["from_x"], edge["from_y"]))
-        if row is None:
-            # 精确端点键失配时，按 objectid + 几何空间邻近兜底匹配
-            row = _match_edge_spatially(
-                objectid,
-                (edge["from_x"], edge["from_y"]),
-                (edge["to_x"], edge["to_y"]),
-                spatial_lookup,
-            )
+        row = _resolve_edge_row(
+            objectid,
+            (edge["from_x"], edge["from_y"]),
+            (edge["to_x"], edge["to_y"]),
+            lookup,
+            spatial_lookup,
+        )
         geometry = _geometry_from_row(row) if row else None
         geometry = _unwrap_geometry(geometry)
         if not _geometry_lines(geometry or {}):
@@ -1251,19 +1265,13 @@ def _build_river_propagation(
         # 端点键缺失（如单元测试构造的极简下游边）时回退 None，由 _pick_river_name 走 edge 名。
         if edge.get("row") is not None:
             return edge["row"]
-        objectid = edge.get("objectid")
-        from_x, from_y = edge.get("from_x"), edge.get("from_y")
-        to_x, to_y = edge.get("to_x"), edge.get("to_y")
-        if objectid is None or from_x is None or to_x is None:
-            return None
-        row = lookup.get(_edge_lookup_key(objectid, from_x, from_y, to_x, to_y))
-        if row is None:
-            row = lookup.get(_edge_lookup_key(objectid, to_x, to_y, from_x, from_y))
-        if row is None:
-            row = _match_edge_spatially(
-                objectid, (from_x, from_y), (to_x, to_y), spatial_lookup
-            )
-        return row
+        return _resolve_edge_row(
+            edge.get("objectid"),
+            (edge.get("from_x"), edge.get("from_y")),
+            (edge.get("to_x"), edge.get("to_y")),
+            lookup,
+            spatial_lookup,
+        )
 
     for edges, field, acc in (
         ((direct_edges or {}).values(), "length_km", direct_len),
