@@ -440,9 +440,15 @@ def calcmaxdataseg5min():
     minute_monitor_id = qmm.id
     session.close()
 
-    # 应急响应监测入库
+    # 应急响应监测入库：独立拉取 HHLY 流域分钟降水（不再读共享 yangxiao.csv / HHLY_JUECE）。
+    # timeRange 用 UTC（HHLY 接口口径），_fetch 内部把返回 Datetime +8h 转北京时间，
+    # 与下方 datatime=end_time（BJT）的 12h/24h 窗口对齐。
+    _emergency_timerange = (
+        f"[{(end_time - timedelta(hours=32)).strftime('%Y%m%d%H%M%S')},"
+        f"{(end_time - timedelta(hours=8)).strftime('%Y%m%d%H%M%S')}]"
+    )
     run_emergency_response_monitor(
-        csv_path=tempfile,
+        timerange=_emergency_timerange,
         datatime=end_time,
         minute_monitor_id=minute_monitor_id,
     )
