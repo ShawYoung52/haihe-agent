@@ -665,3 +665,73 @@ def test_classify_graph_edges_marks_direct_and_buffer_only():
     assert len(start_nodes) == 1
     assert stats["direct_part_matched_edge_count"] == 1
     assert stats["station_buffer_fallback_edge_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 传播时间估算（_build_river_propagation）
+# ---------------------------------------------------------------------------
+
+
+def _direct_edge(name: str, length_km: float) -> dict:
+    return {"edge_key": f"k-{name}-{length_km}", "river_name": name, "length_km": length_km}
+
+
+def _downstream_edge(name: str, end_distance_km: float) -> dict:
+    return {"edge_key": f"d-{name}-{end_distance_km}", "river_name": name, "end_distance_km": end_distance_km}
+
+
+def test_build_river_propagation_uses_max_downstream_end_distance():
+    direct = {"a": _direct_edge("滦河", 3.0)}
+    downstream = [_downstream_edge("滦河", 36.0), _downstream_edge("滦河", 12.0)]
+    result = rig._build_river_propagation(direct, downstream, 2.0)
+    assert result["flow_velocity_mps"] == 2.0
+    assert len(result["rivers"]) == 1
+    river = result["rivers"][0]
+    assert river["river_name"] == "滦河"
+    assert river["propagation_distance_km"] == 36.0
+    assert river["propagation_time_hours"] == 5.0  # 36 / 7.2
+    assert river["arrival_estimate_readable"] == "约5.0小时"
+
+
+def test_build_river_propagation_direct_only_uses_longest_direct_length():
+    direct = {"a": _direct_edge("东河", 1.8), "b": _direct_edge("东河", 3.6)}
+    result = rig._build_river_propagation(direct, [], 2.0)
+    river = result["rivers"][0]
+    assert river["propagation_distance_km"] == 3.6
+    assert river["propagation_time_hours"] == 0.5  # 3.6 / 7.2
+    assert river["arrival_estimate_readable"] == "约30分钟"
+
+
+def test_build_river_propagation_skips_non_finite_and_sorts_desc():
+    direct = {"a": _direct_edge("甲河", float("nan")), "b": _direct_edge("乙河", 7.2)}
+    downstream = [_downstream_edge("丙河", 72.0)]
+    result = rig._build_river_propagation(direct, downstream, 2.0)
+    names = [r["river_name"] for r in result["rivers"]]
+    assert names == ["丙河", "乙河"]  # 甲河 NaN 被跳过；10.0h 的丙河排在 1.0h 的乙河前
+
+
+def test_build_river_propagation_empty():
+    assert rig._build_river_propagation({}, [], 2.0) == {"flow_velocity_mps": 2.0, "rivers": []}
+
+
+def test_validate_params_rejects_non_positive_flow_velocity():
+    with pytest.raises(ValueError):
+        rig._validate_params(50.0, 30.0, 50.0, 0.0)
+    with pytest.raises(ValueError):
+        rig._validate_params(50.0, 30.0, 50.0, -1.0)
+
+
+def test_empty_result_includes_river_propagation_block():
+    result = rig._empty_result(
+        stations=[],
+        threshold=50.0,
+        buffer_km=30.0,
+        downstream_km=50.0,
+        direct_match_km=10.0,
+        schema="public",
+        table="t",
+        graph_path=None,
+        extra=None,
+        flow_velocity_mps=3.0,
+    )
+    assert result["river_propagation"] == {"flow_velocity_mps": 3.0, "rivers": []}
