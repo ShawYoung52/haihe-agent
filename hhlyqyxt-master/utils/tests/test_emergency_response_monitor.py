@@ -172,7 +172,7 @@ def test_response_level_0_when_no_threshold(make_csv):
 
 
 def test_station_levl_normalization(make_csv):
-    """Station_levl 应支持 '11'、'011'、11 等多种输入形式。"""
+    """Station_levl 应支持 '11'、'011'、11 等多种输入形式，归一为去前导零的 2 位口径 11/12/13/16。"""
     rows = [
         {"Station_Id_C": "A", "Datetime": "2026-07-15 09:00:00", "PRE": 60.0, "Station_levl": "11"},
         {"Station_Id_C": "B", "Datetime": "2026-07-15 09:00:00", "PRE": 60.0, "Station_levl": "011"},
@@ -182,8 +182,15 @@ def test_station_levl_normalization(make_csv):
         {"Station_Id_C": "F", "Datetime": "2026-07-15 09:00:00", "PRE": 60.0, "Station_levl": "014"},
     ]
     csv_path = make_csv(rows, datatime="2026-07-15 10:00:00")
+    # 归一为 2 位：11/11/11/13/16/14；国家级口径 {11,12,13,16} 命中前 5 个
+    assert erm._normalize_station_level("011") == "11"
+    assert erm._normalize_station_level("11") == "11"
+    assert erm._normalize_station_level(11) == "11"
+    assert erm._normalize_station_level("016") == "16"
+    assert erm._normalize_station_level("014") == "14"
+    assert erm._normalize_station_level(None) == "0"
+
     result = erm.compute_emergency_response_stats(csv_path, "2026-07-15 10:00:00")
-    # '11'、'011'、11 均归一为 '011'，加上 '013'、'016' 共 5 个国家级站点
     assert result["total_national_stations"] == 5
     assert result["station_12h_baoyu"] == 5
 

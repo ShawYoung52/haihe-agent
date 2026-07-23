@@ -17,7 +17,7 @@ from utils.db import Session
 
 logger = logging.getLogger(__name__)
 
-NATIONAL_STATION_LEVELS = {"011", "012", "013", "016"}
+NATIONAL_STATION_LEVELS = {"11", "12", "13", "16"}
 
 # 降水阈值（毫米）
 BAOYU_LOWER = 50.0
@@ -26,12 +26,12 @@ TEDABAOYU_LOWER = 250.0
 
 
 def _normalize_station_level(value) -> str:
-    """将 Station_levl 归一化为 3 位零填充字符串。"""
+    """归一为去前导零的 2 位字符串：011→11、11→11、'016'→16；None/空→'0'。"""
     try:
-        value = int(value)
+        return str(int(value))
     except (ValueError, TypeError):
-        pass
-    return str(value).zfill(3)
+        text = str(value or "").strip()
+        return text.lstrip("0") or "0"
 
 
 def _parse_datatime(datatime: Union[str, datetime]) -> datetime:
