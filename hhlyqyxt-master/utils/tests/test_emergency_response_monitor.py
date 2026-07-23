@@ -352,3 +352,73 @@ def test_run_emergency_response_monitor_default_datatime_uses_csv_max(make_csv, 
     assert result is not None
     assert result.datatime == pd.Timestamp("2026-07-15 09:00:00")
     assert result.minute_monitor_id == 7
+
+
+def _fake_records(pres=("60.0", "60.0", "60.0"), station_levels=("011", "011", "011")):
+    rows = []
+    for sid, pre, lev in zip(["A", "B", "C"], pres, station_levels):
+        rows.append({
+            "Station_Id_C": sid, "Datetime": "2026-07-15 09:00:00", "PRE": pre,
+            "Station_levl": lev, "Lat": "39.0", "Lon": "117.0",
+            "City": "天津市", "Station_Name": f"站{sid}", "Cnty": "测试区",
+            "Province": "天津市", "Town": "测试镇",
+        })
+    return rows
+
+
+def test_fetch_hhly_rainfall_uses_hhly_basin_and_min_data_code(monkeypatch):
+    """拉取必须 basin_codes=HHLY、data_code=SURF_CHN_MUL_MIN，并含 Station_levl。"""
+    captured = {}
+
+    class FakeClient:
+        def get_surf_pre_in_basin_timerange(self, basin_codes, timeRange, elements=None,
+                                            data_code=None, **kwargs):
+            captured.update(basin_codes=basin_codes, timeRange=timeRange, elements=elements,
+                            data_code=data_code)
+            return _fake_records()
+
+    df = erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]", client=FakeClient())
+    assert captured["basin_codes"] == "HHLY"
+    assert captured["data_code"] == "SURF_CHN_MUL_MIN"
+    assert "Station_levl" in captured["elements"]
+    assert list(df["Station_Id_C"]) == ["A", "B", "C"]
+    assert "Station_levl" in df.columns and "PRE" in df.columns
+
+
+def test_fetch_hhly_rainfall_instantiates_client_when_none(monkeypatch):
+    """client=None 时应现场实例化牵引侧 MusicClient(MusicConfig())。"""
+    created = {}
+
+    class FakeConfig:
+        pass
+
+    class FakeClient:
+        def __init__(self, cfg):
+            created["cfg"] = cfg
+        def get_surf_pre_in_basin_timerange(self, basin_codes, timeRange, elements=None,
+                                           data_code=None, **kwargs):
+            return _fake_records()
+
+    monkeypatch.setattr(erm, "MusicConfig", FakeConfig)
+    monkeypatch.setattr(erm, "MusicClient", FakeClient)
+    df = erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]")
+    assert "cfg" in created
+    assert len(df) == 3
+
+
+def test_fetch_hhly_rainfall_empty_returns_empty_dataframe(monkeypatch):
+    class FakeClient:
+        def get_surf_pre_in_basin_timerange(self, basin_codes, timeRange, **kwargs):
+            return []
+    df = erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]", client=FakeClient())
+    assert df.empty
+    for col in ("Station_Id_C", "Datetime", "PRE", "Station_levl"):
+        assert col in df.columns
+
+
+def test_fetch_hhly_rainfall_propagates_api_error(monkeypatch):
+    class FakeClient:
+        def get_surf_pre_in_basin_timerange(self, basin_codes, timeRange, **kwargs):
+            raise RuntimeError("天擎超时")
+    with pytest.raises(RuntimeError, match="天擎超时"):
+        erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]", client=FakeClient())

@@ -8,16 +8,25 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import pandas as pd
 
 from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
+from utils.MusicTool import MusicClient, MusicConfig
 from utils.db import Session
 
 logger = logging.getLogger(__name__)
 
 NATIONAL_STATION_LEVELS = {"11", "12", "13", "16"}
+
+# 应急响应独立数据源：海河流域（HHLY）分钟降水
+HHLY_BASIN_CODES = "HHLY"
+HHLY_MIN_DATA_CODE = "SURF_CHN_MUL_MIN"
+HHLY_MIN_ELEMENTS = (
+    "Station_levl,Lat,Lon,Alti,Station_Id_C,Datetime,IYMDHM,RYMDHM,UPDATE_TIME,"
+    "City,Station_Name,Cnty,NetCode,Province,REGIONCODE,Town,Year,Mon,Day,Hour,Min,PRE"
+)
 
 # 降水阈值（毫米）
 BAOYU_LOWER = 50.0
@@ -81,6 +90,37 @@ def _determine_response_level(
     if ratio_24h_baoyu >= 0.20:
         return 4
     return 0
+
+
+def _fetch_hhly_rainfall_for_emergency(
+    timerange: str,
+    client: Optional[Any] = None,
+) -> pd.DataFrame:
+    """独立拉取 HHLY 流域 5 分钟降水，供应急响应内部消费。
+
+    timerange 形如 "[20260722080000,20260723080000]"。client 为 None 时
+    现场实例化牵引侧 MusicClient(MusicConfig())。返回含
+    Station_Id_C/Datetime/PRE/Station_levl 等列的 DataFrame；
+    空结果返回带列的空 DataFrame；天擎异常原样向上传播由调用方处理。
+    """
+    own_client = client
+    if own_client is None:
+        own_client = MusicClient(MusicConfig())
+    records = own_client.get_surf_pre_in_basin_timerange(
+        basin_codes=HHLY_BASIN_CODES,
+        timeRange=timerange,
+        elements=HHLY_MIN_ELEMENTS,
+        data_code=HHLY_MIN_DATA_CODE,
+    )
+    columns = HHLY_MIN_ELEMENTS.split(",")
+    if not records:
+        return pd.DataFrame(columns=columns)
+    df = pd.DataFrame(records)
+    # 补齐 elements 中声明但接口未返回的列，保证下游口径稳定
+    for col in columns:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df
 
 
 def compute_emergency_response_stats(
