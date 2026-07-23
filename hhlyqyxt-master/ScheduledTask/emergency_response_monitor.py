@@ -27,6 +27,7 @@ HHLY_MIN_ELEMENTS = (
     "Station_levl,Lat,Lon,Alti,Station_Id_C,Datetime,IYMDHM,RYMDHM,UPDATE_TIME,"
     "City,Station_Name,Cnty,NetCode,Province,REGIONCODE,Town,Year,Mon,Day,Hour,Min,PRE"
 )
+HHLY_MIN_COLUMNS = HHLY_MIN_ELEMENTS.split(",")
 
 # 降水阈值（毫米）
 BAOYU_LOWER = 50.0
@@ -112,12 +113,11 @@ def _fetch_hhly_rainfall_for_emergency(
         elements=HHLY_MIN_ELEMENTS,
         data_code=HHLY_MIN_DATA_CODE,
     )
-    columns = HHLY_MIN_ELEMENTS.split(",")
     if not records:
-        return pd.DataFrame(columns=columns)
+        return pd.DataFrame(columns=HHLY_MIN_COLUMNS)
     df = pd.DataFrame(records)
     # 补齐 elements 中声明但接口未返回的列，保证下游口径稳定
-    for col in columns:
+    for col in HHLY_MIN_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA
     return df
