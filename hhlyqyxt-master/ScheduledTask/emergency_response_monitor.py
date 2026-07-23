@@ -124,27 +124,32 @@ def _fetch_hhly_rainfall_for_emergency(
 
 
 def compute_emergency_response_stats(
-    csv_path: str, datatime: Union[str, datetime, None] = None
+    source: Union[str, pd.DataFrame] = None,
+    datatime: Union[str, datetime, None] = None,
 ) -> Optional[dict]:
-    """从 CSV 计算应急响应统计指标。
+    """从 CSV 路径或 DataFrame 计算应急响应统计指标。
 
     Args:
-        csv_path: 5 分钟降水 CSV 文件路径。
+        source: 5 分钟降水 CSV 文件路径，或已含 Station_Id_C/Datetime/PRE/Station_levl
+            等列的 DataFrame（用于应急响应独立拉取 HHLY 后直接消费，跳过读文件）。
         datatime: 统计结束时间，窗口为 (datatime - 12h/24h, datatime]。
-            为 None 时使用 CSV 中的最大时间。
+            为 None 时使用数据中的最大时间。
 
     Returns:
-        包含各阈值站点数、占比和响应级别的字典；CSV 为空或无可解析内容时返回 None。
+        包含各阈值站点数、占比和响应级别的字典；数据为空或无可解析内容时返回 None。
     """
-    try:
-        df = pd.read_csv(csv_path)
-    except pd.errors.EmptyDataError:
-        return None
-    if df.empty:
+    if isinstance(source, pd.DataFrame):
+        df = source.copy()
+    else:
+        try:
+            df = pd.read_csv(source)
+        except pd.errors.EmptyDataError:
+            return None
+    if df is None or df.empty:
         return None
 
     if "Station_levl" not in df.columns:
-        logger.warning("CSV 缺少 Station_levl 列，全部站点按非国家站处理: %s", csv_path)
+        logger.warning("数据缺少 Station_levl 列，全部站点按非国家站处理: %s", source)
         df["Station_levl"] = ""
 
     df["Datetime"] = pd.to_datetime(df["Datetime"])

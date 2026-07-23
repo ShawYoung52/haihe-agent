@@ -422,3 +422,28 @@ def test_fetch_hhly_rainfall_propagates_api_error(monkeypatch):
             raise RuntimeError("天擎超时")
     with pytest.raises(RuntimeError, match="天擎超时"):
         erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]", client=FakeClient())
+
+
+def test_compute_stats_accepts_dataframe_equivalent_to_csv(make_csv):
+    """compute_emergency_response_stats 应接受 DataFrame，结果与等价 CSV 一致。"""
+    rows = [
+        {"Station_Id_C": "A", "Datetime": "2026-07-15 08:00:00", "PRE": 40.0, "Station_levl": "011"},
+        {"Station_Id_C": "A", "Datetime": "2026-07-15 09:00:00", "PRE": 40.0, "Station_levl": "011"},
+        {"Station_Id_C": "B", "Datetime": "2026-07-15 09:00:00", "PRE": 10.0, "Station_levl": "011"},
+    ]
+    csv_path = make_csv(rows, datatime="2026-07-15 10:00:00")
+    csv_result = erm.compute_emergency_response_stats(csv_path, "2026-07-15 10:00:00")
+
+    df = pd.DataFrame(rows)
+    df["Datetime"] = pd.to_datetime(df["Datetime"])
+    df["PRE"] = pd.to_numeric(df["PRE"], errors="coerce")
+    df_result = erm.compute_emergency_response_stats(df, "2026-07-15 10:00:00")
+
+    assert df_result["total_national_stations"] == csv_result["total_national_stations"]
+    assert df_result["station_12h_baoyu"] == csv_result["station_12h_baoyu"]
+    assert df_result["response_level"] == csv_result["response_level"]
+
+
+def test_compute_stats_empty_dataframe_returns_none():
+    df = pd.DataFrame(columns=["Station_Id_C", "Datetime", "PRE", "Station_levl"])
+    assert erm.compute_emergency_response_stats(df, "2026-07-15 10:00:00") is None
