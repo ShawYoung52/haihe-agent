@@ -18,6 +18,7 @@ import requests
 from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_DATA_CODE, DEFAULT_OBS_ELEMENTS, DEFAULT_THRESHOLDS_MM, DEFAULT_MIN_PRE_DATA_CODE, DEFAULT_MIN_PRE_ELEMENTS
+from rolling_forecast_service import is_basin_weather_query, query_rolling_forecast_core
 
 try:
     from exception.CustomException import BusinessException
@@ -80,7 +81,7 @@ WARNING_API_VERIFY_SSL = os.getenv("WARNING_API_VERIFY_SSL", "false").strip().lo
 WARNING_SEVERITY_ORDER = ["蓝色", "黄色", "橙色", "红色"]
 NATIONAL_WARNING_API_URL = os.getenv("NATIONAL_WARNING_API_URL", "http://10.1.64.146/awsdsi/main/alerts")
 NATIONAL_WARNING_API_TIMEOUT = int(os.getenv("NATIONAL_WARNING_API_TIMEOUT", "15"))
-NATIONAL_WARNING_DEFAULT_KEYWORDS = os.getenv("NATIONAL_WARNING_DEFAULT_KEYWORDS", "天津,华北,京津冀,北京,河北")
+NATIONAL_WARNING_DEFAULT_KEYWORDS = os.getenv("NATIONAL_WARNING_DEFAULT_KEYWORDS", "天津")
 NATIONAL_WARNING_MAX_ITEMS = int(os.getenv("NATIONAL_WARNING_MAX_ITEMS", "30"))
 
 # 天津滚动预报接口配置
@@ -408,11 +409,27 @@ def _split_keywords(keywords: str | None) -> list[str]:
 def _national_warning_matches_keywords(item: dict, keywords: list[str]) -> bool:
     if not keywords:
         return True
-    haystack = "".join(
+    area_text = "".join(
         str(item.get(key) or "")
-        for key in ("province", "city", "county", "event_type", "content")
+        for key in ("province", "city", "county")
     )
-    return any(keyword in haystack for keyword in keywords)
+    full_text = area_text + "".join(
+        str(item.get(key) or "")
+        for key in ("event_type", "content")
+    )
+    strict_area_keywords = {"天津", "天津市"}
+    for keyword in keywords:
+        if keyword in strict_area_keywords:
+            # 天津是行政区筛选条件，优先匹配省/市/县，避免其他地区正文
+            # 只因偶然提到“天津/京津冀”而被纳入天津清单。
+            if keyword in area_text:
+                return True
+            if not area_text.strip() and keyword in full_text:
+                return True
+            continue
+        if keyword in full_text:
+            return True
+    return False
 
 
 def _fetch_national_warning_info(keywords: str | None = None, max_items: int | None = None) -> dict:
@@ -2311,103 +2328,6 @@ def _normalize_time_param(t: str) -> str:
     return t
 
 
-def _select_rolling_forecast_time(now: datetime | None = None) -> str:
-    now = now or datetime.now(TIANJIN_TIMEZONE)
-    if now.hour >= 8:
-        return now.strftime("%Y%m%d080000")
-    return (now - timedelta(days=1)).strftime("%Y%m%d200000")
-
-
-def _parse_rolling_forecast_regions(region_text: str | None) -> list[str]:
-    text = (region_text or "").strip()
-    if not text or any(key in text for key in ("全市", "我市", "天津市", "天津")):
-        return list(ROLLING_FORECAST_COORDS.keys())
-
-    matched: list[str] = []
-    for alias, region in ROLLING_FORECAST_REGION_ALIASES.items():
-        if alias in text and region not in matched:
-            matched.append(region)
-    for region in ROLLING_FORECAST_COORDS:
-        if region in text and region not in matched:
-            matched.append(region)
-
-    return matched or list(ROLLING_FORECAST_COORDS.keys())
-
-
-def _rolling_forecast_series(values: Any) -> list:
-    if isinstance(values, list) and values and isinstance(values[0], list):
-        return values[0]
-    if isinstance(values, list):
-        return values
-    return []
-
-
-def _clean_rolling_forecast_value(value: Any) -> Any:
-    if value in (None, "--", "9999.0", "9999", 9999, 9999.0):
-        return None
-    return value
-
-
-def _format_rolling_forecast_coord(value: float | str) -> str:
-    try:
-        return f"{float(value):.2f}"
-    except Exception:
-        return str(value).strip()
-
-
-def _build_rolling_forecast_periods(
-    result_data: dict,
-    regions: list[str],
-    fcst_time: str,
-    start_period: int,
-    interval: int,
-    locations: list[dict] | None = None,
-) -> list[dict]:
-    fcst_dt = datetime.strptime(fcst_time, "%Y%m%d%H%M%S")
-    periods: list[dict] = []
-
-    if locations is None:
-        locations = [
-            {
-                "name": region,
-                "region": region,
-                "lon": ROLLING_FORECAST_COORDS[region].split("_")[0],
-                "lat": ROLLING_FORECAST_COORDS[region].split("_")[1],
-                "coord": ROLLING_FORECAST_COORDS[region],
-            }
-            for region in regions
-        ]
-
-    for location in locations:
-        region = str(location.get("name") or location.get("region") or location.get("coord") or "指定点位")
-        coord = str(location.get("coord") or "")
-        if not coord:
-            coord = f"{_format_rolling_forecast_coord(location.get('lon'))}_{_format_rolling_forecast_coord(location.get('lat'))}"
-        data = result_data.get(coord) or {}
-        series_by_element = {
-            element: _rolling_forecast_series(data.get(element))
-            for element in ROLLING_FORECAST_ELEMENTS
-        }
-        point_count = max((len(series) for series in series_by_element.values()), default=0)
-
-        for index in range(point_count):
-            start_dt = fcst_dt + timedelta(hours=start_period + index * interval)
-            end_dt = start_dt + timedelta(hours=interval)
-            row = {
-                "region": region,
-                "lon": location.get("lon"),
-                "lat": location.get("lat"),
-                "start_time": start_dt.strftime("%Y-%m-%d %H:%M"),
-                "end_time": end_dt.strftime("%Y-%m-%d %H:%M"),
-                "period_label": f"{start_dt.strftime('%m月%d日%H时')}-{end_dt.strftime('%m月%d日%H时')}",
-            }
-            for element, series in series_by_element.items():
-                row[element] = _clean_rolling_forecast_value(series[index] if index < len(series) else None)
-            periods.append(row)
-
-    return periods
-
-
 def evaluate_emergency_response_core(
     basin_codes: str = DEFAULT_BASIN_CODES,
     times: str = "",
@@ -2808,8 +2728,26 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         start_period: int = 0,
         end_period: int = 240,
         interval: int = 12,
+        forecast_start_date: str = "",
+        forecast_days: int = 0,
     ) -> dict:
         """查询天津滚动预报。适合未来天气、未来一周、明后天、周末、升降温、强降雨、大暴雨、雾霾/能见度、户外活动适宜性等预报类问题。
+
+        **适用范围仅限天津及天津区级区域。禁止**用于"海河流域""流域"或具体河系/子流域
+        （大清河、子牙河、永定河、北三河、漳卫南运河、徒骇马颊河、黑龙港、滦河、潮白河、蓟运河等）
+        对象的天气/降雨问题——无论今天、明天还是未来，这些问题必须改用
+        `get_river_system_rainfall_forecast`（九大分区河系级降雨预报）。
+        本工具是天津 11 站点接口，不覆盖海河流域；误用时工具会直接报错。
+
+        当问题询问“高温/暴雨/大风预警期间”的实际最高气温、雨量、风力、影响时段或影响区域时，
+        仍属于动态预报查询，应调用本工具；例如“高温预警期间最高会到多少度？”。
+        只有询问预警发布标准、颜色等级、阈值、定义或各级区别时，才不属于本工具的预报查询范围。
+
+        未来自然日问题由大模型选择本工具，并传入 forecast_start_date 和 forecast_days。
+        “本周末/这个周末/周末天气”查询当周尚未过去的周六、周日；“下周末”查询下一个自然周的周六、周日。
+        其他“最近会……/近期会……/未来一周/未来七天/未来几天”必须从明天 00:00 开始查 7 个自然日；
+        “未来N天”明确了数量时从明天开始查 N 天。预警过程的动态预报值未说明日期时也按明天起 7 天处理。
+        不要由模型传底层时效参数代替这两个业务参数。
 
         Args:
             user_query: 用户原始问题，用于解析区域；未说明地点时默认查询天津全部区域。
@@ -2822,91 +2760,49 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             start_period: 起始预报时效，单位小时。
             end_period: 结束预报时效，单位小时，默认 240。
             interval: 时间步长，单位小时，默认 12。
-        """
-        point_mode = lon is not None and lat is not None
-        if point_mode:
-            lon_text = _format_rolling_forecast_coord(lon)
-            lat_text = _format_rolling_forecast_coord(lat)
-            coord = f"{lon_text}_{lat_text}"
-            label = (point_name or matched_region or "指定点位").strip()
-            region_names = [label]
-            locations = [{
-                "name": label,
-                "region": matched_region or label,
-                "lon": lon_text,
-                "lat": lat_text,
-                "coord": coord,
-            }]
-            lons = [lon_text]
-            lats = [lat_text]
-        else:
-            region_names = _parse_rolling_forecast_regions(regions or user_query)
-            coords = [ROLLING_FORECAST_COORDS[name] for name in region_names]
-            locations = [
-                {
-                    "name": name,
-                    "region": name,
-                    "lon": coord.split("_")[0],
-                    "lat": coord.split("_")[1],
-                    "coord": coord,
-                }
-                for name, coord in zip(region_names, coords)
-            ]
-            lons = [coord.split("_")[0] for coord in coords]
-            lats = [coord.split("_")[1] for coord in coords]
-        selected_fcst_time = fcst_time or _select_rolling_forecast_time()
-        params = {
-            "fcstTime": selected_fcst_time,
-            "element": ",".join(ROLLING_FORECAST_ELEMENTS),
-            "lon": ",".join(lons),
-            "lat": ",".join(lats),
-            "mode": "GDMODE",
-            "startPeriod": str(start_period),
-            "endPeriod": str(end_period),
-            "interval": str(interval),
-            "count": "0",
-            "stationType": "3",
-        }
-        response = requests.get(ROLLING_FORECAST_API_URL, params=params, timeout=ROLLING_FORECAST_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-        result_data = payload.get("resultData") or {}
+            forecast_start_date: 自然日查询的开始日期，格式 YYYY-MM-DD。除明确的周末查询外，未来类问题从明天开始。
+            forecast_days: 从 forecast_start_date 起连续查询的自然日数。与 forecast_start_date 同时传入时，
+                工具自动使用每日 00:00-24:00、24 小时步长，并覆盖 fcst_time/start_period/end_period/interval。
 
-        result = {
-            "data_source": "天津市气象台滚动预报",
-            "forecast_type": "rolling_forecast",
-            "query_mode": "point" if point_mode else "region",
-            "query_time": datetime.now(TIANJIN_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S"),
-            "fcst_time": selected_fcst_time,
-            "query_regions": region_names,
-            "query_point": {
-                "point_name": point_name or None,
-                "matched_region": matched_region or None,
-                "lon": lons[0] if point_mode else None,
-                "lat": lats[0] if point_mode else None,
-            } if point_mode else None,
-            "elements": ROLLING_FORECAST_ELEMENT_NAMES,
-            "start_period": start_period,
-            "end_period": end_period,
-            "interval_hours": interval,
-            "api_code": payload.get("code"),
-            "api_message": payload.get("message"),
-            "periods": _build_rolling_forecast_periods(
-                result_data=result_data,
-                regions=region_names,
-                fcst_time=selected_fcst_time,
-                start_period=start_period,
-                interval=interval,
-                locations=locations,
-            ),
-        }
-        if os.getenv("DEBUG_ROLLING_FORECAST", "").strip().lower() in {"1", "true", "yes", "on"}:
-            print(
-                "[query_rolling_forecast] full result:\n"
-                + json.dumps(result, ensure_ascii=False, default=str, indent=2),
-                flush=True,
+        未来日历日参数规则：
+        - “本周末”“这个周末”“周末天气”：周一至周五从当周周六开始查2天；周六从当天开始查2天；周日从当天开始查1天。
+        - “下周末”：forecast_start_date=下一个自然周的周六，forecast_days=2。
+        - “最近会……”“近期会……”“未来一周”“未来七天/7天”“未来几天”：从明天开始，forecast_days=7。
+        - “未来N天”明确了数量时：从明天开始，forecast_days=N。
+        - “明天”：forecast_start_date=明天，forecast_days=1；“后天”则从后天开始查 1 天。
+        - 日历日模式会返回 daily_summary、temperature_analysis、visibility_analysis、
+          rainstorm_analysis 和 weather_focus，回答时应优先使用这些代码统计结果，不要由模型重新比较数组。
+
+        当前滚动气象信息专用规则：
+        - “请输出当前时刻的滚动气象信息实况”由调用方对本工具调用两次。
+        - 第一次查当前整点至下一整点，interval=1，end_period=start_period+1。
+        - 第二次从下一整点起查未来12小时，interval=12，end_period=start_period+12。
+        - 两次必须使用同一 fcst_time，regions 留空以查询全市11个代表区域，不传 forecast_start_date/forecast_days。
+        - 调用方由代码计算 TP1H 平均值、最大值和对应地区；模型使用接口返回与代码统计撰写总结，表格仅由代码生成。
+        """
+        # 点位模式（调用方已解析出明确经纬度，如决策天气 POI）不做流域拦截，
+        # 避免"潮白河湿地公园"类点位问题被误伤。
+        if (lon is None or lat is None) and (
+            is_basin_weather_query(user_query) or is_basin_weather_query(regions)
+        ):
+            raise BusinessException(
+                "本工具仅覆盖天津及区级区域，不适用于海河流域/河系天气问题；"
+                "请改用 get_river_system_rainfall_forecast 查询九大分区河系级降雨预报。"
             )
-        return result
+        return query_rolling_forecast_core(
+            user_query=user_query,
+            regions=regions,
+            lon=lon,
+            lat=lat,
+            point_name=point_name,
+            matched_region=matched_region,
+            fcst_time=fcst_time,
+            start_period=start_period,
+            end_period=end_period,
+            interval=interval,
+            forecast_start_date=forecast_start_date,
+            forecast_days=forecast_days,
+        )
 
     @mcp.tool()
     def get_haihe_station_observations(
@@ -3505,7 +3401,10 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         """
         查询中央气象台/国家局预警信息。
         当用户询问国家局、中央气象台、全国、周边区域、华北、京津冀等预警信息时调用。
-        keywords 为逗号分隔的区域或关键词，默认使用天津、华北、京津冀、北京、河北；
+        keywords 为逗号分隔的区域或关键词，默认仅使用“天津”。
+        用户询问“国家局和天津市发布的预警信息”或“中央气象台和天津市预警”时，
+        必须传 keywords="天津"，不得自动扩大到北京、河北、华北、京津冀或全国。
+        只有用户明确询问这些地区时，才传入相应关键词。
         max_items 控制最多返回记录数。返回轻量化 warnings 记录；content 为预警正文，url 为国家气象中心详情链接。
         """
         return _fetch_national_warning_info(keywords=keywords or None, max_items=max_items)
