@@ -72,7 +72,7 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - Verification: run `python tests/test_fast_paths.py` for fast-path static checks and `python -m pytest tests/ -v` for the full suite
 - Tests must run from `chainlitexam/`; running from the repo root causes `ModuleNotFoundError: No module named 'utils'`
 - Git Bash 的 `python` 是 Windows Store 占位程序（静默 exit 49 无输出）；本机无项目 venv，测试用 `py -3` 或隔离 venv `D:\PythonProject\.venv-haihe-tests\Scripts\python.exe`（已装 pytest/pytest-asyncio/pandas/requests/langchain-core）
-- 选择性运行单个测试文件可能被 `tests/stubs.py` 的 `langchain_core` stub 阻断（stub 只在真实 langchain_core 未加载时安装）；以全量 `python -m pytest tests/` 结果为准。`test_run_tool_round_failure_records_tool_message_without_generic_error` 是既有失败（`_run_tool_round` 返回 4 值、测试解包 3 值），与传播时间改动无关
+- 选择性运行单个测试文件可能被 `tests/stubs.py` 的 `langchain_core` stub 阻断（stub 只在真实 langchain_core 未加载时安装）；以全量 `python -m pytest tests/` 结果为准
 - Bash working directory persists across tool calls; use absolute paths when invoking commands outside `chainlitexam/` (the parent directory name contains spaces)
 - `haihe-weather-analyzer-mcp/server.py` overrides `fixed_rainfall_impact_tool.DEFAULT_DIRECT_GRAPH_MATCH_KM` at runtime and hard-codes the `get_affected_river_network_by_rainfall` description; keep both in sync with `hhlyqyxt-master/utils/rainfall_impact_geojson.py`
 - `fixed_rainfall_impact_tool._resolve_graph_path()` prefers `DIRECTED_GRAPH_FILENAME` in the same directory as the configured graph path and is robust to directory paths and empty filenames; keep this logic in sync with any graph-loader fallback in `tools.py`

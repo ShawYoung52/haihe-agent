@@ -120,7 +120,7 @@ async def test_run_tool_round_failure_records_tool_message_without_generic_error
     callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
     messages = []
 
-    forced, ree, bundles = await mo._run_tool_round(
+    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
         FakePlannerMsg(), [FakeTool()], messages, "测试", 1, callbacks
     )
 
@@ -128,6 +128,7 @@ async def test_run_tool_round_failure_records_tool_message_without_generic_error
     assert forced is None
     assert ree is None
     assert bundles == []
+    assert rolling_bundles == []
     assert len(messages) == 1
     tool_msg = messages[0]
     assert tool_msg.content.startswith(f"工具 {FakeTool.name} 执行失败")
