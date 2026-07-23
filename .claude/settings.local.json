@@ -53,7 +53,9 @@
       "Skill(claude-md-management:revise-claude-md)",
       "mcp__plugin_claude-mem_mcp-search__observation_add",
       "Bash(awk -F: '$1 > 1639 && $1 < 1850'2)",
-      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe scripts/verify_river_propagation_offline.py)"
+      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe scripts/verify_river_propagation_offline.py)",
+      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe -m pip install -q psycopg2-binary)",
+      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe -m pytest utils/tests/test_emergency_response_monitor.py -q)"
     ]
   }
 }

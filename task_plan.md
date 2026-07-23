@@ -97,3 +97,29 @@
 | 错误 | 尝试次数 | 解决方案 |
 |------|---------|---------|
 | 暂无 | - | - |
+
+## 任务 C：牵引智能体全量代码审查（进行中）
+
+用户 2026-07-23 指令：遍历项目代码做全流程审查。本期范围 = `hhlyqyxt-master`（牵引智能体），四维度全审（正确性/业务口径/代码质量/部署合规）；另两个仓库（问答智能体、Chainlit 编排）后续排期。流程：superpowers 方法论（理解->规划->执行->验证）+ code-review（并行代理）+ code-simplifier + verification + revise-claude-md + claude-mem + github。
+
+### 审查范围（生产代码 ~6500 行，按风险/规模排序）
+- 高优先（未近期深审）：`utils/MusicTool.py`(1233)、`ScheduledTask/stationProcessMin.py`(908)、`utils/rainstorm_impact_map_service.py`(610)、`main.py`(515)、`Service/monitorservice.py`(493)、`ScheduledTask/stationProcess.py`(428)、`utils/send_wx_message.py`(289)、`utils/river_city_impact_tool.py`(260)、`utils/es_preprocess.py`(249)、`Controller/tool_router.py`(249)
+- 低优先（近期已深审，轻审）：`utils/rainfall_impact_geojson.py`(1386, Request 1)、`ScheduledTask/emergency_response_monitor.py`(281, 本次 HHLY 改造)
+- ORM/小文件：`Models/*`、`utils/db.py`、`utils/config.py`、`Service/reportservice.py`、`Schemas/*`
+
+### 四维度
+- D1 正确性与潜在 bug（边界、异常、数据口径、并发/调度）
+- D2 业务逻辑与口径一致性（vs CLAUDE.md/specs/业务阈值，含应急响应、暴雨影响、面雨量、水库超限等）
+- D3 代码质量与可简化点（去重、过度防御、YAGNI、死代码）
+- D4 安全与部署合规（硬编码 IP/路径、env 覆盖、跨仓库 import、向后兼容、内网部署适配）
+
+### 阶段
+- [x] C1 理解：摸清 hhlyqyxt-master 结构与规模（34 py 文件，生产 ~6500 行）
+- [ ] C2 规划：本任务计划已写入 task_plan.md
+- [ ] C3 执行：4 维度并行审查代理 -> findings 汇总
+- [ ] C4 修复：按严重度修复确认问题（TDD，逐条提交）
+- [ ] C5 code-simplifier：简化 pass
+- [ ] C6 verification：重跑全量测试无回归
+- [ ] C7 revise-claude-md：把审查结论补入 CLAUDE.md
+- [ ] C8 claude-mem：审查记忆
+- [ ] C9 github：提交并 push
