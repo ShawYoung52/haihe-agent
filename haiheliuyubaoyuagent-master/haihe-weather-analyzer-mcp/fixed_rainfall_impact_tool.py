@@ -16,6 +16,7 @@ from constants import DIRECTED_GRAPH_FILENAME, RIVER_TABLE_VERSION
 logger = logging.getLogger(__name__)
 TOOL_NAME = "get_affected_river_network_by_rainfall"
 DEFAULT_DIRECT_GRAPH_MATCH_KM = 10.0
+DEFAULT_FLOW_VELOCITY_MPS = 2.0
 
 # 影响河网计算规则说明，统一在空结果与有结果响应中复用
 IMPACT_RULES = {
@@ -26,6 +27,7 @@ IMPACT_RULES = {
     "name_fallback": f"名称优先级：full_{RIVER_TABLE_VERSION}.src_name → river_name → pkl 名称 → 滦河 objectid 映射（仅单字缩写或全部失败时启用，不覆盖合法全名）→ 未知。",
     "match_filter": "已移除 match_distance_km 过滤；改为三级匹配：精确端点键（objectid+端点 6 位小数取整）→ 反向端点键 → 同 objectid 几何空间邻近（两端点 100m 内）。",
     "downstream_dedupe": "已移除 Shapely 几何覆盖去重；重复由结构保证（direct_keys 跳过 + pkl 边天然唯一）。",
+    "propagation": "传播时间按统一经验流速 flow_velocity_mps（默认 2.0 m/s ≈ 7.2 km/h）估算：河流级传播距离 ÷ 流速；下游河流取 Dijkstra 累计 end_distance_km 最大值，仅直接受影响的河流取最长直接河段长度。",
 }
 
 
@@ -52,6 +54,14 @@ def _resolve_graph_path(graph_path: str | None) -> str | None:
     else:
         v6_path = path.with_name(DIRECTED_GRAPH_FILENAME)
     return str(v6_path) if v6_path.is_file() else graph_path
+
+
+def _resolve_flow_velocity(flow_velocity_mps: float) -> float:
+    """0 = 使用默认经验流速；负数报错；正数原样返回。"""
+    value = float(flow_velocity_mps or 0.0)
+    if value < 0:
+        raise ValueError("flow_velocity_mps 不能为负数")
+    return value if value > 0 else DEFAULT_FLOW_VELOCITY_MPS
 
 
 def _station_reaches_threshold(station: Any, threshold_mm: float) -> bool:
@@ -139,6 +149,7 @@ def _base_response_fields(
     summary: str,
     affected_rivers: list[str] | None = None,
     rules: dict | None = None,
+    river_propagation: dict | None = None,
 ) -> dict:
     """构建问答返回结构中的公共字段。"""
     response = {
@@ -155,6 +166,8 @@ def _base_response_fields(
         "summary": summary,
         "affected_rivers": affected_rivers or [],
         "river_geojson": river_geojson,
+        "river_propagation": river_propagation
+        or {"flow_velocity_mps": DEFAULT_FLOW_VELOCITY_MPS, "rivers": []},
     }
     if rules is not None:
         response["rules"] = rules
@@ -181,6 +194,7 @@ def _empty_response(
     zones: set[str],
     admins: set[str],
     direct_graph_match_km: float = DEFAULT_DIRECT_GRAPH_MATCH_KM,
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
 ) -> dict:
     return _base_response_fields(
         rainfall_result,
@@ -205,6 +219,7 @@ def _empty_response(
             f"未达到 {threshold_mm}mm 降雨阈值的河系数据。"
         ),
         rules=IMPACT_RULES,
+        river_propagation={"flow_velocity_mps": float(flow_velocity_mps), "rivers": []},
     )
 
 
@@ -237,6 +252,7 @@ def _format_mcp_response(
         ),
         affected_rivers=affected_rivers,
         rules=IMPACT_RULES,
+        river_propagation=result.get("river_propagation"),
     )
 
 
@@ -253,8 +269,10 @@ def build_affected_river_network_result(
     analyze_rainfall_core: Callable,
     rain_levels: list[tuple[str, float, float]],
     graph_path: str | None,
+    flow_velocity_mps: float = 0.0,
 ) -> dict:
     """不依赖 MCP 的核心实现，可被 chainlitexam 本地工具直接调用。"""
+    velocity = _resolve_flow_velocity(flow_velocity_mps)
     custom_timerange = f"[{start_time},{end_time}]" if start_time and end_time else ""
     rainfall_result = analyze_rainfall_core(time_str, pg_conf, custom_timerange)
     stations, zone_77_regions, admin_divisions = _extract_rainstorm_stations(
@@ -262,7 +280,8 @@ def build_affected_river_network_result(
     )
     if not stations:
         return _empty_response(
-            rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions, direct_graph_match_km
+            rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions, direct_graph_match_km,
+            flow_velocity_mps=velocity,
         )
 
     builder = _load_impact_builder()
@@ -274,6 +293,7 @@ def build_affected_river_network_result(
         downstream_km=downstream_km,
         direct_match_km=direct_graph_match_km,
         max_segments=max_edges,
+        flow_velocity_mps=velocity,
         extra_summary={"time_range_readable": rainfall_result.get("time_range_readable", "")},
     )
     return _format_mcp_response(result, rainfall_result, rainfall_threshold_mm, zone_77_regions, admin_divisions)
@@ -310,8 +330,12 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
         include_background: bool = True,
         downstream_km: float = 50.0,
         direct_graph_match_km: float = DEFAULT_DIRECT_GRAPH_MATCH_KM,
+        flow_velocity_mps: float = 0.0,
     ) -> dict:
-        """制作暴雨影响河流专题图数据。"""
+        """制作暴雨影响河流专题图数据。
+
+        - flow_velocity_mps: 经验流速 m/s，0 表示默认 2.0。
+        """
         return build_affected_river_network_result(
             time_str=time_str,
             start_time=start_time,
@@ -321,6 +345,7 @@ def register_fixed_rainfall_impact_tool(mcp) -> None:
             include_background=include_background,
             downstream_km=downstream_km,
             direct_graph_match_km=direct_graph_match_km,
+            flow_velocity_mps=flow_velocity_mps,
             pg_conf=base_tools.config["postgres"],
             analyze_rainfall_core=base_tools._analyze_rainfall_core,
             rain_levels=base_tools.RAIN_LEVELS,

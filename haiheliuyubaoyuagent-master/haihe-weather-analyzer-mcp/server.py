@@ -75,7 +75,7 @@ class HaiheWeatherAnalyzerMCP:
                     "get_river_network_leader_view - 获取领导可读卡片+表格+地图数据",
                     "reload_river_graph - 重新加载河网缓存",
                     "analyze_rainfall_by_time - 基于天擎站点分析某时刻降雨（行政区划/77分区/河流）",
-                    "get_affected_river_network_by_rainfall - 暴雨影响河流专题图（30km直接不截断，下游50km截断；直接河段匹配10km口径对齐牵引智能体）",
+                    "get_affected_river_network_by_rainfall - 暴雨影响河流专题图（30km直接不截断，下游50km截断；直接河段匹配10km口径对齐牵引智能体；返回 river_propagation 河流级传播时间估算，默认经验流速2m/s）",
                     "query_last_month_areal_rainfall - 查询上一个自然月的海河9分区累计面雨量",
                     "query_year_to_date_areal_rainfall - 查询今年以来海河9分区累计面雨量",
                     "query_last_year_max_daily_rainfall - 查询上一个自然年最大日降雨量",
