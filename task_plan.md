@@ -115,11 +115,11 @@
 
 ### 阶段
 - [x] C1 理解：摸清 hhlyqyxt-master 结构与规模（34 py 文件，生产 ~6500 行）
-- [ ] C2 规划：本任务计划已写入 task_plan.md
-- [ ] C3 执行：4 维度并行审查代理 -> findings 汇总
-- [ ] C4 修复：按严重度修复确认问题（TDD，逐条提交）
-- [ ] C5 code-simplifier：简化 pass
-- [ ] C6 verification：重跑全量测试无回归
-- [ ] C7 revise-claude-md：把审查结论补入 CLAUDE.md
+- [x] C2 规划：本任务计划已写入 task_plan.md
+- [x] C3 执行：4 维度审查（D1/D2 代理 + D3/D4 内联）-> findings 汇总入 hhlyqyxt-master/findings.md
+- [x] C4 修复：只修我们的代码（TDD，6 提交）-- P0-2 HHLY 接入生产、P0-1 river_propagation 出口、P2-1 12h 占比分母、P2-3 时区、P2-9 坏 datetime、P1-9 下游命名
+- [x] C5 code-simplifier：提取 _resolve_edge_row 共享 helper（GeoJSON + propagation 命名去重）
+- [x] C6 verification：72 passed（emergency 30 + rainfall_impact 42），无回归
+- [x] C7 revise-claude-md：CLAUDE.md 更新 emergency（HHLY 接入生产、12h 分母、时区、坏 datetime）+ rainfall_impact（propagation 命名修复、入口输出）
 - [ ] C8 claude-mem：审查记忆
 - [ ] C9 github：提交并 push
