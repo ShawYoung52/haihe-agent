@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__ide__getDiagnostics",
+      "Bash(python -m py_compile hhlyqyxt-master/ScheduledTask/emergency_response_monitor.py)",
+      "Bash(python -m pytest hhlyqyxt-master/utils/tests/ -q)",
+      "Bash(python -m py_compile ScheduledTask/emergency_response_monitor.py)",
+      "Bash(python -m pytest utils/tests/ -q)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "mcp__context7__query-docs",
+      "Bash(python -m py_compile ScheduledTask/emergency_response_monitor.py ScheduledTask/stationProcessMin.py Models/QyEmergencyResponseMonitor.py)",
+      "Bash(python -m pytest utils/tests/test_emergency_response_monitor.py -v)",
+      "Bash(python -m py_compile ScheduledTask/emergency_response_monitor.py Models/QyEmergencyResponseMonitor.py)",
+      "Bash(python *)",
+      "Bash(git reset *)"
+    ]
+  }
+}

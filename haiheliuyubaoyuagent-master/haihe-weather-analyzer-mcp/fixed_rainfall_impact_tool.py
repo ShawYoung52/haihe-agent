@@ -19,13 +19,13 @@ DEFAULT_DIRECT_GRAPH_MATCH_KM = 10.0
 
 # 影响河网计算规则说明，统一在空结果与有结果响应中复用
 IMPACT_RULES = {
-    "direct": f"ST_Dump(full_{RIVER_TABLE_VERSION}.geom) 后单线段 ST_DWithin 30km 命中，直接段不截断",
-    "downstream": f"从暴雨站 30km 缓冲区内的 pkl 拓扑边向下游追踪 downstream_km，再回 full_{RIVER_TABLE_VERSION} 匹配真实河段并截断；其中同时命中真实直接河段的边标记为 is_direct_graph_edge",
-    "direction": f"GeoJSON 坐标顺序使用 full_{RIVER_TABLE_VERSION} 数据库原始几何顺序；properties.flow_direction=database_geometry_order",
-    "dedupe": "直接河段优先，按 objectid + 真实几何去重，避免多条 pkl 边重复映射同一真实河段",
-    "name_fallback": f"当 full_{RIVER_TABLE_VERSION} 表 src_name 缺失（显示为“未知”）时，使用 pkl 图同名 objectid 的 src_name/river_name/name 回填河系名",
-    "match_filter": "下游河段仅保留与 pkl 拓扑边匹配距离 ≤ 站点缓冲区（默认 30km）的真实河段，剔除因对齐偏差产生的远距离误匹配",
-    "downstream_dedupe": "若下游河段几何被同 objectid 直接河段覆盖，则合并剔除，避免 30km 缓冲区内外重复渲染",
+    "direct": f"full_{RIVER_TABLE_VERSION} 中位于暴雨站点 station_buffer_km（默认 30km）缓冲区内的候选行全部作为 direct_buffer 输出；其中距站点 ≤ direct_match_km（默认 10km）的标记 is_direct_graph_edge=true。距离分类用 SQL 真实几何最近距离，非 pkl 端点弦距。",
+    "downstream": f"从缓冲区内 pkl 边的下游节点起 Dijkstra 追踪 downstream_km；下游边不在 direct_buffer 中的才记录。下游几何通过 objectid 二次查询 full_{RIVER_TABLE_VERSION} 补全，精确端点键失配时按同 objectid 几何空间邻近兜底匹配。",
+    "direction": f"GeoJSON 坐标顺序使用 full_{RIVER_TABLE_VERSION} 数据库原始几何顺序；properties.flow_direction=database_geometry_order。下游裁剪按 pkl from 节点判定方向后从上游端保留 keep_km，纯 Python 无 Shapely 依赖。",
+    "dedupe": "每条 pkl 边至多一个 feature：direct_buffer 中的边在下游追踪时跳过记录（遍历继续穿过），消除跨组重复。",
+    "name_fallback": f"名称优先级：full_{RIVER_TABLE_VERSION}.src_name → river_name → pkl 名称 → 滦河 objectid 映射（仅单字缩写或全部失败时启用，不覆盖合法全名）→ 未知。",
+    "match_filter": "已移除 match_distance_km 过滤；改为三级匹配：精确端点键（objectid+端点 6 位小数取整）→ 反向端点键 → 同 objectid 几何空间邻近（两端点 100m 内）。",
+    "downstream_dedupe": "已移除 Shapely 几何覆盖去重；重复由结构保证（direct_keys 跳过 + pkl 边天然唯一）。",
 }
 
 

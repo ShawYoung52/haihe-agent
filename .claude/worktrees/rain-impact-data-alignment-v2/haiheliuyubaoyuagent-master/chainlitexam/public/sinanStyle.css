@@ -1,0 +1,40 @@
+/*滚动条样式*/
+/* 滚动条整体 */
+::-webkit-scrollbar {
+    width: 8px;        /* 垂直滚动条宽度 */
+    height: 8px;       /* 横向滚动条高度 */
+}
+
+/* 滚动条轨道 */
+::-webkit-scrollbar-track {
+    background: rgba(0,88,147,0.4);
+    border-radius: 10px;
+}
+
+/* 滚动条滑块 */
+::-webkit-scrollbar-thumb {
+    background: rgb(1, 56, 91);
+    border-radius: 10px;
+}
+
+/*聊天框背景颜色*/
+body{
+    /*background-color: rgba(0,88,147,0.9) !important;*/
+    /*border: 1px solid transparent;*/
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+/*默认导航栏 快捷问题样式*/
+.feature-card{
+    background: white;
+    border-radius: 16px;
+    padding: 10px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+    border: 1px solid #F3F4F6;
+    cursor: pointer;
+    transition: all 0.2s;
+}

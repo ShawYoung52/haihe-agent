@@ -1,0 +1,1048 @@
+{
+  "table": "haihe_river_directed_full_v6",
+  "total_rows": 258,
+  "null_objectid_rows": 0,
+  "unique_objectids": 127,
+  "duplicate_objectids": [
+    45,
+    18,
+    101,
+    133,
+    24,
+    93,
+    91,
+    113,
+    131,
+    130,
+    70,
+    132,
+    85,
+    7,
+    20,
+    23,
+    96,
+    83,
+    99,
+    41,
+    53,
+    52,
+    19,
+    34,
+    1,
+    90,
+    87,
+    21,
+    118,
+    6,
+    13,
+    26,
+    5,
+    16,
+    11,
+    12,
+    4,
+    3,
+    92,
+    56,
+    112,
+    14,
+    110,
+    2,
+    9,
+    27,
+    60,
+    111,
+    15,
+    17,
+    59,
+    63,
+    54,
+    10,
+    61,
+    57,
+    58,
+    65,
+    76
+  ],
+  "multi_part_objectids": [],
+  "multi_name_objectids": [
+    18,
+    24,
+    113,
+    7,
+    20,
+    19,
+    1,
+    21,
+    118,
+    6,
+    13,
+    5,
+    16,
+    11,
+    12,
+    4,
+    3,
+    14,
+    2,
+    9,
+    27,
+    15,
+    17,
+    59,
+    10,
+    65
+  ],
+  "details": [
+    {
+      "objectid": 45,
+      "names": [
+        "桑干河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 18,
+      "names": [
+        "白沟河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 101,
+      "names": [
+        "子牙新河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 133,
+      "names": [
+        "浊漳南源"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 24,
+      "names": [
+        "大沙河",
+        "沙河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 93,
+      "names": [
+        "滹沱河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 91,
+      "names": [
+        "北运河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 8,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 113,
+      "names": [
+        "卫运河",
+        "京杭大运河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 9,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 131,
+      "names": [
+        "共产主义渠"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 130,
+      "names": [
+        "卫河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 70,
+      "names": [
+        "永定河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 5,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 132,
+      "names": [
+        "淇河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 85,
+      "names": [
+        "洨河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 7,
+      "names": [
+        "唐河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 20,
+      "names": [
+        "磁河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 23,
+      "names": [
+        "潴龙河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 96,
+      "names": [
+        "滏阳河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 6,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 83,
+      "names": [
+        "留垒河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 99,
+      "names": [
+        "北澧河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 41,
+      "names": [
+        "洋河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 53,
+      "names": [
+        "金钟河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 52,
+      "names": [
+        "泃河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 19,
+      "names": [
+        "燕川河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 12,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 34,
+      "names": [
+        "南阳河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 1,
+      "names": [
+        "拒马河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 90,
+      "names": [
+        "子牙河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 87,
+      "names": [
+        "顺水河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 21,
+      "names": [
+        "曲河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 118,
+      "names": [
+        "汤河",
+        "永通河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 6,
+      "names": [
+        "北拒马河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 13,
+      "names": [
+        "南拒马河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 26,
+      "names": [
+        "中易水"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 5,
+      "names": [
+        "北易水",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 16,
+      "names": [
+        "孝义河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 11,
+      "names": [
+        "瀑河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 12,
+      "names": [
+        "萍河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 4,
+      "names": [
+        "漕河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 3,
+      "names": [
+        "府河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 92,
+      "names": [
+        "大清河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 56,
+      "names": [
+        "白河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 112,
+      "names": [
+        "海河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 14,
+      "names": [
+        "中亭河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 110,
+      "names": [
+        "独流减河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 2,
+      "names": [
+        "牤牛河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 9,
+      "names": [
+        "任文干渠",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 27,
+      "names": [
+        "任文干渠",
+        "滩里新渠"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 60,
+      "names": [
+        "凤港减河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 111,
+      "names": [
+        "马厂减河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 15,
+      "names": [
+        "赵王新河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 17,
+      "names": [
+        "小白河",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 59,
+      "names": [
+        "潮白河",
+        "白河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 5,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 63,
+      "names": [
+        "凉水河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 54,
+      "names": [
+        "北京排污河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 10,
+      "names": [
+        "任河大水渠",
+        null
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 61,
+      "names": [
+        "凤河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 57,
+      "names": [
+        "永定新河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "row_count": 4,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 58,
+      "names": [
+        "潮白新河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    },
+    {
+      "objectid": 65,
+      "names": [
+        "潮白新河",
+        "蓟运河"
+      ],
+      "part_counts": [
+        1,
+        1,
+        1
+      ],
+      "row_count": 3,
+      "issues": [
+        "duplicate_rows",
+        "multi_name"
+      ]
+    },
+    {
+      "objectid": 76,
+      "names": [
+        "沙河"
+      ],
+      "part_counts": [
+        1,
+        1
+      ],
+      "row_count": 2,
+      "issues": [
+        "duplicate_rows"
+      ]
+    }
+  ]
+}

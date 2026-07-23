@@ -28,7 +28,7 @@ from chainlit.data import get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.types import ThreadDict
 from chainlit.user import User
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -36,6 +36,9 @@ from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+from starlette.routing import Mount
+
+from chainlit.auth import decode_jwt, get_token_from_cookies
 
 from prompts import WEATHER_ASSISTANT_PROMPT
 
@@ -54,14 +57,13 @@ from tools.rainfall_river_impact import build_rainfall_river_impact_tools
 app = FastAPI(title="海河流域应急响应判定 REST API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# 当通过 `chainlit run` 启动时，实际对外服务的是 chainlit.server.app；
-# 本地 uvicorn chain_gzt:app 测试时，则使用上面定义的 app。
-try:
-    from chainlit.server import app as chainlit_app
-
-    _API_APP = chainlit_app
-except Exception:
-    _API_APP = app
+# 用户管理 REST 接口挂在独立子应用上，路径不带 `/api/v1` 前缀；
+# 由下方 `app.mount("/api/v1", api_sub_app)` 与
+# `chainlit_app.router.routes.insert(0, Mount("/api/v1", api_sub_app))` 统一挂载。
+# 这样无论用 `chainlit run chain_gzt.py` 还是 `uvicorn chain_gzt:app` 启动，
+# `/api/v1/*` 都能被命中；并且挂载点插在 chainlit SPA 兜底路由 `/{full_path:path}`
+# 之前，避免被 index.html 吞掉。
+api_sub_app = FastAPI(title="海河流域用户管理 REST API", version="1.0.0")
 
 # 前端河网绘图用的 PostgreSQL 连接池（懒加载）
 _RIVER_PLOT_PG_POOL: psycopg2.pool.ThreadedConnectionPool | None = None
@@ -130,6 +132,10 @@ plt.rcParams['axes.unicode_minus'] = False
 _AUTH_TABLES_READY = False
 _CHAINLIT_TABLES_READY = False
 
+# 默认指向外网调试库 211.157.132.19:48091（同时有 hhly / tjznt 两个库）。
+# 切回内网时改回 10.226.107.130:5432，或通过环境变量覆盖：
+#   set CHAINLIT_DB_HOST=10.226.107.130
+#   set CHAINLIT_DB_PORT=5432
 CHAINLIT_DB_HOST = os.getenv("CHAINLIT_DB_HOST", "10.226.107.130").strip()
 CHAINLIT_DB_PORT = os.getenv("CHAINLIT_DB_PORT", "5432").strip()
 CHAINLIT_DB_NAME = os.getenv("CHAINLIT_DB_NAME", "tjznt").strip()
@@ -282,10 +288,21 @@ class ResetPasswordRequest(BaseModel):
     password: str = Field(..., min_length=1, description="新密码")
 
 
-def _require_admin_current_user() -> None:
-    current_user = cl.user_session.get("user")
-    if not current_user:
+def _require_admin_current_user(request: Request) -> None:
+    """从请求 cookie 里解 Chainlit JWT 判断是否管理员。
+
+    自定义 HTTP 路由不在 Chainlit 的 chat context 内，
+    `cl.user_session.get("user")` 拿不到值，必须直接读 cookie。
+    """
+    token = get_token_from_cookies(request.cookies)
+    if not token:
         raise HTTPException(401, "未登录")
+    try:
+        current_user = decode_jwt(token)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(401, "无效的认证 token")
     metadata = getattr(current_user, "metadata", None) or {}
     if metadata.get("role") != "admin":
         raise HTTPException(403, "仅管理员可操作")
@@ -326,7 +343,7 @@ def _build_chainlit_postgres_conninfo() -> tuple[str, bool]:
     return conninfo, ssl_require
 
 
-@_API_APP.post("/api/v1/auth/register", tags=["认证"])
+@api_sub_app.post("/auth/register", tags=["认证"])
 def register_user(req: CreateUserRequest):
     _ensure_chainlit_auth_tables()
     username = req.username.strip()
@@ -351,9 +368,9 @@ def register_user(req: CreateUserRequest):
     return {"code": 200, "data": _user_payload(username, role, "active"), "message": "success"}
 
 
-@_API_APP.post("/api/v1/admin/users/{username}/reset-password", tags=["用户管理"])
-def reset_user_password(username: str, req: ResetPasswordRequest):
-    _require_admin_current_user()
+@api_sub_app.post("/admin/users/{username}/reset-password", tags=["用户管理"])
+def reset_user_password(username: str, req: ResetPasswordRequest, request: Request):
+    _require_admin_current_user(request)
     _ensure_chainlit_auth_tables()
     normalized_username = username.strip()
     with _get_chainlit_pg_conn() as conn:
@@ -382,9 +399,9 @@ def reset_user_password(username: str, req: ResetPasswordRequest):
     return {"code": 200, "data": _user_payload(normalized_username, row["role"], "active"), "message": "success"}
 
 
-@_API_APP.get("/api/v1/admin/users", tags=["用户管理"])
-def list_users():
-    _require_admin_current_user()
+@api_sub_app.get("/admin/users", tags=["用户管理"])
+def list_users(request: Request):
+    _require_admin_current_user(request)
     _ensure_chainlit_auth_tables()
     with _get_chainlit_pg_conn() as conn:
         with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
@@ -413,9 +430,9 @@ def list_users():
             }
 
 
-@_API_APP.post("/api/v1/admin/users", tags=["用户管理"])
-def create_user(req: CreateUserRequest):
-    _require_admin_current_user()
+@api_sub_app.post("/admin/users", tags=["用户管理"])
+def create_user(req: CreateUserRequest, request: Request):
+    _require_admin_current_user(request)
     _ensure_chainlit_auth_tables()
     username = req.username.strip()
     role = _validate_role(req.role)
@@ -437,14 +454,15 @@ def create_user(req: CreateUserRequest):
     return {"code": 200, "data": _user_payload(username, role, "active"), "message": "success"}
 
 
-@_API_APP.patch("/api/v1/admin/users/{username}/status", tags=["用户管理"])
-def update_user_status(username: str, req: UpdateUserStatusRequest):
-    _require_admin_current_user()
+@api_sub_app.patch("/admin/users/{username}/status", tags=["用户管理"])
+def update_user_status(username: str, req: UpdateUserStatusRequest, request: Request):
+    _require_admin_current_user(request)
     _ensure_chainlit_auth_tables()
     status = req.status.strip()
     if status not in {"active", "disabled"}:
         raise HTTPException(400, "status 只能是 active 或 disabled")
-    if username.strip() == ADMIN_DEFAULT_USERNAME and status != "active":
+    normalized_username = username.strip()
+    if normalized_username == ADMIN_DEFAULT_USERNAME and status != "active":
         raise HTTPException(400, "默认管理员不能被禁用")
     with _get_chainlit_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -454,12 +472,40 @@ def update_user_status(username: str, req: UpdateUserStatusRequest):
                 SET status = %s, updated_at = NOW()
                 WHERE username = %s
                 """,
-                (status, username.strip()),
+                (status, normalized_username),
             )
             if cur.rowcount == 0:
                 raise HTTPException(404, "用户不存在")
         conn.commit()
-    return {"code": 200, "data": {"username": username, "status": status}, "message": "success"}
+    return {"code": 200, "data": {"username": normalized_username, "status": status}, "message": "success"}
+
+
+# 把用户管理子应用挂到 `/api/v1`：
+# - 本地 `app`（仅作 uvicorn 兜底；项目统一用 `chainlit run` 启动，见 CLAUDE.md）
+#   直接 mount，否则 uvicorn 入口下 /api/v1/* 会 404。
+# - `chainlit.server.app`（`chainlit run` 入口）把 Mount 插到 routes 列表头部，
+#   早于 Chainlit SPA 兜底路由 `/{full_path:path}`（`chainlit/server.py:1840`），
+#   否则兜底路由会先命中并返回 index.html。
+# - `chainlit run --watch` 热重载会重新执行本模块；用幂等守卫避免重复插入 Mount。
+app.mount("/api/v1", api_sub_app)
+try:
+    from chainlit.server import app as chainlit_app
+
+    if not any(
+        isinstance(r, Mount) and getattr(r, "path", None) == "/api/v1"
+        for r in chainlit_app.router.routes
+    ):
+        chainlit_app.router.routes.insert(0, Mount("/api/v1", api_sub_app))
+except Exception as _chainlit_mount_err:
+    # 挂载失败会让 /api/v1/* 在 chainlit run 下静默落到 SPA 兜底路由——
+    # 这是本改动要修的 404 症状复发，所以打错误日志而不是 print。
+    import logging
+
+    logging.getLogger("chain_gzt").error(
+        "挂载 /api/v1 到 chainlit.server.app 失败，/api/v1/* 在 chainlit run 下将不可用: %s",
+        _chainlit_mount_err,
+        exc_info=True,
+    )
 
 
 def _init_chainlit_data_layer() -> None:

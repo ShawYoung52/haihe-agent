@@ -1,0 +1,224 @@
+﻿[
+  {
+    "id": "claude-md-management@claude-plugins-official",
+    "version": "1.0.0",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\claude-md-management\\1.0.0",
+    "installedAt": "2026-07-07T00:40:13.118Z",
+    "lastUpdated": "2026-07-07T00:40:13.118Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master"
+  },
+  {
+    "id": "claude-md-management@claude-plugins-official",
+    "version": "1.0.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\claude-md-management\\1.0.0",
+    "installedAt": "2026-07-07T00:54:52.259Z",
+    "lastUpdated": "2026-07-07T00:54:52.259Z"
+  },
+  {
+    "id": "code-review@claude-plugins-official",
+    "version": "unknown",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\code-review\\unknown",
+    "installedAt": "2026-07-07T00:38:46.434Z",
+    "lastUpdated": "2026-07-07T00:38:46.434Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master"
+  },
+  {
+    "id": "code-review@claude-plugins-official",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\code-review\\unknown",
+    "installedAt": "2026-07-07T00:54:53.715Z",
+    "lastUpdated": "2026-07-07T00:54:53.715Z"
+  },
+  {
+    "id": "code-simplifier@claude-plugins-official",
+    "version": "1.0.0",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\code-simplifier\\1.0.0",
+    "installedAt": "2026-07-07T00:39:52.978Z",
+    "lastUpdated": "2026-07-07T00:39:52.978Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master"
+  },
+  {
+    "id": "code-simplifier@claude-plugins-official",
+    "version": "1.0.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\code-simplifier\\1.0.0",
+    "installedAt": "2026-07-07T00:54:55.163Z",
+    "lastUpdated": "2026-07-07T00:54:55.163Z"
+  },
+  {
+    "id": "context7@claude-plugins-official",
+    "version": "unknown",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\context7\\unknown",
+    "installedAt": "2026-07-07T00:37:55.184Z",
+    "lastUpdated": "2026-07-07T00:37:55.184Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master",
+    "mcpServers": {
+      "context7": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@upstash/context7-mcp"
+        ]
+      }
+    }
+  },
+  {
+    "id": "context7@claude-plugins-official",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\context7\\unknown",
+    "installedAt": "2026-07-07T00:54:56.662Z",
+    "lastUpdated": "2026-07-07T00:54:56.662Z",
+    "mcpServers": {
+      "context7": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@upstash/context7-mcp"
+        ]
+      }
+    }
+  },
+  {
+    "id": "frontend-design@claude-plugins-official",
+    "version": "unknown",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\frontend-design\\unknown",
+    "installedAt": "2026-07-07T00:38:38.328Z",
+    "lastUpdated": "2026-07-07T00:38:38.328Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master"
+  },
+  {
+    "id": "frontend-design@claude-plugins-official",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\frontend-design\\unknown",
+    "installedAt": "2026-07-07T00:54:58.096Z",
+    "lastUpdated": "2026-07-07T00:54:58.096Z"
+  },
+  {
+    "id": "github@claude-plugins-official",
+    "version": "unknown",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\github\\unknown",
+    "installedAt": "2026-07-07T00:39:59.338Z",
+    "lastUpdated": "2026-07-07T00:39:59.338Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master",
+    "mcpServers": {
+      "github": {
+        "type": "http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "headers": {
+          "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+        }
+      }
+    }
+  },
+  {
+    "id": "github@claude-plugins-official",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\github\\unknown",
+    "installedAt": "2026-07-07T00:54:59.753Z",
+    "lastUpdated": "2026-07-07T00:54:59.753Z",
+    "mcpServers": {
+      "github": {
+        "type": "http",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "headers": {
+          "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
+        }
+      }
+    }
+  },
+  {
+    "id": "planning-with-files@planning-with-files",
+    "version": "3.4.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\planning-with-files\\planning-with-files\\3.4.0",
+    "installedAt": "2026-07-07T00:45:58.239Z",
+    "lastUpdated": "2026-07-07T00:45:58.239Z"
+  },
+  {
+    "id": "playwright@claude-plugins-official",
+    "version": "unknown",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\playwright\\unknown",
+    "installedAt": "2026-07-07T00:40:09.696Z",
+    "lastUpdated": "2026-07-07T00:40:09.696Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master",
+    "mcpServers": {
+      "playwright": {
+        "command": "npx",
+        "args": [
+          "@playwright/mcp@latest"
+        ]
+      }
+    }
+  },
+  {
+    "id": "playwright@claude-plugins-official",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\playwright\\unknown",
+    "installedAt": "2026-07-07T00:55:01.246Z",
+    "lastUpdated": "2026-07-07T00:55:01.246Z",
+    "mcpServers": {
+      "playwright": {
+        "command": "npx",
+        "args": [
+          "@playwright/mcp@latest"
+        ]
+      }
+    }
+  },
+  {
+    "id": "skill-creator@claude-plugins-official",
+    "version": "unknown",
+    "scope": "project",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\skill-creator\\unknown",
+    "installedAt": "2026-07-07T00:39:46.373Z",
+    "lastUpdated": "2026-07-07T00:39:46.373Z",
+    "projectPath": "C:\\Users\\gaozr\\Downloads\\haiheliuyubaoyuagent-master (3)\\hhlyqyxt-master"
+  },
+  {
+    "id": "skill-creator@claude-plugins-official",
+    "version": "unknown",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\skill-creator\\unknown",
+    "installedAt": "2026-07-07T00:55:07.291Z",
+    "lastUpdated": "2026-07-07T00:55:07.291Z"
+  },
+  {
+    "id": "superpowers@claude-plugins-official",
+    "version": "5.1.0",
+    "scope": "user",
+    "enabled": true,
+    "installPath": "C:\\Users\\gaozr\\.claude\\plugins\\cache\\claude-plugins-official\\superpowers\\5.1.0",
+    "installedAt": "2026-07-07T00:34:58.044Z",
+    "lastUpdated": "2026-07-07T00:34:58.044Z"
+  }
+]

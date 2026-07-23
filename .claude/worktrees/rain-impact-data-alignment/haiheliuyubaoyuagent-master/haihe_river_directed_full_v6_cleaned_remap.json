@@ -1,0 +1,950 @@
+[
+  {
+    "original_objectid": 1,
+    "new_objectid": 1,
+    "src_name": "拒马河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 1,
+    "new_objectid": 134,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 2,
+    "new_objectid": 135,
+    "src_name": "牤牛河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 2,
+    "new_objectid": 2,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 3,
+    "new_objectid": 136,
+    "src_name": "府河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 3,
+    "new_objectid": 3,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 4,
+    "new_objectid": 4,
+    "src_name": "漕河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 4,
+    "new_objectid": 137,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 5,
+    "new_objectid": 138,
+    "src_name": "北易水",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 5,
+    "new_objectid": 5,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 6,
+    "new_objectid": 6,
+    "src_name": "北拒马河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 6,
+    "new_objectid": 139,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 7,
+    "new_objectid": 7,
+    "src_name": "唐河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 7,
+    "new_objectid": 140,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 8,
+    "new_objectid": 8,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 9,
+    "new_objectid": 141,
+    "src_name": "任文干渠",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 9,
+    "new_objectid": 9,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 10,
+    "new_objectid": 142,
+    "src_name": "任河大水渠",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 10,
+    "new_objectid": 10,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 11,
+    "new_objectid": 11,
+    "src_name": "瀑河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 11,
+    "new_objectid": 143,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 12,
+    "new_objectid": 12,
+    "src_name": "萍河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 12,
+    "new_objectid": 144,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 13,
+    "new_objectid": 145,
+    "src_name": "南拒马河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 13,
+    "new_objectid": 13,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 14,
+    "new_objectid": 146,
+    "src_name": "中亭河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 14,
+    "new_objectid": 14,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 15,
+    "new_objectid": 15,
+    "src_name": "赵王新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 15,
+    "new_objectid": 147,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 16,
+    "new_objectid": 148,
+    "src_name": "孝义河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 16,
+    "new_objectid": 16,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 17,
+    "new_objectid": 149,
+    "src_name": "小白河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 17,
+    "new_objectid": 17,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 18,
+    "new_objectid": 150,
+    "src_name": "白沟河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 18,
+    "new_objectid": 18,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 19,
+    "new_objectid": 151,
+    "src_name": "燕川河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 19,
+    "new_objectid": 19,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 20,
+    "new_objectid": 20,
+    "src_name": "磁河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 20,
+    "new_objectid": 152,
+    "src_name": "",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 21,
+    "new_objectid": 153,
+    "src_name": "曲河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 21,
+    "new_objectid": 21,
+    "src_name": "",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 22,
+    "new_objectid": 22,
+    "src_name": "陈村分洪道",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 23,
+    "new_objectid": 23,
+    "src_name": "潴龙河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 24,
+    "new_objectid": 154,
+    "src_name": "大沙河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 24,
+    "new_objectid": 24,
+    "src_name": "沙河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 25,
+    "new_objectid": 25,
+    "src_name": "界河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 26,
+    "new_objectid": 26,
+    "src_name": "中易水",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 27,
+    "new_objectid": 27,
+    "src_name": "任文干渠",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 27,
+    "new_objectid": 155,
+    "src_name": "滩里新渠",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 28,
+    "new_objectid": 28,
+    "src_name": "龙安沟",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 30,
+    "new_objectid": 30,
+    "src_name": "郜河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 31,
+    "new_objectid": 31,
+    "src_name": "新引河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 32,
+    "new_objectid": 32,
+    "src_name": "小清河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 33,
+    "new_objectid": 33,
+    "src_name": "大石河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 34,
+    "new_objectid": 34,
+    "src_name": "南阳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 35,
+    "new_objectid": 35,
+    "src_name": "龙河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 36,
+    "new_objectid": 36,
+    "src_name": "浑河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 37,
+    "new_objectid": 37,
+    "src_name": "壶流河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 38,
+    "new_objectid": 38,
+    "src_name": "妫水河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 39,
+    "new_objectid": 39,
+    "src_name": "东洋河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 40,
+    "new_objectid": 40,
+    "src_name": "御河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 41,
+    "new_objectid": 41,
+    "src_name": "洋河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 42,
+    "new_objectid": 42,
+    "src_name": "西洋河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 43,
+    "new_objectid": 43,
+    "src_name": "天堂河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 44,
+    "new_objectid": 44,
+    "src_name": "桑乾河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 45,
+    "new_objectid": 45,
+    "src_name": "桑干河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 46,
+    "new_objectid": 46,
+    "src_name": "清水河1",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 47,
+    "new_objectid": 47,
+    "src_name": "清水河2",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 48,
+    "new_objectid": 48,
+    "src_name": "新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 49,
+    "new_objectid": 49,
+    "src_name": "潮河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 51,
+    "new_objectid": 51,
+    "src_name": "淋河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 52,
+    "new_objectid": 52,
+    "src_name": "泃河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 53,
+    "new_objectid": 53,
+    "src_name": "金钟河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 54,
+    "new_objectid": 54,
+    "src_name": "北京排污河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 54,
+    "new_objectid": 156,
+    "src_name": "北京排污河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 55,
+    "new_objectid": 55,
+    "src_name": "白马关河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 56,
+    "new_objectid": 56,
+    "src_name": "白河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 57,
+    "new_objectid": 57,
+    "src_name": "永定新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 58,
+    "new_objectid": 58,
+    "src_name": "潮白新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 59,
+    "new_objectid": 157,
+    "src_name": "白河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 59,
+    "new_objectid": 59,
+    "src_name": "潮白河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 60,
+    "new_objectid": 60,
+    "src_name": "凤港减河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 61,
+    "new_objectid": 61,
+    "src_name": "凤河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 63,
+    "new_objectid": 63,
+    "src_name": "凉水河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 64,
+    "new_objectid": 64,
+    "src_name": "黎河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 65,
+    "new_objectid": 158,
+    "src_name": "潮白新河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 65,
+    "new_objectid": 65,
+    "src_name": "蓟运河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 66,
+    "new_objectid": 66,
+    "src_name": "怀九河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 67,
+    "new_objectid": 67,
+    "src_name": "果河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 68,
+    "new_objectid": 68,
+    "src_name": "还乡河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 69,
+    "new_objectid": 69,
+    "src_name": "黑河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 70,
+    "new_objectid": 70,
+    "src_name": "永定河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 71,
+    "new_objectid": 71,
+    "src_name": "引泃入潮",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 72,
+    "new_objectid": 72,
+    "src_name": "温榆河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 73,
+    "new_objectid": 73,
+    "src_name": "魏进河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 74,
+    "new_objectid": 74,
+    "src_name": "通惠河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 75,
+    "new_objectid": 75,
+    "src_name": "汤河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 76,
+    "new_objectid": 76,
+    "src_name": "沙河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 77,
+    "new_objectid": 77,
+    "src_name": "青龙湾减河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 78,
+    "new_objectid": 78,
+    "src_name": "果河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 79,
+    "new_objectid": 79,
+    "src_name": "运潮减河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 80,
+    "new_objectid": 80,
+    "src_name": "北沙河1",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 81,
+    "new_objectid": 81,
+    "src_name": "北沙河2",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 82,
+    "new_objectid": 82,
+    "src_name": "小漳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 83,
+    "new_objectid": 83,
+    "src_name": "留垒河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 84,
+    "new_objectid": 84,
+    "src_name": "支漳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 85,
+    "new_objectid": 85,
+    "src_name": "洨河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 86,
+    "new_objectid": 86,
+    "src_name": "白马河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 87,
+    "new_objectid": 87,
+    "src_name": "顺水河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 89,
+    "new_objectid": 89,
+    "src_name": "南澧河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 90,
+    "new_objectid": 90,
+    "src_name": "子牙河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 90,
+    "new_objectid": 159,
+    "src_name": "子牙河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 91,
+    "new_objectid": 91,
+    "src_name": "北运河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 92,
+    "new_objectid": 92,
+    "src_name": "大清河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 93,
+    "new_objectid": 93,
+    "src_name": "滹沱河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 94,
+    "new_objectid": 94,
+    "src_name": "洺河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 95,
+    "new_objectid": 95,
+    "src_name": "北排水河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 96,
+    "new_objectid": 96,
+    "src_name": "滏阳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 96,
+    "new_objectid": 160,
+    "src_name": "滏阳河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 97,
+    "new_objectid": 97,
+    "src_name": "清凉江",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 98,
+    "new_objectid": 98,
+    "src_name": "南排水河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 99,
+    "new_objectid": 99,
+    "src_name": "北澧河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 100,
+    "new_objectid": 100,
+    "src_name": "牧马河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 101,
+    "new_objectid": 101,
+    "src_name": "子牙新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 102,
+    "new_objectid": 102,
+    "src_name": "甘陶河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 103,
+    "new_objectid": 103,
+    "src_name": "滏阳新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 104,
+    "new_objectid": 104,
+    "src_name": "滏东排河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 105,
+    "new_objectid": 105,
+    "src_name": "清水河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 106,
+    "new_objectid": 106,
+    "src_name": "老漳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 107,
+    "new_objectid": 107,
+    "src_name": "冶河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 108,
+    "new_objectid": 108,
+    "src_name": "绵河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 109,
+    "new_objectid": 109,
+    "src_name": "泜河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 110,
+    "new_objectid": 110,
+    "src_name": "独流减河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 111,
+    "new_objectid": 111,
+    "src_name": "马厂减河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 112,
+    "new_objectid": 112,
+    "src_name": "海河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 113,
+    "new_objectid": 113,
+    "src_name": "京杭大运河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 113,
+    "new_objectid": 161,
+    "src_name": "京杭大运河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 113,
+    "new_objectid": 162,
+    "src_name": "卫运河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 114,
+    "new_objectid": 114,
+    "src_name": "捷地减河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 117,
+    "new_objectid": 117,
+    "src_name": "大沙河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 118,
+    "new_objectid": 118,
+    "src_name": "汤河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 118,
+    "new_objectid": 163,
+    "src_name": "汤河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 118,
+    "new_objectid": 164,
+    "src_name": "永通河",
+    "reason": "split_component"
+  },
+  {
+    "original_objectid": 119,
+    "new_objectid": 119,
+    "src_name": "清漳西源",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 120,
+    "new_objectid": 120,
+    "src_name": "清漳东源",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 121,
+    "new_objectid": 121,
+    "src_name": "清漳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 122,
+    "new_objectid": 122,
+    "src_name": "漳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 123,
+    "new_objectid": 123,
+    "src_name": "浊漳西源",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 124,
+    "new_objectid": 124,
+    "src_name": "浊漳北源",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 125,
+    "new_objectid": 125,
+    "src_name": "浊漳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 126,
+    "new_objectid": 126,
+    "src_name": "绛河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 127,
+    "new_objectid": 127,
+    "src_name": "安阳河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 128,
+    "new_objectid": 128,
+    "src_name": "淅河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 129,
+    "new_objectid": 129,
+    "src_name": "漳卫新河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 130,
+    "new_objectid": 130,
+    "src_name": "卫河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 131,
+    "new_objectid": 131,
+    "src_name": "共产主义渠",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 132,
+    "new_objectid": 132,
+    "src_name": "淇河",
+    "reason": "kept_main"
+  },
+  {
+    "original_objectid": 133,
+    "new_objectid": 133,
+    "src_name": "浊漳南源",
+    "reason": "kept_main"
+  }
+]

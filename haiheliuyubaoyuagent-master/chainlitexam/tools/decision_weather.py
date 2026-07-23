@@ -1,8 +1,8 @@
-"""点位决策天气工具：将原 DecisionWeatherQAService 中的纯逻辑抽取为可复用的 LangChain Tool。
+"""点位决策天气 Planner 工具。
 
 供 LLM Agent 在需要回答“某个具体点位/场馆/单位附近未来天气如何”时调用；
-内部自动完成 POI 检索、代表站匹配、滚动预报查询与格式化回答生成，
-不依赖 Chainlit UI，仅返回 Markdown 文本。
+内部自动完成 POI 检索、代表站匹配、滚动预报查询与格式化回答生成。
+快捷路径实现位于 ``tools.decision_weather_fast_path``，两者共享核心逻辑。
 """
 from __future__ import annotations
 
@@ -46,6 +46,9 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
         4. 匹配最近的滚动预报代表区域；
         5. 调用滚动预报数据；
         6. 格式化并生成面向用户的 Markdown 回答。
+        
+        本工具已完整封装上述流程。Planner 选择本工具后，不得同轮并列调用
+        search_poi、query_rolling_forecast、get_server_time 或 analyze_rainfall_by_time。
 
         如果问题不属于点位决策天气范围，或缺少必要的位置/时间信息，
         工具会返回中文提示说明。

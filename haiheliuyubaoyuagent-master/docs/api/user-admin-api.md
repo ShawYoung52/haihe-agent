@@ -19,7 +19,10 @@
 
 - **Chainlit 服务**：`http(s)://<chainlit-host>:<chainlit-port>`
   - 生产/测试环境以实际部署的 Chainlit 服务地址为准。
-  - 默认本地开发可通过 `chainlit run chain_gzt.py` 启动的地址访问。
+  - 本地开发统一通过 `chainlit run chain_gzt.py` 启动（**不要用 `uvicorn chain_gzt:app`**——
+    虽然 `app.mount("/api/v1", api_sub_app)` 也会注册 `/api/v1/*`，但本地 `app`
+    没有 Chainlit 的 chat/socket/登录页，前端不可用，只能当作 REST API 冒烟入口）。
+  - 默认端口 `8000`，可通过 `--port` 覆盖。
 - **MCP 服务**：`http(s)://<mcp-host>:<mcp-port>`
   - 以 `haihe-weather-analyzer-mcp/rest_api.py` 实际运行的地址为准。
 

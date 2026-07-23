@@ -13,17 +13,13 @@ import json
 import logging
 import os
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
+import requests
 from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RISK_WARN_BASE = "http://10.226.107.35:8070"
-DEFAULT_PAGE_NUM = 1
-DEFAULT_PAGE_SIZE = 1000
 RISK_ROUTE = "/hhfw/riskWarnNew/findDataListByConfig"
 
 RISK_CONFIGS: dict[str, dict[str, Any]] = {
@@ -62,6 +58,8 @@ RISK_ALIASES = {
     "landslide": "geologic",
     "地质灾害": "geologic",
     "滑坡": "geologic",
+    "崩塌": "geologic",
+    "泥石流": "geologic",
 }
 
 BASE_ENV_KEYS = (
@@ -119,24 +117,6 @@ def _risk_api_base_urls() -> list[str]:
     return bases
 
 
-def _load_json_response(url: str, timeout_sec: int) -> dict[str, Any]:
-    req = Request(url, headers={"Accept": "application/json"})
-    with urlopen(req, timeout=timeout_sec) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-    try:
-        return json.loads(raw)
-    except Exception:
-        logger.warning("[risk_warning] non-json response url=%s raw=%s", url, raw[:500])
-        return {"raw": raw}
-
-
-def _read_http_error_body(exc: HTTPError) -> str:
-    try:
-        return exc.read().decode("utf-8", errors="replace")[:500]
-    except Exception:
-        return ""
-
-
 def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
     cfg = RISK_CONFIGS[kind]
     bases = _risk_api_base_urls()
@@ -144,30 +124,30 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
         raise RuntimeError("风险预警服务地址未配置，请配置 RISK_WARN_BASE 或 HHFW_API_BASE。")
 
     params: dict[str, Any] = {k: v for k, v in (extra_params or {}).items() if v not in (None, "")}
-    params.setdefault("pageNum", DEFAULT_PAGE_NUM)
-    params.setdefault("pageSize", DEFAULT_PAGE_SIZE)
-    params.update({"model": cfg["model"], "type": cfg["type"]})
-    query = urlencode(params, doseq=False)
+    params["model"] = cfg["model"]
+    params["type"] = cfg["type"]
+    headers = {"Accept": "application/json", "User-Agent": "haihe-weather-analyzer/1.0"}
 
     errors: list[str] = []
     for base in bases:
-        url = f"{base}{RISK_ROUTE}?{query}"
-        logger.warning("[risk_warning] request kind=%s url=%s", kind, url)
+        url = f"{base}{RISK_ROUTE}"
+        logger.warning("[risk_warning] request kind=%s url=%s params=%s", kind, url, params)
         try:
-            return _load_json_response(url, timeout_sec)
-        except HTTPError as exc:
-            body = _read_http_error_body(exc)
-            msg = f"{base}: HTTP {exc.code}"
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout_sec)
+            if resp.ok:
+                try:
+                    return resp.json()
+                except Exception:
+                    logger.warning("[risk_warning] non-json response url=%s status=%s body=%s", url, resp.status_code, resp.text[:500])
+                    return {"raw": resp.text}
+            msg = f"{base}: HTTP {resp.status_code}"
+            body = resp.text[:500]
             if body:
                 msg = f"{msg}, body={body}"
             errors.append(msg)
             logger.warning("[risk_warning] %s", msg)
-        except URLError as exc:
-            msg = f"{base}: {exc.reason}"
-            errors.append(msg)
-            logger.warning("[risk_warning] %s", msg)
-        except Exception as exc:
-            msg = f"{base}: {str(exc)[:180]}"
+        except requests.RequestException as exc:
+            msg = f"{base}: {exc}"
             errors.append(msg)
             logger.warning("[risk_warning] %s", msg)
 
@@ -298,9 +278,15 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
         region: str = "",
         start_time: str = "",
         end_time: str = "",
+        fcst_time: str = "",
         extra_params_json: str = "",
     ) -> dict[str, Any]:
-        """查询山洪、地质灾害或中小河流洪水风险预警。"""
+        """查询山洪、地质灾害或中小河流洪水风险预警。
+
+        时间参数格式为 YYYYMMDDHHmmss（北京时间），未传时自动取最近一个
+        起报时次（08:00 或 20:00）作为 fcstTime 和 startTime，
+        endTime = fcstTime + 24h。
+        """
         try:
             kind = _normalize_risk_kind(risk_kind)
         except Exception as exc:
@@ -314,17 +300,37 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
                     extra.update(obj)
             except Exception as exc:
                 logger.warning("[risk_warning] extra_params_json parse failed: %s", exc)
-        if region:
-            extra.setdefault("region", region)
+        # 后端 /hhfw/riskWarnNew/findDataListByConfig 不支持 region query
+        # parameter，传入即 HTTP 500（同事前端也未发 region）。若需区域过滤，
+        # 由 LLM 侧基于返回结果筛选即可。
+        if not start_time and not end_time and not fcst_time:
+            import datetime as _dt
+            beijing = _dt.timezone(_dt.timedelta(hours=8))
+            now = _dt.datetime.now(beijing)
+            if now.hour >= 20:
+                fcst_hour = 20
+            elif now.hour >= 8:
+                fcst_hour = 8
+            else:
+                fcst_hour = 20
+                now -= _dt.timedelta(days=1)
+            fcst = now.replace(hour=fcst_hour, minute=0, second=0, microsecond=0)
+            fcst_str = fcst.strftime("%Y%m%d%H%M%S")
+            end_dt = fcst + _dt.timedelta(hours=24)
+            start_time = fcst_str
+            end_time = end_dt.strftime("%Y%m%d%H%M%S")
+            fcst_time = fcst_str
         if start_time:
             extra.setdefault("startTime", start_time)
         if end_time:
             extra.setdefault("endTime", end_time)
+        if fcst_time:
+            extra.setdefault("fcstTime", fcst_time)
 
         try:
             payload = _fetch_risk_warning(kind, extra)
             result = _summarize(kind, payload)
-            result["query"] = {"region": region, "start_time": start_time, "end_time": end_time}
+            result["query"] = {"region": region, "start_time": start_time, "end_time": end_time, "fcst_time": fcst_time}
             return result
         except Exception as exc:
             logger.warning("[risk_warning] failed kind=%s error=%s", kind, exc)

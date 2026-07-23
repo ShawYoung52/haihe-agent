@@ -1,0 +1,872 @@
+diff --git a/haiheliuyubaoyuagent-master/chainlitexam/message_orchestrator.py b/haiheliuyubaoyuagent-master/chainlitexam/message_orchestrator.py
+index 99b5656..e1b6e53 100644
+--- a/haiheliuyubaoyuagent-master/chainlitexam/message_orchestrator.py
++++ b/haiheliuyubaoyuagent-master/chainlitexam/message_orchestrator.py
+@@ -9,6 +9,7 @@ import asyncio
+ import uuid
+ import httpx
+ import chainlit as cl
++from collections import Counter
+ from datetime import datetime, timedelta
+ from typing import Any
+ from langchain_core.messages import ToolMessage, HumanMessage, AIMessage
+@@ -44,6 +45,7 @@ ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower()
+ 
+ from tools.decision_weather_core import (
+     _compact_decision_forecast_facts,
++    _decision_hourly_window,
+     _decision_period_args,
+     _decision_pick_first_poi,
+     _decision_weather_prefilter,
+@@ -52,6 +54,7 @@ from tools.decision_weather_core import (
+     _generate_decision_weather_answer,
+     _nearest_decision_station,
+     _normalize_decision_weather_slots,
++    _parse_decision_dt,
+     _select_decision_fcst_time,
+ )
+ 
+@@ -342,7 +345,8 @@ class DecisionWeatherQAService:
+                 cl.user_session.set("messages", messages)
+                 return True
+ 
+-            normalized = self._normalize_slots(slots)
++            hourly_request = _decision_hourly_window(user_text, slots.get("question_type"), datetime.now())
++            normalized = self._normalize_slots(slots, hourly_request)
+             if normalized.get("error"):
+                 await status_msg.remove()
+                 await _maybe_close_reasoning(reasoning)
+@@ -431,6 +435,7 @@ class DecisionWeatherQAService:
+                 forecast_payload if isinstance(forecast_payload, dict) else {},
+                 target_start,
+                 target_end,
++                hourly_request,
+             )
+             facts["poi"] = {
+                 "name": point_name,
+@@ -440,6 +445,8 @@ class DecisionWeatherQAService:
+             }
+             facts["matched_station"] = nearest
+             facts["question_type"] = slots.get("question_type") or "general_weather"
++            if hourly_request:
++                facts["question_type"] = hourly_request["mode"]
+ 
+             await self._update_step(step, status_msg, "✍️ 数据已返回，正在生成面向用户的回答...")
+             final_text = await self._generate_answer(user_text, facts)
+@@ -468,8 +475,8 @@ class DecisionWeatherQAService:
+     async def _extract_slots(self, user_text: str) -> dict:
+         return await _extract_decision_weather_slots(user_text, self.answer_chain, self.callbacks)
+ 
+-    def _normalize_slots(self, slots: dict) -> dict:
+-        return _normalize_decision_weather_slots(slots)
++    def _normalize_slots(self, slots: dict, hourly_request: dict | None = None) -> dict:
++        return _normalize_decision_weather_slots(slots, hourly_request)
+ 
+     async def _generate_answer(self, user_text: str, facts: dict) -> str:
+         return await _generate_decision_weather_answer(user_text, facts, self.answer_chain, self.callbacks)
+@@ -3079,68 +3086,267 @@ async def _try_today_rain_duration_fast_path(user_text: str, thinking_chain, too
+     finally:
+         await reasoning.close()
+ 
++def _format_decision_dt(dt: datetime) -> str:
++    return f"{dt.month}月{dt.day}日{dt.hour:02d}时{dt.minute:02d}分"
++
++
++def _fmt_forecast_period_label(start_text: str, end_text: str) -> str:
++    start_dt = _parse_decision_dt(start_text)
++    end_dt = _parse_decision_dt(end_text)
++    if not start_dt or not end_dt:
++        return f"{_clean_table_cell(start_text)}-{_clean_table_cell(end_text)}"
++    return f"{_format_decision_dt(start_dt)}-{_format_decision_dt(end_dt)}"
++
++
++def _to_float_or_none(value) -> float | None:
++    try:
++        if value in {None, "", "-", "—"}:
++            return None
++        return float(value)
++    except Exception:
++        return None
++
++
++def _format_number_text(value: float | None) -> str:
++    if value is None:
++        return "—"
++    return f"{value:.1f}".rstrip("0").rstrip(".")
++
++
++def _split_weather_tokens(value: str | None) -> list[str]:
++    text = str(value or "").strip()
++    if not text:
++        return []
++    parts = re.split(r"[、,，/]|转|到", text)
++    return [p.strip() for p in parts if p.strip()]
++
++
++def _extract_wind_parts(value: str | None) -> tuple[list[str], list[int]]:
++    text = str(value or "").strip()
++    directions = list(dict.fromkeys(re.findall(r"([东北西南中]{1,3}风)", text)))
++    levels: list[int] = []
++    for low, high in re.findall(r"(\d+)\s*-\s*(\d+)\s*级", text):
++        levels.extend((int(low), int(high)))
++    for single in re.findall(r"(?<!-)(\d+)\s*级", text):
++        levels.append(int(single))
++    return directions, levels
++
++
++def _top_items(items: list[str], limit: int = 3) -> list[str]:
++    counts = Counter(item for item in items if item)
++    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
++    return [name for name, _ in ranked[:limit]]
++
++
++def _temperature_trend(day_rows: list[dict]) -> str:
++    mids = []
++    for row in day_rows:
++        vals = [_to_float_or_none(row.get(k)) for k in ("temp_min", "temp_max")]
++        vals = [v for v in vals if v is not None]
++        if vals:
++            mids.append(sum(vals) / len(vals))
++    if len(mids) < 3:
++        return "气温变化不明显"
++    first = sum(mids[:2]) / 2
++    last = sum(mids[-2:]) / 2
++    peak_idx = max(range(len(mids)), key=lambda i: mids[i])
++    valley_idx = min(range(len(mids)), key=lambda i: mids[i])
++    peak = mids[peak_idx]
++    valley = mids[valley_idx]
++    if 0 < peak_idx < len(mids) - 1 and peak - first >= 1.0 and peak - last >= 1.0:
++        return "气温先升后降"
++    if 0 < valley_idx < len(mids) - 1 and first - valley >= 1.0 and last - valley >= 1.0:
++        return "气温先降后升"
++    if last - first >= 1.0:
++        return "气温总体上升"
++    if first - last >= 1.0:
++        return "气温总体下降"
++    return "气温总体平稳"
++
++
++def _aggregate_rolling_daily_rows(payload: dict) -> list[dict]:
++    periods = payload.get("periods") if isinstance(payload, dict) else []
++    if not isinstance(periods, list):
++        return []
++
++    groups: dict[tuple[str, str], list[dict]] = {}
++    for item in periods:
++        if not isinstance(item, dict):
++            continue
++        start = str(item.get("start_time") or "")
++        end = str(item.get("end_time") or "")
++        if start and end:
++            groups.setdefault((start, end), []).append(item)
++
++    rows = []
++    sorted_groups = sorted(
++        groups.items(),
++        key=lambda kv: _parse_decision_dt(kv[0][0]) or datetime.min,
++    )
++    for (start_text, end_text), items in sorted_groups:
++        weather_tokens: list[str] = []
++        wind_dirs: list[str] = []
++        wind_levels: list[int] = []
++        tmax_values: list[float] = []
++        tmin_values: list[float] = []
++        rain_values: list[float] = []
++        rain_regions: list[tuple[str, float]] = []
++        for item in items:
++            weather_tokens.extend(_split_weather_tokens(item.get("WEA")))
++            if (tmax := _to_float_or_none(item.get("TMAX"))) is not None:
++                tmax_values.append(tmax)
++            if (tmin := _to_float_or_none(item.get("TMIN"))) is not None:
++                tmin_values.append(tmin)
++            if (rain := _to_float_or_none(item.get("TP1H"))) is not None:
++                rain_values.append(rain)
++                rain_regions.append((str(item.get("region") or ""), rain))
++            dirs, levels = _extract_wind_parts(item.get("EDA"))
++            wind_dirs.extend([d for d in dirs if d not in wind_dirs])
++            wind_levels.extend(levels)
++
++        top_weather = _top_items(weather_tokens, 3)
++        max_rain = max(rain_values) if rain_values else None
++        max_rain_regions = [
++            region for region, value in rain_regions
++            if max_rain is not None and abs(value - max_rain) < 0.05 and region
++        ][:5]
++        rows.append({
++            "period": _fmt_forecast_period_label(start_text, end_text),
++            "start_time": start_text,
++            "end_time": end_text,
++            "weather": "、".join(top_weather) if top_weather else "—",
++            "temp_min": min(tmin_values) if tmin_values else None,
++            "temp_max": max(tmax_values) if tmax_values else None,
++            "temp_range": (
++                f"{_format_number_text(min(tmin_values))}~{_format_number_text(max(tmax_values))}℃"
++            ) if tmin_values and tmax_values else "—",
++            "wind_direction": "、".join(_top_items(wind_dirs, 4)) if wind_dirs else "—",
++            "wind_level": f"{min(wind_levels)}~{max(wind_levels)}级" if wind_levels else "—",
++            "max_rain_mm": round(max_rain, 1) if max_rain is not None else None,
++            "max_rain_text": _format_number_text(max_rain),
++            "max_rain_regions": max_rain_regions,
++        })
++    return rows
++
++
++def _weekly_trend_sentence(rows: list[dict], user_text: str) -> str:
++    weather_tokens = [
++        p
++        for row in rows
++        for p in str(row.get("weather") or "").split("、")
++        if p and p != "—"
++    ]
++    weather = "和".join(_top_items(weather_tokens, 2)) or "天气变化"
++    trend = _temperature_trend(rows)
++    scope = "天津" if "天津" in (user_text or "") else "我市"
++    return f"预计未来一周{scope}天气以{weather}为主，{trend}。"
++
++
++def _weekly_focus_text(rows: list[dict]) -> str:
++    focus = []
++    rain_rows = [
++        r for r in rows
++        if (rain := _to_float_or_none(r.get("max_rain_mm"))) is not None and rain >= 10
++    ]
++    if rain_rows:
++        show = "、".join(f"{r['period']}局地最大降水{r['max_rain_text']}毫米" for r in rain_rows[:3])
++        focus.append(f"降水较明显时段：{show}。")
++    wind_rows = [r for r in rows if re.search(r"([5-9]|1\d)级", str(r.get("wind_level") or ""))]
++    if wind_rows:
++        focus.append("部分时段风力偏大，需关注临近预报更新。")
++    return "\n".join(f"- {item}" for item in focus)
++
++
++def _build_weekly_rolling_forecast_text(payload: dict, user_text: str) -> str:
++    rows = _aggregate_rolling_daily_rows(payload)
++    if not rows:
++        return "当前暂未获取到天津滚动预报数据。"
++    first_week = rows[:7]
++    lines = [
++        "【核心结论】\n",
++        _weekly_trend_sentence(first_week, user_text),
++        "\n\n【逐日预报】\n",
++        "| 日期时段 | 天气现象 | 气温区间(℃) | 风向 | 风力 |\n",
++        "| :--- | :--- | :--- | :--- | :--- |\n",
++    ]
++    for row in first_week:
++        lines.append(
++            f"| {_clean_table_cell(row['period'])} | {_clean_table_cell(row['weather'])} | "
++            f"{_clean_table_cell(row['temp_range'])} | {_clean_table_cell(row['wind_direction'])} | "
++            f"{_clean_table_cell(row['wind_level'])} |\n"
++        )
++    focus = _weekly_focus_text(first_week)
++    if focus:
++        lines.append(f"\n【重点关注】\n{focus}\n")
++    lines.append("\n数据来源：天津市气象台滚动预报。")
++    return "".join(lines)
++
++
++def _build_big_rain_forecast_text(payload: dict) -> str:
++    rows = _aggregate_rolling_daily_rows(payload)
++    if not rows:
++        return "当前暂未获取到天津滚动预报数据。"
++    first_week = rows[:7]
++    risk_rows = [
++        row for row in first_week
++        if (rain := _to_float_or_none(row.get("max_rain_mm"))) is not None and rain >= 100.0
++    ]
++    if not risk_rows:
++        return "根据最新天气预报，未来一周，我市无大暴雨天气。\n\n数据来源：天津市气象台滚动预报。"
++
++    lines = ["【核心结论】\n预计未来一周我市有大暴雨天气风险。\n\n【重点关注】\n"]
++    for row in risk_rows[:5]:
++        regions = "、".join(row.get("max_rain_regions") or [])
++        region_text = f"，主要区域：{regions}" if regions else ""
++        lines.append(f"- {row['period']}：局地最大降水约{row['max_rain_text']}毫米{region_text}。\n")
++    lines.append("\n数据来源：天津市气象台滚动预报。")
++    return "".join(lines)
++
++
++async def _query_weekly_rolling_forecast(tools, user_text: str):
++    tool = _find_tool(tools, "query_rolling_forecast")
++    if not tool:
++        return None
++    return await _invoke_tool_for_fast_path(
++        tool.name,
++        tool,
++        {
++            "user_query": user_text,
++            "regions": "",
++            "start_period": 0,
++            "end_period": 168,
++            "interval": 24,
++        },
++        user_text,
++    )
++
+ 
+ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
+     """未来一周天气预报快速路径"""
+     if not user_text:
+         return False
+     t = user_text.strip()
+-    wk_keywords = ["一周天气", "7天天气", "七天天气", "天气预报汇总"]
++    wk_keywords = ["一周天气", "未来一周", "未来7天", "7天天气", "七天天气", "天气预报汇总"]
+     if not any(k in t for k in wk_keywords):
+         return False
+ 
+-    tool = _find_tool(tools, "get_city_rainfall_time_range")
+-    if not tool:
++    if not _find_tool(tools, "query_rolling_forecast"):
+         return False
+ 
+-    print(f"\n=== 未来一周预报快速路径 ===")
++    print(f"\n=== 未来一周滚动预报快速路径 ===")
+     reasoning = await _show_business_reasoning(
+         "查询未来一周天气预报",
+-        ["ECMWF AIFS 预报数据"],
++        ["天津市气象台滚动预报"],
+         "将给出未来一周天气趋势与重点关注",
+     )
+     await generate_fast_path_thinking(
+-        thinking_chain, user_text, "查询未来一周天气预报", ["ECMWF AIFS 预报数据"], reasoning
++        thinking_chain, user_text, "查询未来一周天气预报", ["天津市气象台滚动预报"], reasoning
+     )
+     await reasoning.stage("📡 查询数据", "正在查询未来一周天气预报...")
+ 
+     try:
+-        now = datetime.now()
+-        sync_h = [2, 8, 14, 20]
+-        base_h = max([h for h in sync_h if h <= now.hour], default=14)
+-
+-        rows = []
+-        for day_off in range(0, 7):
+-            day_dt = now.replace(hour=base_h, minute=0, second=0, microsecond=0) + timedelta(days=day_off)
+-            day_str = day_dt.strftime("%Y-%m-%d %H:%M:%S")
+-            try:
+-                r = await asyncio.wait_for(
+-                    _invoke_tool_for_fast_path(
+-                        tool.name,
+-                        tool,
+-                        {"city_name": "天津市", "start_time": day_str, "forecast_hours": 24},
+-                        user_text,
+-                    ),
+-                    timeout=15,
+-                )
+-                rd = _unwrap_tool_result(r)
+-                if isinstance(rd, dict):
+-                    avg = rd.get("average_rainfall_mm", "-")
+-                    mx = rd.get("max_rainfall_mm", "-")
+-                    rows.append((day_dt.strftime("%m/%d"), avg, mx))
+-            except Exception:
+-                rows.append((day_dt.strftime("%m/%d"), "无数据", "—"))
+-            await asyncio.sleep(0.3)
+-
+-        if rows:
+-            lines = [f"## 天津市未来一周预报\n\n"]
+-            lines.append("| 日期 | 平均雨量(mm) | 最大雨量(mm) |\n| :--- | :--- | :--- |\n")
+-            for d, avg, mx in rows:
+-                lines.append(f"| {d} | {avg} | {mx} |\n")
+-            lines.append(f"\n数据来源：ECMWF AIFS")
+-            text = "".join(lines)
+-        else:
+-            text = "暂无未来一周预报数据。"
++        payload = await _query_weekly_rolling_forecast(tools, user_text)
++        text = _build_weekly_rolling_forecast_text(payload if isinstance(payload, dict) else {}, user_text)
+ 
+         text = _prepend_thinking_summary(text, user_text, has_chart=False)
+         await _maybe_close_reasoning(reasoning)
+@@ -3156,6 +3362,46 @@ async def _try_weekly_forecast_fast_path(user_text: str, thinking_chain, tools,
+     finally:
+         await reasoning.close()
+ 
++async def _try_big_rain_forecast_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
++    """未来一周是否有大暴雨：滚动预报确定性收口。"""
++    if not user_text:
++        return False
++    t = user_text.strip()
++    if "大暴雨" not in t and "特大暴雨" not in t:
++        return False
++    forecast_words = ("会", "会不会", "会有", "有没有", "是否", "预计", "未来", "接下来", "最近", "近期")
++    past_words = ("过去", "已出现", "已经", "发生过", "实况", "昨天", "昨日")
++    if not any(k in t for k in forecast_words) or any(k in t for k in past_words):
++        return False
++    if not _find_tool(tools, "query_rolling_forecast"):
++        return False
++
++    print(f"\n=== 大暴雨滚动预报快速路径 ===")
++    reasoning = await _show_business_reasoning(
++        "查询未来一周大暴雨预报",
++        ["天津市气象台滚动预报"],
++        "将给出未来一周大暴雨风险判断",
++    )
++    await generate_fast_path_thinking(
++        thinking_chain, user_text, "查询未来一周大暴雨预报", ["天津市气象台滚动预报"], reasoning
++    )
++    await reasoning.stage("📡 查询数据", "正在查询未来一周大暴雨预报...")
++
++    try:
++        payload = await _query_weekly_rolling_forecast(tools, user_text)
++        text = _build_big_rain_forecast_text(payload if isinstance(payload, dict) else {})
++        text = _prepend_thinking_summary(text, user_text, has_chart=False)
++        await _maybe_close_reasoning(reasoning)
++        await callbacks["stream_text_to_message"](text)
++        messages.append(HumanMessage(content=user_text))
++        messages.append(AIMessage(content=text))
++        cl.user_session.set("messages", messages)
++        return True
++    except Exception as e:
++        print(f"大暴雨滚动预报快速路径失败：{e}")
++        return False
++    finally:
++        await reasoning.close()
+ 
+ async def _try_heavy_rain_check_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
+     """近期是否有强降雨/暴雨快速路径"""
+@@ -4135,6 +4381,7 @@ async def _try_basin_areal_rainfall_fast_path(user_text: str, thinking_chain, to
+         explicit_time_range 表示用户是否明确指定了绝对日期。
+         """
+         now = datetime.now()
++        _dt = datetime
+ 
+         # 1. 绝对日期：2024年7月25日 / 2024-07-25 / 20240725 / 2024/07/25
+         abs_patterns = [
+@@ -4592,6 +4839,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
+             _log_query_exit(query_start_time, session_id, query_summary, "ok")
+             return
+ 
++        # 未来大暴雨预报快速路径（无大暴雨时短答收口）
++        if await _try_big_rain_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
++            _log_query_exit(query_start_time, session_id, query_summary, "ok")
++            return
++
+         # 未来一周预报快速路径
+         if await _try_weekly_forecast_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+             _log_query_exit(query_start_time, session_id, query_summary, "ok")
+diff --git a/haiheliuyubaoyuagent-master/chainlitexam/prompts.py b/haiheliuyubaoyuagent-master/chainlitexam/prompts.py
+index 50ba2dc..9f9babc 100644
+--- a/haiheliuyubaoyuagent-master/chainlitexam/prompts.py
++++ b/haiheliuyubaoyuagent-master/chainlitexam/prompts.py
+@@ -369,7 +369,7 @@ get_river_network_for_plot
+      4）起报时间默认由工具按当前时间自动选择；用户没有明确要求时不要传 `fcst_time`。
+    - 预报类回答模板：
+    - 预报类问题必须基于 `query_rolling_forecast` 返回的真实数据组织回答，统一使用以下共性结构：
+-     1） `【核心结论】`：用 1-2 句话回答最关键判断，如晴雨趋势、是否有强降雨、升降温趋势、是否适合户外、是否有低能见度风险。必须使用“预计、预报、可能”等预报不确定性表述。
++     1） `【核心结论】`：直接回答用户问题的要点，只围绕用户明确询问的天气、降雨、气温、风力、能见度或活动适宜性作结论，不主动扩展无关风险、背景或建议；原则上 1-2 句话，确有必要时最多 2 句话。必须使用“预计、预报、可能”等预报不确定性表述。
+        预报类【核心结论】中，必须对用户最关注的关键信息加粗，包括：
+        - 天气判断，如 **有明显降雨**、**无大暴雨过程**、**不适合户外活动**
+        - 温度数值和趋势，如 **最高气温32℃**、**最低气温24℃**、**明显升温**
+@@ -378,17 +378,17 @@ get_river_network_for_plot
+        - 影响时段和重点区域，如 **明天白天**、**周末两天**、**中心城区、西青区**
+        - 风险或建议结论，如 **需关注短时强降雨**、**建议减少长时间户外活动**
+        只加粗数字、等级、区域、时段、结论性短语，不要整段加粗；如果某项数据工具未返回，不得为了加粗而编造。
+-     2） 根据问题选择一个主表格标题：
++     2） 根据问题选择一个主表格标题；所有表格中的“日期/时段/影响时段”必须写清楚完整日期和时间，格式如 `7月8日14时-7月8日15时`，不要只写“14时-15时”或“明天白天”。
+        - 综合天气用 `【逐时段预报】` 或 `【未来7天预报表】`，列包含日期/时段、天气现象、气温、风力/风况。
+-       - 强降雨/大暴雨用 `【过程详情】`，列或字段包含影响时段、累计雨量、局地最大、主要影响区域；大暴雨等级只能依据 TP1H/累计降水数据判断，不能脱离数据下结论。
++       - 强降雨/大暴雨用 `【过程详情】`，列或字段包含影响时段、累计雨量、局地最大、主要影响区域；大暴雨等级只能依据 TP1H/累计降水数据判断，不能脱离数据下结论。若数据未达到大暴雨阈值，核心结论只需说明未来一周无大暴雨天气，不要输出过程详情。
+        - 气温趋势用 `【未来一周气温预报】`，列包含日期、最高气温、最低气温，并给出最高点、最低点、昼夜温差最大日。
+        - 户外活动用 `【周末详细预报】`，列包含日期/时段、天气、气温、风力、活动建议。
+        - 雾霾/能见度用 `【逐日能见度与天气】`，列包含日期/时段、能见度、天气现象、关注点；不要把能见度直接等同于空气质量。
+      3） `【重点关注】`：仅在数据中存在降雨、明显降温/升温、大风、低能见度等值得关注因素时输出；无显著不利因素时可省略。
+      4） 末尾必须准确说明数据来源，只写业务来源，不写工具名或接口名，例如：`数据来源：天津市气象台滚动预报。`
+    - 决策服务/点位天气/活动保障类预报回答要使用业务简报口径，禁止输出点位定位过程、经纬度、代表点、工具名、接口名、URL 或任何参数名。
+-     1）综合天气、考试、会展、节假日、活动保障类，结构为：`【核心结论】` + `【XX逐日预报】` 或 `【XX明日预报】`。核心结论用一句话概括“天气晴好/基本良好/有降雨/有灾害性天气风险/对活动影响较小或较大”等业务判断；表格列固定为“日期、天气现象、气温(℃)、风力（级）、风向”。
+-     2）未来N小时是否下雨类，结构为：`【核心结论】` + `【XX逐小时预报】`。核心结论直接写“未来N小时，XX无降雨/有小雨/有明显降雨”，并尽量给出雨量级别或累计雨量；表格列固定为“时段、天气现象、气温(℃)、风力（级）、风向”。
++     1）综合天气、考试、会展、节假日、活动保障类，结构为：`【核心结论】` + `【XX逐日预报】` 或 `【XX明日预报】`。核心结论用一句话概括“天气晴好/基本良好/有降雨/有灾害性天气风险/对活动影响较小或较大”等业务判断，不扩展用户未问的内容；表格列固定为“日期、天气现象、气温(℃)、风力（级）、风向”，日期必须写成完整月日和时间。
++     2）未来N小时是否下雨类，结构为：`【核心结论】` + `【XX逐小时预报】`。核心结论直接写“未来N小时，XX无降雨/有小雨/有明显降雨”，并尽量给出雨量级别或累计雨量，不追加无关天气建议；表格列固定为“时段、天气现象、气温(℃)、风力（级）、风向”，时段必须写成完整月日时分。
+      3）当前是否下雨类，结构为：`【核心结论】` + `【降雨情况】`。核心结论直接写“XX当前无降雨/当前正在降雨”；若工具只返回预报时段降水，不得编造1小时、3小时、6小时累计雨量，只展示工具返回的降水信息。
+      4）风况字段若同时包含风向和风力，应拆分到“风向”和“风力（级）”两列；拆分不了时保留可识别内容，不得臆造。
+ 
+diff --git a/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather.py b/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather.py
+index 9d714d0..f474970 100644
+--- a/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather.py
++++ b/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather.py
+@@ -7,12 +7,14 @@
+ from __future__ import annotations
+ 
+ import json
++from datetime import datetime
+ from typing import Any
+ 
+ from langchain_core.tools import tool
+ 
+ from tools.decision_weather_core import (
+     _compact_decision_forecast_facts,
++    _decision_hourly_window,
+     _decision_period_args,
+     _decision_pick_first_poi,
+     _decision_weather_prefilter,
+@@ -78,7 +80,8 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
+             if slots.get("need_clarification"):
+                 return str(slots.get("clarification_question") or "请补充具体位置和查询时段。").strip()
+ 
+-            normalized = _normalize_decision_weather_slots(slots)
++            hourly_request = _decision_hourly_window(user_text, slots.get("question_type"), datetime.now())
++            normalized = _normalize_decision_weather_slots(slots, hourly_request)
+             if normalized.get("error"):
+                 return normalized["error"]
+ 
+@@ -138,6 +141,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
+                 forecast_payload if isinstance(forecast_payload, dict) else {},
+                 target_start,
+                 target_end,
++                hourly_request,
+             )
+             facts["poi"] = {
+                 "name": point_name,
+@@ -147,6 +151,8 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
+             }
+             facts["matched_station"] = nearest
+             facts["question_type"] = slots.get("question_type") or "general_weather"
++            if hourly_request:
++                facts["question_type"] = hourly_request["mode"]
+ 
+             final_text = await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
+             append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)
+diff --git a/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather_core.py b/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather_core.py
+index b33ce19..45f7521 100644
+--- a/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather_core.py
++++ b/haiheliuyubaoyuagent-master/chainlitexam/tools/decision_weather_core.py
+@@ -89,6 +89,78 @@ def _normalize_decision_interval(value: Any) -> int:
+         return interval
+     return min(DECISION_WEATHER_ALLOWED_INTERVALS, key=lambda x: abs(x - interval))
+ 
++_CN_NUMBERS = {
++    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
++    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
++}
++
++
++def _parse_decision_hours(text: str) -> int | None:
++    t = text or ""
++    match = re.search(r"(?:未来|接下来|随后|后面|之后)\s*([0-9一二两三四五六七八九十]+)\s*(?:个)?小时", t)
++    if not match:
++        return None
++    raw = match.group(1)
++    if raw.isdigit():
++        return max(1, min(int(raw), 24))
++    if raw in _CN_NUMBERS:
++        return _CN_NUMBERS[raw]
++    if raw.startswith("十") and len(raw) == 2 and raw[1] in _CN_NUMBERS:
++        return 10 + _CN_NUMBERS[raw[1]]
++    if raw.endswith("十") and len(raw) == 2 and raw[0] in _CN_NUMBERS:
++        return _CN_NUMBERS[raw[0]] * 10
++    return None
++
++
++def _decision_floor_hour(value: datetime) -> datetime:
++    return value.replace(minute=0, second=0, microsecond=0)
++
++
++def _decision_next_hour(value: datetime) -> datetime:
++    return _decision_floor_hour(value) + timedelta(hours=1)
++
++
++def _decision_hourly_rain_mode(user_text: str, question_type: str | None) -> dict | None:
++    t = user_text or ""
++    qtype = str(question_type or "")
++    rain_words = ("下雨", "有雨", "降雨", "降水", "雨量", "雨")
++    if not any(k in t for k in rain_words):
++        return None
++
++    future_hours = _parse_decision_hours(t)
++    if future_hours is not None:
++        return {"mode": "rain_next_hours", "hours": future_hours}
++
++    current_words = ("现在", "当前", "目前", "此刻", "这会", "正在")
++    if qtype == "rain_now" or any(k in t for k in current_words):
++        return {"mode": "rain_now", "hours": 6}
++    return None
++
++
++def _decision_hourly_window(user_text: str, question_type: str | None, now: datetime) -> dict | None:
++    mode = _decision_hourly_rain_mode(user_text, question_type)
++    if not mode:
++        return None
++    if mode["mode"] == "rain_now":
++        cutoff = _decision_floor_hour(now)
++        return {
++            "mode": "rain_now",
++            "target_start": cutoff - timedelta(hours=6),
++            "target_end": cutoff,
++            "interval": 1,
++            "cutoff_time": cutoff,
++        }
++
++    hours = int(mode.get("hours") or 3)
++    start = _decision_next_hour(now)
++    return {
++        "mode": "rain_next_hours",
++        "hours": hours,
++        "target_start": start,
++        "target_end": start + timedelta(hours=hours),
++        "interval": 1,
++    }
++
+ 
+ def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+     """计算两点间大地线距离（千米）。"""
+@@ -175,41 +247,163 @@ def _decision_period_overlaps(period: dict, start_dt: datetime, end_dt: datetime
+     return p_start < end_dt and p_end > start_dt
+ 
+ 
+-def _compact_decision_forecast_facts(forecast_payload: dict, target_start: datetime, target_end: datetime) -> dict:
+-    """压缩滚动预报结果为业务事实字典。"""
++def _decision_rain_value(period: dict) -> float | None:
++    try:
++        return float(period.get("TP1H"))
++    except Exception:
++        return None
++
++
++def _decision_rain_text(value: float | None) -> str:
++    if value is None:
++        return "暂无数据"
++    return f"{value:.2f}".rstrip("0").rstrip(".")
++
++
++def _decision_future_rain_level(total_rain: float | None) -> str:
++    if total_rain is None:
++        return "暂无足够逐小时降水数据"
++    if total_rain <= 0.1:
++        return "无降雨"
++    if total_rain < 3:
++        return "有小雨，雨量<3毫米"
++    if total_rain < 10:
++        return "有降雨"
++    return "有明显降雨"
++
++
++def _sum_decision_rain(periods: list[dict], start_dt: datetime, end_dt: datetime) -> tuple[float | None, int]:
++    values: list[float] = []
++    for p in periods:
++        p_start = _parse_decision_dt(p.get("start_time"))
++        p_end = _parse_decision_dt(p.get("end_time"))
++        if not p_start or not p_end:
++            continue
++        if p_start >= start_dt and p_end <= end_dt:
++            rain = _decision_rain_value(p)
++            if rain is not None:
++                values.append(rain)
++    if not values:
++        return None, 0
++    return round(sum(values), 2), len(values)
++
++
++def _compact_decision_period(period: dict) -> dict:
++    return {
++        "region": period.get("region"),
++        "start_time": period.get("start_time"),
++        "end_time": period.get("end_time"),
++        "weather": period.get("WEA"),
++        "tmax": period.get("TMAX"),
++        "tmin": period.get("TMIN"),
++        "wind": period.get("EDA"),
++        "visibility_min": period.get("VISMIN"),
++        "rain_1h": period.get("TP1H"),
++    }
++
++
++def _build_decision_hourly_facts(periods: list[dict], hourly_request: dict | None) -> dict | None:
++    if not hourly_request:
++        return None
++    mode = hourly_request.get("mode")
++    if mode == "rain_now":
++        cutoff = hourly_request["cutoff_time"]
++        hourly_rain: dict[str, Any] = {}
++        source_counts: dict[str, int] = {}
++        for hours in (1, 3, 6):
++            value, count = _sum_decision_rain(periods, cutoff - timedelta(hours=hours), cutoff)
++            hourly_rain[f"rain_{hours}h_mm"] = value
++            hourly_rain[f"rain_{hours}h_text"] = _decision_rain_text(value)
++            source_counts[f"{hours}h"] = count
++        return {
++            "mode": "rain_now",
++            "cutoff_time": cutoff.strftime("%Y-%m-%d %H:%M:%S"),
++            "cutoff_label": cutoff.strftime("%m月%d日%H时"),
++            **hourly_rain,
++            "is_raining_now": (
++                hourly_rain["rain_1h_mm"] is not None
++                and hourly_rain["rain_1h_mm"] > 0.1
++            ),
++            "source_hour_counts": source_counts,
++        }
++
++    if mode == "rain_next_hours":
++        target_start = hourly_request["target_start"]
++        target_end = hourly_request["target_end"]
++        selected = []
++        rain_values: list[float] = []
++        for p in periods:
++            p_start = _parse_decision_dt(p.get("start_time"))
++            p_end = _parse_decision_dt(p.get("end_time"))
++            if p_start and p_end and p_start >= target_start and p_end <= target_end:
++                selected.append(p)
++                if (rain := _decision_rain_value(p)) is not None:
++                    rain_values.append(rain)
++        total = round(sum(rain_values), 2) if rain_values else None
++        return {
++            "mode": "rain_next_hours",
++            "hours": int(hourly_request.get("hours") or 3),
++            "target_start_time": target_start.strftime("%Y-%m-%d %H:%M:%S"),
++            "target_end_time": target_end.strftime("%Y-%m-%d %H:%M:%S"),
++            "total_rain_mm": total,
++            "total_rain_text": _decision_rain_text(total),
++            "rain_level": _decision_future_rain_level(total),
++            "hourly_periods": [_compact_decision_period(p) for p in selected],
++        }
++    return None
++
++
++def _select_decision_periods(
++    periods: list[dict],
++    target_start: datetime,
++    target_end: datetime,
++    hourly_request: dict | None,
++    hourly_facts: dict | None,
++) -> list[dict]:
++    if hourly_facts and hourly_facts.get("mode") == "rain_now":
++        cutoff = hourly_request["cutoff_time"]
++        return [p for p in periods if _parse_decision_dt(p.get("end_time")) == cutoff]
++
++    if hourly_facts and hourly_facts.get("mode") == "rain_next_hours":
++        start = hourly_request["target_start"]
++        end = hourly_request["target_end"]
++        return [
++            p for p in periods
++            if (p_start := _parse_decision_dt(p.get("start_time")))
++            and (p_end := _parse_decision_dt(p.get("end_time")))
++            and p_start >= start
++            and p_end <= end
++        ]
++
++    selected = [p for p in periods if _decision_period_overlaps(p, target_start, target_end)]
++    return selected or periods[:8]
++
++
++def _compact_decision_forecast_facts(
++    forecast_payload: dict,
++    target_start: datetime,
++    target_end: datetime,
++    hourly_request: dict | None = None,
++) -> dict:
+     periods = forecast_payload.get("periods") if isinstance(forecast_payload, dict) else []
+     if not isinstance(periods, list):
+         periods = []
+-    selected = [p for p in periods if isinstance(p, dict) and _decision_period_overlaps(p, target_start, target_end)]
+-    if not selected:
+-        selected = [p for p in periods if isinstance(p, dict)][:8]
++    periods = [p for p in periods if isinstance(p, dict)]
++
++    hourly_facts = _build_decision_hourly_facts(periods, hourly_request)
++    selected = _select_decision_periods(periods, target_start, target_end, hourly_request, hourly_facts)
+ 
+     compact_periods = []
+     total_rain = 0.0
+     has_rain = False
+     for p in selected[:12]:
+-        rain = p.get("TP1H")
+-        try:
+-            rain_value = float(rain)
+-        except Exception:
+-            rain_value = None
+-        if rain_value is not None:
++        if (rain_value := _decision_rain_value(p)) is not None:
+             total_rain += rain_value
+             if rain_value > 0.1:
+                 has_rain = True
+-        compact_periods.append({
+-            "region": p.get("region"),
+-            "start_time": p.get("start_time"),
+-            "end_time": p.get("end_time"),
+-            "weather": p.get("WEA"),
+-            "tmax": p.get("TMAX"),
+-            "tmin": p.get("TMIN"),
+-            "wind": p.get("EDA"),
+-            "visibility_min": p.get("VISMIN"),
+-            "rain_1h": rain,
+-        })
++        compact_periods.append(_compact_decision_period(p))
+ 
+-    return {
++    facts = {
+         "data_source": forecast_payload.get("data_source"),
+         "query_mode": forecast_payload.get("query_mode"),
+         "fcst_time": forecast_payload.get("fcst_time"),
+@@ -220,6 +414,9 @@ def _compact_decision_forecast_facts(forecast_payload: dict, target_start: datet
+         "total_rain_mm": round(total_rain, 2),
+         "periods": compact_periods,
+     }
++    if hourly_facts:
++        facts["hourly_rain"] = hourly_facts
++    return facts
+ 
+ 
+ def _ainvoke_chain(callbacks: dict) -> Any:
+@@ -243,6 +440,8 @@ async def _extract_decision_weather_slots(user_text: str, answer_chain: Any, cal
+         "时间规则：没有明确时间时，target_start_time 默认为当前时间，target_end_time 默认为当前时间后24小时，interval_hours=12；"
+         "明日/明天为明天00:00到后天00:00，interval_hours=24；"
+         "未来N小时为当前时间到N小时后，interval_hours优先取N，若N不在1/3/6/12/24中则选最接近值；"
++        "具体点位的“现在/当前/目前下雨了吗”属于 rain_now，interval_hours=1；"
++        "具体点位的“未来N小时会下雨吗”属于 rain_next_hours，interval_hours=1。\n"
+         "高考期间、国庆期间等公共事件可给出具体时间，但必须标明 time_basis=公共常识、time_confidence=medium；"
+         "展会期间、会议期间、考试期间等没有明确日期的事件必须 need_clarification=true。\n"
+         "滚动预报只适合未来时段；若目标时段已经过去或无法确定，need_clarification=true。\n"
+@@ -266,7 +465,7 @@ async def _extract_decision_weather_slots(user_text: str, answer_chain: Any, cal
+     return _extract_first_json_object(content)
+ 
+ 
+-def _normalize_decision_weather_slots(slots: dict) -> dict:
++def _normalize_decision_weather_slots(slots: dict, hourly_request: dict | None = None) -> dict:
+     """校验并规范化 LLM 抽取的槽位。"""
+     location_name = str(slots.get("location_name") or "").strip()
+     if not location_name:
+@@ -275,10 +474,17 @@ def _normalize_decision_weather_slots(slots: dict) -> dict:
+     now = datetime.now()
+     target_start = _parse_decision_dt(slots.get("target_start_time")) or now
+     target_end = _parse_decision_dt(slots.get("target_end_time")) or (target_start + timedelta(hours=24))
++    if hourly_request:
++        target_start = hourly_request["target_start"]
++        target_end = hourly_request["target_end"]
++        interval = int(hourly_request["interval"])
++    else:
++        interval = _normalize_decision_interval(slots.get("interval_hours"))
++
+     if target_end <= target_start:
+         return {"error": "请确认查询的结束时间需要晚于开始时间。"}
+ 
+-    if target_end <= now:
++    if target_end <= now and not hourly_request:
+         return {"error": "该时段已经过去，滚动预报仅支持未来天气查询；如需历史天气，需要改用历史实况或历史预报数据。"}
+ 
+     max_end = now + timedelta(hours=240)
+@@ -291,7 +497,7 @@ def _normalize_decision_weather_slots(slots: dict) -> dict:
+         "location_name": location_name,
+         "target_start": target_start,
+         "target_end": target_end,
+-        "interval": _normalize_decision_interval(slots.get("interval_hours")),
++        "interval": interval,
+     }
+ 
+ 
+@@ -306,16 +512,17 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
+         "是否有降雨信号": facts.get("has_rain_signal"),
+         "累计降水量毫米": facts.get("total_rain_mm"),
+         "预报时段": facts.get("periods") or [],
++        "小时级降雨计算": facts.get("hourly_rain"),
+         "数据来源": facts.get("data_source") or "天津市气象台滚动预报",
+     }
+     prompt = (
+         "请仅依据下面 JSON 中的业务天气事实回答用户问题。不要编造未返回的天气、雨量、温度、风力或能见度。\n"
+         "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
+         "回答统一采用业务口径：\n"
+-        "1. 必须先输出【核心结论】，用一句话直接回答天气是否良好、是否有降雨、是否有灾害性天气或是否适合活动。\n"
+-        "2. 综合天气/活动/考试/会展/节假日类：第二模块用【XX逐日预报】或【XX明日预报】，表格列为：日期｜天气现象｜气温(℃)｜风力（级）｜风向。\n"
+-        "3. 未来N小时是否下雨类：第二模块用【XX逐小时预报】，表格列为：时段｜天气现象｜气温(℃)｜风力（级）｜风向。\n"
+-        "4. 当前是否下雨类：核心结论写“当前无降雨/当前正在降雨”；第二模块用【降雨情况】，列出已返回的累计雨量或时段降水，缺失的1小时/3小时/6小时雨量不要编造。\n"
++        "1. 必须先输出【核心结论】，用一句话直接回答用户问题的要点，只围绕用户明确询问的降雨、天气、气温、风力、能见度或活动适宜性作答，不主动扩展无关风险、背景或建议。\n"
++        "2. 综合天气/活动/考试/会展/节假日类：第二模块用【XX逐日预报】或【XX明日预报】，表格列为：日期｜天气现象｜气温(℃)｜风力（级）｜风向；日期必须写清楚完整月日和时间。\n"
++        "3. 未来N小时是否下雨类：只输出【核心结论】和【逐小时预报】；核心结论用代码给出的 rain_level 和 total_rain_text 判断无降雨/有小雨/有明显降雨，逐小时预报只列出 JSON 中 hourly_periods 的时段；表格时段必须写成完整日期和时间，格式如 7月8日14时-7月8日15时，不要只写 14时-15时。\n"
++        "4. 当前是否下雨类：只输出【核心结论】和【降雨实况】；核心结论只总结目前是否下雨以及过去1小时累计降水量。【降雨实况】不得用表格，必须严格按以下四行格式输出：截止XX，位置名称；1小时累计雨量：XX毫米；3小时累计降雨量：XX毫米；6小时累计降雨量：XX毫米。\n"
+         "5. 风况字段中若同时包含风向和风力，请拆成“风力（级）”和“风向”；无法拆分时可在对应列写原始风况中的可识别部分。\n"
+         "6. 末尾只写：数据来源：天津市气象台滚动预报。\n\n"
+         f"用户问题：{user_text}\n\n"

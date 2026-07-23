@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(git *)",
+      "Bash(copy \"C:\\\\Users\\\\gaozr\\\\Downloads\\\\haiheliuyubaoyuagent-master \\(3\\)\\\\.claude\\\\worktrees\\\\emergency-response-monitor\\\\hhlyqyxt-master\\\\Models\\\\QyEmergencyResponseMonitor.py\" \"C:\\\\Users\\\\gaozr\\\\Downloads\\\\haiheliuyubaoyuagent-master \\(3\\)\\\\hhlyqyxt-master\\\\Models\\\\QyEmergencyResponseMonitor.py\")",
+      "Bash(copy \"C:\\\\Users\\\\gaozr\\\\Downloads\\\\haiheliuyubaoyuagent-master \\(3\\)\\\\.claude\\\\worktrees\\\\emergency-response-monitor\\\\hhlyqyxt-master\\\\ScheduledTask\\\\emergency_response_monitor.py\" \"C:\\\\Users\\\\gaozr\\\\Downloads\\\\haiheliuyubaoyuagent-master \\(3\\)\\\\hhlyqyxt-master\\\\ScheduledTask\\\\emergency_response_monitor.py\")",
+      "Bash(copy \"C:\\\\Users\\\\gaozr\\\\Downloads\\\\haiheliuyubaoyuagent-master \\(3\\)\\\\.claude\\\\worktrees\\\\emergency-response-monitor\\\\hhlyqyxt-master\\\\utils\\\\tests\\\\test_emergency_response_monitor.py\" \"C:\\\\Users\\\\gaozr\\\\Downloads\\\\haiheliuyubaoyuagent-master \\(3\\)\\\\hhlyqyxt-master\\\\utils\\\\tests\\\\test_emergency_response_monitor.py\")",
+      "Skill(code-review:code-review)"
+    ]
+  }
+}

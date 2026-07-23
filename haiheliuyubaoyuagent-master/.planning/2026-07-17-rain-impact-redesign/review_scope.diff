@@ -1,0 +1,854 @@
+diff --git a/hhlyqyxt-master/ScheduledTask/emergency_response_monitor.py b/hhlyqyxt-master/ScheduledTask/emergency_response_monitor.py
+index 03cc5f8..47a44d7 100644
+--- a/hhlyqyxt-master/ScheduledTask/emergency_response_monitor.py
++++ b/hhlyqyxt-master/ScheduledTask/emergency_response_monitor.py
+@@ -94,9 +94,12 @@ def compute_emergency_response_stats(
+             为 None 时使用 CSV 中的最大时间。
+ 
+     Returns:
+-        包含各阈值站点数、占比和响应级别的字典；CSV 为空时返回 None。
++        包含各阈值站点数、占比和响应级别的字典；CSV 为空或无可解析内容时返回 None。
+     """
+-    df = pd.read_csv(csv_path)
++    try:
++        df = pd.read_csv(csv_path)
++    except pd.errors.EmptyDataError:
++        return None
+     if df.empty:
+         return None
+ 
+@@ -188,11 +191,7 @@ def run_emergency_response_monitor(
+         logger.warning("CSV 文件不存在: %s", csv_path)
+         return None
+ 
+-    try:
+-        stats = compute_emergency_response_stats(csv_path, datatime)
+-    except pd.errors.EmptyDataError:
+-        logger.warning("CSV 文件为空: %s", csv_path)
+-        return None
++    stats = compute_emergency_response_stats(csv_path, datatime)
+     if stats is None:
+         logger.warning("CSV 文件为空: %s", csv_path)
+         return None
+diff --git a/hhlyqyxt-master/utils/rainfall_impact_geojson.py b/hhlyqyxt-master/utils/rainfall_impact_geojson.py
+index ae364df..3634be1 100644
+--- a/hhlyqyxt-master/utils/rainfall_impact_geojson.py
++++ b/hhlyqyxt-master/utils/rainfall_impact_geojson.py
+@@ -183,12 +183,13 @@ def build_rainstorm_impact_thematic_map(
+         return result
+ 
+     conn, should_close = _open_connection(pg_conf, db_connection)
++    graph = get_graph(graph_path)
+     try:
+         from psycopg2.extras import RealDictCursor
+         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+             _ensure_river_columns(cur, schema, river_table, geom_column, objectid_column, river_name_column)
+             _create_station_temp(cur, rainstorm_stations)
+-            direct_rows = _query_direct_rows(
++            candidate_rows = _query_candidate_edge_rows(
+                 cur,
+                 schema,
+                 river_table,
+@@ -196,31 +197,23 @@ def build_rainstorm_impact_thematic_map(
+                 objectid_column,
+                 river_name_column,
+                 station_buffer_km,
+-                direct_station_top_n,
+             )
+-            start_nodes, direct_keys, downstream_start_stats = _find_direct_graph_starts(
++            direct_edges, start_nodes, downstream_start_stats = _classify_graph_edges(
++                candidate_rows,
++                graph,
+                 rainstorm_stations,
+-                direct_rows,
+-                graph_path,
+                 station_buffer_km,
+                 direct_match_km,
+             )
+-            downstream_edges = _collect_downstream_edges(start_nodes, graph_path, direct_keys, downstream_km)
+-            downstream_rows = _query_downstream_rows(
+-                cur,
+-                schema,
+-                river_table,
+-                geom_column,
+-                objectid_column,
+-                river_name_column,
+-                downstream_edges,
+-                station_buffer_km,
++            direct_keys = {k for k, e in direct_edges.items() if e["is_direct_graph_edge"]}
++            downstream_edges = _collect_downstream_edges(
++                {node: 0.0 for node in start_nodes}, graph_path, direct_keys, downstream_km
+             )
+     finally:
+         if should_close:
+             conn.close()
+ 
+-    river_geojson = _build_river_geojson(direct_rows, downstream_rows, graph_path=graph_path)
++    river_geojson = _build_river_geojson(direct_edges, downstream_edges, candidate_rows, graph_path=graph_path)
+     segments = geojson_to_plot_segments(river_geojson, rainstorm_stations)
+     if max_segments and max_segments > 0:
+         segments = segments[:max_segments]
+@@ -472,7 +465,7 @@ def _build_edge_lookup(rows: list[dict]) -> dict[tuple[str, float, float, float,
+     return lookup
+ 
+ 
+-def _query_direct_rows(
++def _query_candidate_edge_rows(
+     cur,
+     schema: str,
+     table: str,
+@@ -480,46 +473,100 @@ def _query_direct_rows(
+     objectid_col: str,
+     river_name_col: str,
+     buffer_km: float,
+-    direct_station_top_n: int,
+ ) -> list[dict]:
+-    """查询暴雨站点缓冲区内直接命中的河段，按 objectid 聚合为 MultiLineString。"""
++    """查询暴雨站点缓冲区内的 full_v6 行，每行对应一条 pkl 边，不做 Dump/聚合。"""
+     cur.execute(f"""
+-        WITH river_parts AS (
+-            SELECT r.{_qi(objectid_col)}::text AS objectid,
+-                   COALESCE(NULLIF(TRIM(r.{_qi(river_name_col)}::text), ''), '未知') AS river_name,
+-                   COALESCE(r.is_luan, false) AS is_luan,
+-                   (ST_Dump(r.{_qi(geom_col)})).geom AS geom
+-            FROM {_qi(schema)}.{_qi(table)} r
+-            WHERE r.{_qi(geom_col)} IS NOT NULL AND NOT ST_IsEmpty(r.{_qi(geom_col)})
+-        ), station_hits AS (
+-            SELECT p.objectid, p.river_name, p.is_luan, p.geom,
+-                   s.station_id, s.station_name, s.lon, s.lat, s.rain_24h,
+-                   ST_Distance(p.geom::geography, s.geom::geography) / 1000.0 AS station_distance_km,
+-                   ROW_NUMBER() OVER (
+-                       PARTITION BY s.station_id
+-                       ORDER BY ST_Distance(p.geom::geography, s.geom::geography), p.river_name, p.objectid
+-                   ) AS station_rank
+-            FROM river_parts p
+-            JOIN tmp_rain24h_impact_stations s ON ST_DWithin(p.geom::geography, s.geom::geography, %(buffer_m)s)
+-        ), selected_hits AS (
+-            SELECT * FROM station_hits
+-            WHERE %(top_n)s <= 0 OR station_rank <= %(top_n)s
+-        )
+-        SELECT objectid, objectid AS id, river_name, is_luan,
+-               ST_AsGeoJSON(ST_Multi(ST_Collect(geom))) AS geom_json,
+-               SUM(ST_Length(geom::geography)) / 1000.0 AS length_km,
+-               MIN(station_distance_km) AS min_station_distance_km,
+-               COUNT(DISTINCT station_id) AS trigger_station_count,
+-               jsonb_agg(DISTINCT jsonb_build_object(
+-                   'station_id',station_id,'station_name',station_name,'lon',lon,'lat',lat,'rain_24h',rain_24h
+-               )) AS trigger_stations
+-        FROM selected_hits
+-        GROUP BY objectid, river_name, is_luan
+-        ORDER BY min_station_distance_km, river_name, objectid
+-    """, {"buffer_m": float(buffer_km) * 1000.0, "top_n": int(direct_station_top_n or 0)})
++        SELECT
++            r.{_qi(objectid_col)}::text AS objectid,
++            COALESCE(NULLIF(TRIM(r.{_qi(river_name_col)}::text), ''), '未知') AS river_name,
++            COALESCE(NULLIF(TRIM(r.src_name::text), ''), '未知') AS src_name,
++            COALESCE(r.is_luan, false) AS is_luan,
++            r.from_x, r.from_y, r.to_x, r.to_y,
++            r.len_km,
++            ST_AsGeoJSON(r.{_qi(geom_col)}) AS geom_json,
++            MIN(ST_Distance(r.{_qi(geom_col)}::geography, s.geom::geography) / 1000.0) AS min_station_distance_km,
++            COUNT(DISTINCT s.station_id) AS trigger_station_count,
++            jsonb_agg(DISTINCT jsonb_build_object(
++                'station_id', s.station_id,
++                'station_name', s.station_name,
++                'lon', s.lon,
++                'lat', s.lat,
++                'rain_24h', s.rain_24h
++            )) AS trigger_stations
++        FROM {_qi(schema)}.{_qi(table)} r
++        JOIN tmp_rain24h_impact_stations s
++          ON ST_DWithin(r.{_qi(geom_col)}::geography, s.geom::geography, %(buffer_m)s)
++        WHERE r.{_qi(geom_col)} IS NOT NULL AND NOT ST_IsEmpty(r.{_qi(geom_col)})
++        GROUP BY r.id, r.{_qi(objectid_col)}, r.{_qi(river_name_col)}, r.src_name, r.is_luan,
++                 r.from_x, r.from_y, r.to_x, r.to_y, r.len_km, r.{_qi(geom_col)}
++        ORDER BY min_station_distance_km, r.{_qi(objectid_col)}
++    """, {"buffer_m": float(buffer_km) * 1000.0})
+     return list(cur.fetchall())
+ 
+ 
++def _classify_graph_edges(
++    candidate_rows: list[dict],
++    graph,
++    stations: list[dict],
++    station_buffer_km: float,
++    direct_match_km: float,
++) -> tuple[dict[str, dict], set[Any], dict]:
++    """
++    把 full_v6 候选行匹配到 pkl 边，并按精确距离分类。
++    返回 (direct_edges, downstream_start_nodes, stats)。
++    """
++    lookup = _build_edge_lookup(candidate_rows)
++    direct_edges: dict[str, dict] = {}
++    buffer_only_keys: set[str] = set()
++    start_nodes: set[Any] = set()
++
++    for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
++        edge_key = _edge_key(u, v, key, attr)
++        objectid = _edge_objectid_key(attr)
++        row = lookup.get((objectid, p1[0], p1[1], p2[0], p2[1]))
++        if row is None:
++            continue
++
++        min_dist = min(
++            _point_to_segment_km(s["lon"], s["lat"], p1, p2)
++            for s in stations
++            if s.get("lon") is not None and s.get("lat") is not None
++        )
++        if min_dist > station_buffer_km:
++            continue
++
++        edge_info = {
++            "edge_key": edge_key,
++            "objectid": objectid,
++            "river_name": get_edge_river_name(attr),
++            "from_x": p1[0],
++            "from_y": p1[1],
++            "to_x": p2[0],
++            "to_y": p2[1],
++            "is_direct_graph_edge": min_dist <= direct_match_km,
++            "is_luan": bool(attr.get("is_luan")),
++            "min_station_distance_km": round(float(min_dist), 3),
++            "trigger_stations": row.get("trigger_stations", []),
++            "trigger_station_count": int(row.get("trigger_station_count") or 0),
++            "row": row,
++        }
++
++        if min_dist <= direct_match_km:
++            direct_edges[edge_key] = edge_info
++        else:
++            buffer_only_keys.add(edge_key)
++
++        start_nodes.add(v)
++
++    stats = _downstream_start_stats(
++        direct_part_matched_edge_count=len(direct_edges),
++        station_buffer_fallback_edge_count=len(buffer_only_keys),
++        direct_match_km=direct_match_km,
++        station_buffer_km=station_buffer_km,
++    )
++    return direct_edges, start_nodes, stats
++
++
+ def _query_downstream_rows(cur, schema: str, table: str, geom_col: str, objectid_col: str, river_name_col: str, edges: list[dict], buffer_km: float) -> list[dict]:
+     """根据下游追踪边 keys 查询数据库几何，并裁剪到保留长度。
+ 
+@@ -818,75 +865,155 @@ def _save_downstream_edge(
+     return end_km
+ 
+ 
+-def _build_river_geojson(direct_rows: list[dict], downstream_rows: list[dict], graph_path=None) -> dict:
+-    """生成河流 GeoJSON；直接河段优先，按真实几何去重，并回补水系名称。"""
+-    rows_with_type = (
+-        [(r, "direct_buffer") for r in direct_rows]
+-        + [(r, "downstream_50km") for r in downstream_rows]
++def _build_river_geojson(
++    direct_edges: dict[str, dict],
++    downstream_edges: list[dict],
++    candidate_rows: list[dict],
++    graph_path=None,
++) -> dict:
++    """生成河流 GeoJSON；每条约 pkl 边对应一个 feature，无聚合/去重。"""
++    lookup = _build_edge_lookup(candidate_rows)
++    luan_mapping = _load_luan_name_mapping(graph_path)
++
++    direct_features = _resolve_edge_features(
++        list(direct_edges.values()), lookup, "direct_buffer", luan_mapping
+     )
+-    features: list[dict] = []
+-    seen = set()
+-    for row, impact_type in rows_with_type:
+-        feature = _river_feature(row, impact_type)
+-        if not feature:
+-            continue
+-        key = _feature_geometry_key(feature)
+-        if key in seen:
+-            continue
+-        seen.add(key)
++    downstream_features = _resolve_edge_features(
++        downstream_edges, lookup, "downstream_50km", luan_mapping
++    )
++
++    features = direct_features + downstream_features
++    features.sort(
++        key=lambda f: (
++            0 if f["properties"]["impact_type"] == "direct_buffer" else 1,
++            f["properties"].get("river_name") or "",
++            f["properties"].get("min_downstream_distance_km", 0.0),
++        )
++    )
++    return {"type": "FeatureCollection", "features": features}
++
++
++def _resolve_edge_features(
++    edges: list[dict],
++    lookup: dict[tuple[str, float, float, float, float], dict],
++    impact_type: str,
++    luan_mapping: dict[str, str],
++) -> list[dict]:
++    """把 pkl 边列表解析为 GeoJSON features，几何/名称来自 full_v6 lookup。"""
++    features = []
++    for edge in edges:
++        objectid = edge["objectid"]
++        key = (objectid, edge["from_x"], edge["from_y"], edge["to_x"], edge["to_y"])
++        row = lookup.get(key)
++        geom_json = row.get("geom_json") if row else None
++        if not geom_json:
++            geom_json = json.dumps({
++                "type": "LineString",
++                "coordinates": [[edge["from_x"], edge["from_y"]], [edge["to_x"], edge["to_y"]]],
++            })
++            logger.warning("full_v6 缺少边几何，使用直线兜底: %s", edge["edge_key"])
++
++        if impact_type == "downstream_50km":
++            clip_fraction = float(edge.get("clip_fraction") or 1.0)
++            if clip_fraction < 1.0:
++                geom_json = _clip_linestring_to_fraction(geom_json, clip_fraction)
++
++        river_name = _pick_river_name(row, edge, luan_mapping)
++        feature = {
++            "type": "Feature",
++            "properties": {
++                "objectid": objectid,
++                "id": objectid,
++                "river_name": river_name,
++                "is_luan": edge.get("is_luan", False),
++                "impact_type": impact_type,
++                "length_km": round(float(row.get("len_km") if row else edge.get("keep_km", 0.0)), 3),
++                "edge_key": edge["edge_key"],
++                "flow_direction": "database_geometry_order",
++                "direction_source": f"full_{RIVER_TABLE_VERSION}_original_geometry",
++            },
++            "geometry": json.loads(geom_json),
++        }
++        if impact_type == "direct_buffer":
++            feature["properties"].update({
++                "min_station_distance_km": edge.get("min_station_distance_km", 0.0),
++                "trigger_station_count": edge.get("trigger_station_count", 0),
++                "trigger_stations": edge.get("trigger_stations", []),
++                "geometry_source": f"full_{RIVER_TABLE_VERSION}_direct_uncut",
++            })
++        else:
++            feature["properties"].update({
++                "min_downstream_distance_km": edge.get("min_distance_km", 0.0),
++                "end_downstream_distance_km": edge.get("end_distance_km", 0.0),
++                "keep_km": edge.get("keep_km", 0.0),
++                "clip_fraction": edge.get("clip_fraction", 1.0),
++                "is_direct_graph_edge": edge.get("is_direct_graph_edge", False),
++                "geometry_source": f"full_{RIVER_TABLE_VERSION}_downstream_clipped",
++            })
+         features.append(feature)
++    return features
++
++
++def _pick_river_name(row: dict | None, edge: dict, luan_mapping: dict[str, str]) -> str:
++    candidates = []
++    if row:
++        candidates.append(row.get("src_name"))
++        candidates.append(row.get("river_name"))
++    candidates.append(edge.get("river_name"))
++    for name in candidates:
++        if name and str(name).strip() and str(name).strip() != "未知":
++            picked = str(name).strip()
++            # 滦河系单字名需要展开/映射
++            if edge.get("is_luan"):
++                expanded = _luan_full_name(picked, str(edge.get("objectid") or ""), luan_mapping)
++                if expanded:
++                    return expanded
++            return picked
++    if edge.get("is_luan"):
++        objectid = str(edge.get("objectid") or "")
++        mapped = luan_mapping.get(objectid)
++        if mapped:
++            return mapped
++    return "未知"
+ 
+-    if any(_needs_name_enrichment(f) for f in features):
+-        name_map = _build_objectid_name_map(graph_path)
+-        if name_map:
+-            _enrich_unknown_river_names(features, name_map)
+ 
+-    _apply_luan_names(features, _load_luan_name_mapping(graph_path))
++_WATER_BODY_SUFFIXES = frozenset({"河", "江", "湖", "海", "渠", "溪", "涧", "沟", "汊"})
+ 
+-    features = _drop_downstream_covered_by_direct(features)
+ 
+-    features.sort(key=lambda f: (0 if f["properties"]["impact_type"] == "direct_buffer" else 1, f["properties"].get("river_name") or ""))
+-    return {"type": "FeatureCollection", "features": features}
++def _luan_full_name(name: str, objectid: str, mapping: dict[str, str]) -> str | None:
++    """若 name 是滦河系单字缩写，返回映射表中的全名；否则返回原值。"""
++    if not name:
++        return None
++    if objectid in mapping:
++        return mapping[objectid]
++    text = name.strip()
++    if len(text) == 1 and "一" <= text <= "鿿" and text not in _WATER_BODY_SUFFIXES:
++        return f"{text}河"
++    return None
+ 
+ 
+-def _build_objectid_name_map(graph_path) -> dict[str, str]:
+-    """从 pkl 有向图中建立 objectid -> 河系名 的映射，用于回填数据库缺失名称。"""
++def _clip_linestring_to_fraction(geom_json: str, fraction: float) -> str:
++    """使用 Shapely 把 LineString 几何按保留比例裁剪。"""
+     try:
+-        graph = get_graph(graph_path)
++        from shapely.geometry import shape
++        from shapely.ops import substring
++        geom = shape(json.loads(geom_json))
++        clipped = substring(geom, 0.0, min(1.0, fraction), normalized=True)
++        return json.dumps({"type": "LineString", "coordinates": list(clipped.coords)})
+     except Exception:
+-        logger.exception("加载河网拓扑文件失败，无法构建 objectid 名称映射")
+-        return {}
+-    mapping: dict[str, str] = {}
+-    for _u, _v, _k, attr in iter_graph_edges(graph):
+-        objectid = _edge_objectid_key(attr)
+-        if not objectid:
+-            continue
+-        name = get_edge_river_name(attr)
+-        if not name or name == "未知":
+-            continue
+-        if mapping.get(objectid) in (None, "未知"):
+-            mapping[objectid] = name
+-    return mapping
+-
+-
+-def _needs_name_enrichment(feature: dict) -> bool:
+-    name = str((feature.get("properties") or {}).get("river_name") or "").strip()
+-    return not name or name == "未知"
++        logger.warning("裁剪下游几何失败，返回原始几何")
++        return geom_json
+ 
+ 
+-def _enrich_unknown_river_names(features: list[dict], name_map: dict[str, str]) -> None:
+-    """将属性中 river_name 为“未知”的要素替换为 pkl 图中的名称。"""
++def _apply_luan_names(features: list[dict], mapping: dict[str, str]) -> None:
++    """滦河系 objectid 映射表修正（备用，_pick_river_name 已优先处理）。"""
+     for feature in features:
+         props = feature.get("properties") or {}
+-        name = str(props.get("river_name") or "").strip()
+-        if name and name != "未知":
++        if not props.get("is_luan"):
+             continue
+         objectid = str(props.get("objectid") or "")
+-        if objectid and objectid in name_map:
+-            props["river_name"] = name_map[objectid]
+-
+-
+-_WATER_BODY_SUFFIXES = frozenset({"河", "江", "湖", "海", "渠", "溪", "涧", "沟", "汊"})
++        if objectid in mapping:
++            props["river_name"] = mapping[objectid]
+ 
+ 
+ def _normalize_river_name(name: Any) -> str:
+diff --git a/hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py b/hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py
+index bf9e962..bda5972 100644
+--- a/hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py
++++ b/hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py
+@@ -205,131 +205,99 @@ def test_find_direct_graph_starts_includes_all_rivers_in_buffer():
+     assert stats["station_buffer_fallback_edge_count"] == 1
+ 
+ 
+-def test_build_objectid_name_map_prefers_non_unknown():
+-    """pkl 图名称映射应跳过“未知”并优先有效名称。"""
++def test_pick_river_name_prefers_src_name_then_pkl():
++    """名称优先级：full_v6.src_name > full_v6.river_name > pkl.river_name。"""
++    luan_mapping = {}
++    edge = {"objectid": "2", "river_name": "pkl_name", "is_luan": False}
++    row_src = {"src_name": "src_name", "river_name": "row_name"}
++    row_no_src = {"src_name": "未知", "river_name": "row_name"}
++    row_unknown = {"src_name": "未知", "river_name": "未知"}
++    assert rig._pick_river_name(row_src, edge, luan_mapping) == "src_name"
++    assert rig._pick_river_name(row_no_src, edge, luan_mapping) == "row_name"
++    assert rig._pick_river_name(row_unknown, edge, luan_mapping) == "pkl_name"
++
++
++def test_pick_river_name_uses_luan_mapping():
++    """is_luan=true 且其他名称都未知时，使用滦河 objectid 映射。"""
++    edge = {"objectid": "13", "river_name": "未知", "is_luan": True}
++    row = {"src_name": "未知", "river_name": "未知"}
++    assert rig._pick_river_name(row, edge, {"13": "青龙河"}) == "青龙河"
++
++
++def test_pick_river_name_haihe_not_overwritten_by_luan_mapping():
++    """is_luan=false 时即使 objectid 与滦河系冲突，也保留 DB 名称。"""
++    edge = {"objectid": "13", "river_name": "未知", "is_luan": False}
++    row = {"src_name": "南拒马河", "river_name": "南拒马河"}
++    assert rig._pick_river_name(row, edge, {"13": "青龙河"}) == "南拒马河"
++
++
++def test_build_river_geojson_resolves_names():
++    """_build_river_geojson 应通过 lookup 回填河流名称。"""
+     edges = [
+-        ("0,0", "1,0", 0, {"objectid": "2", "src_name": "牤牛河", "length_km": 10.0}),
+-        ("1,0", "2,0", 0, {"objectid": "2", "src_name": "未知", "length_km": 10.0}),
++        ("0,0", "1,0", 0, {"objectid": "2", "src_name": "牤牛河", "river_name": "牤牛河", "length_km": 10.0}),
+     ]
+     graph_path = _make_graph_path(edges)
+-    mapping = rig._build_objectid_name_map(graph_path)
+-    assert mapping.get("2") == "牤牛河"
+-
+-
+-def test_enrich_unknown_river_names_from_graph():
+-    """GeoJSON 要素中 river_name 为“未知”时应被 pkl 图名称回填。"""
+-    features = [
+-        {
+-            "type": "Feature",
+-            "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 0]]},
+-            "properties": {"objectid": "2", "river_name": "未知", "impact_type": "direct_buffer"},
+-        },
+-        {
+-            "type": "Feature",
+-            "geometry": {"type": "LineString", "coordinates": [[1, 0], [2, 0]]},
+-            "properties": {"objectid": "70", "river_name": "永定河", "impact_type": "downstream_50km"},
+-        },
+-    ]
+-    name_map = {"2": "牤牛河"}
+-    rig._enrich_unknown_river_names(features, name_map)
+-    assert features[0]["properties"]["river_name"] == "牤牛河"
+-    assert features[1]["properties"]["river_name"] == "永定河"
+-
+-
+-def test_drop_downstream_covered_by_direct():
+-    """几何上被同 objectid 直接河段覆盖的下游河段应被剔除。"""
+-    pytest.importorskip("shapely")
+-    features = [
+-        {
+-            "type": "Feature",
+-            "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 0]]},
+-            "properties": {"objectid": "70", "river_name": "永定河", "impact_type": "direct_buffer"},
+-        },
+-        {
+-            "type": "Feature",
+-            "geometry": {"type": "LineString", "coordinates": [[0.2, 0], [0.8, 0]]},
+-            "properties": {"objectid": "70", "river_name": "永定河", "impact_type": "downstream_50km"},
+-        },
+-        {
+-            "type": "Feature",
+-            "geometry": {"type": "LineString", "coordinates": [[2, 0], [3, 0]]},
+-            "properties": {"objectid": "70", "river_name": "永定河", "impact_type": "downstream_50km"},
+-        },
+-    ]
+-    result = rig._drop_downstream_covered_by_direct(features)
+-    assert len(result) == 2
+-    assert all(f["properties"]["impact_type"] != "downstream_50km" or f["geometry"]["coordinates"][0][0] == 2.0 for f in result)
+-
+-
+-def test_normalize_river_name_expands_single_char():
+-    """单字河系名应补全为“X河”；已有完整名称或“未知”保持不变。"""
+-    assert rig._normalize_river_name("青") == "青河"
+-    assert rig._normalize_river_name("东") == "东河"
+-    assert rig._normalize_river_name("永定河") == "永定河"
+-    assert rig._normalize_river_name("未知") == "未知"
+-    assert rig._normalize_river_name("") == ""
+-    assert rig._normalize_river_name("湖") == "湖"  # 已含水系后缀，不再追加
+-
+-
+-def test_sorted_feature_river_names_skips_unknown():
+-    """汇总河系名时应跳过“未知”。"""
+-    geojson = {
+-        "type": "FeatureCollection",
+-        "features": [
+-            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 0]]}, "properties": {"river_name": "永定河", "impact_type": "direct_buffer"}},
+-            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[1, 0], [2, 0]]}, "properties": {"river_name": "未知", "impact_type": "downstream_50km"}},
+-        ],
+-    }
+-    assert rig._sorted_feature_river_names(geojson, "direct_buffer") == ["永定河"]
+-    assert rig._sorted_feature_river_names(geojson, "downstream_50km") == []
+-
+-
+-def test_build_river_geojson_enriches_and_dedupes():
+-    """_build_river_geojson 应完成名称回填与下游去重。"""
+-    pytest.importorskip("shapely")
+-    edges = [
+-        ("0,0", "1,0", 0, {"objectid": "2", "src_name": "牤牛河", "length_km": 10.0}),
+-    ]
+-    graph_path = _make_graph_path(edges)
+-    direct_rows = [
+-        {
++    direct_edges = {
++        "k": {
++            "edge_key": "k",
+             "objectid": "2",
+-            "id": "2",
+-            "river_name": "未知",
+-            "geom_json": '{"type":"LineString","coordinates":[[0,0],[1,0]]}',
+-            "length_km": 10.0,
++            "river_name": "牤牛河",
++            "from_x": 0.0,
++            "from_y": 0.0,
++            "to_x": 1.0,
++            "to_y": 0.0,
++            "is_direct_graph_edge": True,
++            "is_luan": False,
+             "min_station_distance_km": 5.0,
+             "trigger_station_count": 1,
+             "trigger_stations": [],
+         }
+-    ]
+-    downstream_rows = [
++    }
++    candidate_rows = [
+         {
+-            "edge_key": "k",
+             "objectid": "2",
+-            "id": "2",
++            "src_name": "未知",
+             "river_name": "未知",
+-            "geom_json": '{"type":"LineString","coordinates":[[0.3,0],[0.7,0]]}',
+-            "length_km": 0.4,
+-            "min_downstream_distance_km": 0.0,
+-            "end_downstream_distance_km": 0.4,
+-            "keep_km": 0.4,
+-            "clip_fraction": 1.0,
+-            "is_direct_graph_edge": False,
+-            "match_distance_km": 0.0,
+-            "from_x": 0.3,
++            "is_luan": False,
++            "from_x": 0.0,
+             "from_y": 0.0,
+-            "to_x": 0.7,
++            "to_x": 1.0,
+             "to_y": 0.0,
++            "len_km": 10.0,
++            "geom_json": '{"type":"LineString","coordinates":[[0,0],[1,0]]}',
+         }
+     ]
+-    geojson = rig._build_river_geojson(direct_rows, downstream_rows, graph_path=graph_path)
+-    names = {f["properties"]["river_name"] for f in geojson["features"]}
+-    assert "未知" not in names
+-    assert "牤牛河" in names
+-    # 下游段被直接段覆盖，应被删除
++    geojson = rig._build_river_geojson(direct_edges, [], candidate_rows, graph_path=graph_path)
++    assert len(geojson["features"]) == 1
++    assert geojson["features"][0]["properties"]["river_name"] == "牤牛河"
++
++
++def test_resolve_edge_features_uses_fallback_line_when_row_missing():
++    """pkl 边在 full_v6 lookup 中缺失时，应使用直线几何兜底。"""
++    edges = [
++        ("118,40", "119,40", 0, {"objectid": "13", "src_name": "", "river_name": "青", "length_km": 10.0, "is_luan": True}),
++    ]
++    graph_path = _make_graph_path(edges)
++    edge_info = {
++        "edge_key": "k",
++        "objectid": "13",
++        "river_name": "青",
++        "from_x": 118.0,
++        "from_y": 40.0,
++        "to_x": 119.0,
++        "to_y": 40.0,
++        "is_direct_graph_edge": False,
++        "is_luan": True,
++        "min_distance_km": 0.0,
++        "end_distance_km": 10.0,
++        "keep_km": 10.0,
++        "clip_fraction": 1.0,
++    }
++    geojson = rig._build_river_geojson({}, [edge_info], [], graph_path=graph_path)
+     assert len(geojson["features"]) == 1
+-    assert geojson["features"][0]["properties"]["impact_type"] == "direct_buffer"
++    props = geojson["features"][0]["properties"]
++    assert props["river_name"] == "青龙河"
++    assert props["geometry_source"].endswith("_downstream_clipped")
+ 
+ 
+ def test_luan_river_name_mapping_by_objectid():
+@@ -338,20 +306,37 @@ def test_luan_river_name_mapping_by_objectid():
+         ("118,40", "119,40", 0, {"objectid": "13", "src_name": "", "river_name": "青", "length_km": 10.0, "is_luan": True}),
+     ]
+     graph_path = _make_graph_path(edges)
+-    direct_rows = [
+-        {
++    direct_edges = {
++        "k": {
++            "edge_key": "k",
+             "objectid": "13",
+-            "id": "13",
+             "river_name": "青",
++            "from_x": 118.0,
++            "from_y": 40.0,
++            "to_x": 119.0,
++            "to_y": 40.0,
++            "is_direct_graph_edge": True,
+             "is_luan": True,
+-            "geom_json": '{"type":"LineString","coordinates":[[118,40],[119,40]]}',
+-            "length_km": 10.0,
+             "min_station_distance_km": 5.0,
+             "trigger_station_count": 1,
+             "trigger_stations": [],
+         }
++    }
++    candidate_rows = [
++        {
++            "objectid": "13",
++            "src_name": "未知",
++            "river_name": "青",
++            "is_luan": True,
++            "from_x": 118.0,
++            "from_y": 40.0,
++            "to_x": 119.0,
++            "to_y": 40.0,
++            "len_km": 10.0,
++            "geom_json": '{"type":"LineString","coordinates":[[118,40],[119,40]]}',
++        }
+     ]
+-    geojson = rig._build_river_geojson(direct_rows, [], graph_path=graph_path)
++    geojson = rig._build_river_geojson(direct_edges, [], candidate_rows, graph_path=graph_path)
+     assert len(geojson["features"]) == 1
+     props = geojson["features"][0]["properties"]
+     assert props["is_luan"] is True
+@@ -364,20 +349,37 @@ def test_haihe_river_name_not_overwritten_by_luan_mapping():
+         ("115,39", "116,39", 0, {"objectid": "13", "src_name": "南拒马河", "river_name": "南拒马河", "length_km": 10.0, "is_luan": False}),
+     ]
+     graph_path = _make_graph_path(edges)
+-    direct_rows = [
+-        {
++    direct_edges = {
++        "k": {
++            "edge_key": "k",
+             "objectid": "13",
+-            "id": "13",
+             "river_name": "南拒马河",
++            "from_x": 115.0,
++            "from_y": 39.0,
++            "to_x": 116.0,
++            "to_y": 39.0,
++            "is_direct_graph_edge": True,
+             "is_luan": False,
+-            "geom_json": '{"type":"LineString","coordinates":[[115,39],[116,39]]}',
+-            "length_km": 10.0,
+             "min_station_distance_km": 5.0,
+             "trigger_station_count": 1,
+             "trigger_stations": [],
+         }
++    }
++    candidate_rows = [
++        {
++            "objectid": "13",
++            "src_name": "南拒马河",
++            "river_name": "南拒马河",
++            "is_luan": False,
++            "from_x": 115.0,
++            "from_y": 39.0,
++            "to_x": 116.0,
++            "to_y": 39.0,
++            "len_km": 10.0,
++            "geom_json": '{"type":"LineString","coordinates":[[115,39],[116,39]]}',
++        }
+     ]
+-    geojson = rig._build_river_geojson(direct_rows, [], graph_path=graph_path)
++    geojson = rig._build_river_geojson(direct_edges, [], candidate_rows, graph_path=graph_path)
+     assert geojson["features"][0]["properties"]["river_name"] == "南拒马河"
+ 
+ 
+@@ -391,82 +393,36 @@ def test_downstream_edge_carries_is_luan():
+     assert edge["is_luan"] is True
+ 
+ 
+-def test_downstream_row_is_luan_maps_to_luan_full_name():
+-    """下游行 is_luan=true 时，即使 river_name 来自 DB 也应被映射为滦河全名。"""
+-    edges = [
+-        ("118,40", "119,40", 0, {"objectid": "13", "src_name": "", "river_name": "青", "length_km": 10.0, "is_luan": True}),
+-    ]
+-    graph_path = _make_graph_path(edges)
+-    downstream_rows = [
+-        {
+-            "edge_key": "k",
+-            "objectid": "13",
+-            "id": "13",
+-            "river_name": "南拒马河",
+-            "is_luan": True,
+-            "geom_json": '{"type":"LineString","coordinates":[[118,40],[119,40]]}',
+-            "length_km": 10.0,
+-            "min_downstream_distance_km": 0.0,
+-            "end_downstream_distance_km": 10.0,
+-            "keep_km": 10.0,
+-            "clip_fraction": 1.0,
+-            "is_direct_graph_edge": False,
+-            "match_distance_km": 0.0,
+-            "from_x": 118,
+-            "from_y": 40,
+-            "to_x": 119,
+-            "to_y": 40,
+-        }
+-    ]
+-    geojson = rig._build_river_geojson([], downstream_rows, graph_path=graph_path)
+-    assert len(geojson["features"]) == 1
+-    props = geojson["features"][0]["properties"]
+-    assert props["is_luan"] is True
+-    assert props["river_name"] == "青龙河"
+-
+-
+-def test_downstream_row_haihe_keeps_db_name():
+-    """下游行 is_luan=false 时应保留 DB 河名，不被滦河映射覆盖。"""
++def test_classify_graph_edges_marks_direct_and_buffer_only():
++    """_classify_graph_edges 应区分真实直接边和仅缓冲区边。"""
+     edges = [
+-        ("115,39", "116,39", 0, {"objectid": "13", "src_name": "南拒马河", "river_name": "南拒马河", "length_km": 10.0, "is_luan": False}),
++        ("116.0,39.0", "116.1,39.0", 0, {"objectid": "1", "src_name": "A", "river_name": "A", "length_km": 10.0}),
+     ]
+     graph_path = _make_graph_path(edges)
+-    downstream_rows = [
++    graph = rig.get_graph(graph_path)
++    candidate_rows = [
+         {
+-            "edge_key": "k",
+-            "objectid": "13",
+-            "id": "13",
+-            "river_name": "南拒马河",
++            "objectid": "1",
++            "src_name": "A",
++            "river_name": "A",
+             "is_luan": False,
+-            "geom_json": '{"type":"LineString","coordinates":[[115,39],[116,39]]}',
+-            "length_km": 10.0,
+-            "min_downstream_distance_km": 0.0,
+-            "end_downstream_distance_km": 10.0,
+-            "keep_km": 10.0,
+-            "clip_fraction": 1.0,
+-            "is_direct_graph_edge": False,
+-            "match_distance_km": 0.0,
+-            "from_x": 115,
+-            "from_y": 39,
+-            "to_x": 116,
+-            "to_y": 39,
++            "from_x": 116.0,
++            "from_y": 39.0,
++            "to_x": 116.1,
++            "to_y": 39.0,
++            "len_km": 10.0,
++            "geom_json": '{"type":"LineString","coordinates":[[116.0,39.0],[116.1,39.0]]}',
++            "trigger_stations": [],
++            "trigger_station_count": 1,
+         }
+     ]
+-    geojson = rig._build_river_geojson([], downstream_rows, graph_path=graph_path)
+-    assert geojson["features"][0]["properties"]["river_name"] == "南拒马河"
+-
+-
+-def test_unmatched_downstream_fallback_uses_luan_mapping():
+-    """SQL 未匹配到的下游边回退到 pkl 直线几何时，is_luan=true 仍应映射为滦河全名。"""
+-    edges = [
+-        ("118,40", "119,40", 0, {"objectid": "13", "src_name": "", "river_name": "青", "length_km": 10.0, "is_luan": True}),
+-    ]
+-    graph_path = _make_graph_path(edges)
+-    edges_dict = {}
+-    rig._save_downstream_edge(edges_dict, "118,40", "119,40", 0, edges[0][3], 0.0, 50.0, set())
+-    edge = next(iter(edges_dict.values()))
+-    rows = rig._fill_unmatched_downstream_edges([], [edge])
+-    assert len(rows) == 1
+-    assert rows[0]["is_luan"] is True
+-    geojson = rig._build_river_geojson([], rows, graph_path=graph_path)
+-    assert geojson["features"][0]["properties"]["river_name"] == "青龙河"
++    # station 5km from the edge midpoint → within direct_match_km
++    stations = [{"lon": 116.05, "lat": 39.0, "rain_24h": 100.0}]
++    direct_edges, start_nodes, stats = rig._classify_graph_edges(
++        candidate_rows, graph, stations, station_buffer_km=30.0, direct_match_km=10.0
++    )
++    assert len(direct_edges) == 1
++    assert list(direct_edges.values())[0]["is_direct_graph_edge"] is True
++    assert len(start_nodes) == 1
++    assert stats["direct_part_matched_edge_count"] == 1
++    assert stats["station_buffer_fallback_edge_count"] == 0

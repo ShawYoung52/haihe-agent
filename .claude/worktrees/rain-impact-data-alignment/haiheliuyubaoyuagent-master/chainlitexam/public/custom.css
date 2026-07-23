@@ -1,0 +1,105 @@
+/* 隐藏 Chainlit 默认头部 */
+.header {
+    display: none !important;
+}
+
+/* 自定义头部 */
+.custom-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: #ffffff;
+    border-bottom: 1px solid #e8e8e8;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    z-index: 1000;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+/* 左侧 Logo 区域 */
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-icon {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, #1890ff, #36cfc9);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: bold;
+    font-size: 14px;
+}
+
+.brand-text {
+    display: flex;
+    flex-direction: column;
+}
+
+.brand-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #1f1f1f;
+    line-height: 1.4;
+}
+
+.brand-subtitle {
+    font-size: 11px;
+    color: #8c8c8c;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* 右侧用户信息 */
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 8px;
+    transition: background 0.2s;
+}
+
+.header-right:hover {
+    background: #f5f5f5;
+}
+
+.user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #1890ff, #69c0ff);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.user-name {
+    font-size: 14px;
+    color: #1f1f1f;
+    font-weight: 500;
+}
+
+.dropdown-icon {
+    color: #8c8c8c;
+    font-size: 12px;
+    margin-left: 4px;
+}
+
+/* 调整主内容区域，给头部留出空间 */
+.main {
+    margin-top: 60px !important;
+}

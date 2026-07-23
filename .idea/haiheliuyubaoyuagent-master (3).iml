@@ -3,7 +3,6 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/haiheliuyubaoyuagent-master/chainlitexam/.venv_new" />
-      <excludeFolder url="file://$MODULE_DIR$/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.11 virtualenv at C:\Users\gaozr\Downloads\haiheliuyubaoyuagent-master (3)\haiheliuyubaoyuagent-master\chainlitexam\.venv_new" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

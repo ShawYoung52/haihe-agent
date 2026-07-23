@@ -1,7 +1,7 @@
 """Shared core logic for decision weather point-of-interest queries.
 
 This module holds the helpers and LLM prompts used by both the planner-only
-`query_decision_weather_for_poi` tool and the legacy `DecisionWeatherQAService`
+`query_decision_weather_for_poi` tool and `decision_weather_fast_path`
 fast path. Keeping them in one place avoids duplicated prompts and slot
 normalization rules.
 """
@@ -30,7 +30,41 @@ DECISION_WEATHER_STATIONS = [
 ]
 
 DECISION_WEATHER_ALLOWED_INTERVALS = [1, 3, 6, 12, 24]
+DECISION_WEATHER_COMPOSITE_TOOL = "query_decision_weather_for_poi"
+DECISION_WEATHER_INTERNAL_TOOLS = {
+    "search_poi",
+    "search_poi_by_distance",
+    "query_rolling_forecast",
+    "get_server_time",
+    "analyze_rainfall_by_time",
+    "local_analyze_rainfall_by_time",
+}
 
+
+def filter_redundant_decision_weather_calls(tool_calls: list[Any]) -> list[Any]:
+    """当 Planner 已选择点位决策天气组合工具时，移除其内部已覆盖的重复调用。"""
+    calls = list(tool_calls or [])
+
+    def tool_name(call: Any) -> str:
+        if isinstance(call, dict):
+            return str(call.get("name") or "")
+        return str(getattr(call, "name", "") or "")
+
+    if not any(tool_name(call) == DECISION_WEATHER_COMPOSITE_TOOL for call in calls):
+        return calls
+
+    filtered: list[Any] = []
+    composite_seen = False
+    for call in calls:
+        name = tool_name(call)
+        if name == DECISION_WEATHER_COMPOSITE_TOOL:
+            if composite_seen:
+                continue
+            composite_seen = True
+            filtered.append(call)
+        elif name not in DECISION_WEATHER_INTERNAL_TOOLS:
+            filtered.append(call)
+    return filtered
 
 def _extract_first_json_object(text: str) -> dict:
     """从文本中提取第一个 JSON 对象，支持 Markdown 代码块包裹。"""
