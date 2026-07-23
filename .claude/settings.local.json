@@ -52,7 +52,8 @@
       "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe -m pytest tests/test_message_orchestrator.py tests/test_rainfall_river_impact.py)",
       "Skill(claude-md-management:revise-claude-md)",
       "mcp__plugin_claude-mem_mcp-search__observation_add",
-      "Bash(awk -F: '$1 > 1639 && $1 < 1850'2)"
+      "Bash(awk -F: '$1 > 1639 && $1 < 1850'2)",
+      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe scripts/verify_river_propagation_offline.py)"
     ]
   }
 }
