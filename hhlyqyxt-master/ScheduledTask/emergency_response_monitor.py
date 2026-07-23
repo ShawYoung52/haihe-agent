@@ -120,6 +120,10 @@ def _fetch_hhly_rainfall_for_emergency(
     for col in HHLY_MIN_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA
+    # HHLY 接口返回 UTC 时间，应急响应窗口/datatime 均按北京时间（BJT），
+    # 与 stationProcessMin 读 CSV（已 +8h）口径对齐，否则 24h 窗口会整体偏移 8h。
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce") + pd.Timedelta(hours=8)
+    df = df.dropna(subset=["Datetime"])
     return df
 
 
@@ -152,7 +156,10 @@ def compute_emergency_response_stats(
         logger.warning("数据缺少 Station_levl 列，全部站点按非国家站处理: %s", source)
         df["Station_levl"] = ""
 
-    df["Datetime"] = pd.to_datetime(df["Datetime"])
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
+    df = df.dropna(subset=["Datetime"])
+    if df.empty:
+        return None
     if datatime is None:
         datatime = df["Datetime"].max()
 
@@ -179,7 +186,7 @@ def compute_emergency_response_stats(
     sum_pre_24h = _sum_precip_by_station(window_24h)
     sum_pre_12h = _sum_precip_by_station(window_12h)
 
-    total = len(sum_pre_24h)
+    total = len(sum_pre_24h)  # 24h 国家站数，作为 total_national_stations 与 24h 占比分母
 
     station_12h_baoyu = _count_by_threshold(sum_pre_12h["PRE"], BAOYU_LOWER, DABAOYU_LOWER)
     station_24h_baoyu = _count_by_threshold(sum_pre_24h["PRE"], BAOYU_LOWER, DABAOYU_LOWER)
@@ -188,7 +195,9 @@ def compute_emergency_response_stats(
     )
     station_24h_tedabaoyu = _count_by_threshold(sum_pre_24h["PRE"], TEDABAOYU_LOWER)
 
-    ratio_12h_baoyu = _ratio(station_12h_baoyu, total)
+    # 12h 占比分母用 12h 窗口国家站数（"过去 12h 暴雨国家站占比"按 12h 口径），
+    # 24h 各占比沿用 24h 国家站数；停报站点不应进 12h 分母压低占比、漏 Ⅲ 级触发。
+    ratio_12h_baoyu = _ratio(station_12h_baoyu, len(sum_pre_12h))
     ratio_24h_baoyu = _ratio(station_24h_baoyu, total)
     ratio_24h_dabaoyu = _ratio(station_24h_dabaoyu, total)
     ratio_24h_tedabaoyu = _ratio(station_24h_tedabaoyu, total)

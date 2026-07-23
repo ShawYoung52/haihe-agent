@@ -75,9 +75,29 @@ def test_compute_stats_aggregates_by_station_and_window(make_csv):
     assert result["station_24h_baoyu"] == 1  # A（12h 属于 24h 子集）
     assert result["station_24h_dabaoyu"] == 1  # B
     assert result["station_24h_tedabaoyu"] == 0
-    assert result["ratio_12h_baoyu"] == pytest.approx(0.3333, abs=1e-4)
+    # 12h 占比分母用 12h 窗口国家站数（A、C=2），非 24h 窗口数（A、B、C=3）
+    assert result["ratio_12h_baoyu"] == pytest.approx(0.5, abs=1e-4)
     assert result["ratio_24h_baoyu"] == pytest.approx(0.3333, abs=1e-4)
     assert result["ratio_24h_dabaoyu"] == pytest.approx(0.3333, abs=1e-4)
+
+
+def test_compute_stats_12h_ratio_uses_12h_denominator(make_csv):
+    """12h 暴雨占比分母应为 12h 窗口内国家站数，仅落在 24h 外段的站不计入。"""
+    csv_path = make_csv(
+        [
+            # 12h 窗口内 (2026-07-14 22:00 -> 2026-07-15 10:00]：A 暴雨、B 无暴雨
+            {"Station_Id_C": "A", "Datetime": "2026-07-15 09:00:00", "PRE": 60.0, "Station_levl": "011"},
+            {"Station_Id_C": "B", "Datetime": "2026-07-15 09:00:00", "PRE": 10.0, "Station_levl": "011"},
+            # 仅 24h 窗口内（12h 外）、无暴雨：不应进 12h 分母
+            {"Station_Id_C": "C", "Datetime": "2026-07-14 12:00:00", "PRE": 5.0, "Station_levl": "011"},
+        ],
+        datatime="2026-07-15 10:00:00",
+    )
+    result = erm.compute_emergency_response_stats(csv_path, "2026-07-15 10:00:00")
+    assert result["total_national_stations"] == 3  # 24h 口径仍为 3
+    assert result["station_12h_baoyu"] == 1  # A
+    # 12h 分母=2（A、B），ratio=1/2=0.5；若误用 24h 分母 3 则为 0.333
+    assert result["ratio_12h_baoyu"] == pytest.approx(0.5, abs=1e-4)
 
 
 def test_compute_stats_uses_sum_not_max(make_csv):
@@ -504,3 +524,30 @@ def test_run_emergency_response_monitor_requires_source(monkeypatch):
                         lambda *a, **k: pd.DataFrame())
     with pytest.raises(ValueError, match="csv_path 或 timerange"):
         erm.run_emergency_response_monitor(datatime="2026-07-15 10:00:00")
+
+
+def test_fetch_hhly_shifts_utc_to_bjt(monkeypatch):
+    """HHLY 接口返回 UTC Datetime，应急响应拉取应 +8h 转北京时间，与 CSV 口径一致。"""
+    class FakeClient:
+        def get_surf_pre_in_basin_timerange(self, basin_codes, timeRange, **kwargs):
+            return [{
+                "Station_Id_C": "A", "Datetime": "2026-07-15 02:00:00", "PRE": "60.0",
+                "Station_levl": "011", "Lat": "39.0", "Lon": "117.0",
+            }]
+    df = erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]", client=FakeClient())
+    # 02:00 UTC -> 10:00 BJT
+    assert df["Datetime"].iloc[0] == pd.Timestamp("2026-07-15 10:00:00")
+
+
+def test_compute_stats_coerces_bad_datetime(make_csv):
+    """单条无法解析的 Datetime 应被丢弃而非崩溃（5 分钟任务不能因一条坏数据整体失败）。"""
+    csv_path = make_csv(
+        [
+            {"Station_Id_C": "A", "Datetime": "not-a-date", "PRE": 60.0, "Station_levl": "011"},
+            {"Station_Id_C": "B", "Datetime": "2026-07-15 09:00:00", "PRE": 60.0, "Station_levl": "011"},
+        ],
+        datatime="2026-07-15 10:00:00",
+    )
+    result = erm.compute_emergency_response_stats(csv_path, "2026-07-15 10:00:00")
+    assert result is not None
+    assert result["total_national_stations"] == 1  # 仅 B
