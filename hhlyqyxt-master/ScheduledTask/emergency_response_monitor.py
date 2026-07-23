@@ -216,29 +216,49 @@ def compute_emergency_response_stats(
 
 
 def run_emergency_response_monitor(
-    csv_path: str,
+    csv_path: Optional[str] = None,
     datatime: Union[str, datetime, None] = None,
     minute_monitor_id: Optional[int] = None,
+    timerange: Optional[str] = None,
+    client: Optional[Any] = None,
 ) -> Optional[QyEmergencyResponseMonitor]:
     """计算应急响应指标并写入数据库。
 
-    同一 datatime 的记录先删后插，保证数据延迟或追补重跑时不会产生重复行。
+    数据来源二选一：
+    - timerange：独立拉取 HHLY 流域分钟降水后判定（推荐，应急响应自带数据源）；
+    - csv_path：从 5 分钟降水 CSV 判定（旧链路，向下兼容现有调用方）。
+    同时提供 timerange 与 csv_path 时，timerange 优先并记录 WARNING 日志；
+    都不传时抛 ValueError。同一 datatime 的记录先删后插，保证重跑无重复行。
 
     Args:
-        csv_path: 5 分钟降水 CSV 文件路径。
-        datatime: 统计结束时间，默认为 CSV 中最大时间。
+        csv_path: 5 分钟降水 CSV 文件路径（旧链路）。
+        datatime: 统计结束时间，默认为数据最大时间。
         minute_monitor_id: 关联的分钟监测记录 ID。
+        timerange: HHLY 拉取时间窗，形如 "[20260722080000,20260723080000]"（新链路）。
+        client: 已实例化的 MusicClient，None 时在拉取层现场实例化。
 
     Returns:
-        写入的 ORM 对象；CSV 不存在或为空时返回 None。
+        写入的 ORM 对象；数据不存在/为空时返回 None。
     """
-    if not Path(csv_path).exists():
-        logger.warning("CSV 文件不存在: %s", csv_path)
-        return None
+    if timerange and csv_path:
+        logger.warning("同时提供 timerange 与 csv_path，优先使用 timerange（HHLY），忽略 csv_path=%s", csv_path)
+    if not timerange and not csv_path:
+        raise ValueError("run_emergency_response_monitor 需要提供 csv_path 或 timerange 之一")
 
-    stats = compute_emergency_response_stats(csv_path, datatime)
+    if timerange:
+        df = _fetch_hhly_rainfall_for_emergency(timerange, client=client)
+        if df is None or df.empty:
+            logger.warning("HHLY 拉取为空，不写表：timerange=%s", timerange)
+            return None
+        stats = compute_emergency_response_stats(df, datatime)
+    else:
+        if not Path(csv_path).exists():
+            logger.warning("CSV 文件不存在: %s", csv_path)
+            return None
+        stats = compute_emergency_response_stats(csv_path, datatime)
+
     if stats is None:
-        logger.warning("CSV 文件为空: %s", csv_path)
+        logger.warning("数据为空，未写入应急响应记录")
         return None
 
     record = QyEmergencyResponseMonitor(

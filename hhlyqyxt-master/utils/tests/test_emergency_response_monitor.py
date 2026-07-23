@@ -447,3 +447,60 @@ def test_compute_stats_accepts_dataframe_equivalent_to_csv(make_csv):
 def test_compute_stats_empty_dataframe_returns_none():
     df = pd.DataFrame(columns=["Station_Id_C", "Datetime", "PRE", "Station_levl"])
     assert erm.compute_emergency_response_stats(df, "2026-07-15 10:00:00") is None
+
+
+def test_run_emergency_response_monitor_timerange_uses_hhly_fetch(monkeypatch):
+    """传 timerange 时走 HHLY 自拉链路并入库。"""
+    fetched = {"called": False}
+
+    def fake_fetch(timerange, client=None):
+        fetched["called"] = True
+        fetched["timerange"] = timerange
+        return pd.DataFrame([
+            {"Station_Id_C": "A", "Datetime": "2026-07-15 09:00:00",
+             "PRE": 60.0, "Station_levl": "011", "Lat": "39.0", "Lon": "117.0",
+             "City": "天津市", "Station_Name": "站A", "Cnty": "测试区",
+             "Province": "天津市", "Town": "测试镇"},
+        ])
+
+    monkeypatch.setattr(erm, "_fetch_hhly_rainfall_for_emergency", fake_fetch)
+    mock_session = MagicMock()
+    monkeypatch.setattr(erm, "Session", MagicMock(return_value=mock_session))
+
+    result = erm.run_emergency_response_monitor(
+        timerange="[20260715000000,20260715100000]",
+        datatime="2026-07-15 10:00:00",
+        minute_monitor_id=7,
+    )
+    assert fetched["called"] is True
+    assert fetched["timerange"] == "[20260715000000,20260715100000]"
+    assert isinstance(result, QyEmergencyResponseMonitor)
+    assert result.minute_monitor_id == 7
+    assert result.total_national_stations == 1
+    mock_session.add.assert_called_once_with(result)
+    mock_session.commit.assert_called_once()
+
+
+def test_run_emergency_response_monitor_timerange_priority_over_csv_warns(make_csv, monkeypatch, caplog):
+    """同时传 timerange 与 csv 时 timerange 优先，并 WARNING 提示忽略 CSV。"""
+    csv_path = make_csv([], datatime="2026-07-15 10:00:00")
+    monkeypatch.setattr(erm, "_fetch_hhly_rainfall_for_emergency",
+                        lambda timerange, client=None: pd.DataFrame(
+                            columns=["Station_Id_C", "Datetime", "PRE", "Station_levl"]))
+    monkeypatch.setattr(erm, "Session", MagicMock())
+
+    with caplog.at_level("WARNING", logger="ScheduledTask.emergency_response_monitor"):
+        erm.run_emergency_response_monitor(
+            csv_path=csv_path,
+            timerange="[20260715000000,20260715100000]",
+            datatime="2026-07-15 10:00:00",
+        )
+    assert "timerange" in caplog.text and "csv" in caplog.text.lower()
+
+
+def test_run_emergency_response_monitor_requires_source(monkeypatch):
+    """csv_path 与 timerange 都不传时应抛 ValueError。"""
+    monkeypatch.setattr(erm, "_fetch_hhly_rainfall_for_emergency",
+                        lambda *a, **k: pd.DataFrame())
+    with pytest.raises(ValueError, match="csv_path 或 timerange"):
+        erm.run_emergency_response_monitor(datatime="2026-07-15 10:00:00")
