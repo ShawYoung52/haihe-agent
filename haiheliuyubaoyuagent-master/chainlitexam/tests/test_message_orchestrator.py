@@ -133,3 +133,42 @@ async def test_run_tool_round_failure_records_tool_message_without_generic_error
     assert tool_msg.content.startswith(f"工具 {FakeTool.name} 执行失败")
     assert "该数据暂不可用" in tool_msg.content
     assert "2026071302" in tool_msg.content
+
+
+def _impact_result_with_propagation():
+    return {
+        "time_range_readable": "2026-07-22 08:00 ~ 2026-07-23 08:00",
+        "rainfall_threshold_mm": 50.0,
+        "affected_rivers": ["滦河"],
+        "affected_zone_77_regions": ["滦河山区"],
+        "affected_admin_divisions": ["承德市"],
+        "total_segments": 3,
+        "affected_segments": 3,
+        "river_propagation": {
+            "flow_velocity_mps": 2.0,
+            "rivers": [
+                {
+                    "river_name": "滦河",
+                    "propagation_distance_km": 48.2,
+                    "propagation_time_hours": 6.7,
+                    "arrival_estimate_readable": "约6.7小时",
+                }
+            ],
+        },
+    }
+
+
+def test_brief_includes_propagation_summary():
+    brief = mo._build_affected_river_network_brief(_impact_result_with_propagation(), "暴雨影响哪些河系")
+    assert "按经验流速 2.0 m/s 估算" in brief
+    assert "约6.7小时" in brief
+    assert "48.2" in brief
+    assert "滦河" in brief
+
+
+def test_brief_without_propagation_block_stays_compatible():
+    result = _impact_result_with_propagation()
+    del result["river_propagation"]
+    brief = mo._build_affected_river_network_brief(result, "暴雨影响哪些河系")
+    assert "经验流速" not in brief
+    assert "滦河" in brief  # 既有河系列表不受影响

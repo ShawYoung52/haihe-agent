@@ -1027,6 +1027,17 @@ def _build_affected_river_network_brief(result_data: dict, user_text: str) -> st
     if affected_admins:
         lines.extend(["", "**涉及行政区划**", "", ", ".join(sorted(affected_admins))])
 
+    propagation = result_data.get("river_propagation") or {}
+    propagation_rivers = propagation.get("rivers") or []
+    if propagation_rivers:
+        top = propagation_rivers[0]
+        velocity = propagation.get("flow_velocity_mps", 2.0)
+        lines.extend([
+            "",
+            f"按经验流速 {velocity} m/s 估算，影响预计{top.get('arrival_estimate_readable', '')}"
+            f"传播至下游最远约 {top.get('propagation_distance_km')} 公里（{top.get('river_name')}）。",
+        ])
+
     lines.extend([
         "",
         f"专题图已按受影响河段高亮渲染（共 {affected_segments}/{total_segments} 条河段）。",
