@@ -241,7 +241,10 @@ def build_rainstorm_impact_thematic_map(
             "geojson_feature_count": len(river_geojson["features"]),
             "plot_segment_count": len(segments),
         },
-        "river_propagation": _build_river_propagation(direct_edges, downstream_edges, flow_velocity_mps),
+        "river_propagation": _build_river_propagation(
+            direct_edges, downstream_edges, flow_velocity_mps,
+            luan_mapping=_load_luan_name_mapping(graph_path),
+        ),
     })
     return result
 
@@ -305,8 +308,8 @@ def _validate_params(threshold: float, buffer_km: float, downstream_km: float, f
         raise ValueError("station_buffer_km 必须大于 0")
     if downstream_km < 0:
         raise ValueError("downstream_km 不能为负数")
-    if flow_velocity_mps <= 0:
-        raise ValueError("flow_velocity_mps 必须大于 0")
+    if not math.isfinite(float(flow_velocity_mps)) or flow_velocity_mps <= 0:
+        raise ValueError("flow_velocity_mps 必须为大于 0 的有限数值")
 
 
 def _resolve_table(pg_conf: dict | None, schema: str, river_table: str) -> tuple[str, str]:
@@ -1223,37 +1226,43 @@ def _build_river_propagation(
     direct_edges: dict[str, dict],
     downstream_edges: list[dict],
     flow_velocity_mps: float,
+    luan_mapping: dict[str, str] | None = None,
 ) -> dict:
     """按河流聚合暴雨影响传播时间估算。
 
     口径：下游边取 Dijkstra 累计 end_distance_km 最大值（暴雨入口视为 0km）；
     仅有直接边、无下游边的河流取直接边中最长 length_km（影响就地发生）。
+    河名经 _pick_river_name 解析，与 GeoJSON/affected_rivers 的命名口径一致。
     """
+    mapping = luan_mapping or {}
     velocity_kmh = float(flow_velocity_mps) * 3.6
     direct_len: dict[str, float] = {}
     downstream_dist: dict[str, float] = {}
+
     for edge in (direct_edges or {}).values():
-        name = str(edge.get("river_name") or "").strip()
+        name = _pick_river_name(edge.get("row"), edge, mapping).strip()
         length = _safe_float(edge.get("length_km"))
-        if not name or length is None or not math.isfinite(length) or length <= 0:
+        if not name or name == "未知" or length is None or not math.isfinite(length) or length <= 0:
             continue
         direct_len[name] = max(direct_len.get(name, 0.0), float(length))
     for edge in downstream_edges or []:
-        name = str(edge.get("river_name") or "").strip()
+        name = _pick_river_name(edge.get("row"), edge, mapping).strip()
         dist = _safe_float(edge.get("end_distance_km"))
-        if not name or dist is None or not math.isfinite(dist) or dist <= 0:
+        if not name or name == "未知" or dist is None or not math.isfinite(dist) or dist <= 0:
             continue
         downstream_dist[name] = max(downstream_dist.get(name, 0.0), float(dist))
 
     rivers = []
     for name in sorted(set(direct_len) | set(downstream_dist)):
-        distance_km = downstream_dist[name] if name in downstream_dist else direct_len[name]
-        hours = round(distance_km / velocity_kmh, 1)
+        has_downstream = name in downstream_dist
+        distance_km = downstream_dist[name] if has_downstream else direct_len[name]
+        raw_hours = distance_km / velocity_kmh
         rivers.append({
             "river_name": name,
             "propagation_distance_km": round(distance_km, 3),
-            "propagation_time_hours": hours,
-            "arrival_estimate_readable": _propagation_readable(hours),
+            "propagation_time_hours": round(raw_hours, 1),
+            "arrival_estimate_readable": _propagation_readable(raw_hours),
+            "has_downstream": has_downstream,
         })
     rivers.sort(key=lambda r: r["propagation_time_hours"], reverse=True)
     return {"flow_velocity_mps": float(flow_velocity_mps), "rivers": rivers}

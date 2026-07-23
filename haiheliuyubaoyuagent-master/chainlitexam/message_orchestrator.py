@@ -1031,12 +1031,23 @@ def _build_affected_river_network_brief(result_data: dict, user_text: str) -> st
     propagation_rivers = propagation.get("rivers") or []
     if propagation_rivers:
         top = propagation_rivers[0]
-        velocity = propagation.get("flow_velocity_mps", 2.0)
-        lines.extend([
-            "",
-            f"按经验流速 {velocity} m/s 估算，影响预计{top.get('arrival_estimate_readable', '')}"
-            f"传播至下游最远约 {top.get('propagation_distance_km')} 公里（{top.get('river_name')}）。",
-        ])
+        velocity = propagation.get("flow_velocity_mps") or 2.0
+        top_name = top.get("river_name") or ""
+        top_distance = top.get("propagation_distance_km")
+        top_readable = top.get("arrival_estimate_readable") or ""
+        if top_name and top_distance is not None and top_readable:
+            if top.get("has_downstream"):
+                lines.extend([
+                    "",
+                    f"按经验流速 {velocity} m/s 估算，影响预计{top_readable}"
+                    f"传播至下游最远约 {top_distance} 公里（{top_name}）。",
+                ])
+            else:
+                lines.extend([
+                    "",
+                    f"按经验流速 {velocity} m/s 估算，{top_name} 受影响河段约 {top_distance} 公里，"
+                    f"洪水通过约需{top_readable}。",
+                ])
 
     lines.extend([
         "",

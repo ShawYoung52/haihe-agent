@@ -152,6 +152,7 @@ def _impact_result_with_propagation():
                     "propagation_distance_km": 48.2,
                     "propagation_time_hours": 6.7,
                     "arrival_estimate_readable": "约6.7小时",
+                    "has_downstream": True,
                 }
             ],
         },
@@ -164,6 +165,23 @@ def test_brief_includes_propagation_summary():
     assert "约6.7小时" in brief
     assert "48.2" in brief
     assert "滦河" in brief
+    assert "传播至下游最远约" in brief
+
+
+def test_brief_direct_only_propagation_uses_pass_through_wording():
+    result = _impact_result_with_propagation()
+    result["river_propagation"]["rivers"][0]["has_downstream"] = False
+    brief = mo._build_affected_river_network_brief(result, "暴雨影响哪些河系")
+    assert "洪水通过约需约6.7小时" in brief
+    assert "传播至下游" not in brief
+
+
+def test_brief_skips_propagation_line_when_keys_missing():
+    result = _impact_result_with_propagation()
+    result["river_propagation"]["rivers"] = [{"propagation_time_hours": 1.0}]
+    brief = mo._build_affected_river_network_brief(result, "暴雨影响哪些河系")
+    assert "经验流速" not in brief
+    assert "None" not in brief
 
 
 def test_brief_without_propagation_block_stays_compatible():

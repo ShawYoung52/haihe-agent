@@ -29,6 +29,8 @@ class HaiheWeatherAnalyzerMCP:
         # 对齐牵引智能体 hhlyqyxt-master/utils/rainfall_impact_geojson.py：
         # build_rain24h_impact_river_geojson(..., direct_match_km=10.0)。
         rainfall_impact_tool.DEFAULT_DIRECT_GRAPH_MATCH_KM = 10.0
+        # 传播时间估算的默认经验流速同样对齐牵引智能体 DEFAULT_FLOW_VELOCITY_MPS。
+        rainfall_impact_tool.DEFAULT_FLOW_VELOCITY_MPS = 2.0
         rainfall_impact_tool.register_fixed_rainfall_impact_tool(self.mcp)
         register_last_month_areal_rainfall_tool(self.mcp)
         register_last_year_max_daily_rainfall_tool(self.mcp)
@@ -91,6 +93,7 @@ class HaiheWeatherAnalyzerMCP:
                     "downstream": "从直接河流下游端点追踪50km，最后一段截断",
                     "direct_match": "直接命中真实河段与pkl边匹配采用10km阈值，对齐牵引智能体",
                     "geometry": f"使用 {RIVER_TABLE_FULL} 真实河流几何",
+                    "propagation": "river_propagation 按统一经验流速（默认2m/s）估算河流级传播时间",
                 },
                 "compatibility_note": "已保留 analyze_rainstorm_impact 等原有调用方式；新增拆分工具用于分阶段调用，前端可按需渐进迁移。",
                 "deprecated_aggregated_tools": [

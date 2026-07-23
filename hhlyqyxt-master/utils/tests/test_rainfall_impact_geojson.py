@@ -672,12 +672,16 @@ def test_classify_graph_edges_marks_direct_and_buffer_only():
 # ---------------------------------------------------------------------------
 
 
-def _direct_edge(name: str, length_km: float) -> dict:
-    return {"edge_key": f"k-{name}-{length_km}", "river_name": name, "length_km": length_km}
+def _direct_edge(name: str, length_km: float, **extra) -> dict:
+    edge = {"edge_key": f"k-{name}-{length_km}", "river_name": name, "length_km": length_km}
+    edge.update(extra)
+    return edge
 
 
-def _downstream_edge(name: str, end_distance_km: float) -> dict:
-    return {"edge_key": f"d-{name}-{end_distance_km}", "river_name": name, "end_distance_km": end_distance_km}
+def _downstream_edge(name: str, end_distance_km: float, **extra) -> dict:
+    edge = {"edge_key": f"d-{name}-{end_distance_km}", "river_name": name, "end_distance_km": end_distance_km}
+    edge.update(extra)
+    return edge
 
 
 def test_build_river_propagation_uses_max_downstream_end_distance():
@@ -719,6 +723,36 @@ def test_validate_params_rejects_non_positive_flow_velocity():
         rig._validate_params(50.0, 30.0, 50.0, 0.0)
     with pytest.raises(ValueError):
         rig._validate_params(50.0, 30.0, 50.0, -1.0)
+    with pytest.raises(ValueError):
+        rig._validate_params(50.0, 30.0, 50.0, float("nan"))
+
+
+def test_build_river_propagation_downstream_takes_priority_over_direct():
+    """同一条河同时有直接边与下游边时，距离口径取下游累计距离（即使直接边更长）。"""
+    direct = {"a": _direct_edge("滦河", 10.0)}
+    downstream = [_downstream_edge("滦河", 5.0)]
+    river = rig._build_river_propagation(direct, downstream, 2.0)["rivers"][0]
+    assert river["propagation_distance_km"] == 5.0
+    assert river["has_downstream"] is True
+
+
+def test_build_river_propagation_marks_direct_only_river():
+    river = rig._build_river_propagation({"a": _direct_edge("东河", 3.6)}, [], 2.0)["rivers"][0]
+    assert river["has_downstream"] is False
+
+
+def test_build_river_propagation_hour_boundary_readable():
+    direct = {"a": _direct_edge("东河", 7.2)}
+    river = rig._build_river_propagation(direct, [], 2.0)["rivers"][0]
+    assert river["propagation_time_hours"] == 1.0
+    assert river["arrival_estimate_readable"] == "约1.0小时"
+
+
+def test_build_river_propagation_resolves_luan_single_char_name():
+    """滦河系 pkl 单字缩写必须经滦河映射回填，与 GeoJSON 命名口径一致。"""
+    direct = {"a": _direct_edge("滦", 3.6, is_luan=True, objectid="1")}
+    result = rig._build_river_propagation(direct, [], 2.0, luan_mapping={"1": "滦河"})
+    assert result["rivers"][0]["river_name"] == "滦河"
 
 
 def test_empty_result_includes_river_propagation_block():

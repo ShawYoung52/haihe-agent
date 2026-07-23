@@ -34,9 +34,12 @@ def _builder_result(**overrides):
 def test_resolve_flow_velocity_defaults_and_rejects_negative():
     assert frit._resolve_flow_velocity(0) == 2.0
     assert frit._resolve_flow_velocity(0.0) == 2.0
+    assert frit._resolve_flow_velocity(None) == 2.0
     assert frit._resolve_flow_velocity(3.0) == 3.0
     with pytest.raises(ValueError):
         frit._resolve_flow_velocity(-1)
+    with pytest.raises(ValueError):
+        frit._resolve_flow_velocity(float("nan"))
 
 
 def test_empty_response_carries_empty_propagation_block():

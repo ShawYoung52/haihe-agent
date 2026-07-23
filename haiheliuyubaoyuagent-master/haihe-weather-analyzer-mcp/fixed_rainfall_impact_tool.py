@@ -27,7 +27,7 @@ IMPACT_RULES = {
     "name_fallback": f"名称优先级：full_{RIVER_TABLE_VERSION}.src_name → river_name → pkl 名称 → 滦河 objectid 映射（仅单字缩写或全部失败时启用，不覆盖合法全名）→ 未知。",
     "match_filter": "已移除 match_distance_km 过滤；改为三级匹配：精确端点键（objectid+端点 6 位小数取整）→ 反向端点键 → 同 objectid 几何空间邻近（两端点 100m 内）。",
     "downstream_dedupe": "已移除 Shapely 几何覆盖去重；重复由结构保证（direct_keys 跳过 + pkl 边天然唯一）。",
-    "propagation": "传播时间按统一经验流速 flow_velocity_mps（默认 2.0 m/s ≈ 7.2 km/h）估算：河流级传播距离 ÷ 流速；下游河流取 Dijkstra 累计 end_distance_km 最大值，仅直接受影响的河流取最长直接河段长度。",
+    "propagation": "传播时间按统一经验流速 flow_velocity_mps（默认 2.0 m/s ≈ 7.2 km/h）估算：河流级传播距离 ÷ 流速；下游河流取 Dijkstra 累计 end_distance_km 最大值，仅直接受影响的河流取站点缓冲区内最长直接河段长度。河名口径与 affected_rivers 一致。",
 }
 
 
@@ -57,10 +57,10 @@ def _resolve_graph_path(graph_path: str | None) -> str | None:
 
 
 def _resolve_flow_velocity(flow_velocity_mps: float) -> float:
-    """0 = 使用默认经验流速；负数报错；正数原样返回。"""
+    """0/None = 使用默认经验流速；负数或非有限数值报错；正数原样返回。"""
     value = float(flow_velocity_mps or 0.0)
-    if value < 0:
-        raise ValueError("flow_velocity_mps 不能为负数")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("flow_velocity_mps 必须为非负有限数值")
     return value if value > 0 else DEFAULT_FLOW_VELOCITY_MPS
 
 
