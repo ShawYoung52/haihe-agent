@@ -1,7 +1,8 @@
-# 任务计划：暴雨影响河流 — 传播时间返回
+# 任务计划：暴雨影响河流 — 传播时间返回 + 牵引应急响应 HHLY 改造
 
 ## 目标
-牵引智能体"暴雨影响河流"模块返回结构新增 `river_propagation` 河流级传播时间汇总字段：
+牵引智能体"暴雨影响河流"模块返回结构新增 `river_propagation` 河流级传播时间汇总字段（已完成、已推送）；
+牵引智能体应急响应改用 HHLY 数据源 + 2 位国家站口径 11/12/13/16（进行中）。
 - 口径：河流级汇总的预计影响时长（用户确认）
 - 流速：统一经验流速常量，默认 2.0 m/s，可配置（用户确认）
 - 位置：新增独立汇总字段，`affected_rivers` 不变，向后兼容（用户确认）
@@ -45,6 +46,43 @@
 - [x] claude-md-management:revise-claude-md 更新 CLAUDE.md（ebc1f03）
 - [x] claude-mem 写入记忆（文件记忆 2 条；服务端 observation_add 需 server runtime，worker 模式不可用）
 - [x] git push（dd1f4b1..ebc1f03 → origin/main）
+
+---
+
+## 任务 B：牵引应急响应 HHLY 改造（进行中）
+
+依据：`docs/superpowers/specs/2026-07-23-traction-emergency-hhly-source-design.md`（commit 52ca8e5）
+计划：`docs/superpowers/plans/2026-07-23-traction-emergency-hhly-source.md`（commit 1fc96bd）
+
+强约束：代码写进 `hhlyqyxt-master/ScheduledTask/emergency_response_monitor.py` 自己，复用牵引侧 `utils.MusicTool`，不得跨仓库 import 问答侧模块。
+
+### B1：国家站口径改 2 位 11/12/13/16（去前导零）
+- [x] `NATIONAL_STATION_LEVELS` + `_normalize_station_level`（commit 9f4773a，18 passed）
+
+### B2：新增 HHLY 拉取函数 `_fetch_hhly_rainfall_for_emergency`
+- [x] 复用 MusicClient，basin_codes=HHLY、data_code=SURF_CHN_MUL_MIN（commit fa48740，22 passed）
+
+### B3：`compute_emergency_response_stats` 扩容接受 DataFrame
+- [x] CSV 路径 / DataFrame 双入口（commit a862634，24 passed；偏离计划：去掉 `if national_df.empty: return None` 与 `dropna(Datetime)` 早返回，保留旧 total=0 语义以不破坏 `test_missing_station_levl_column_treated_as_non_national`）
+
+### B4：`run_emergency_response_monitor` 扩容支持 timerange 新链路
+- [x] timerange 优先 + 旧 CSV 向下兼容 + 都不传 ValueError（commit b98247b，27 passed；验证 stationProcessMin.py:444 旧调用不传 timerange 走 CSV 链路）
+
+### B5：全链路回归 + 质量流程
+- [x] Step 1-2：牵引仓库回归 68 passed（emergency 27 + rainfall_impact 41），无回归
+- [x] Step 3：code-review（双代理 CLAUDE.md 合规 + 正确性）- 合规代理 5 项硬约束全 PASS；正确性代理因 volcengine API 订阅错误中断，已自补正确性自审（fetch/compute/run/fixture 均通过，NaT-datatime 为既有非回归）
+- [x] Step 4：code-simplifier - hoist HHLY_MIN_COLUMNS 模块常量（commit 42023e9，68 passed）
+- [x] Step 5：verification-before-completion - 简化后重跑 68 passed
+- [x] Step 6：revise-claude-md - haiheliuyubaoyuagent-master/CLAUDE.md 新增 emergency_response_monitor HHLY 条目
+- [x] Step 7：claude-mem - 写入 traction-emergency-hhly-source.md 记忆 + MEMORY.md 索引
+- [ ] Step 8：git push
+
+## 计划修正记录
+| 修正 | 原因 | 解决 |
+|------|------|------|
+| B2 `_fake_records` 测试 fixture | 计划原默认元组长度 1，`zip` 截断只产 1 行，与 `len(df)==3` 断言冲突 | 改为长度 3 的默认元组 |
+| B3 `compute` 重构早返回 | 计划原版加 `if national_df.empty: return None` + `dropna(subset=["Datetime"])` 会破坏既有 `test_missing_station_levl_column_treated_as_non_national`（期望 total=0 的非 None 结果） | 保留旧语义：不早返回，national_df 空时继续算出 total=0 结果字典 |
+| B2 `pd.DataFrame(records, columns=)` | dict records + 显式 columns 会导致 pandas 位置映射，塌缩成 1 行 | 非空路径不传 columns 用 dict 键推断，再补齐缺失列 |
 
 ## 关键决策
 | 决策 | 结论 | 来源 |
