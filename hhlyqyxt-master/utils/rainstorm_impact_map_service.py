@@ -238,6 +238,7 @@ def _write_geojson_files(context: dict[str, Any]) -> dict[str, str]:
     return {
         "river_impact_geojson": _write_json(output_dir / "river_impact.geojson", river_geojson),
         "impact_stations_geojson": _write_json(output_dir / "impact_stations.geojson", core.get("station_geojson") or _empty_feature_collection()),
+        "river_propagation_json": _write_json(output_dir / "river_propagation.json", core.get("river_propagation") or {"rivers": []}),
         "summary_json": _write_json(output_dir / "summary.json", context["summary"]),
         "style_json": _write_json(output_dir / "style.json", get_rainstorm_impact_map_style()),
     }
@@ -511,6 +512,9 @@ def _build_summary(core: dict[str, Any]) -> dict[str, Any]:
     return {
         "affected_river_count": len(river_names),
         "affected_rivers": river_names,
+        "direct_rivers": core.get("direct_rivers", []),
+        "downstream_rivers": core.get("downstream_rivers", []),
+        "river_propagation": core.get("river_propagation") or {"rivers": []},
         "impact_station_count": station_summary.get("impact_station_count", 0),
         "max_rain_24h": station_summary.get("max_rain_24h", 0),
         "river_feature_count": len(rivers.get("features", [])),

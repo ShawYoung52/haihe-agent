@@ -77,14 +77,19 @@ def main():
 
     summary = result.get("river_summary", {})
     start_stats = result.get("downstream_start_stats", {})
+    propagation = result.get("river_propagation", {"flow_velocity_mps": "N/A", "rivers": []})
     print("\n=== 结果摘要 ===")
     print(f"直接河段 feature 数：{summary.get('direct_feature_count', 0)}")
     print(f"下游边数：{summary.get('downstream_edge_count', 0)}")
     print(f"触发站点数：{len(stations)}")
     print(f"GeoJSON feature 总数：{summary.get('geojson_feature_count', 0)}")
     print(f"受影响河流：{result.get('affected_rivers', [])}")
+    print(f"直接河段河流：{result.get('direct_rivers', [])}")
+    print(f"下游河流：{result.get('downstream_rivers', [])}")
     print(f"\n=== 下游起点统计 ===")
     print(json.dumps(start_stats, ensure_ascii=False, indent=2))
+    print(f"\n=== 河流传播时间（流速 {propagation.get('flow_velocity_mps', 'N/A')} m/s）===")
+    print(json.dumps(propagation.get("rivers", []), ensure_ascii=False, indent=2))
 
     output_path = Path(args.output)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -93,6 +98,9 @@ def main():
                 "downstream_start_stats": start_stats,
                 "river_summary": summary,
                 "affected_rivers": result.get("affected_rivers", []),
+                "direct_rivers": result.get("direct_rivers", []),
+                "downstream_rivers": result.get("downstream_rivers", []),
+                "river_propagation": propagation,
                 "impact_stations": result.get("impact_stations", []),
                 "station_geojson": result.get("station_geojson", {"type": "FeatureCollection", "features": []}),
                 "river_geojson": result.get("river_geojson", {"type": "FeatureCollection", "features": []}),
