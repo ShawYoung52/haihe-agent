@@ -1,75 +1,36 @@
 # 项目探索发现
 
-## 文档现状
-- 仓库根目录（`C:\Users\gaozr\Downloads\haiheliuyubaoyuagent-master (3)\`）已存在 4 份目标文档：
-  - `PRODUCT.md`
-  - `DESIGN.md`
-  - `AGENTS.md`
-  - `current-progress.md`
-- 文档质量较高，面向非技术人员可读，但 `AGENTS.md` 和 `current-progress.md` 存在与实际项目状态不一致的地方。
+## 2026-07-23：暴雨影响河流 — 传播时间功能调研
 
-## 项目结构确认
-- 主要业务目录：`haiheliuyubaoyuagent-master/`
-  - `chainlitexam/`：Chainlit 智能体入口
-    - `chain_gzt.py`：会话入口、FastAPI、认证
-    - `message_orchestrator.py`：消息编排
-    - `prompts.py`：系统提示词
-    - `fast_paths/`：快速路径包（新结构）
-      - `rainfall_fast_paths.py`
-      - `poi_weather_fast_paths.py`
-      - `water_level_fast_paths.py`
-      - `risk_warning_fast_paths.py`
-      - `emergency_response_fast_path.py`
-      - `rainstorm_impact_time_fast_path.py`
-    - `tools/rain_analysis.py`：本地降雨分析
-    - `external_skill_tools.py`：合作方能力
-    - `utils/`：MUSIC 客户端、数据库配置
-  - `haihe-weather-analyzer-mcp/`：后端 MCP 服务
-    - `server.py`、`tools.py`、`haihe_mcp_tools.py`：MCP 工具
-    - `rest_api.py`、`emergency_api.py`、`emergency_http_server.py`：REST/应急接口
-    - `wms_vector_service/`：GIS/WMS 矢量服务
-    - `custom_tools/`：扩展工具
-    - `analyzers/`：分析器
+### 功能链路（三层）
+1. **牵引智能体核心算法**：`hhlyqyxt-master/utils/rainfall_impact_geojson.py`
+   - `build_rainstorm_impact_thematic_map()` 是唯一拓扑计算入口
+   - Dijkstra 下游追踪：`_collect_downstream_edges` / `_save_downstream_edge`，每条下游边记录 `min_distance_km` / `end_distance_km` / `keep_km` / `river_name`
+   - 直接边分类：`_classify_graph_edges`，edge_info 含 `length_km`（`get_edge_length_km` 对滦河 34 条 NaN 边有 haversine 兜底）与 `river_name`
+   - `_empty_result` 与正常结果同构是硬约定
+   - 测试惯例：`utils/tests/test_rainfall_impact_geojson.py`，pandas/psycopg2 用最小 stub，无需真实 DB/pkl
+2. **MCP 适配层**：`haihe-weather-analyzer-mcp/fixed_rainfall_impact_tool.py`
+   - 只做参数解析 + 降雨站点提取 + 返回格式适配，不含拓扑逻辑
+   - `_format_mcp_response` / `_empty_response` / `_base_response_fields` 组装响应
+   - `IMPACT_RULES` 规则说明字典，空结果与有结果都带
+   - `server.py:78` 有该工具描述的硬编码字符串
+   - 测试惯例：仓库根目录 `test_*.py`（如 `test_rolling_forecast_grid.py`）
+3. **问答侧**：`chainlitexam/tools/rainfall_river_impact.py`（本地包装，懒加载 MCP 模块）
+   - 简报：`message_orchestrator._build_affected_river_network_brief`（line 997-1034），快路径 `rainstorm_impact_time_fast_path._build_brief` 优先复用它
+   - 提示词：`prompts.py` 规则 2.5（line 344）路由到本地工具
+   - 测试：`tests/test_rainfall_river_impact.py`（mock `_load_mcp_modules`/`_load_mcp_config`）、`tests/test_message_orchestrator.py`
 
-## AGENTS.md 中的问题
-- 引用不存在的文件：
-  - `chainlitexam/USER_API.md`
-  - `chainlitexam/USER_AND_FRONTEND_INTEGRATION.md`
-  - `haihe-weather-analyzer-mcp/REST_API_README.md`
-  - `haihe-weather-analyzer-mcp/RIVER_API_README.md`
-- 缺少对 `fast_paths/` 目录的说明。
-- `message_orchestrator.py` 仍在，但快速路径已拆分到 `fast_paths/` 包。
+### 传播时间数据来源结论
+- 无需新增图遍历或外部数据：`downstream_edges` 的 `end_distance_km` 就是 Dijkstra 累计传播距离
+- 河流级传播距离 = max（下游边 end_distance_km)；仅直接边河流 = max（直接边 length_km)
+- 传播时间 = 距离 ÷ （经验流速 2.0 m/s × 3.6)
 
-## current-progress.md 中的问题
-- 声称“当前没有修改运行代码；只做项目上下文整理”，但最近 20 条提交显示大量代码修改，尤其是：
-  - 暴雨影响河网（rainfall impact river）相关修复
-  - 应急响应路径调整
-  - 删除无关代码
+### 环境注意
+- claude-mem 语义检索离线（uvx 缺失），仅关键词检索可用
+- 工作区有大量无关 `.venv_new` 删除，提交时必须按文件精确 add
+- chainlitexam 测试必须从 `chainlitexam/` 目录运行（否则 `No module named 'utils'`）
 
-## 最近提交主题（top 20）
-1. 删除一些无关的代码
-2. debug: log rainfall impact river features
-3. revert: keep rainfall impact direct river selection unchanged
-4. fix: align QA rainfall impact with realtime station logic
-5. fix: tighten rainstorm impact direct river selection
-6. fix: expose flow direction in rainfall impact QA tool
-7. fix: orient downstream geojson coordinates by flow direction
-8. refactor: remove extra rainstorm impact graph start rules file
-9. refactor: remove rainstorm impact monkey patch installer
-10. fix: install strict rainfall impact start rule
-11. fix: add strict rainfall impact graph start rule
-12. fix: restrict downstream tracing to direct river matches
-13. fix: sanitize river impact geojson line geometries
-14. fix: revert: disable first-class emergency response helper
-15. fix: keep emergency response fast path to second-class observation only
-16. fix: keep emergency response tool to second-class observation only
-17. fix: prefer official first-class emergency response in fast path
-18. fix: check first-class official response before rainfall rules
-19. feat: add official emergency response status helper
-20. fix: run emergency response locally and correct daypart times
-
-## 数据来源
-- 直接读取仓库中的 Markdown 文件
-- `git log --oneline -20`
-- `Glob` 扫描 `.md`、`.py` 文件
-- `Read` 关键源码文件片段
+## 2026-07-07：项目结构确认（历史）
+- 主要业务目录：`haiheliuyubaoyuagent-master/`（chainlitexam 智能体 + haihe-weather-analyzer-mcp 后端）
+- `fast_paths/` 快速路径包：rainfall / poi_weather / water_level / risk_warning / emergency_response / rainstorm_impact_time
+- `ENABLE_FAST_PATHS` 默认 false，planner LLM 为主路径
