@@ -34,13 +34,30 @@ def _sep(title: str) -> None:
     print(f"{'='*60}")
 
 
+def _try_fetch(timerange: str, max_retries: int = 3):
+    """带重试的 HHLY 拉取——MUSIC 内网服务偶发瞬断，重试通常能过。"""
+    import time as _time
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return _fetch_hhly_rainfall_for_emergency(timerange)
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"  (attempt {attempt}/{max_retries} 失败, {wait}s 后重试: {e})")
+                _time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
+
+
 def verify_fetch(timerange: str) -> bool:
     """验证 1-2：拉取 + 时区。"""
     _sep("验证 1：HHLY 数据拉取")
+    _max_retries = 3
     try:
-        df = _fetch_hhly_rainfall_for_emergency(timerange)
+        df = _try_fetch(timerange, max_retries=_max_retries)
     except Exception as e:
-        print(f"✗ 拉取失败: {e}")
+        print(f"✗ 拉取失败（{_max_retries} 次重试后仍失败）: {e}")
         return False
 
     if df.empty:
