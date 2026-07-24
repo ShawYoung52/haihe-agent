@@ -117,31 +117,54 @@ def verify_geojson_properties(river_geojson: dict) -> bool:
 
 
 def verify_propagation_consistency(result: dict) -> bool:
-    """验证 5：river_propagation 汇总与 per-edge propagation 一致性。"""
+    """验证 5：river_propagation 汇总与 per-edge propagation 一致性。
+
+    per-edge 边级别 propagation_distance：
+    - 下游 feature → end_distance_km（累计下游距离）
+    - 直接 feature → length_km（边本身长度）
+    summary 河级别汇总：下游边取 max end_distance_km，纯直接边取 max length_km。
+    比较时按同口径分两组：下游组比下游，直接（无下游河）组比直接。
+    """
     _sep("验证 5：传播时间一致性")
     river_prop = result.get("river_propagation", {})
     river_geojson = result.get("river_geojson", {})
     prop_rivers = {r["river_name"]: r for r in river_prop.get("rivers", [])}
 
-    # 按河名汇总 per-edge 最大 propagation_distance
-    edge_max_dist: dict[str, float] = {}
+    # 按河名 + impact_type 分组 per-edge max
+    downstream_max: dict[str, float] = {}
+    direct_max: dict[str, float] = {}
     for feat in river_geojson.get("features", []):
         props = feat.get("properties", {})
         name = props.get("river_name", "")
         dist = props.get("propagation_distance_km", 0)
-        if name and dist and math.isfinite(dist):
-            edge_max_dist[name] = max(edge_max_dist.get(name, 0), dist)
+        if not (name and dist and math.isfinite(dist)):
+            continue
+        if props.get("impact_type") == "downstream_50km":
+            downstream_max[name] = max(downstream_max.get(name, 0), dist)
+        else:
+            direct_max[name] = max(direct_max.get(name, 0), dist)
 
     issues = 0
-    for name, dist in edge_max_dist.items():
-        if name in prop_rivers:
-            expected = prop_rivers[name]["propagation_distance_km"]
-            if abs(dist - expected) > 1.0:  # 1km tolerance
-                print(f"  ✗ {name}: per-edge max={dist} vs summary={expected}, 偏差 > 1km")
+    for name, summary in prop_rivers.items():
+        has_ds = summary.get("has_downstream", False)
+        expected = summary["propagation_distance_km"]
+        if has_ds:
+            actual = downstream_max.get(name, 0)
+            # 下游边 end_distance_km ≤ downstream_km(50)，summary 口径一致
+            if abs(actual - expected) > 1.0:
+                print(f"  ✗ {name}: per-edge 下游 max={actual} vs summary={expected}, 偏差 > 1km")
+                issues += 1
+        else:
+            actual = direct_max.get(name, 0)
+            # 直接边取 max length_km；_feature_length_km（full_v6 len_km）与
+            # get_edge_length_km（pkl/haversine）可能差少许，容差 5km
+            if abs(actual - expected) > 5.0:
+                print(f"  ✗ {name}: per-edge 直接 max={actual} vs summary={expected}, 偏差 > 5km")
                 issues += 1
 
     if issues == 0:
-        print(f"  ✓ per-edge 传播距离与 river_propagation 汇总一致（{len(edge_max_dist)} 条河）")
+        checked = len([n for n in prop_rivers if n in downstream_max or n in direct_max])
+        print(f"  ✓ per-edge 与 summary 一致（{checked} 条河，按同口径对齐）")
     return issues == 0
 
 
