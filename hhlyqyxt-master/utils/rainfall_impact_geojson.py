@@ -881,13 +881,18 @@ def _resolve_edge_features(
     features = []
     for edge in edges:
         objectid = edge["objectid"]
-        row = _resolve_edge_row(
-            objectid,
-            (edge["from_x"], edge["from_y"]),
-            (edge["to_x"], edge["to_y"]),
-            lookup,
-            spatial_lookup,
-        )
+        # 直接边在 _classify_graph_edges 构建时已带 full_v6 "row"，
+        # 优先用已存储的 row 而非重新 lookup，与 _build_river_propagation._resolve_row
+        # 同口径，避免两次 lookup 在滦河命名等路径产出不同行→不同河名→per-edge 与 summary 分组错位。
+        row = edge.get("row")
+        if row is None:
+            row = _resolve_edge_row(
+                objectid,
+                (edge["from_x"], edge["from_y"]),
+                (edge["to_x"], edge["to_y"]),
+                lookup,
+                spatial_lookup,
+            )
         geometry = _geometry_from_row(row) if row else None
         geometry = _unwrap_geometry(geometry)
         if not _geometry_lines(geometry or {}):
