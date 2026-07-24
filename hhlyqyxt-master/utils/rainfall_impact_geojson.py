@@ -965,11 +965,21 @@ def _resolve_edge_features(
 
 
 def _feature_length_km(row: dict | None, edge: dict, impact_type: str) -> float:
-    """下游裁剪段报告 keep_km；直接段优先用 full_v6 len_km，缺失时退化为 pkl 边长。"""
+    """下游裁剪段报告 keep_km；直接段优先用 full_v6 len_km，缺失/NaN 时退化为 pkl 边长。
+
+    滦河系 34 条 DB 记录 len_km=NaN（CLAUDE.md 记录），必须 fallback，
+    否则 per-edge 传播时间为 NaN，与 summary（summary 用 edge['length_km']=pkl）不一致。
+    """
     if impact_type == "downstream_50km":
         return round(float(edge.get("keep_km") or 0.0), 3)
-    if row and row.get("len_km") is not None:
-        return round(float(row["len_km"]), 3)
+    row_len = row.get("len_km") if row else None
+    if row_len is not None:
+        try:
+            val = float(row_len)
+            if math.isfinite(val) and val > 0:
+                return round(val, 3)
+        except (TypeError, ValueError):
+            pass
     return round(float(edge.get("length_km") or 0.0), 3)
 
 

@@ -289,6 +289,38 @@ def test_geojson_direct_feature_has_per_edge_propagation():
     assert props["propagation_time_hours"] == pytest.approx(1.0, abs=0.1)  # 7.2/7.2
 
 
+def test_geojson_direct_feature_falls_back_to_pkl_length_when_row_len_nan():
+    """滦河系 DB len_km=NaN 时，_feature_length_km 应 fallback 到 pkl edge['length_km']，
+    否则 per-edge propagation_distance = NaN，与 summary（用 pkl length_km）不一致，
+    验证 5 会报 dir_max=0 vs summary=X。CLAUDE.md 记录过滦河 34 条边 len_km=NaN。"""
+    import math
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "13", "src_name": "青龙河", "length_km": 10.0, "is_luan": True}),
+    ]
+    graph_path = _make_graph_path(edges)
+    direct = {
+        "k": {
+            "edge_key": "k", "objectid": "13", "river_name": "青龙河",
+            "from_x": 0.0, "from_y": 0.0, "to_x": 1.0, "to_y": 0.0,
+            "is_direct_graph_edge": True, "is_luan": True,
+            "min_station_distance_km": 0.5, "length_km": 10.0,
+            "trigger_station_count": 1,
+            "trigger_stations": [],
+            # 滦河 DB row len_km=NaN
+            "row": _candidate_row("13", (0.0, 0.0), (1.0, 0.0), name="青龙河", len_km=float("nan")),
+        },
+    }
+    candidate_rows = [_candidate_row("13", (0.0, 0.0), (1.0, 0.0), name="青龙河", len_km=float("nan"))]
+    geojson = rig._build_river_geojson(direct, [], candidate_rows, graph_path=graph_path,
+                                        flow_velocity_mps=2.0)
+    props = geojson["features"][0]["properties"]
+    # length_km 应 fallback 到 pkl edge['length_km']=10.0，而非 NaN
+    assert math.isfinite(props["length_km"]) and props["length_km"] == 10.0
+    # 传播时间同理，非 0（NaN 会走 0.0 分支）
+    assert props["propagation_distance_km"] == 10.0
+    assert props["propagation_time_hours"] == pytest.approx(1.4, abs=0.1)  # 10/7.2
+
+
 def test_pick_river_name_luan_mapping_does_not_override_full_name():
     """is_luan=true 但 src_name 已是合法全名时，不应被静态映射覆盖。"""
     edge = {"objectid": "13", "river_name": "未知", "is_luan": True}
