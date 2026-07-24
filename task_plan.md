@@ -142,3 +142,20 @@
 - [x] D3 修复：只修明确 bug/泄漏——P0-1 删所有硬编码密码（6 文件）、P0-2 删僵尸文件（3 个含阈值 30.0 漂移的 haihe_music_api）、P1-5 修 tempfile 泄漏（output_dir 必传）
 - [x] D4 simplifier+verify+docs+memory+push：4 修复 2 提交 1 push（gitee a347ca2）
 - 其余 P0-3（应急判定三处重复）、P1~P2 均仅报告 findings.md，不修
+
+## 任务 E：Chainlit 编排 chainlitexam 全量代码审查（进行中）
+
+用户 2026-07-24 指令：验证完暴雨影响河流后审最后一个仓库 chainlitexam。43 py 文件、~15000 行、单文件最大 message_orchestrator.py 4241、chain_gzt.py 3670。测试基线 70 passed。
+
+### 审查重点
+- 主入口：chain_gzt.py（3670，Chainlit lifecycle + FastAPI + auth）、message_orchestrator.py（4241，消息路由+快路径+planner）
+- 快路径：fast_paths/*（rainfall/water_level/rainstorm_impact_time/emergency_response/risk_warning/poi_weather）
+- 工具：tools/*（decision_weather*/rolling_forecast_response/warning_workflow/rain_analysis/rainfall_river_impact）
+- 提示词：prompts.py（565）
+- 其它：send_wechat.py、utils/MusicTool.py、mock_vendor_agents.py、external_skill_tools.py
+
+### 阶段
+- [x] E1 理解：43 py 文件 ~15000 行、tests 70 passed 基线
+- [ ] E2 审查：综合代理 D1+D2+D3 + 内联 D4（secrets/imports/timeouts）
+- [ ] E3 修复：只修明确 bug/泄漏（沿用 traction/MCP 规则）
+- [ ] E4 simplifier+verify+docs+memory+push
