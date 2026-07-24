@@ -908,9 +908,23 @@ def _resolve_edge_features(
             )
 
         river_name = _pick_river_name(row, edge, luan_mapping)
+        is_direct = impact_type == "direct_buffer"
+        # 传播距离
+        prop_distance = (
+            float(edge.get("end_distance_km") or 0)
+            if not is_direct
+            else _feature_length_km(row, edge, impact_type)
+        )
+        if velocity_kmh > 0 and math.isfinite(prop_distance):
+            prop_time = round(prop_distance / velocity_kmh, 1)
+        else:
+            prop_distance = 0.0
+            prop_time = 0.0
+
         feature = {
             "type": "Feature",
             "properties": {
+                # 基础信息
                 "objectid": objectid,
                 "id": objectid,
                 "river_name": river_name,
@@ -920,37 +934,27 @@ def _resolve_edge_features(
                 "edge_key": edge["edge_key"],
                 "flow_direction": "database_geometry_order",
                 "direction_source": f"full_{RIVER_TABLE_VERSION}_original_geometry",
+                "geometry_source": (
+                    f"full_{RIVER_TABLE_VERSION}_downstream_clipped" if not is_direct and from_db
+                    else f"full_{RIVER_TABLE_VERSION}_direct_uncut" if is_direct and from_db
+                    else "pkl_edge_straight_fallback"
+                ),
+                # 直接河段属性（下游段填默认值，保证属性表统一无 NULL 列）
+                "min_station_distance_km": (edge.get("min_station_distance_km") or 0.0) if is_direct else 0.0,
+                "trigger_station_count": (edge.get("trigger_station_count") or 0) if is_direct else 0,
+                "trigger_stations": (edge.get("trigger_stations") or []) if is_direct else [],
+                # 下游河段属性（直接段填默认值）
+                "min_downstream_distance_km": (edge.get("min_distance_km") or 0.0) if not is_direct else 0.0,
+                "end_downstream_distance_km": (edge.get("end_distance_km") or 0.0) if not is_direct else 0.0,
+                "keep_km": (edge.get("keep_km") or 0.0) if not is_direct else 0.0,
+                "clip_fraction": (edge.get("clip_fraction") or 1.0) if not is_direct else 0.0,
+                "is_direct_graph_edge": edge.get("is_direct_graph_edge") if not is_direct else True,
+                # 传播时间（所有河段统一）
+                "propagation_distance_km": round(prop_distance, 3),
+                "propagation_time_hours": prop_time,
             },
             "geometry": geometry,
         }
-        if impact_type == "direct_buffer":
-            feature["properties"].update({
-                "min_station_distance_km": edge.get("min_station_distance_km") or 0.0,
-                "trigger_station_count": edge.get("trigger_station_count") or 0,
-                "trigger_stations": edge.get("trigger_stations") or [],
-                "geometry_source": f"full_{RIVER_TABLE_VERSION}_direct_uncut" if from_db else "pkl_edge_straight_fallback",
-            })
-        else:
-            feature["properties"].update({
-                "min_downstream_distance_km": edge.get("min_distance_km") or 0.0,
-                "end_downstream_distance_km": edge.get("end_distance_km") or 0.0,
-                "keep_km": edge.get("keep_km") or 0.0,
-                "clip_fraction": edge.get("clip_fraction") or 1.0,
-                "is_direct_graph_edge": edge.get("is_direct_graph_edge") or False,
-                "geometry_source": f"full_{RIVER_TABLE_VERSION}_downstream_clipped" if from_db else "pkl_edge_straight_fallback",
-            })
-        # 每条河段的独立传播时间（与 river_propagation 河流级汇总口径一致）
-        prop_distance = (
-            float(edge.get("end_distance_km") or 0)
-            if impact_type == "downstream_50km"
-            else _feature_length_km(row, edge, impact_type)
-        )
-        if velocity_kmh > 0 and math.isfinite(prop_distance):
-            feature["properties"]["propagation_distance_km"] = round(prop_distance, 3)
-            feature["properties"]["propagation_time_hours"] = round(prop_distance / velocity_kmh, 1)
-        else:
-            feature["properties"]["propagation_distance_km"] = 0.0
-            feature["properties"]["propagation_time_hours"] = 0.0
         features.append(feature)
     return features
 
