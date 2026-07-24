@@ -932,11 +932,11 @@ def _resolve_edge_features(
             })
         else:
             feature["properties"].update({
-                "min_downstream_distance_km": edge.get("min_distance_km", 0.0),
-                "end_downstream_distance_km": edge.get("end_distance_km", 0.0),
-                "keep_km": edge.get("keep_km", 0.0),
-                "clip_fraction": edge.get("clip_fraction", 1.0),
-                "is_direct_graph_edge": edge.get("is_direct_graph_edge", False),
+                "min_downstream_distance_km": edge.get("min_distance_km") or 0.0,
+                "end_downstream_distance_km": edge.get("end_distance_km") or 0.0,
+                "keep_km": edge.get("keep_km") or 0.0,
+                "clip_fraction": edge.get("clip_fraction") or 1.0,
+                "is_direct_graph_edge": edge.get("is_direct_graph_edge") or False,
                 "geometry_source": f"full_{RIVER_TABLE_VERSION}_downstream_clipped" if from_db else "pkl_edge_straight_fallback",
             })
         # 每条河段的独立传播时间（与 river_propagation 河流级汇总口径一致）
