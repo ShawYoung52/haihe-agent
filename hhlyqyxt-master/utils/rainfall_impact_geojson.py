@@ -219,7 +219,8 @@ def build_rainstorm_impact_thematic_map(
         if should_close:
             conn.close()
 
-    river_geojson = _build_river_geojson(direct_edges, downstream_edges, geometry_rows, graph_path=graph_path)
+    river_geojson = _build_river_geojson(direct_edges, downstream_edges, geometry_rows,
+                                         graph_path=graph_path, flow_velocity_mps=flow_velocity_mps)
     segments = geojson_to_plot_segments(river_geojson, rainstorm_stations)
     if max_segments and max_segments > 0:
         segments = segments[:max_segments]
@@ -651,7 +652,7 @@ def _classify_graph_edges(
             "is_direct_graph_edge": is_direct,
             "is_luan": bool(attr.get("is_luan")),
             "min_station_distance_km": round(float(min_dist), 3),
-            "trigger_stations": row.get("trigger_stations", []),
+            "trigger_stations": row.get("trigger_stations") or [],
             "trigger_station_count": int(row.get("trigger_station_count") or 0),
             "row": row,
         }
@@ -821,10 +822,10 @@ def _save_downstream_edge(
         "edge_key": edge_key,
         "objectid": objectid,
         "river_name": river_name,
-        "min_distance_km": round(float(start_km), 3),
-        "end_distance_km": round(float(start_km + keep_km), 3),
-        "keep_km": round(float(keep_km), 3),
-        "clip_fraction": round(float(keep_km / length_km), 8),
+        "min_distance_km": _round(start_km, 3) or 0.0,
+        "end_distance_km": _round(start_km + keep_km, 3) or 0.0,
+        "keep_km": _round(keep_km, 3) or 0.0,
+        "clip_fraction": _round(keep_km / length_km, 8) or 0.0,
         "is_direct_graph_edge": edge_key in direct_keys,
         "is_luan": bool(attr.get("is_luan")),
         "from_x": from_x,
@@ -840,6 +841,7 @@ def _build_river_geojson(
     downstream_edges: list[dict],
     candidate_rows: list[dict],
     graph_path=None,
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
 ) -> dict:
     """生成河流 GeoJSON；直接边与下游边按 edge_key 天然互斥，每条 pkl 边至多一个 feature。"""
     lookup = _build_edge_lookup(candidate_rows)
@@ -847,10 +849,12 @@ def _build_river_geojson(
     luan_mapping = _load_luan_name_mapping(graph_path)
 
     direct_features = _resolve_edge_features(
-        list(direct_edges.values()), lookup, spatial_lookup, "direct_buffer", luan_mapping
+        list(direct_edges.values()), lookup, spatial_lookup, "direct_buffer", luan_mapping,
+        flow_velocity_mps=flow_velocity_mps,
     )
     downstream_features = _resolve_edge_features(
-        downstream_edges, lookup, spatial_lookup, "downstream_50km", luan_mapping
+        downstream_edges, lookup, spatial_lookup, "downstream_50km", luan_mapping,
+        flow_velocity_mps=flow_velocity_mps,
     )
 
     features = direct_features + downstream_features
@@ -870,8 +874,10 @@ def _resolve_edge_features(
     spatial_lookup: dict[str, list[dict]],
     impact_type: str,
     luan_mapping: dict[str, str],
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
 ) -> list[dict]:
-    """把 pkl 边列表解析为 GeoJSON features，几何/名称来自 full_v6 lookup。"""
+    """把 pkl 边列表解析为 GeoJSON features，几何/名称来自 full_v6 lookup。每条 feature 含 per-edge 传播时间。"""
+    velocity_kmh = float(flow_velocity_mps) * 3.6
     features = []
     for edge in edges:
         objectid = edge["objectid"]
@@ -919,9 +925,9 @@ def _resolve_edge_features(
         }
         if impact_type == "direct_buffer":
             feature["properties"].update({
-                "min_station_distance_km": edge.get("min_station_distance_km", 0.0),
-                "trigger_station_count": edge.get("trigger_station_count", 0),
-                "trigger_stations": edge.get("trigger_stations", []),
+                "min_station_distance_km": edge.get("min_station_distance_km") or 0.0,
+                "trigger_station_count": edge.get("trigger_station_count") or 0,
+                "trigger_stations": edge.get("trigger_stations") or [],
                 "geometry_source": f"full_{RIVER_TABLE_VERSION}_direct_uncut" if from_db else "pkl_edge_straight_fallback",
             })
         else:
@@ -933,6 +939,18 @@ def _resolve_edge_features(
                 "is_direct_graph_edge": edge.get("is_direct_graph_edge", False),
                 "geometry_source": f"full_{RIVER_TABLE_VERSION}_downstream_clipped" if from_db else "pkl_edge_straight_fallback",
             })
+        # 每条河段的独立传播时间（与 river_propagation 河流级汇总口径一致）
+        prop_distance = (
+            float(edge.get("end_distance_km") or 0)
+            if impact_type == "downstream_50km"
+            else _feature_length_km(row, edge, impact_type)
+        )
+        if velocity_kmh > 0 and math.isfinite(prop_distance):
+            feature["properties"]["propagation_distance_km"] = round(prop_distance, 3)
+            feature["properties"]["propagation_time_hours"] = round(prop_distance / velocity_kmh, 1)
+        else:
+            feature["properties"]["propagation_distance_km"] = 0.0
+            feature["properties"]["propagation_time_hours"] = 0.0
         features.append(feature)
     return features
 
@@ -1213,9 +1231,10 @@ def _safe_float(value: Any) -> float | None:
 
 def _round(value: Any, digits: int = 3) -> float | None:
     try:
-        return round(float(value), digits)
+        result = round(float(value), digits)
     except (TypeError, ValueError):
         return None
+    return result if math.isfinite(result) else None
 
 
 def _sorted_feature_river_names(river_geojson: dict, impact_type: str) -> list[str]:

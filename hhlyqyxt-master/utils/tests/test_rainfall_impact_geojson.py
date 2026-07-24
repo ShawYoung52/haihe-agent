@@ -259,6 +259,34 @@ def test_downstream_feature_length_km_reports_keep_km():
     props = geojson["features"][0]["properties"]
     assert props["length_km"] == 10.0
     assert props["geometry_source"] == f"full_{rig.RIVER_TABLE_VERSION}_downstream_clipped"
+    # per-edge 传播时间：下游用 end_distance_km
+    assert props["propagation_distance_km"] == 50.0
+    assert props["propagation_time_hours"] == pytest.approx(6.9, abs=0.1)  # 50/7.2
+
+
+def test_geojson_direct_feature_has_per_edge_propagation():
+    """直接河段 GeoJSON feature 应有 per-edge 传播时间（基于 length_km）。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "2", "src_name": "东河", "length_km": 7.2}),
+    ]
+    graph_path = _make_graph_path(edges)
+    direct = {
+        "k": {
+            "edge_key": "k", "objectid": "2", "river_name": "东河",
+            "from_x": 0.0, "from_y": 0.0, "to_x": 1.0, "to_y": 0.0,
+            "is_direct_graph_edge": True, "is_luan": False,
+            "min_station_distance_km": 0.5, "length_km": 7.2,
+            "trigger_station_count": 1,
+            "trigger_stations": [{"station_id": "X", "station_name": "X站", "rain_24h": 60.0}],
+            "row": _candidate_row("2", (0.0, 0.0), (1.0, 0.0), name="东河", len_km=7.2),
+        },
+    }
+    candidate_rows = [_candidate_row("2", (0.0, 0.0), (1.0, 0.0), name="东河", len_km=7.2)]
+    geojson = rig._build_river_geojson(direct, [], candidate_rows, graph_path=graph_path,
+                                        flow_velocity_mps=2.0)
+    props = geojson["features"][0]["properties"]
+    assert props["propagation_distance_km"] == 7.2
+    assert props["propagation_time_hours"] == pytest.approx(1.0, abs=0.1)  # 7.2/7.2
 
 
 def test_pick_river_name_luan_mapping_does_not_override_full_name():
