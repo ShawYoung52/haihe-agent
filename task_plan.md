@@ -121,5 +121,24 @@
 - [x] C5 code-simplifier：提取 _resolve_edge_row 共享 helper（GeoJSON + propagation 命名去重）
 - [x] C6 verification：72 passed（emergency 30 + rainfall_impact 42），无回归
 - [x] C7 revise-claude-md：CLAUDE.md 更新 emergency（HHLY 接入生产、12h 分母、时区、坏 datetime）+ rainfall_impact（propagation 命名修复、入口输出）
-- [ ] C8 claude-mem：审查记忆
-- [ ] C9 github：提交并 push
+- [x] C8 claude-mem：更新 traction-emergency-hhly-source + 新增 traction-review-scope-rule
+- [x] C9 github：提交并 push（00eff8e..e53e337）
+
+## 任务 D：问答智能体 haihe-weather-analyzer-mcp 全量代码审查（进行中）
+
+用户 2026-07-24 指令：牵引智能体审完后，接着审问答智能体。本期范围 = `haihe-weather-analyzer-mcp`（独立 git 仓库，74 py 文件/3 万+ 行），四维度全审。规模是牵引侧的 ~5 倍，聚焦最近改动和高风险文件。
+
+### 审查重点文件（按风险/改动频率）
+- 最近改动：`rolling_forecast_grid.py`(363)、`rolling_forecast_service.py`(808)、`server.py`(152)、`tools.py`(4592)、`vector_boundary_api.py`(302)
+- CLAUDE.md 核心条目 + Request 1 相关：`fixed_rainfall_impact_tool.py`(330)、`haihe_mcp_tools.py`(3596)、`rainfall_ranking_service.py`(119)、`constants.py`(39)
+- 应急响应链：`emergency_response_interface.py`(573)、`emergency_api.py`(571)、`emergency_http_server.py`(4547)、`emergency_event_store.py`(292)、`emergency_intranet_sync.py`(629)、`emergency_management_store.py`(1022)
+- 绘图产品：`draw_haihe_precip_product.py`(1999)、`draw_river_network.py`(1696)、`forecast_product_queue.py`(420)、`observation_product_queue.py`(804)
+- 分析器：`analyzers/RainfallAnalyzer.py`(523)
+- 自定义工具：`custom_tools/*`
+
+### 阶段
+- [x] D1 理解：摸清 MCP 结构、规模、最近改动
+- [x] D2 审查：综合代理（D1+D2+D3）+ 内联 D4 -> 15 项发现（3 P0 + 4 P1 + 8 P2）
+- [x] D3 修复：只修明确 bug/泄漏——P0-1 删所有硬编码密码（6 文件）、P0-2 删僵尸文件（3 个含阈值 30.0 漂移的 haihe_music_api）、P1-5 修 tempfile 泄漏（output_dir 必传）
+- [x] D4 simplifier+verify+docs+memory+push：4 修复 2 提交 1 push（gitee a347ca2）
+- 其余 P0-3（应急判定三处重复）、P1~P2 均仅报告 findings.md，不修
