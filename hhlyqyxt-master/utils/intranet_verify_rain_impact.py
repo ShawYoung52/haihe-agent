@@ -20,8 +20,9 @@ from pathlib import Path
 try:
     import rainfall_impact_geojson as rig
 except ImportError:
-    _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(_PROJECT_ROOT))
+    # 未安装时用相对路径兜底（内网离线环境）
+    _HERE = Path(__file__).resolve().parent
+    sys.path.insert(0, str(_HERE))
     import rainfall_impact_geojson as rig
 
 
