@@ -160,3 +160,64 @@ def test_normalize_station_defaults_rain_end_time_to_none():
     station = {"station_id": "A", "name": "站A", "lon": 117.0, "lat": 39.0, "rainfall": 60.0}
     result = frit._normalize_station(station, "暴雨")  # 不传 rain_end_time
     assert result.get("rain_end_time") is None
+
+
+def test_base_response_fields_includes_reference_time():
+    """_base_response_fields 传 reference_time 时，顶层 dict 包含该字段。"""
+    import fixed_rainfall_impact_tool as frit
+    resp = frit._base_response_fields(
+        rainfall_result={}, threshold_mm=50.0, zones=set(), admins=set(),
+        stations=[], segments=[], river_geojson=None,
+        start_stats={}, summary="test",
+        reference_time="2026-07-28T07:30:00Z",
+    )
+    assert resp.get("reference_time") == "2026-07-28T07:30:00Z"
+
+
+def test_base_response_fields_reference_time_defaults_none():
+    """不传 reference_time 时，顶层 dict 有 reference_time: None。"""
+    import fixed_rainfall_impact_tool as frit
+    resp = frit._base_response_fields(
+        rainfall_result={}, threshold_mm=50.0, zones=set(), admins=set(),
+        stations=[], segments=[], river_geojson=None,
+        start_stats={}, summary="test",
+    )
+    assert resp.get("reference_time") is None
+
+
+def test_format_mcp_response_extracts_reference_time_from_builder_result():
+    """_format_mcp_response 从 builder result.params.reference_time 提取到顶层。"""
+    import fixed_rainfall_impact_tool as frit
+    mock_result = {
+        "segments": [],
+        "river_geojson": {"type": "FeatureCollection", "features": []},
+        "downstream_start_stats": {},
+        "impact_stations": [],
+        "river_summary": {"downstream_edge_count": 0},
+        "params": {"reference_time": "2026-07-28T07:30:00Z"},
+        "river_propagation": {"flow_velocity_mps": 2.0, "rivers": []},
+    }
+    rainfall_result = {"time_range_readable": "test"}
+    resp = frit._format_mcp_response(
+        mock_result, rainfall_result, 50.0, set(), set()
+    )
+    assert resp.get("reference_time") == "2026-07-28T07:30:00Z"
+
+
+def test_format_mcp_response_reference_time_none_when_params_missing():
+    """老 builder 无 params 时，reference_time 降级为 None。"""
+    import fixed_rainfall_impact_tool as frit
+    mock_result = {
+        "segments": [],
+        "river_geojson": {"type": "FeatureCollection", "features": []},
+        "downstream_start_stats": {},
+        "impact_stations": [],
+        "river_summary": {"downstream_edge_count": 0},
+        # 故意缺失 params
+        "river_propagation": {"flow_velocity_mps": 2.0, "rivers": []},
+    }
+    rainfall_result = {"time_range_readable": "test"}
+    resp = frit._format_mcp_response(
+        mock_result, rainfall_result, 50.0, set(), set()
+    )
+    assert resp.get("reference_time") is None

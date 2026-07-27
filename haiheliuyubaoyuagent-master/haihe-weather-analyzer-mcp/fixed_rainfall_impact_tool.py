@@ -201,6 +201,7 @@ def _base_response_fields(
     affected_rivers: list[str] | None = None,
     rules: dict | None = None,
     river_propagation: dict | None = None,
+    reference_time: str | None = None,
 ) -> dict:
     """构建问答返回结构中的公共字段。"""
     response = {
@@ -218,6 +219,7 @@ def _base_response_fields(
         "affected_rivers": affected_rivers or [],
         "river_geojson": river_geojson,
         "river_propagation": river_propagation or _empty_propagation(),
+        "reference_time": reference_time,
     }
     if rules is not None:
         response["rules"] = rules
@@ -270,6 +272,7 @@ def _empty_response(
         ),
         rules=IMPACT_RULES,
         river_propagation=_empty_propagation(flow_velocity_mps),
+        reference_time=None,
     )
 
 
@@ -284,6 +287,7 @@ def _format_mcp_response(
         affected_rivers = sorted(
             {str(s.get("rivername") or "").strip() for s in segments if s.get("rivername")}
         )
+    reference_time = (result.get("params") or {}).get("reference_time")
     return _base_response_fields(
         rainfall_result,
         threshold_mm,
@@ -303,6 +307,7 @@ def _format_mcp_response(
         affected_rivers=affected_rivers,
         rules=IMPACT_RULES,
         river_propagation=result.get("river_propagation"),
+        reference_time=reference_time,
     )
 
 
