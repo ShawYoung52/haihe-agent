@@ -252,6 +252,7 @@ def build_rainstorm_impact_thematic_map(
             direct_edges, downstream_edges, flow_velocity_mps,
             luan_mapping=_load_luan_name_mapping(graph_path),
             candidate_rows=geometry_rows,
+            features=river_geojson.get("features", []),
         ),
     })
     return result
@@ -1422,6 +1423,7 @@ def _build_river_propagation(
     flow_velocity_mps: float,
     luan_mapping: dict[str, str] | None = None,
     candidate_rows: list[dict] | None = None,
+    features: list[dict] | None = None,
 ) -> dict:
     """按河流聚合暴雨影响传播时间估算。
 
@@ -1475,6 +1477,32 @@ def _build_river_propagation(
             "has_downstream": has_downstream,
         })
     rivers.sort(key=lambda r: r["propagation_time_hours"], reverse=True)
+
+    # 如果提供了 features（GeoJSON features 列表），从每条 feature 的 estimated_arrival_time
+    # 按 river_name 分组收集，计算每条河的最早/最晚到达时间。
+    if features:
+        from dateutil import parser as dateparser
+        river_arrivals: dict[str, list[datetime]] = {}
+        for feat in features:
+            props = feat.get("properties", {})
+            name = props.get("river_name", "")
+            arrival_str = props.get("estimated_arrival_time")
+            if name and arrival_str:
+                try:
+                    dt = dateparser.parse(arrival_str)
+                    river_arrivals.setdefault(name, []).append(dt)
+                except Exception:
+                    pass
+        for r in rivers:
+            name = r["river_name"]
+            arrivals = river_arrivals.get(name, [])
+            if arrivals:
+                r["earliest_arrival_time"] = _iso_utc(min(arrivals))
+                r["latest_arrival_time"] = _iso_utc(max(arrivals))
+            else:
+                r["earliest_arrival_time"] = None
+                r["latest_arrival_time"] = None
+
     return {"flow_velocity_mps": float(flow_velocity_mps), "rivers": rivers}
 
 

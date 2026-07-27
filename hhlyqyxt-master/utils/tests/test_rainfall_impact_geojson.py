@@ -1123,3 +1123,85 @@ def test_classify_graph_edges_returns_start_nodes_t0():
     assert t0 is not None
     assert t0.hour == 8
     assert t0.minute == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: river_propagation earliest/latest_arrival_time + backward compat
+# ---------------------------------------------------------------------------
+
+
+def test_arrival_none_when_rain_end_missing():
+    """站点无 rain_end_time 时，feature.t0_source_time 和 estimated_arrival_time = None。"""
+    from utils.rainfall_impact_geojson import _resolve_edge_features
+    edge = {
+        "edge_key": "test|key",
+        "objectid": "999",
+        "river_name": "测试河",
+        "from_x": 117.0, "from_y": 39.0,
+        "to_x": 117.01, "to_y": 39.01,
+        "length_km": 10.0,
+        "is_direct_graph_edge": True,
+        "is_luan": False,
+        "min_station_distance_km": 5.0,
+        "trigger_stations": ["站A"],
+        "trigger_station_count": 1,
+        "trigger_rain_end_time": None,  # 无 rain_end_time
+        "row": {"len_km": 10.0, "src_name": "测试河", "objectid": "999"},
+    }
+    features = _resolve_edge_features(
+        [edge], {}, {}, "direct_buffer", {},
+        flow_velocity_mps=2.0,
+    )
+    assert len(features) == 1
+    props = features[0]["properties"]
+    assert props["t0_source_time"] is None
+    assert props["estimated_arrival_time"] is None
+    # propagation_time_hours 不受影响
+    assert props["propagation_time_hours"] > 0
+
+
+def test_river_propagation_arrival_bounds():
+    """river_propagation.rivers 的 earliest/latest_arrival_time 等于该河 features 的 min/max。"""
+    from datetime import datetime, timezone
+    from utils.rainfall_impact_geojson import _build_river_propagation, _iso_utc
+    # 构造 features 列表，含两条河的 arrival 时间
+    features = [
+        {"properties": {"river_name": "甲河", "estimated_arrival_time": "2026-07-27T08:00:00Z"}},
+        {"properties": {"river_name": "甲河", "estimated_arrival_time": "2026-07-27T09:00:00Z"}},
+        {"properties": {"river_name": "乙河", "estimated_arrival_time": "2026-07-27T07:30:00Z"}},
+        # 无 arrival 的 feature 应被忽略
+        {"properties": {"river_name": "甲河", "estimated_arrival_time": None}},
+        {"properties": {"river_name": "丙河", "estimated_arrival_time": "2026-07-27T10:00:00Z"}},
+    ]
+    # 只传必要的 direct_edges/downstream_edges 把河名注册进去
+    direct = {
+        "a": {"edge_key": "a", "river_name": "甲河", "length_km": 7.2, "row": {"src_name": "甲河", "len_km": 7.2}},
+        "b": {"edge_key": "b", "river_name": "乙河", "length_km": 7.2, "row": {"src_name": "乙河", "len_km": 7.2}},
+    }
+    result = _build_river_propagation(direct, [], 2.0, features=features)
+    rivers = {r["river_name"]: r for r in result["rivers"]}
+    assert "甲河" in rivers
+    assert rivers["甲河"]["earliest_arrival_time"] == "2026-07-27T08:00:00Z"
+    assert rivers["甲河"]["latest_arrival_time"] == "2026-07-27T09:00:00Z"
+    # 乙河只有一条带 arrival 的 feature，earliest == latest
+    assert "乙河" in rivers
+    assert rivers["乙河"]["earliest_arrival_time"] == "2026-07-27T07:30:00Z"
+    assert rivers["乙河"]["latest_arrival_time"] == "2026-07-27T07:30:00Z"
+    # 丙河没有 direct/downstream 边，不会出现在 rivers 中
+    assert "丙河" not in rivers
+
+
+def test_backward_compat_missing_rain_end_time():
+    """老调用（不传 features）不 raise，新字段不在 rivers 中。"""
+    from utils.rainfall_impact_geojson import _build_river_propagation
+    direct = {"a": {"edge_key": "a", "river_name": "甲河", "length_km": 7.2, "row": {"src_name": "甲河", "len_km": 7.2}}}
+    # 不传 features（老调用）
+    result = _build_river_propagation(direct, [], 2.0)
+    assert "rivers" in result
+    assert len(result["rivers"]) == 1
+    r = result["rivers"][0]
+    assert r["river_name"] == "甲河"
+    assert r["propagation_time_hours"] == 1.0
+    # 老调用不应该有 arrival 字段
+    assert "earliest_arrival_time" not in r
+    assert "latest_arrival_time" not in r
