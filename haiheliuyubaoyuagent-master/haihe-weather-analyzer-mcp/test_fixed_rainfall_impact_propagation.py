@@ -130,12 +130,21 @@ def test_empty_response_station_buffer_km_is_20():
 
 
 def test_derive_rain_end_time_from_time_range_readable():
-    """从 time_range_readable（"至 YYYY-MM-DD HH:MM"）派生 ISO 结束时刻。"""
+    """从 time_range_readable（生产格式 "X ~ Y"）派生结束时刻，返回原字符串交给牵引层做时区归一。"""
     import fixed_rainfall_impact_tool as frit
-    result = {"time_range_readable": "2026-07-27 15:30 至 2026-07-28 07:30"}
+    # 生产格式（tools.py:1399）
+    result = {"time_range_readable": "2026-07-22 08:00 ~ 2026-07-23 08:00"}
     end = frit._derive_rain_end_time(result)
-    assert end is not None
-    assert "07:30" in str(end) or "07:30" in end
+    # 直接返回原字符串（naive BJT）；由牵引层的 _normalize_end_time 做 Asia/Shanghai→UTC
+    assert end == "2026-07-23 08:00", f"期望原字符串 '2026-07-23 08:00'，实际: {end!r}"
+
+
+def test_derive_rain_end_time_supports_zhi_separator():
+    """兼容旧格式 'X 至 Y' 分隔符。"""
+    import fixed_rainfall_impact_tool as frit
+    result = {"time_range_readable": "2026-07-22 08:00 至 2026-07-23 08:00"}
+    end = frit._derive_rain_end_time(result)
+    assert end == "2026-07-23 08:00", f"期望原字符串 '2026-07-23 08:00'，实际: {end!r}"
 
 
 def test_derive_rain_end_time_returns_none_when_missing():

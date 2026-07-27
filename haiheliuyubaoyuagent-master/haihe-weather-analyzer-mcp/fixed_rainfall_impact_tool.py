@@ -36,6 +36,9 @@ IMPACT_RULES = {
         "顶层 reference_time = 所有 rainstorm_stations 中最早 rain_end_time（UTC ISO Z）。"
         "站点 rain_end_time 从 rainfall_result 顶层 time_range 末端派生，"
         "所有站点共用查询时段结束时刻。"
+        "（注：当前 MCP 实现将查询窗口末端时刻派生给所有 rainstorm_stations 共用，"
+        "非站点实际雨止时刻；每条 direct edge 的 T0 因此塌成同一值。"
+        "未来若上游按站点提供真实 rain_end_time，可去除此约束。）"
     ),
 }
 
@@ -103,12 +106,16 @@ def _normalize_station(station: dict, level: str, rain_end_time: str | None = No
 
 
 def _derive_rain_end_time(rainfall_result: dict | None) -> str | None:
-    """从 rainfall_result 顶层派生 rain_end_time ISO 字符串。
+    """从 rainfall_result 顶层派生 rain_end_time 字符串（不做时区转换）。
 
     尝试顺序：
     1. time_range 字段（"[start,end]" 格式，取 end 部分）
-    2. time_range_readable 字段（"X 至 Y" 格式，取 Y）
+    2. time_range_readable 字段（"X ~ Y" 或 "X 至 Y" 格式，取 Y）
     若都缺失或无法解析，返回 None（不抛异常）。
+
+    注意：直接返回原字符串（naive BJT 或已带 tz），交给牵引层
+    hhlyqyxt-master/utils/rainfall_impact_geojson.py:_normalize_end_time
+    做 "naive→Asia/Shanghai→UTC" 归一化，避免在 MCP 层重复实现 tz 逻辑。
     """
     if not isinstance(rainfall_result, dict):
         return None
@@ -120,27 +127,19 @@ def _derive_rain_end_time(rainfall_result: dict | None) -> str | None:
         if len(parts) == 2:
             end_raw = parts[1].strip()
             if end_raw and len(end_raw) >= 8:
-                try:
-                    from dateutil import parser as dateparser
-                    dt = dateparser.parse(end_raw)
-                    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                except Exception:
-                    logger.warning("解析 time_range 失败: %s", end_raw)
-                    return end_raw
+                # 直接返回原字符串（naive BJT 或已带 tz），让牵引层
+                # _normalize_end_time 走 "naive→Asia/Shanghai→UTC" 归一化
+                return end_raw
 
-    # 次选 time_range_readable（中文格式）
+    # 次选 time_range_readable（中文格式 "X 至 Y" 或生产格式 "X ~ Y"）
     trr = rainfall_result.get("time_range_readable")
     if isinstance(trr, str):
         m = re.search(r"[至~]\s*(\S+(?:\s+\S+)?)\s*$", trr)
         if m:
             end_raw = m.group(1).strip()
-            try:
-                from dateutil import parser as dateparser
-                dt = dateparser.parse(end_raw)
-                return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except Exception:
-                logger.warning("解析 time_range_readable 失败: %s", end_raw)
-                return end_raw
+            # 直接返回原字符串（naive BJT 或已带 tz），让牵引层
+            # _normalize_end_time 走 "naive→Asia/Shanghai→UTC" 归一化
+            return end_raw if end_raw else None
 
     return None
 

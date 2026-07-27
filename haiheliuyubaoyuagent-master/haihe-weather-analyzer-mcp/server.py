@@ -89,11 +89,11 @@ class HaiheWeatherAnalyzerMCP:
                     "query_rolling_forecast - 天津滚动预报综合天气查询",
                 ],
                 "rainfall_impact_rule": {
-                    "direct": "30km缓冲区只用于判断直接影响，直接河流完整输出",
+                    "direct": "20km缓冲区只用于判断直接影响，直接河流完整输出",
                     "downstream": "从直接河流下游端点追踪50km，最后一段截断",
                     "direct_match": "直接命中真实河段与pkl边匹配采用10km阈值，对齐牵引智能体",
                     "geometry": f"使用 {RIVER_TABLE_FULL} 真实河流几何",
-                    "propagation": "river_propagation 按统一经验流速（默认2m/s）估算河流级传播时间",
+                    "propagation": "river_propagation 按统一经验流速（默认2m/s）估算河流级传播时间；GeoJSON feature.properties 附 estimated_arrival_time（UTC ISO Z）= t0_source_time + propagation_time_hours",
                 },
                 "compatibility_note": "已保留 analyze_rainstorm_impact 等原有调用方式；新增拆分工具用于分阶段调用，前端可按需渐进迁移。",
                 "deprecated_aggregated_tools": [
