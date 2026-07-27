@@ -272,8 +272,16 @@ def verify_arrival_time_consistency(result: dict) -> bool:
     ]
     if all_t0s:
         earliest_t0 = min(all_t0s)
-        if ref_time != earliest_t0:
-            print(f"  ✗ params.reference_time={ref_time}，但 feature 中最早 t0={earliest_t0}")
+        # reference_time 是所有 rainstorm_stations（含未触发河流的阈值以上站）的最早 rain_end_time，
+        # 涵盖范围是 trigger 站的超集，故 reference_time <= earliest_t0 是硬性口径（可 <，不可 >）
+        try:
+            ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00")) if ref_time else None
+            earliest_dt = datetime.fromisoformat(earliest_t0.replace("Z", "+00:00"))
+            if ref_dt is None or ref_dt > earliest_dt:
+                print(f"  ✗ params.reference_time={ref_time} > 最早 trigger t0={earliest_t0}")
+                issues += 1
+        except Exception as e:
+            print(f"  ✗ reference_time 解析失败: {e}")
             issues += 1
     else:
         if ref_time is not None:

@@ -1094,6 +1094,60 @@ def test_downstream_edge_t0_takes_min_when_multiple_starts_converge():
     assert edge_402.get("t0_source_time") == t0_early
 
 
+def test_downstream_t0_transitive_convergence():
+    """BFS 传递性 T0 收敛：早 t0 通过较长路径到达中间节点时，下游 t0 也必须收敛到早值。
+
+    场景（安全隐患：t0 报晚 = arrival 报晚 = 应急响应遗漏）：
+      A(t0=late)  --5km-->  X
+      B(t0=early) --10km--> Y --5km--> X --10km--> Z
+
+    单遍 Dijkstra 中 X 先被短路径以晚 t0 弹出并向 Z 传播；随后 Y 走长路径带来早 t0，
+    best_t0[X] 会被更新为早 t0，但如果 X 不重放，Z 的 t0 停留在晚值。
+    修复要求：t0 改进后 X 重新入堆（用其当前最短距离）→ 下游 Z t0 收敛为早值。
+    """
+    from datetime import datetime, timezone
+
+    edges = [
+        # A → X（短路径，5km，带 late t0）
+        ("A,0", "X,0", 0, {"objectid": "500", "src_name": "东河", "length_km": 5.0}),
+        # B → Y（10km，带 early t0）
+        ("B,0", "Y,0", 0, {"objectid": "501", "src_name": "东河", "length_km": 10.0}),
+        # Y → X（5km，把 early t0 传到 X，但距离更远：10+5=15 > 5）
+        ("Y,0", "X,0", 0, {"objectid": "502", "src_name": "东河", "length_km": 5.0}),
+        # X → Z（下游，10km）
+        ("X,0", "Z,0", 0, {"objectid": "503", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    t0_early = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)
+    t0_late = datetime(2026, 7, 27, 9, 0, 0, tzinfo=timezone.utc)
+    starts = {"A,0": (0.0, t0_late), "B,0": (0.0, t0_early)}
+    downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
+
+    # 下游边 503 (X→Z) 必须继承 t0_early（B→Y→X 的传递性收敛）
+    edge_503 = next((e for e in downstream if e["objectid"] == "503"), None)
+    assert edge_503 is not None, "下游边 503 (X→Z) 缺失"
+    assert edge_503.get("t0_source_time") == t0_early, (
+        f"传递性 T0 收敛失败: X→Z 边 t0={edge_503.get('t0_source_time')}，预期 {t0_early} "
+        f"（若为 {t0_late}，说明 X 未 re-visit，Z 保留 stale 晚 t0 = 安全隐患）"
+    )
+
+
+def test_downstream_edges_no_from_node_leak():
+    """回填 t0_source_time 后 from_node 内部字段必须删除，避免 JSON 序列化非字符串 node 出错。"""
+    from datetime import datetime, timezone
+
+    edges = [
+        ("0.5,0", "1.0,0", 0, {"objectid": "600", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    starts = {"0.5,0": (0.0, datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc))}
+    downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
+    for edge in downstream:
+        assert "from_node" not in edge, f"from_node 内部字段泄漏到输出: {edge!r}"
+
+
 def test_classify_graph_edges_returns_start_nodes_t0():
     """_classify_graph_edges 返回值升级为 4-元组，包含 start_nodes_t0 dict。"""
     from datetime import datetime, timezone

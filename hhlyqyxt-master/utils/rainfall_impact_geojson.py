@@ -839,21 +839,31 @@ def _collect_downstream_edges(starts: dict, graph, direct_keys: set[str], downst
             if next_distance > downstream_km:
                 continue
             # T0 传播：取上游最早 t0（无论 distance 是否改进都要更新）
+            t0_improved = False
             upstream_t0 = best_t0.get(u)
             if upstream_t0 is not None:
                 existing_t0 = best_t0.get(v)
                 if existing_t0 is None or upstream_t0 < existing_t0:
                     best_t0[v] = upstream_t0
+                    t0_improved = True
             else:
                 best_t0.setdefault(v, None)
-            # 只有 distance 改进时才 push（保持 Dijkstra 语义）
+            # 距离改进：常规 Dijkstra 松弛，push v 以最短距离展开下游
             if next_distance < best_dist.get(v, math.inf):
                 best_dist[v] = next_distance
                 heapq.heappush(heap, (next_distance, next(seq), v))
+            # 距离未改进但 t0 改进：以 v 当前最优距离 re-push，触发出边重放让 t0 收敛到下游。
+            # _save_downstream_edge 对同 edge_key 且 min_distance_km <= start_km 幂等返回，
+            # 不会污染下游 edge 的 min_distance_km；t0 收敛次数被 best_t0 单调递减性限制为有限。
+            elif t0_improved:
+                heapq.heappush(heap, (best_dist.get(v, next_distance), next(seq), v))
     # 回填 t0_source_time 到 edge：使用 edge["from_node"] 直接取原始 node 对象，
     # 避免依赖 str(u) 反解 edge_key（node 可能是 tuple/list 而非字符串）。
+    # 回填后必须删除 from_node —— 它是内部实现细节，若泄漏到输出，
+    # JSON 序列化非字符串 node（如 tuple/list）会 mangle。
     for edge in edges.values():
         edge["t0_source_time"] = best_t0.get(edge["from_node"])
+        del edge["from_node"]
     return sorted(edges.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["edge_key"]))
 
 
