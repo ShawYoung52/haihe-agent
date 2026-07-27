@@ -199,7 +199,7 @@ def build_rainstorm_impact_thematic_map(
                 river_name_column,
                 station_buffer_km,
             )
-            direct_edges, start_nodes, downstream_start_stats = _classify_graph_edges(
+            direct_edges, start_nodes, downstream_start_stats, start_nodes_t0 = _classify_graph_edges(
                 candidate_rows,
                 graph,
                 rainstorm_stations,
@@ -208,7 +208,8 @@ def build_rainstorm_impact_thematic_map(
             )
             direct_keys = set(direct_edges)
             downstream_edges = _collect_downstream_edges(
-                {node: 0.0 for node in start_nodes}, graph, direct_keys, downstream_km
+                {node: (0.0, start_nodes_t0.get(node)) for node in start_nodes},
+                graph, direct_keys, downstream_km,
             )
             geometry_rows = _fetch_missing_edge_rows(
                 cur,
@@ -613,11 +614,11 @@ def _classify_graph_edges(
     stations: list[dict],
     station_buffer_km: float,
     direct_match_km: float,
-) -> tuple[dict[str, dict], set[Any], dict]:
+) -> tuple[dict[str, dict], set[Any], dict, dict[Any, datetime | None]]:
     """
     把 full_v6 候选行匹配到 pkl 边并分类。站点缓冲区（station_buffer_km）内的所有边
     都作为 direct_buffer 输出，其中距站点 ≤ direct_match_km 的标记 is_direct_graph_edge=true。
-    返回 (direct_edges, downstream_start_nodes, stats)。
+    返回 (direct_edges, downstream_start_nodes, stats, start_nodes_t0)。
     """
     lookup = _build_edge_lookup(candidate_rows)
     spatial_lookup = _build_spatial_lookup(candidate_rows)
@@ -626,6 +627,7 @@ def _classify_graph_edges(
     direct_match_count = 0
     buffer_only_count = 0
     start_nodes: set[Any] = set()
+    start_nodes_t0: dict[Any, datetime | None] = {}
 
     for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
         edge_key = _edge_key(u, v, key, attr)
@@ -698,6 +700,14 @@ def _classify_graph_edges(
         else:
             buffer_only_count += 1
         start_nodes.add(v)
+        # 记录该 start_node 对应的最早 T0（多条直接段汇合到同一节点时取 min）
+        if trigger_rain_end_time is not None:
+            existing = start_nodes_t0.get(v)
+            if existing is None or trigger_rain_end_time < existing:
+                start_nodes_t0[v] = trigger_rain_end_time
+        else:
+            # 保持 key 存在（None 表示无 T0，但节点确实是 start）
+            start_nodes_t0.setdefault(v, None)
 
     unmatched_rows = sum(1 for r in candidate_rows if id(r) not in used_row_ids)
     if unmatched_rows:
@@ -709,7 +719,7 @@ def _classify_graph_edges(
         direct_match_km=direct_match_km,
         station_buffer_km=station_buffer_km,
     )
-    return direct_edges, start_nodes, stats
+    return direct_edges, start_nodes, stats, start_nodes_t0
 
 
 def _fetch_missing_edge_rows(
@@ -804,21 +814,46 @@ def _iter_edges_with_points(graph):
         yield u, v, key, attr, p1, p2
 
 
-def _collect_downstream_edges(starts: dict[Any, float], graph, direct_keys: set[str], downstream_km: float) -> list[dict]:
-    best = dict(starts)
+def _collect_downstream_edges(starts: dict, graph, direct_keys: set[str], downstream_km: float) -> list[dict]:
+    # 兼容老签名：{node: float} → {node: (float, None)}
+    _starts: dict[Any, tuple[float, datetime | None]] = {}
+    for node, val in starts.items():
+        if isinstance(val, (int, float)):
+            _starts[node] = (float(val), None)
+        else:
+            _starts[node] = (float(val[0]), val[1] if len(val) > 1 else None)
+
+    best_dist = {node: d for node, (d, _) in _starts.items()}
+    best_t0: dict[Any, datetime | None] = {node: t0 for node, (_, t0) in _starts.items()}
     seq = count()
-    heap = [(float(dist), next(seq), node) for node, dist in starts.items()]
+    heap = [(float(dist), next(seq), node) for node, (dist, _) in _starts.items()]
     heapq.heapify(heap)
     edges: dict[str, dict] = {}
     while heap:
         distance, _seq, node = heapq.heappop(heap)
-        if distance > best.get(node, math.inf) or distance >= downstream_km:
+        if distance > best_dist.get(node, math.inf) or distance >= downstream_km:
             continue
         for u, v, key, attr in iter_out_edges(graph, node):
             next_distance = _save_downstream_edge(edges, u, v, key, attr, distance, downstream_km, direct_keys)
-            if next_distance <= downstream_km and next_distance < best.get(v, math.inf):
-                best[v] = next_distance
+            if next_distance > downstream_km:
+                continue
+            # T0 传播：取上游最早 t0（无论 distance 是否改进都要更新）
+            upstream_t0 = best_t0.get(u)
+            if upstream_t0 is not None:
+                existing_t0 = best_t0.get(v)
+                if existing_t0 is None or upstream_t0 < existing_t0:
+                    best_t0[v] = upstream_t0
+            else:
+                best_t0.setdefault(v, None)
+            # 只有 distance 改进时才 push（保持 Dijkstra 语义）
+            if next_distance < best_dist.get(v, math.inf):
+                best_dist[v] = next_distance
                 heapq.heappush(heap, (next_distance, next(seq), v))
+    # 回填 t0_source_time 到 edge：edge_key 格式 "from|to|key|objectid|river_name"，
+    # 取起点节点最终的 best_t0（BFS 结束时所有节点 t0 已收敛）。
+    for edge_key, edge in edges.items():
+        from_node = edge_key.split("|", 1)[0]
+        edge["t0_source_time"] = best_t0.get(from_node)
     return sorted(edges.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["edge_key"]))
 
 

@@ -117,7 +117,7 @@ def test_classify_uses_sql_distance_for_meandering_geometry():
     # 弦距约 100km（站点在 50,50），但 SQL 真实几何距离 5km
     rows = [_candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0)]
     stations = [{"lon": 50.0, "lat": 50.0, "rain_24h": 60.0}]
-    direct_edges, start_nodes, stats = _run_classify(edges, rows, stations)
+    direct_edges, start_nodes, stats, _ = _run_classify(edges, rows, stations)
     assert len(direct_edges) == 1
     assert list(direct_edges.values())[0]["is_direct_graph_edge"] is True
     assert len(start_nodes) == 1
@@ -135,7 +135,7 @@ def test_classify_buffer_only_edges_become_starts_not_direct():
         _candidate_row("101", (0.1, 0.0), (0.2, 0.0), min_dist=20.0, trigger_station_count=1),
     ]
     stations = [{"lon": 0.0, "lat": 0.0, "rain_24h": 60.0}]
-    direct_edges, start_nodes, stats = _run_classify(edges, rows, stations)
+    direct_edges, start_nodes, stats, _ = _run_classify(edges, rows, stations)
     # 两条候选边都进 direct_edges，用 is_direct_graph_edge 区分
     assert len(direct_edges) == 2
     by_oid = {e["objectid"]: e for e in direct_edges.values()}
@@ -154,7 +154,7 @@ def test_classify_skips_edges_without_candidate_row():
     ]
     rows = [_candidate_row("999", (0.0, 0.0), (1.0, 0.0), min_dist=1.0, name="西河")]
     stations = [{"lon": 0.0, "lat": 0.0, "rain_24h": 60.0}]
-    direct_edges, start_nodes, stats = _run_classify(edges, rows, stations)
+    direct_edges, start_nodes, stats, _ = _run_classify(edges, rows, stations)
     assert len(direct_edges) == 0
     assert len(start_nodes) == 0
     assert stats["station_buffer_fallback_used"] is False
@@ -167,7 +167,7 @@ def test_classify_falls_back_to_chord_distance_without_sql_distance():
     ]
     rows = [_candidate_row("100", (0.0, 0.0), (0.1, 0.0), min_dist=None)]
     stations = [{"lon": 0.05, "lat": 0.0, "rain_24h": 60.0}]
-    direct_edges, start_nodes, stats = _run_classify(edges, rows, stations)
+    direct_edges, start_nodes, stats, _ = _run_classify(edges, rows, stations)
     assert len(direct_edges) == 1
     assert list(direct_edges.values())[0]["is_direct_graph_edge"] is True
 
@@ -409,7 +409,7 @@ def test_classify_emits_buffer_only_edge_as_direct_with_flag():
         # 102 不在候选行中（超出 30km 缓冲区）
     ]
     stations = [{"lon": 0.0, "lat": 0.0, "rain_24h": 60.0}]
-    direct_edges, start_nodes, stats = _run_classify(edges, rows, stations)
+    direct_edges, start_nodes, stats, _ = _run_classify(edges, rows, stations)
     # 100 (≤10km) 和 101 (10-30km) 都应作为 direct_buffer
     assert len(direct_edges) == 2
     by_oid = {e["objectid"]: e for e in direct_edges.values()}
@@ -465,7 +465,7 @@ def test_classify_uses_spatial_fallback_when_endpoint_key_mismatches():
         "trigger_station_count": 1,
     }]
     stations = [{"lon": 0.5, "lat": 0.0, "rain_24h": 60.0}]
-    direct_edges, start_nodes, stats = _run_classify(edges, rows, stations)
+    direct_edges, start_nodes, stats, _ = _run_classify(edges, rows, stations)
     assert len(direct_edges) == 1
     assert list(direct_edges.values())[0]["is_direct_graph_edge"] is True
 
@@ -717,7 +717,7 @@ def test_classify_graph_edges_marks_direct_and_buffer_only():
     ]
     # station 5km from the edge midpoint → within direct_match_km
     stations = [{"lon": 116.05, "lat": 39.0, "rain_24h": 100.0}]
-    direct_edges, start_nodes, stats = rig._classify_graph_edges(
+    direct_edges, start_nodes, stats, _ = rig._classify_graph_edges(
         candidate_rows, graph, stations, station_buffer_km=20.0, direct_match_km=10.0
     )
     assert len(direct_edges) == 1
@@ -1011,10 +1011,115 @@ def test_classify_direct_edge_records_earliest_trigger_rain_end_time():
     ]
     # stations 需先归一化以带 rain_end_time
     normalized_stations = rig._normalize_stations(stations, 50.0)
-    direct_edges, _, _ = _run_classify(edges, rows, normalized_stations)
+    direct_edges, _, _, _ = _run_classify(edges, rows, normalized_stations)
     assert len(direct_edges) == 1
     edge = list(direct_edges.values())[0]
     assert edge["trigger_rain_end_time"] is not None
     # 最早的是 B 的 07:30
     assert edge["trigger_rain_end_time"].hour == 7
     assert edge["trigger_rain_end_time"].minute == 30
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: 下游 BFS T0 传播
+# ---------------------------------------------------------------------------
+
+
+def test_downstream_edges_pending_backward_compat():
+    """老签名 {node: 0.0}（纯 float 值）应仍被接受，不抛异常。"""
+    edges = [
+        ("0,0", "0.1,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 10.0}),
+        ("0.1,0", "0.2,0", 0, {"objectid": "101", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    # 老签名：value 是纯 float
+    downstream = rig._collect_downstream_edges({"0,0": 0.0}, graph, set(), 50.0)
+    # 至少能跑通，不 raise TypeError/KeyError
+    assert isinstance(downstream, list)
+    # 老签名下 t0_source_time 应为 None
+    for edge in downstream:
+        assert edge.get("t0_source_time") is None
+
+
+def test_downstream_edge_t0_is_min_upstream_rain_end():
+    """下游段 t0_source_time = 上游直接段中最早 rain_end_time。
+
+    两条直接段 A/B 都汇合到下游节点 c，A 有更早 t0，最终下游边 t0 = A 的 t0。
+    """
+    from datetime import datetime, timezone
+    # a → c (via node "0.0,0"→"0.5,0")
+    # b → c (via node "0.5,0.5"→"0.5,0")
+    # c → d (下游边，应继承最早 t0)
+    edges = [
+        ("0.5,0", "1.0,0", 0, {"objectid": "300", "src_name": "东河", "length_km": 10.0}),
+        ("1.0,0", "1.5,0", 0, {"objectid": "301", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    t0_early = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)
+    t0_late = datetime(2026, 7, 27, 7, 0, 0, tzinfo=timezone.utc)
+    # 两个 start_node 都是 "0.5,0"（模拟两条直接段的终点），t0 不同
+    # 由于 dict 键唯一，我们用新签名让 starts 直接携带 t0
+    starts = {"0.5,0": (0.0, t0_early)}
+    downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
+    # 下游第 1 条边（"0.5,0" → "1.0,0"）应带 t0_early
+    assert len(downstream) >= 1
+    edge_1 = next(e for e in downstream if e["objectid"] == "300")
+    assert edge_1.get("t0_source_time") == t0_early
+    # 传播到 "1.0,0" → "1.5,0"，应继续继承 t0_early
+    edge_2 = next(e for e in downstream if e["objectid"] == "301")
+    assert edge_2.get("t0_source_time") == t0_early
+
+
+def test_downstream_edge_t0_takes_min_when_multiple_starts_converge():
+    """两个不同 t0 的 start_nodes 汇合到同一下游节点时，取最早 t0。"""
+    from datetime import datetime, timezone
+    # 两条独立入口都指向同一下游 node "1.0,0"
+    edges = [
+        ("A,0", "1.0,0", 0, {"objectid": "400", "src_name": "东河", "length_km": 10.0}),
+        ("B,0", "1.0,0", 0, {"objectid": "401", "src_name": "东河", "length_km": 10.0}),
+        ("1.0,0", "2.0,0", 0, {"objectid": "402", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    t0_early = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)
+    t0_late = datetime(2026, 7, 27, 9, 0, 0, tzinfo=timezone.utc)
+    # A 更早，B 更晚。两者都作为 start_nodes（distance=0），BFS 走到 "1.0,0" 时取 min t0
+    starts = {"A,0": (0.0, t0_late), "B,0": (0.0, t0_early)}
+    downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
+    # 下游边 402（"1.0,0" → "2.0,0"）应带 min(t0_early, t0_late) = t0_early
+    edge_402 = next((e for e in downstream if e["objectid"] == "402"), None)
+    assert edge_402 is not None
+    assert edge_402.get("t0_source_time") == t0_early
+
+
+def test_classify_graph_edges_returns_start_nodes_t0():
+    """_classify_graph_edges 返回值升级为 4-元组，包含 start_nodes_t0 dict。"""
+    from datetime import datetime, timezone
+    edges = [
+        ("0,0", "0.1,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 10.0}),
+    ]
+    rows = [
+        _candidate_row(
+            "100", (0.0, 0.0), (0.1, 0.0), min_dist=5.0,
+            trigger_station_count=1,
+            trigger_stations=[{"station_id": "A"}],
+        )
+    ]
+    stations = [
+        {"station_id": "A", "lon": 0.0, "lat": 0.0, "rain_24h": 60.0,
+         "rain_end_time": datetime(2026, 7, 27, 8, 0, 0, tzinfo=timezone.utc)}
+    ]
+    normalized = rig._normalize_stations(stations, 50.0)
+    result = _run_classify(edges, rows, normalized)
+    # 现在应是 4-元组
+    assert len(result) == 4
+    direct_edges, start_nodes, stats, start_nodes_t0 = result
+    assert "0.1,0" in start_nodes
+    assert "0.1,0" in start_nodes_t0
+    # start_nodes_t0["0.1,0"] 应为 A 的 rain_end_time（UTC）
+    t0 = start_nodes_t0["0.1,0"]
+    assert t0 is not None
+    assert t0.hour == 8
+    assert t0.minute == 0
