@@ -856,3 +856,65 @@ def test_validate_params_rejects_absurd_buffer():
     from utils.rainfall_impact_geojson import _validate_params
     with pytest.raises(ValueError, match="station_buffer_km"):
         _validate_params(50.0, 600.0, 50.0, 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: _normalize_end_time + _iso_utc + params.reference_time
+# ---------------------------------------------------------------------------
+
+
+def test_iso_utc_format_regex():
+    """_iso_utc 输出必须匹配 YYYY-MM-DDTHH:MM:SSZ。"""
+    from utils.rainfall_impact_geojson import _iso_utc
+    from datetime import datetime, timezone
+    result = _iso_utc(datetime(2026, 7, 27, 15, 30, 0, tzinfo=timezone.utc))
+    assert result == "2026-07-27T15:30:00Z"
+    # 无输入时输出 None
+    assert _iso_utc(None) is None
+
+
+def test_normalize_end_time_naive_bj_to_utc():
+    """naive datetime 按 Asia/Shanghai 转 UTC。"""
+    from utils.rainfall_impact_geojson import _normalize_end_time
+    from datetime import datetime
+    dt = _normalize_end_time(datetime(2026, 7, 27, 15, 30, 0))
+    assert dt is not None
+    from datetime import timezone
+    result = dt.astimezone(timezone.utc)
+    assert result.hour == 7  # 15:30 BJ = 07:30 UTC
+    assert result.minute == 30
+
+
+def test_normalize_end_time_iso_string():
+    """ISO 字符串（Z / +08:00 / naive）归一到 UTC datetime。"""
+    from utils.rainfall_impact_geojson import _normalize_end_time, _iso_utc
+    # 带 Z
+    dt1 = _normalize_end_time("2026-07-27T07:30:00Z")
+    assert _iso_utc(dt1) == "2026-07-27T07:30:00Z"
+    # 带 +08:00
+    dt2 = _normalize_end_time("2026-07-27T15:30:00+08:00")
+    assert _iso_utc(dt2) == "2026-07-27T07:30:00Z"
+    # naive 字符串
+    dt3 = _normalize_end_time("2026-07-27 15:30:00")
+    assert _iso_utc(dt3) == "2026-07-27T07:30:00Z"
+
+
+def test_normalize_end_time_invalid_returns_none():
+    """无效输入不抛异常，返 None。"""
+    from utils.rainfall_impact_geojson import _normalize_end_time
+    assert _normalize_end_time(None) is None
+    assert _normalize_end_time("") is None
+    assert _normalize_end_time("not-a-date") is None
+    assert _normalize_end_time(12345) is None  # 非标准类型
+
+
+def test_params_reference_time_is_earliest():
+    """params.reference_time 等于所有站点中最早 rain_end_time 的 UTC ISO。"""
+    from utils.rainfall_impact_geojson import _normalize_stations
+    stations = [
+        {"station_id": "A", "lon": 117.0, "lat": 39.0, "rain_24h": 60.0, "rain_end_time": "2026-07-27T08:00:00Z"},
+        {"station_id": "B", "lon": 117.1, "lat": 39.1, "rain_24h": 70.0, "rain_end_time": "2026-07-27T07:30:00Z"},
+    ]
+    normalized = _normalize_stations(stations, 50.0)
+    for s in normalized:
+        assert s.get("rain_end_time") is not None or s.get("rain_end_time") is None

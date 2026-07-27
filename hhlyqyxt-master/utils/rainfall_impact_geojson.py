@@ -14,6 +14,7 @@ import os
 import pickle
 import re
 import threading
+from datetime import datetime, timedelta, timezone
 from itertools import count
 from pathlib import Path
 from typing import Any, Iterator
@@ -161,6 +162,9 @@ def build_rainstorm_impact_thematic_map(
     _validate_params(rainfall_threshold_mm, station_buffer_km, downstream_km, flow_velocity_mps)
     schema, river_table = _resolve_table(pg_conf, schema, river_table)
     rainstorm_stations = _normalize_stations(stations, rainfall_threshold_mm)
+    # 计算全局 reference_time = 最早雨止时刻（UTC ISO）
+    _end_times = [s.get("rain_end_time") for s in rainstorm_stations if s.get("rain_end_time") is not None]
+    reference_time = _iso_utc(min(_end_times)) if _end_times else None
     result = _empty_result(
         stations=rainstorm_stations,
         threshold=rainfall_threshold_mm,
@@ -173,6 +177,7 @@ def build_rainstorm_impact_thematic_map(
         extra=extra_summary,
         flow_velocity_mps=flow_velocity_mps,
     )
+    result["params"]["reference_time"] = reference_time
     if not rainstorm_stations:
         result["message"] = f"未找到降雨量≥{rainfall_threshold_mm}mm 的站点。"
         return result
@@ -385,6 +390,7 @@ def _empty_result(
             "direct_match_km": float(direct_match_km),
             "river_table": f"{schema}.{table}",
             "graph_path": str(graph_path or _default_graph_path()),
+            "reference_time": None,  # 可选，稍后填充
         },
         "impact_stations": stations,
         "station_geojson": _make_station_geojson(stations),
@@ -425,6 +431,9 @@ def _normalize_station(station: dict, threshold_mm: float) -> dict | None:
         "lat": lat,
         "rain_24h": rainfall,
         "rainfall": rainfall,
+        "rain_end_time": _normalize_end_time(
+            station.get("rain_end_time") or station.get("end_time") or station.get("time")
+        ),
         "level": station.get("level", ""),
     }
 
@@ -1174,6 +1183,61 @@ def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _normalize_end_time(raw: Any) -> datetime | None:
+    """将各种形式的时间输入归一化为 UTC datetime。
+
+    支持：ISO 字符串、datetime（naive→Asia/Shanghai→UTC）、pandas.Timestamp。
+    缺失或无法解析时返回 None + warning。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, str):
+        if not raw.strip():
+            return None
+        try:
+            from dateutil import parser as dateparser
+        except ImportError:
+            logger.warning("dateutil 未安装，无法解析字符串: %s", raw)
+            return None
+        try:
+            dt = dateparser.parse(raw)
+        except (ValueError, TypeError, OverflowError):
+            logger.warning("无法解析 rain_end_time 字符串: %s", raw)
+            return None
+    elif isinstance(raw, pd.Timestamp):
+        try:
+            dt = raw.to_pydatetime()
+        except (AttributeError, ValueError, TypeError):
+            logger.warning("无法转换 pandas.Timestamp: %s", raw)
+            return None
+    else:
+        logger.warning("不支持的 rain_end_time 类型 %s: %s", type(raw).__name__, raw)
+        return None
+
+    if dt.tzinfo is None:
+        # naive → 视为 Asia/Shanghai（生产数据来源）
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        except Exception:
+            # 旧 Python 兜底：+08:00 fixed offset
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt.astimezone(timezone.utc)
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    """datetime → UTC ISO 8601 字符串（YYYY-MM-DDTHH:MM:SSZ），缺失时返回 None。"""
+    if dt is None:
+        return None
+    try:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (AttributeError, ValueError, OSError):
+        logger.warning("_iso_utc 无法格式化时间: %s", dt)
+        return None
 
 
 def _edge_points(u, v):
