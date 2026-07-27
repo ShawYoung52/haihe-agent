@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -78,7 +79,7 @@ def _station_reaches_threshold(station: Any, threshold_mm: float) -> bool:
         return False
 
 
-def _normalize_station(station: dict, level: str) -> dict:
+def _normalize_station(station: dict, level: str, rain_end_time: str | None = None) -> dict:
     name = station.get("name") or station.get("station_name")
     return {
         "station_id": station.get("station_id"),
@@ -89,7 +90,51 @@ def _normalize_station(station: dict, level: str) -> dict:
         "rainfall": station.get("rainfall"),
         "rain_24h": station.get("rainfall"),
         "level": level,
+        "rain_end_time": rain_end_time,
     }
+
+
+def _derive_rain_end_time(rainfall_result: dict | None) -> str | None:
+    """从 rainfall_result 顶层派生 rain_end_time ISO 字符串。
+
+    尝试顺序：
+    1. time_range 字段（"[start,end]" 格式，取 end 部分）
+    2. time_range_readable 字段（"X 至 Y" 格式，取 Y）
+    若都缺失或无法解析，返回 None（不抛异常）。
+    """
+    if not isinstance(rainfall_result, dict):
+        return None
+
+    # 优先 time_range 结构化字段
+    tr = rainfall_result.get("time_range")
+    if isinstance(tr, str) and "," in tr:
+        parts = tr.strip("[]").split(",", 1)
+        if len(parts) == 2:
+            end_raw = parts[1].strip()
+            if end_raw and len(end_raw) >= 8:
+                try:
+                    from dateutil import parser as dateparser
+                    dt = dateparser.parse(end_raw)
+                    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    logger.warning("解析 time_range 失败: %s", end_raw)
+                    return end_raw
+
+    # 次选 time_range_readable（中文格式）
+    trr = rainfall_result.get("time_range_readable")
+    if isinstance(trr, str):
+        m = re.search(r"[至~]\s*(\S+(?:\s+\S+)?)\s*$", trr)
+        if m:
+            end_raw = m.group(1).strip()
+            try:
+                from dateutil import parser as dateparser
+                dt = dateparser.parse(end_raw)
+                return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                logger.warning("解析 time_range_readable 失败: %s", end_raw)
+                return end_raw
+
+    return None
 
 
 def _collect_non_empty_strings(items: list[Any] | None) -> set[str]:
@@ -103,6 +148,7 @@ def _extract_rainstorm_stations(
 ) -> tuple[list[dict], set[str], set[str]]:
     """从降雨分析结果中提取达到阈值的站点及其所属区域。"""
     level_to_threshold = {name: low for name, low, _high in rain_levels}
+    derived_rain_end_time = _derive_rain_end_time(rainfall_result)
     stations: list[dict] = []
     zone_77_regions: set[str] = set()
     admin_divisions: set[str] = set()
@@ -114,7 +160,7 @@ def _extract_rainstorm_stations(
         zone_77_regions.update(_collect_non_empty_strings(level_item.get("zone_77_regions")))
         admin_divisions.update(_collect_non_empty_strings(level_item.get("admin_divisions")))
         stations.extend(
-            _normalize_station(station, level)
+            _normalize_station(station, level, rain_end_time=derived_rain_end_time)
             for station in level_item.get("stations", []) or []
             if _station_reaches_threshold(station, threshold_mm)
         )

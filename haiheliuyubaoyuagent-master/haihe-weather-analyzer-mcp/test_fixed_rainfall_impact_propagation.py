@@ -127,3 +127,36 @@ def test_empty_response_station_buffer_km_is_20():
     downstream_start_stats = start_stats.get("downstream_start_stats", {})
     assert downstream_start_stats.get("station_buffer_km") == 20.0, \
         f"station_buffer_km 应为 20.0，实际: {downstream_start_stats.get('station_buffer_km')}"
+
+
+def test_derive_rain_end_time_from_time_range_readable():
+    """从 time_range_readable（"至 YYYY-MM-DD HH:MM"）派生 ISO 结束时刻。"""
+    import fixed_rainfall_impact_tool as frit
+    result = {"time_range_readable": "2026-07-27 15:30 至 2026-07-28 07:30"}
+    end = frit._derive_rain_end_time(result)
+    assert end is not None
+    assert "07:30" in str(end) or "07:30" in end
+
+
+def test_derive_rain_end_time_returns_none_when_missing():
+    """完全无时间字段时返回 None，不抛异常。"""
+    import fixed_rainfall_impact_tool as frit
+    assert frit._derive_rain_end_time({}) is None
+    assert frit._derive_rain_end_time({"foo": "bar"}) is None
+    assert frit._derive_rain_end_time(None) is None
+
+
+def test_normalize_station_adds_rain_end_time():
+    """_normalize_station 输出含 rain_end_time 字段。"""
+    import fixed_rainfall_impact_tool as frit
+    station = {"station_id": "A", "name": "站A", "lon": 117.0, "lat": 39.0, "rainfall": 60.0}
+    result = frit._normalize_station(station, "暴雨", rain_end_time="2026-07-28T07:30:00Z")
+    assert result.get("rain_end_time") == "2026-07-28T07:30:00Z"
+
+
+def test_normalize_station_defaults_rain_end_time_to_none():
+    """老调用不传 rain_end_time 时，输出 rain_end_time 为 None。"""
+    import fixed_rainfall_impact_tool as frit
+    station = {"station_id": "A", "name": "站A", "lon": 117.0, "lat": 39.0, "rainfall": 60.0}
+    result = frit._normalize_station(station, "暴雨")  # 不传 rain_end_time
+    assert result.get("rain_end_time") is None
