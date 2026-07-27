@@ -103,3 +103,27 @@ def test_build_result_zero_velocity_uses_default(monkeypatch):
     captured: dict = {}
     _run_build(monkeypatch, captured)
     assert captured["flow_velocity_mps"] == 2.0
+
+
+def test_default_station_buffer_km_matches_traction_agent():
+    """IMPACT_RULES["direct"] 应描述 20km 而非 30km。"""
+    import fixed_rainfall_impact_tool as frit
+    rules = frit.IMPACT_RULES
+    direct_text = rules.get("direct", "")
+    assert "20km" in direct_text, f"IMPACT_RULES.direct 应含 20km，实际: {direct_text}"
+    assert "30km" not in direct_text, "IMPACT_RULES.direct 不应含 30km"
+
+
+def test_empty_response_station_buffer_km_is_20():
+    """_empty_response 的 station_buffer_km 应为 20.0。"""
+    import fixed_rainfall_impact_tool as frit
+    resp = frit._empty_response(
+        rainfall_result={},
+        threshold_mm=50.0,
+        zones=set(),
+        admins=set(),
+    )
+    start_stats = resp.get("start_stats", {})
+    downstream_start_stats = start_stats.get("downstream_start_stats", {})
+    assert downstream_start_stats.get("station_buffer_km") == 20.0, \
+        f"station_buffer_km 应为 20.0，实际: {downstream_start_stats.get('station_buffer_km')}"

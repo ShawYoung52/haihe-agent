@@ -20,7 +20,7 @@ DEFAULT_FLOW_VELOCITY_MPS = 2.0
 
 # 影响河网计算规则说明，统一在空结果与有结果响应中复用
 IMPACT_RULES = {
-    "direct": f"full_{RIVER_TABLE_VERSION} 中位于暴雨站点 station_buffer_km（默认 30km）缓冲区内的候选行全部作为 direct_buffer 输出；其中距站点 ≤ direct_match_km（默认 10km）的标记 is_direct_graph_edge=true。距离分类用 SQL 真实几何最近距离，非 pkl 端点弦距。",
+    "direct": f"full_{RIVER_TABLE_VERSION} 中位于暴雨站点 station_buffer_km（默认 20km）缓冲区内的候选行全部作为 direct_buffer 输出；其中距站点 ≤ direct_match_km（默认 10km）的标记 is_direct_graph_edge=true。距离分类用 SQL 真实几何最近距离，非 pkl 端点弦距。",
     "downstream": f"从缓冲区内 pkl 边的下游节点起 Dijkstra 追踪 downstream_km；下游边不在 direct_buffer 中的才记录。下游几何通过 objectid 二次查询 full_{RIVER_TABLE_VERSION} 补全，精确端点键失配时按同 objectid 几何空间邻近兜底匹配。",
     "direction": f"GeoJSON 坐标顺序使用 full_{RIVER_TABLE_VERSION} 数据库原始几何顺序；properties.flow_direction=database_geometry_order。下游裁剪按 pkl from 节点判定方向后从上游端保留 keep_km，纯 Python 无 Shapely 依赖。",
     "dedupe": "每条 pkl 边至多一个 feature：direct_buffer 中的边在下游追踪时跳过记录（遍历继续穿过），消除跨组重复。",
@@ -212,7 +212,7 @@ def _empty_response(
             downstream_edge_count=0,
             downstream_start_stats={
                 "direct_match_km": direct_graph_match_km,
-                "station_buffer_km": 30.0,
+                "station_buffer_km": 20.0,
                 "station_buffer_fallback_used": False,
                 "station_buffer_fallback_edge_count": 0,
                 "direct_part_matched_edge_count": 0,
