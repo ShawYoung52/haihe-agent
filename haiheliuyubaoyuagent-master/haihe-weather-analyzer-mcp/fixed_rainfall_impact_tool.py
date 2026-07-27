@@ -29,6 +29,14 @@ IMPACT_RULES = {
     "match_filter": "已移除 match_distance_km 过滤；改为三级匹配：精确端点键（objectid+端点 6 位小数取整）→ 反向端点键 → 同 objectid 几何空间邻近（两端点 100m 内）。",
     "downstream_dedupe": "已移除 Shapely 几何覆盖去重；重复由结构保证（direct_keys 跳过 + pkl 边天然唯一）。",
     "propagation": "传播时间按统一经验流速 flow_velocity_mps（默认 2.0 m/s ≈ 7.2 km/h）估算：河流级传播距离 ÷ 流速；下游河流取 Dijkstra 累计 end_distance_km 最大值，仅直接受影响的河流取站点缓冲区内最长直接河段长度。河名口径与 affected_rivers 一致。",
+    "arrival": (
+        "GeoJSON feature.properties.estimated_arrival_time（UTC ISO 8601 Z 格式）"
+        "= t0_source_time + propagation_time_hours。直接段 T0 = 该边所有 trigger 站点中最早 "
+        "rain_end_time；下游段 T0 = 上游 direct 段中最早 rain_end_time（沿 BFS 路径传播）。"
+        "顶层 reference_time = 所有 rainstorm_stations 中最早 rain_end_time（UTC ISO Z）。"
+        "站点 rain_end_time 从 rainfall_result 顶层 time_range 末端派生，"
+        "所有站点共用查询时段结束时刻。"
+    ),
 }
 
 

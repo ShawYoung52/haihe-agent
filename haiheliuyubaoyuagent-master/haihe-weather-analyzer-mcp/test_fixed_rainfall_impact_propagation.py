@@ -221,3 +221,14 @@ def test_format_mcp_response_reference_time_none_when_params_missing():
         mock_result, rainfall_result, 50.0, set(), set()
     )
     assert resp.get("reference_time") is None
+
+
+def test_impact_rules_contains_arrival_description():
+    """IMPACT_RULES 应包含 arrival 键且含 'estimated_arrival_time'。"""
+    import fixed_rainfall_impact_tool as frit
+    rules = frit.IMPACT_RULES
+    assert "arrival" in rules, "IMPACT_RULES 应包含 arrival 键"
+    text = rules["arrival"]
+    assert "estimated_arrival_time" in text, "arrival 描述应含 estimated_arrival_time"
+    assert "t0_source_time" in text, "arrival 描述应含 t0_source_time"
+    assert "reference_time" in text, "arrival 描述应含 reference_time"
