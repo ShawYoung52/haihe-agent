@@ -79,7 +79,7 @@ def _run_classify(
     candidate_rows: list[dict],
     stations: list[dict],
     *,
-    station_buffer_km: float = 30.0,
+    station_buffer_km: float = 20.0,
     direct_match_km: float = 10.0,
 ):
     graph_path = _make_graph_path(edges)
@@ -718,7 +718,7 @@ def test_classify_graph_edges_marks_direct_and_buffer_only():
     # station 5km from the edge midpoint → within direct_match_km
     stations = [{"lon": 116.05, "lat": 39.0, "rain_24h": 100.0}]
     direct_edges, start_nodes, stats = rig._classify_graph_edges(
-        candidate_rows, graph, stations, station_buffer_km=30.0, direct_match_km=10.0
+        candidate_rows, graph, stations, station_buffer_km=20.0, direct_match_km=10.0
     )
     assert len(direct_edges) == 1
     assert list(direct_edges.values())[0]["is_direct_graph_edge"] is True
@@ -830,7 +830,7 @@ def test_empty_result_includes_river_propagation_block():
     result = rig._empty_result(
         stations=[],
         threshold=50.0,
-        buffer_km=30.0,
+        buffer_km=20.0,
         downstream_km=50.0,
         direct_match_km=10.0,
         schema="public",
@@ -840,3 +840,19 @@ def test_empty_result_includes_river_propagation_block():
         flow_velocity_mps=3.0,
     )
     assert result["river_propagation"] == {"flow_velocity_mps": 3.0, "rivers": []}
+
+
+def test_default_station_buffer_km_is_20():
+    """默认站点缓冲区应为 20km。"""
+    from utils.rainfall_impact_geojson import build_rainstorm_impact_thematic_map
+    import inspect
+    sig = inspect.signature(build_rainstorm_impact_thematic_map)
+    default = sig.parameters["station_buffer_km"].default
+    assert default == 20.0, f"默认值应为 20.0，实际为 {default}"
+
+
+def test_validate_params_rejects_absurd_buffer():
+    """超过 500km 的缓冲区应该抛 ValueError。"""
+    from utils.rainfall_impact_geojson import _validate_params
+    with pytest.raises(ValueError, match="station_buffer_km"):
+        _validate_params(50.0, 600.0, 50.0, 2.0)

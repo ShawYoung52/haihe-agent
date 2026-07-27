@@ -97,7 +97,7 @@ def _build_rainstorm_context(
     output_dir: str | Path | None = None,
     public_base_url: str | None = None,
     api_time_shift_hours: int | None = None,
-    station_buffer_km: float = 30.0,
+    station_buffer_km: float = 20.0,
     downstream_km: float = 50.0,
     direct_match_km: float = 10.0,
     river_table: str = DEFAULT_RIVER_TABLE,

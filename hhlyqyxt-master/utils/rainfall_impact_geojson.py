@@ -145,7 +145,7 @@ def build_rainstorm_impact_thematic_map(
     db_connection=None,
     graph_path: str | os.PathLike | None = None,
     rainfall_threshold_mm: float = 50.0,
-    station_buffer_km: float = 30.0,
+    station_buffer_km: float = 20.0,
     downstream_km: float = 50.0,
     river_table: str = DEFAULT_RIVER_TABLE,
     schema: str = "public",
@@ -255,7 +255,7 @@ def build_rain24h_impact_river_geojson(
     csv_path: str | os.PathLike,
     *,
     rain_threshold_mm: float = 50.0,
-    station_buffer_km: float = 30.0,
+    station_buffer_km: float = 20.0,
     downstream_km: float = 50.0,
     river_table: str = DEFAULT_RIVER_TABLE,
     schema: str = "public",
@@ -308,6 +308,8 @@ def _validate_params(threshold: float, buffer_km: float, downstream_km: float, f
         raise ValueError("rainfall_threshold_mm 不能为负数")
     if buffer_km <= 0:
         raise ValueError("station_buffer_km 必须大于 0")
+    if buffer_km > 500:
+        raise ValueError("station_buffer_km 不能超过 500km")
     if downstream_km < 0:
         raise ValueError("downstream_km 不能为负数")
     velocity = float(flow_velocity_mps)
