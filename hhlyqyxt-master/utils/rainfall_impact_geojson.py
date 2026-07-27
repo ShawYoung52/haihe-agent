@@ -651,6 +651,30 @@ def _classify_graph_edges(
             continue
 
         is_direct = min_dist <= direct_match_km
+        # 计算 trigger_rain_end_time = 该边所有 trigger 站中最早 rain_end_time。
+        # SQL 层 trigger_stations 是 jsonb_agg(jsonb_build_object(...)) 输出的对象列表，
+        # 元素形如 {"station_id": ..., "station_name": ..., "lon": ..., ...}；
+        # 若上游传入字符串列表也兼容处理。
+        raw_triggers = row.get("trigger_stations") or []
+        trigger_station_ids: set[str] = set()
+        for t in raw_triggers:
+            if isinstance(t, dict):
+                sid = t.get("station_id")
+            else:
+                sid = t
+            if sid is None:
+                continue
+            trigger_station_ids.add(str(sid))
+        trigger_end_times = []
+        if trigger_station_ids:
+            for s in stations:
+                sid = s.get("station_id")
+                if sid is None or str(sid) not in trigger_station_ids:
+                    continue
+                t = _normalize_end_time(s.get("rain_end_time"))
+                if t is not None:
+                    trigger_end_times.append(t)
+        trigger_rain_end_time = min(trigger_end_times) if trigger_end_times else None
         edge_info = {
             "edge_key": edge_key,
             "objectid": objectid,
@@ -663,8 +687,9 @@ def _classify_graph_edges(
             "is_direct_graph_edge": is_direct,
             "is_luan": bool(attr.get("is_luan")),
             "min_station_distance_km": round(float(min_dist), 3),
-            "trigger_stations": row.get("trigger_stations") or [],
+            "trigger_stations": raw_triggers,
             "trigger_station_count": int(row.get("trigger_station_count") or 0),
+            "trigger_rain_end_time": trigger_rain_end_time,
             "row": row,
         }
         direct_edges[edge_key] = edge_info
@@ -925,6 +950,8 @@ def _resolve_edge_features(
 
         river_name = _pick_river_name(row, edge, luan_mapping)
         is_direct = impact_type == "direct_buffer"
+        # 基准时间 T0：直接段=trigger_rain_end_time，下游段=t0_source_time（待实现）
+        t0 = edge.get("trigger_rain_end_time" if is_direct else "t0_source_time")
         # 传播距离
         prop_distance = (
             float(edge.get("end_distance_km") or 0)
@@ -936,6 +963,15 @@ def _resolve_edge_features(
         else:
             prop_distance = 0.0
             prop_time = 0.0
+
+        # 预计到达时间
+        if t0 is not None and math.isfinite(prop_time) and prop_time >= 0:
+            arrival = t0 + timedelta(hours=prop_time)
+            t0_iso = _iso_utc(t0)
+            arrival_iso = _iso_utc(arrival)
+        else:
+            t0_iso = _iso_utc(t0)  # 可能为 None
+            arrival_iso = None
 
         feature = {
             "type": "Feature",
@@ -968,6 +1004,9 @@ def _resolve_edge_features(
                 # 传播时间（所有河段统一）
                 "propagation_distance_km": round(prop_distance, 3),
                 "propagation_time_hours": prop_time,
+                # 预计到达时间（UTC ISO 字符串；缺失时为 None）
+                "t0_source_time": t0_iso,
+                "estimated_arrival_time": arrival_iso,
             },
             "geometry": geometry,
         }

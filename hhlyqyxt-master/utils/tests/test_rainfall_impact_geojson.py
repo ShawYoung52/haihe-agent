@@ -918,3 +918,103 @@ def test_params_reference_time_is_earliest():
     normalized = _normalize_stations(stations, 50.0)
     for s in normalized:
         assert s.get("rain_end_time") is not None or s.get("rain_end_time") is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: direct_edge trigger_rain_end_time + per-feature arrival time
+# ---------------------------------------------------------------------------
+
+
+def test_direct_edge_arrival_equals_t0_plus_propagation():
+    """直接段 estimated_arrival_time = trigger_rain_end_time + length_km/velocity_kmh。"""
+    from datetime import datetime, timezone
+    edge = {
+        "edge_key": "test|key",
+        "objectid": "999",
+        "river_name": "测试河",
+        "from_x": 117.0, "from_y": 39.0,
+        "to_x": 117.01, "to_y": 39.01,
+        "length_km": 10.0,
+        "is_direct_graph_edge": True,
+        "is_luan": False,
+        "min_station_distance_km": 5.0,
+        "trigger_stations": [{"station_id": "站A", "rain_24h": 60.0}],
+        "trigger_station_count": 1,
+        "trigger_rain_end_time": datetime(2026, 7, 27, 7, 30, 0, tzinfo=timezone.utc),
+        "row": {"len_km": 10.0, "src_name": "测试河", "objectid": "999"},
+    }
+    features = rig._resolve_edge_features(
+        [edge], {}, {}, "direct_buffer", {},
+        flow_velocity_mps=2.0,
+    )
+    assert len(features) == 1
+    props = features[0]["properties"]
+    assert props["t0_source_time"] == "2026-07-27T07:30:00Z"
+    # 10km / (2.0*3.6 kmh) = 10/7.2 ≈ 1.389h ≈ round to 1.4h
+    # arrival = 07:30 + 1.4h = 08:54
+    assert props["estimated_arrival_time"] is not None
+    assert props["estimated_arrival_time"].startswith("2026-07-27T08:")
+
+
+def test_direct_edge_arrival_none_when_trigger_rain_end_time_missing():
+    """trigger_rain_end_time=None 时降级：t0_source_time=None, estimated_arrival_time=None。"""
+    edge = {
+        "edge_key": "test|key",
+        "objectid": "999",
+        "river_name": "测试河",
+        "from_x": 117.0, "from_y": 39.0,
+        "to_x": 117.01, "to_y": 39.01,
+        "length_km": 10.0,
+        "is_direct_graph_edge": True,
+        "is_luan": False,
+        "min_station_distance_km": 5.0,
+        "trigger_stations": [],
+        "trigger_station_count": 0,
+        "trigger_rain_end_time": None,
+        "row": {"len_km": 10.0, "src_name": "测试河", "objectid": "999"},
+    }
+    features = rig._resolve_edge_features(
+        [edge], {}, {}, "direct_buffer", {},
+        flow_velocity_mps=2.0,
+    )
+    props = features[0]["properties"]
+    assert props["t0_source_time"] is None
+    assert props["estimated_arrival_time"] is None
+
+
+def test_classify_direct_edge_records_earliest_trigger_rain_end_time():
+    """_classify_graph_edges 应把该边所有 trigger 站中最早 rain_end_time 记为 trigger_rain_end_time。"""
+    from datetime import datetime, timezone
+    edges = [
+        ("0,0", "0.1,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 10.0}),
+    ]
+    # 候选行 trigger_stations 是 jsonb_agg 对象列表（SQL 层结构）
+    rows = [
+        _candidate_row(
+            "100", (0.0, 0.0), (0.1, 0.0), min_dist=5.0,
+            trigger_station_count=2,
+            trigger_stations=[
+                {"station_id": "A", "station_name": "A站"},
+                {"station_id": "B", "station_name": "B站"},
+            ],
+        )
+    ]
+    stations = [
+        {
+            "station_id": "A", "lon": 0.0, "lat": 0.0, "rain_24h": 60.0,
+            "rain_end_time": datetime(2026, 7, 27, 8, 0, 0, tzinfo=timezone.utc),
+        },
+        {
+            "station_id": "B", "lon": 0.0, "lat": 0.0, "rain_24h": 70.0,
+            "rain_end_time": datetime(2026, 7, 27, 7, 30, 0, tzinfo=timezone.utc),
+        },
+    ]
+    # stations 需先归一化以带 rain_end_time
+    normalized_stations = rig._normalize_stations(stations, 50.0)
+    direct_edges, _, _ = _run_classify(edges, rows, normalized_stations)
+    assert len(direct_edges) == 1
+    edge = list(direct_edges.values())[0]
+    assert edge["trigger_rain_end_time"] is not None
+    # 最早的是 B 的 07:30
+    assert edge["trigger_rain_end_time"].hour == 7
+    assert edge["trigger_rain_end_time"].minute == 30
