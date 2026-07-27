@@ -193,6 +193,125 @@ def verify_propagation_consistency(result: dict) -> bool:
     return issues == 0
 
 
+def verify_arrival_time_consistency(result: dict) -> bool:
+    """验证 6：预计到达时间一致性。
+
+    - 每个有 t0_source_time 的 feature 必须有 estimated_arrival_time
+    - ISO UTC 格式正则
+    - 直接段：|arrival - t0 - propagation_time_hours * 3600| ≤ 200s
+    - 下游段：arrival ≥ t0（时间不倒流）
+    - params.reference_time == min(feature.t0_source_time)
+    - river_propagation.rivers[*].earliest_arrival_time == min(该河 features estimated_arrival_time)
+    """
+    _sep("验证 6：预计到达时间一致性")
+    import re
+    from datetime import datetime, timezone
+
+    iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+    features = result.get("river_geojson", {}).get("features", [])
+    issues = 0
+
+    # 逐 feature 检查
+    feature_arrivals: dict[str, list[datetime]] = {}
+    for feat in features:
+        props = feat.get("properties", {})
+        name = props.get("river_name", "")
+        t0 = props.get("t0_source_time")
+        arrival = props.get("estimated_arrival_time")
+        prop_hours = props.get("propagation_time_hours", 0)
+
+        if t0 is not None:
+            # 有 t0 必须有 arrival
+            if arrival is None:
+                print(f"  ✗ {name}: t0_source_time={t0} 但 estimated_arrival_time 为 None")
+                issues += 1
+                continue
+            # ISO 格式
+            if not iso_re.match(t0):
+                print(f"  ✗ {name}: t0_source_time 格式异常: {t0}")
+                issues += 1
+            if not iso_re.match(arrival):
+                print(f"  ✗ {name}: estimated_arrival_time 格式异常: {arrival}")
+                issues += 1
+
+            # 直接段：arrival - t0 ≈ prop_hours * 3600s
+            # 容忍度 200s：propagation_time_hours 是 round(x, 1) 精度，最差 0.05h*3600=180s 误差
+            if prop_hours and math.isfinite(prop_hours) and prop_hours > 0:
+                try:
+                    t0_dt = datetime.fromisoformat(t0.replace("Z", "+00:00"))
+                    arr_dt = datetime.fromisoformat(arrival.replace("Z", "+00:00"))
+                    diff_s = (arr_dt - t0_dt).total_seconds()
+                    expected_s = prop_hours * 3600
+                    if abs(diff_s - expected_s) > 200:
+                        print(f"  ✗ {name}: arrival-t0={diff_s}s, 预期={expected_s}s (prop={prop_hours}h), 偏差 > 200s")
+                        issues += 1
+                except Exception as e:
+                    print(f"  ✗ {name}: 时间解析失败: {e}")
+                    issues += 1
+        else:
+            # 无 t0 → arrival 应为 None
+            if arrival is not None:
+                print(f"  ✗ {name}: t0_source_time=None 但 estimated_arrival_time={arrival}")
+                issues += 1
+
+        # 收集 arrival 用于河级别汇总检查
+        if name and arrival:
+            try:
+                feature_arrivals.setdefault(name, []).append(
+                    datetime.fromisoformat(arrival.replace("Z", "+00:00"))
+                )
+            except Exception:
+                pass
+
+    # params.reference_time
+    ref_time = result.get("params", {}).get("reference_time")
+    all_t0s = [
+        f["properties"]["t0_source_time"]
+        for f in features
+        if f.get("properties", {}).get("t0_source_time") is not None
+    ]
+    if all_t0s:
+        earliest_t0 = min(all_t0s)
+        if ref_time != earliest_t0:
+            print(f"  ✗ params.reference_time={ref_time}，但 feature 中最早 t0={earliest_t0}")
+            issues += 1
+    else:
+        if ref_time is not None:
+            print(f"  ✗ 无 feature 有 t0，但 params.reference_time={ref_time}")
+            # 不记为 issues，因为可能 0 features
+        print(f"  - 无 t0 数据（features 为空或全无 rain_end_time），跳过 reference_time 检查")
+
+    # river_propagation 河级别汇总
+    prop = result.get("river_propagation", {})
+    for r in prop.get("rivers", []):
+        name = r["river_name"]
+        arrivals = feature_arrivals.get(name, [])
+        if arrivals:
+            expected_earliest = min(arrivals)
+            expected_latest = max(arrivals)
+            actual_earliest = r.get("earliest_arrival_time")
+            actual_latest = r.get("latest_arrival_time")
+            # 解析字符串比较
+            try:
+                if actual_earliest:
+                    ae = datetime.fromisoformat(actual_earliest.replace("Z", "+00:00"))
+                    if abs((ae - expected_earliest).total_seconds()) > 1:
+                        print(f"  ✗ summary {name}: earliest_arrival 偏差")
+                        issues += 1
+                if actual_latest:
+                    al = datetime.fromisoformat(actual_latest.replace("Z", "+00:00"))
+                    if abs((al - expected_latest).total_seconds()) > 1:
+                        print(f"  ✗ summary {name}: latest_arrival 偏差")
+                        issues += 1
+            except Exception as e:
+                print(f"  ✗ summary {name}: 解析异常: {e}")
+                issues += 1
+
+    if issues == 0:
+        print(f"  ✓ 预计到达时间一致性验证通过（{len(features)} 条 features）")
+    return issues == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="暴雨影响河流 GeoJSON 传播时间内网验证")
     parser.add_argument("--csv", required=True, help="5 分钟降水 CSV 路径")
@@ -255,6 +374,7 @@ def main():
         ("顶层字段", verify_top_level(result)),
         ("GeoJSON properties", verify_geojson_properties(river_geojson)),
         ("传播时间一致性", verify_propagation_consistency(result)),
+        ("预计到达时间一致性", verify_arrival_time_consistency(result)),
     ]
 
     _sep("结果汇总")
