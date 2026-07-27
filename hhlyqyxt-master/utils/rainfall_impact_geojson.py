@@ -849,11 +849,10 @@ def _collect_downstream_edges(starts: dict, graph, direct_keys: set[str], downst
             if next_distance < best_dist.get(v, math.inf):
                 best_dist[v] = next_distance
                 heapq.heappush(heap, (next_distance, next(seq), v))
-    # 回填 t0_source_time 到 edge：edge_key 格式 "from|to|key|objectid|river_name"，
-    # 取起点节点最终的 best_t0（BFS 结束时所有节点 t0 已收敛）。
-    for edge_key, edge in edges.items():
-        from_node = edge_key.split("|", 1)[0]
-        edge["t0_source_time"] = best_t0.get(from_node)
+    # 回填 t0_source_time 到 edge：使用 edge["from_node"] 直接取原始 node 对象，
+    # 避免依赖 str(u) 反解 edge_key（node 可能是 tuple/list 而非字符串）。
+    for edge in edges.values():
+        edge["t0_source_time"] = best_t0.get(edge["from_node"])
     return sorted(edges.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["edge_key"]))
 
 
@@ -899,6 +898,7 @@ def _save_downstream_edge(
         "clip_fraction": _round(keep_km / length_km, 8) or 0.0,
         "is_direct_graph_edge": edge_key in direct_keys,
         "is_luan": bool(attr.get("is_luan")),
+        "from_node": u,  # 存原始 node 对象，用于回填 T0（避免依赖 str(u) 反解 edge_key）
         "from_x": from_x,
         "from_y": from_y,
         "to_x": to_x,
