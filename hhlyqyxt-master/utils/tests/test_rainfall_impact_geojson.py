@@ -1260,8 +1260,9 @@ def test_downstream_edges_no_from_node_leak():
         assert "from_node" not in edge, f"from_node 内部字段泄漏到输出: {edge!r}"
 
 
-def test_classify_graph_edges_returns_start_nodes_t0():
-    """_classify_graph_edges 返回值升级为 4-元组，包含 start_nodes_t0 dict。"""
+def test_classify_graph_edges_returns_start_nodes_arrival():
+    """_classify_graph_edges 返回值升级为 4-元组，包含 start_nodes_arrival dict。
+    arrival = t0 + direct_edge_length / velocity（水走完直接段到达出口的时刻）。"""
     from datetime import datetime, timezone
     edges = [
         ("0,0", "0.1,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 10.0}),
@@ -1281,14 +1282,14 @@ def test_classify_graph_edges_returns_start_nodes_t0():
     result = _run_classify(edges, rows, normalized)
     # 现在应是 4-元组
     assert len(result) == 4
-    direct_edges, start_nodes, stats, start_nodes_t0 = result
+    direct_edges, start_nodes, stats, start_nodes_arrival = result
     assert "0.1,0" in start_nodes
-    assert "0.1,0" in start_nodes_t0
-    # start_nodes_t0["0.1,0"] 应为 A 的 rain_end_time（UTC）
-    t0 = start_nodes_t0["0.1,0"]
-    assert t0 is not None
-    assert t0.hour == 8
-    assert t0.minute == 0
+    assert "0.1,0" in start_nodes_arrival
+    # start_nodes_arrival["0.1,0"] = 08:00 + 10km/7.2kmh ≈ 08:00 + 1.389h ≈ 09:23
+    arrival = start_nodes_arrival["0.1,0"]
+    assert arrival is not None
+    assert arrival.hour == 9  # 08:00 + ~1.4h → 09:xx
+    assert 20 <= arrival.minute <= 30  # ~23 分钟
 
 
 # ---------------------------------------------------------------------------

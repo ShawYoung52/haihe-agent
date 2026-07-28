@@ -199,16 +199,17 @@ def build_rainstorm_impact_thematic_map(
                 river_name_column,
                 station_buffer_km,
             )
-            direct_edges, start_nodes, downstream_start_stats, start_nodes_t0 = _classify_graph_edges(
+            direct_edges, start_nodes, downstream_start_stats, start_nodes_arrival = _classify_graph_edges(
                 candidate_rows,
                 graph,
                 rainstorm_stations,
                 station_buffer_km,
                 direct_match_km,
+                flow_velocity_mps=flow_velocity_mps,
             )
             direct_keys = set(direct_edges)
             downstream_edges = _collect_downstream_edges(
-                {node: (0.0, start_nodes_t0.get(node)) for node in start_nodes},
+                {node: (0.0, start_nodes_arrival.get(node)) for node in start_nodes},
                 graph, direct_keys, downstream_km,
                 flow_velocity_mps=flow_velocity_mps,
             )
@@ -616,11 +617,14 @@ def _classify_graph_edges(
     stations: list[dict],
     station_buffer_km: float,
     direct_match_km: float,
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
 ) -> tuple[dict[str, dict], set[Any], dict, dict[Any, datetime | None]]:
     """
     把 full_v6 候选行匹配到 pkl 边并分类。站点缓冲区（station_buffer_km）内的所有边
     都作为 direct_buffer 输出，其中距站点 ≤ direct_match_km 的标记 is_direct_graph_edge=true。
-    返回 (direct_edges, downstream_start_nodes, stats, start_nodes_t0)。
+    返回 (direct_edges, downstream_start_nodes, stats, start_nodes_arrival)。
+    start_nodes_arrival 为水走完直接段到达各 start_node 出口的实施时刻（t0 + length_km/v），
+    而非原始 t0（触发站雨止时刻）。
     """
     lookup = _build_edge_lookup(candidate_rows)
     spatial_lookup = _build_spatial_lookup(candidate_rows)
@@ -629,7 +633,8 @@ def _classify_graph_edges(
     direct_match_count = 0
     buffer_only_count = 0
     start_nodes: set[Any] = set()
-    start_nodes_t0: dict[Any, datetime | None] = {}
+    start_nodes_arrival: dict[Any, datetime | None] = {}
+    velocity_kmh = float(flow_velocity_mps) * 3.6
 
     for u, v, key, attr, p1, p2 in _iter_edges_with_points(graph):
         edge_key = _edge_key(u, v, key, attr)
@@ -702,14 +707,18 @@ def _classify_graph_edges(
         else:
             buffer_only_count += 1
         start_nodes.add(v)
-        # 记录该 start_node 对应的最早 T0（多条直接段汇合到同一节点时取 min）
-        if trigger_rain_end_time is not None:
-            existing = start_nodes_t0.get(v)
-            if existing is None or trigger_rain_end_time < existing:
-                start_nodes_t0[v] = trigger_rain_end_time
+        # 记录水走完直接段到达该节点出口的时刻（含直接段旅程），
+        # 多条直接段汇合到同一节点时取最早的到达时刻。
+        if trigger_rain_end_time is not None and velocity_kmh > 0:
+            edge_length = edge_info.get("length_km") or 0.0
+            travel_hours = float(edge_length) / velocity_kmh
+            arrival = trigger_rain_end_time + timedelta(hours=travel_hours)
+            existing = start_nodes_arrival.get(v)
+            if existing is None or arrival < existing:
+                start_nodes_arrival[v] = arrival
         else:
-            # 保持 key 存在（None 表示无 T0，但节点确实是 start）
-            start_nodes_t0.setdefault(v, None)
+            # trigger_rain_end_time 为 None：保持 key 存在（值为 None）
+            start_nodes_arrival.setdefault(v, None)
 
     unmatched_rows = sum(1 for r in candidate_rows if id(r) not in used_row_ids)
     if unmatched_rows:
@@ -721,7 +730,7 @@ def _classify_graph_edges(
         direct_match_km=direct_match_km,
         station_buffer_km=station_buffer_km,
     )
-    return direct_edges, start_nodes, stats, start_nodes_t0
+    return direct_edges, start_nodes, stats, start_nodes_arrival
 
 
 def _fetch_missing_edge_rows(
