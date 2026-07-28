@@ -55,7 +55,10 @@
       "Bash(awk -F: '$1 > 1639 && $1 < 1850'2)",
       "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe scripts/verify_river_propagation_offline.py)",
       "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe -m pip install -q psycopg2-binary)",
-      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe -m pytest utils/tests/test_emergency_response_monitor.py -q)"
+      "Bash(/d/PythonProject/.venv-haihe-tests/Scripts/python.exe -m pytest utils/tests/test_emergency_response_monitor.py -q)",
+      "Bash(D:/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe *)",
+      "Bash(\"D:/PythonProject/haihe-forecast-eval/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/.venv/Scripts/python.exe\" -m pip show fastmcp)",
+      "Bash(pip install *)"
     ]
   }
 }
