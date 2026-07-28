@@ -115,6 +115,7 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
         begin_time: str = "",
         end_time: str = "",
         time_session: int = 24,
+        area_codes: str = "",
     ) -> dict[str, Any]:
         """查询预报检验评分数据。
 
@@ -159,6 +160,7 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
 
         # 实时调用检验API
         try:
+            area = area_codes if area_codes else None
             if is_rain:
                 api_result = run_rain_eva(
                     test_type=test_type,
@@ -167,6 +169,7 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
                     end_time=e_time,
                     time_session=time_session,
                     save_json=False,
+                    area_codes=area,
                 )
             else:
                 api_result = run_temp_eva(
@@ -175,6 +178,7 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
                     end_time=e_time,
                     time_session=time_session,
                     save_json=False,
+                    area_codes=area,
                 )
 
             if "error" in api_result:
