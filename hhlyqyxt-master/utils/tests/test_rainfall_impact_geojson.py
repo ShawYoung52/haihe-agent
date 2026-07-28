@@ -1043,14 +1043,14 @@ def test_downstream_edges_pending_backward_compat():
 
 
 def test_downstream_edge_t0_is_min_upstream_rain_end():
-    """下游段 t0_source_time = 上游直接段中最早 rain_end_time。
+    """下游段 t0_source_time = 上游 start 节点的到达时刻经链式传播。
 
-    两条直接段 A/B 都汇合到下游节点 c，A 有更早 t0，最终下游边 t0 = A 的 t0。
+    两条直接段 A/B 都汇合到下游节点 c，A 有更早 t0，最终下游边 t0 = A 的链式到达时刻。
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
     # a → c (via node "0.0,0"→"0.5,0")
     # b → c (via node "0.5,0.5"→"0.5,0")
-    # c → d (下游边，应继承最早 t0)
+    # c → d (下游边，应继承最早 arrival)
     edges = [
         ("0.5,0", "1.0,0", 0, {"objectid": "300", "src_name": "东河", "length_km": 10.0}),
         ("1.0,0", "1.5,0", 0, {"objectid": "301", "src_name": "东河", "length_km": 10.0}),
@@ -1063,18 +1063,24 @@ def test_downstream_edge_t0_is_min_upstream_rain_end():
     # 由于 dict 键唯一，我们用新签名让 starts 直接携带 t0
     starts = {"0.5,0": (0.0, t0_early)}
     downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
-    # 下游第 1 条边（"0.5,0" → "1.0,0"）应带 t0_early
+    velocity_kmh = 2.0 * 3.6  # 默认 7.2 km/h
+    # 下游第 1 条边（"0.5,0" → "1.0,0"）的 from_node 是 start node，t0 = raw t0_early
     assert len(downstream) >= 1
     edge_1 = next(e for e in downstream if e["objectid"] == "300")
     assert edge_1.get("t0_source_time") == t0_early
-    # 传播到 "1.0,0" → "1.5,0"，应继续继承 t0_early
+    # 传播到 "1.0,0" → "1.5,0"，应继续继承链式 arrival（而非 raw t0）
     edge_2 = next(e for e in downstream if e["objectid"] == "301")
-    assert edge_2.get("t0_source_time") == t0_early
+    assert edge_2 is not None
+    expected_arrival = t0_early + timedelta(hours=10.0 / velocity_kmh)
+    assert abs((edge_2["t0_source_time"] - expected_arrival).total_seconds()) < 2, (
+        f"下游第二段 t0_source_time={edge_2['t0_source_time']}，预期≈{expected_arrival} "
+        f"(链式传播：06:00 + 10km/7.2kmh)"
+    )
 
 
 def test_downstream_edge_t0_takes_min_when_multiple_starts_converge():
-    """两个不同 t0 的 start_nodes 汇合到同一下游节点时，取最早 t0。"""
-    from datetime import datetime, timezone
+    """两个不同 t0 的 start_nodes 汇合到同一下游节点时，取物理最早链式到达时刻。"""
+    from datetime import datetime, timezone, timedelta
     # 两条独立入口都指向同一下游 node "1.0,0"
     edges = [
         ("A,0", "1.0,0", 0, {"objectid": "400", "src_name": "东河", "length_km": 10.0}),
@@ -1085,27 +1091,34 @@ def test_downstream_edge_t0_takes_min_when_multiple_starts_converge():
     graph = rig.get_graph(graph_path)
     t0_early = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)
     t0_late = datetime(2026, 7, 27, 9, 0, 0, tzinfo=timezone.utc)
-    # A 更早，B 更晚。两者都作为 start_nodes（distance=0），BFS 走到 "1.0,0" 时取 min t0
+    velocity_kmh = 2.0 * 3.6  # 7.2 km/h
+    # A(t0_late) 走 10km，B(t0_early) 走 10km，两者都到 "1.0,0"
+    # BFS 走到 "1.0,0" 时取 min arrival：
+    #   via A: 09:00 + 10/7.2 ≈ 10:23
+    #   via B: 06:00 + 10/7.2 ≈ 07:23
     starts = {"A,0": (0.0, t0_late), "B,0": (0.0, t0_early)}
     downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
-    # 下游边 402（"1.0,0" → "2.0,0"）应带 min(t0_early, t0_late) = t0_early
+    # 下游边 402（"1.0,0" → "2.0,0"）应带链式最早 arrival（非 raw t0_early）
     edge_402 = next((e for e in downstream if e["objectid"] == "402"), None)
     assert edge_402 is not None
-    assert edge_402.get("t0_source_time") == t0_early
+    expected = t0_early + timedelta(hours=10.0 / velocity_kmh)
+    assert abs((edge_402["t0_source_time"] - expected).total_seconds()) < 2, (
+        f"汇合下游 t0_source_time={edge_402['t0_source_time']}，预期≈{expected} "
+        f"(链式传播：06:00 + 10km/7.2kmh，非 raw t0)"
+    )
 
 
 def test_downstream_t0_transitive_convergence():
-    """BFS 传递性 T0 收敛：早 t0 通过较长路径到达中间节点时，下游 t0 也必须收敛到早值。
+    """BFS 传递性 arrival 收敛：早 t0 通过较长路径到达中间节点时，下游 arrival 也必须收敛到早值。
 
-    场景（安全隐患：t0 报晚 = arrival 报晚 = 应急响应遗漏）：
+    场景（安全隐患：arrival 报晚 = 应急响应遗漏）：
       A(t0=late)  --5km-->  X
       B(t0=early) --10km--> Y --5km--> X --10km--> Z
 
-    单遍 Dijkstra 中 X 先被短路径以晚 t0 弹出并向 Z 传播；随后 Y 走长路径带来早 t0，
-    best_t0[X] 会被更新为早 t0，但如果 X 不重放，Z 的 t0 停留在晚值。
-    修复要求：t0 改进后 X 重新入堆（用其当前最短距离）→ 下游 Z t0 收敛为早值。
+    单遍 Dijkstra 中 X 先被短路径以晚 arrival 弹出并向 Z 传播；随后 Y 走长路径带来早 arrival，
+    best_arrival[X] 会被更新为早 arrival，重新入堆后 Z 的 arrival 收敛为早值。
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
     edges = [
         # A → X（短路径，5km，带 late t0）
@@ -1121,15 +1134,114 @@ def test_downstream_t0_transitive_convergence():
     graph = rig.get_graph(graph_path)
     t0_early = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)
     t0_late = datetime(2026, 7, 27, 9, 0, 0, tzinfo=timezone.utc)
+    velocity_kmh = 2.0 * 3.6  # 7.2 km/h
     starts = {"A,0": (0.0, t0_late), "B,0": (0.0, t0_early)}
     downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
 
-    # 下游边 503 (X→Z) 必须继承 t0_early（B→Y→X 的传递性收敛）
+    # 下游边 503 (X→Z) 的 t0_source_time 必须是链式最早到达 X 的时刻
+    #   via A→X: 09:00 + 5/7.2 ≈ 09:41
+    #   via B→Y→X: 06:00 + 15/7.2 ≈ 08:04
+    # best_arrival[X] ≈ 08:04 (链式，非 raw t0)
     edge_503 = next((e for e in downstream if e["objectid"] == "503"), None)
     assert edge_503 is not None, "下游边 503 (X→Z) 缺失"
-    assert edge_503.get("t0_source_time") == t0_early, (
-        f"传递性 T0 收敛失败: X→Z 边 t0={edge_503.get('t0_source_time')}，预期 {t0_early} "
-        f"（若为 {t0_late}，说明 X 未 re-visit，Z 保留 stale 晚 t0 = 安全隐患）"
+    expected = t0_early + timedelta(hours=15.0 / velocity_kmh)
+    assert abs((edge_503["t0_source_time"] - expected).total_seconds()) < 2, (
+        f"传递性 arrival 收敛失败: X→Z 边 t0_source_time={edge_503.get('t0_source_time')}，"
+        f"预期≈{expected} "
+        f"（若≈{t0_late + timedelta(hours=5.0/velocity_kmh)}，说明 X 未 re-visit = 安全隐患）"
+    )
+
+
+def test_multi_source_convergence_earliest_arrival():
+    """两个不同 t0 的站点汇聚到同一节点时，下游段取物理最早到达时刻。
+
+    S1(t0=early) --3km--> merge --10km--> Z
+    S2(t0=late)  --2km--> merge
+
+    S2 距离更短会被先处理（Dijkstra 优先），但 S1 到 merge 的 arrival 更早，
+    下游边 merge→Z 的 t0_source_time 应为 S1 的链式 arrival（非 S2 的）。
+    """
+    from datetime import datetime, timezone, timedelta
+
+    t0_early = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)   # 06:00 UTC
+    t0_late = datetime(2026, 7, 27, 9, 0, 0, tzinfo=timezone.utc)    # 09:00 UTC
+
+    edges = [
+        ("S1,0", "merge,0", 0, {"objectid": "701", "src_name": "东河", "length_km": 3.0}),
+        ("S2,0", "merge,0", 0, {"objectid": "702", "src_name": "东河", "length_km": 2.0}),
+        ("merge,0", "Z,0", 0, {"objectid": "703", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    starts = {"S1,0": (0.0, t0_early), "S2,0": (0.0, t0_late)}
+    downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
+
+    # 验证下游边 merge→Z 的 t0_source_time 是物理最早到达 merge 的时刻
+    edge_703 = next((e for e in downstream if e["objectid"] == "703"), None)
+    assert edge_703 is not None, "下游边 merge→Z 缺失"
+
+    # arrival at merge via S1: 06:00 + 3/7.2 ≈ 06:25
+    # arrival at merge via S2: 09:00 + 2/7.2 ≈ 09:16
+    # best_arrival[merge] ≈ 06:25 (from S1, 链式非 raw t0)
+    velocity_kmh = 2.0 * 3.6  # 7.2 km/h
+    expected_arrival = t0_early + timedelta(hours=3.0 / velocity_kmh)
+    actual = edge_703.get("t0_source_time")
+    assert actual is not None, "t0_source_time 不应为 None"
+    # 允许 2 秒浮点误差
+    assert abs((actual - expected_arrival).total_seconds()) < 2, (
+        f"merge→Z 的 t0_source_time={actual}，预期≈{expected_arrival} "
+        f"(06:00 + 3km/7.2kmh，非 raw 06:00)"
+    )
+
+
+def test_arrival_propagation_chains_along_path():
+    """沿路径传播时，下游边的 t0_source_time 应递增（等于累计 travel time）。
+
+    A --10km--> B --10km--> C --10km--> D
+    start t0 = 06:00
+    Edge A→B: t0_source_time = 06:00 (start node raw t0)
+    Edge B→C: t0_source_time = 06:00 + 10/7.2 ≈ 07:23
+    Edge C→D: t0_source_time = 06:00 + 20/7.2 ≈ 08:46
+    """
+    from datetime import datetime, timezone, timedelta
+
+    t0 = datetime(2026, 7, 27, 6, 0, 0, tzinfo=timezone.utc)  # 06:00 UTC
+    velocity_kmh = 2.0 * 3.6  # 7.2 km/h
+
+    edges = [
+        ("A,0", "B,0", 0, {"objectid": "801", "src_name": "东河", "length_km": 10.0}),
+        ("B,0", "C,0", 0, {"objectid": "802", "src_name": "东河", "length_km": 10.0}),
+        ("C,0", "D,0", 0, {"objectid": "803", "src_name": "东河", "length_km": 10.0}),
+    ]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    starts = {"A,0": (0.0, t0)}
+    downstream = rig._collect_downstream_edges(starts, graph, set(), 50.0)
+
+    # Edge A→B: t0_source_time = t0 (from start node)
+    edge_ab = next((e for e in downstream if e["objectid"] == "801"), None)
+    assert edge_ab is not None
+    assert edge_ab["t0_source_time"] == t0
+
+    # Edge B→C: t0_source_time = t0 + 10/7.2 ≈ 07:23
+    edge_bc = next((e for e in downstream if e["objectid"] == "802"), None)
+    assert edge_bc is not None
+    expected_b = t0 + timedelta(hours=10.0 / velocity_kmh)
+    assert abs((edge_bc["t0_source_time"] - expected_b).total_seconds()) < 2, (
+        f"B→C t0_source_time={edge_bc['t0_source_time']}, 预期≈{expected_b}"
+    )
+
+    # Edge C→D: t0_source_time = t0 + 20/7.2 ≈ 08:46
+    edge_cd = next((e for e in downstream if e["objectid"] == "803"), None)
+    assert edge_cd is not None
+    expected_c = t0 + timedelta(hours=20.0 / velocity_kmh)
+    assert abs((edge_cd["t0_source_time"] - expected_c).total_seconds()) < 2, (
+        f"C→D t0_source_time={edge_cd['t0_source_time']}, 预期≈{expected_c}"
+    )
+
+    # 验证递增：t0_source_time 沿路径严格递增（非原始 t0 平坦传播）
+    assert edge_cd["t0_source_time"] > edge_bc["t0_source_time"] > edge_ab["t0_source_time"], (
+        "t0_source_time 应沿路径递增"
     )
 
 

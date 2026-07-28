@@ -210,6 +210,7 @@ def build_rainstorm_impact_thematic_map(
             downstream_edges = _collect_downstream_edges(
                 {node: (0.0, start_nodes_t0.get(node)) for node in start_nodes},
                 graph, direct_keys, downstream_km,
+                flow_velocity_mps=flow_velocity_mps,
             )
             geometry_rows = _fetch_missing_edge_rows(
                 cur,
@@ -815,7 +816,10 @@ def _iter_edges_with_points(graph):
         yield u, v, key, attr, p1, p2
 
 
-def _collect_downstream_edges(starts: dict, graph, direct_keys: set[str], downstream_km: float) -> list[dict]:
+def _collect_downstream_edges(
+    starts: dict, graph, direct_keys: set[str], downstream_km: float,
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
+) -> list[dict]:
     # 兼容老签名：{node: float} → {node: (float, None)}
     _starts: dict[Any, tuple[float, datetime | None]] = {}
     for node, val in starts.items():
@@ -825,7 +829,11 @@ def _collect_downstream_edges(starts: dict, graph, direct_keys: set[str], downst
             _starts[node] = (float(val[0]), val[1] if len(val) > 1 else None)
 
     best_dist = {node: d for node, (d, _) in _starts.items()}
-    best_t0: dict[Any, datetime | None] = {node: t0 for node, (_, t0) in _starts.items()}
+    best_arrival: dict[Any, datetime | None] = {}
+    for node, (_, t0) in _starts.items():
+        if t0 is not None:
+            best_arrival[node] = t0
+    velocity_kmh = float(flow_velocity_mps) * 3.6
     seq = count()
     heap = [(float(dist), next(seq), node) for node, (dist, _) in _starts.items()]
     heapq.heapify(heap)
@@ -835,34 +843,33 @@ def _collect_downstream_edges(starts: dict, graph, direct_keys: set[str], downst
         if distance > best_dist.get(node, math.inf) or distance >= downstream_km:
             continue
         for u, v, key, attr in iter_out_edges(graph, node):
-            next_distance = _save_downstream_edge(edges, u, v, key, attr, distance, downstream_km, direct_keys)
+            edge_length = get_edge_length_km(attr, from_xy=_parse_node_xy(u), to_xy=_parse_node_xy(v))
+            next_distance = distance + edge_length
             if next_distance > downstream_km:
                 continue
-            # T0 传播：取上游最早 t0（无论 distance 是否改进都要更新）
-            t0_improved = False
-            upstream_t0 = best_t0.get(u)
-            if upstream_t0 is not None:
-                existing_t0 = best_t0.get(v)
-                if existing_t0 is None or upstream_t0 < existing_t0:
-                    best_t0[v] = upstream_t0
-                    t0_improved = True
-            else:
-                best_t0.setdefault(v, None)
-            # 距离改进：常规 Dijkstra 松弛，push v 以最短距离展开下游
-            if next_distance < best_dist.get(v, math.inf):
+
+            next_distance = _save_downstream_edge(
+                edges, u, v, key, attr, distance, downstream_km, direct_keys)
+
+            # ---- 距离 Dijkstra（不变）----
+            if next_distance <= downstream_km and next_distance < best_dist.get(v, math.inf):
                 best_dist[v] = next_distance
                 heapq.heappush(heap, (next_distance, next(seq), v))
-            # 距离未改进但 t0 改进：以 v 当前最优距离 re-push，触发出边重放让 t0 收敛到下游。
-            # _save_downstream_edge 对同 edge_key 且 min_distance_km <= start_km 幂等返回，
-            # 不会污染下游 edge 的 min_distance_km；t0 收敛次数被 best_t0 单调递减性限制为有限。
-            elif t0_improved:
-                heapq.heappush(heap, (best_dist.get(v, next_distance), next(seq), v))
-    # 回填 t0_source_time 到 edge：使用 edge["from_node"] 直接取原始 node 对象，
-    # 避免依赖 str(u) 反解 edge_key（node 可能是 tuple/list 而非字符串）。
-    # 回填后必须删除 from_node —— 它是内部实现细节，若泄漏到输出，
-    # JSON 序列化非字符串 node（如 tuple/list）会 mangle。
+
+            # ---- 到达时刻链式传播（新增）----
+            if best_arrival.get(node) is not None and edge_length > 0:
+                travel_hours = edge_length / velocity_kmh
+                arrival_at_v = best_arrival[node] + timedelta(hours=travel_hours)
+
+                existing = best_arrival.get(v)
+                if existing is None or arrival_at_v < existing:
+                    best_arrival[v] = arrival_at_v
+                    # 用 v 当前最短距离 re-push 触发出边重放（让下游也看到改进的 arrival）
+                    heapq.heappush(heap, (best_dist.get(v, next_distance), next(seq), v))
+    # 回填 t0_source_time 到 edge：使用 best_arrival[from_node]（链式到达时刻）
+    # 而非原始 start node t0，避免下游段 t0_source_time 不随距离增长。
     for edge in edges.values():
-        edge["t0_source_time"] = best_t0.get(edge["from_node"])
+        edge["t0_source_time"] = best_arrival.get(edge["from_node"])
         del edge["from_node"]
     return sorted(edges.values(), key=lambda x: (x["min_distance_km"], x["river_name"], x["edge_key"]))
 
