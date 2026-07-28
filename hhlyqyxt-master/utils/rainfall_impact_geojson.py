@@ -1372,6 +1372,9 @@ def _make_station_geojson(stations: list[dict]) -> dict:
         props = dict(s)
         props.pop("lon", None)
         props.pop("lat", None)
+        # 将内部 datetime 对象转为 ISO 字符串，防止 json.dumps 炸掉
+        if props.get("rain_end_time") is not None:
+            props["rain_end_time"] = _iso_utc(props["rain_end_time"])
         features.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [float(s["lon"]), float(s["lat"])]},
