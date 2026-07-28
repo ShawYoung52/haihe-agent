@@ -844,17 +844,19 @@ def _collect_downstream_edges(
             continue
         for u, v, key, attr in iter_out_edges(graph, node):
             edge_length = get_edge_length_km(attr, from_xy=_parse_node_xy(u), to_xy=_parse_node_xy(v))
-            next_distance = distance + edge_length
-            if next_distance > downstream_km:
-                continue
 
-            next_distance = _save_downstream_edge(
+            # 先记录边（_save_downstream_edge 内部做裁剪，保留部分落入窗口的段）
+            saved_distance = _save_downstream_edge(
                 edges, u, v, key, attr, distance, downstream_km, direct_keys)
 
+            # 只在 _save_downstream_edge 返回后做范围判断
+            if saved_distance > downstream_km:
+                continue
+
             # ---- 距离 Dijkstra（不变）----
-            if next_distance <= downstream_km and next_distance < best_dist.get(v, math.inf):
-                best_dist[v] = next_distance
-                heapq.heappush(heap, (next_distance, next(seq), v))
+            if saved_distance < best_dist.get(v, math.inf):
+                best_dist[v] = saved_distance
+                heapq.heappush(heap, (saved_distance, next(seq), v))
 
             # ---- 到达时刻链式传播（新增）----
             if best_arrival.get(node) is not None and edge_length > 0:
@@ -865,7 +867,7 @@ def _collect_downstream_edges(
                 if existing is None or arrival_at_v < existing:
                     best_arrival[v] = arrival_at_v
                     # 用 v 当前最短距离 re-push 触发出边重放（让下游也看到改进的 arrival）
-                    heapq.heappush(heap, (best_dist.get(v, next_distance), next(seq), v))
+                    heapq.heappush(heap, (best_dist.get(v, saved_distance), next(seq), v))
     # 回填 t0_source_time 到 edge：使用 best_arrival[from_node]（链式到达时刻）
     # 而非原始 start node t0，避免下游段 t0_source_time 不随距离增长。
     for edge in edges.values():
