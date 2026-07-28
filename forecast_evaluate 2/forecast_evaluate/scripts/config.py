@@ -254,7 +254,7 @@ class DefaultConfig:
     END_TIME = _DEFAULT_END_TIME
     PREDICT_HOURS = '08,20'
     COLLECTION_CODE = 'county_jy'
-    AREA_CODES = '110000,120000,130000,140000,150000,370000,410000'
+    AREA_CODES = '120000'
     STATIONS = 'all'
     DATA_CODES = ','.join(ProductConfig.PRODUCT_NAMES.keys())
     # 海河流域默认区划代码
