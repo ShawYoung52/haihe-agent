@@ -2889,6 +2889,172 @@ async def _try_water_level_fast_path(user_text: str, thinking_chain, tools, mess
             await reasoning.close()
 
 
+def _need_forecast_evaluate(user_text: str) -> bool:
+    """检测用户问题是否需要调用预报检验工具。"""
+    if not user_text:
+        return False
+    keywords = [
+        "TS评分", "ts评分", "晴雨预报", "晴雨准确率",
+        "模式评估", "模式对比", "模式比较", "各家模式",
+        "预报检验", "预报评分", "预报评估",
+        "准确率对比", "偏差分析", "偏差对比",
+        "落区预报", "暴雨落区", "误差分析",
+        "BIAS", "bias", "MAE", "mae",
+        "预报效果", "预报准确性",
+        "暴雨TS", "暴雨ts",
+    ]
+    return any(k in user_text for k in keywords)
+
+
+async def _try_forecast_evaluate_fast_path(
+    user_text: str, thinking_chain, tools, messages, callbacks
+) -> bool:
+    """预报检验快速路径：直接调用 evaluate_forecast MCP 工具"""
+    if not _need_forecast_evaluate(user_text):
+        return False
+
+    tool = _find_tool(tools, "evaluate_forecast")
+    if not tool:
+        return False
+
+    reasoning = None
+    try:
+        # 从用户问题中提取参数
+        element = "rain24"
+        test_type = "daily"
+        rain_type = ""
+        time_session = 24
+
+        # 逐时效 / 分地区
+        if any(k in user_text for k in ("逐时效", "分时效", "时间序列")):
+            test_type = "time_session"
+        elif any(k in user_text for k in ("分地区", "各区", "落区", "各个区")):
+            test_type = "area"
+        elif any(k in user_text for k in ("逐日", "每天", "逐天")):
+            test_type = "daily"
+
+        # 降水子类
+        if any(k in user_text for k in ("晴雨", "晴雨预报")):
+            rain_type = "ng"
+        elif any(k in user_text for k in ("暴雨", "TS评分", "ts评分", "TS")):
+            rain_type = "g"
+        elif any(k in user_text for k in ("累计", "面雨量误差")):
+            rain_type = "acc"
+
+        # 温度
+        if any(k in user_text for k in ("最高温", "最高温度", "高温")):
+            element = "tmax24"
+            rain_type = ""
+        elif any(k in user_text for k in ("最低温", "最低温度", "低温")):
+            element = "tmin24"
+            rain_type = ""
+        elif any(k in user_text for k in ("2米温度", "2m温度", "气温")):
+            element = "t2m"
+            rain_type = ""
+
+        # 预报时效
+        import re
+        session_match = re.search(r"(\d{2,3})\s*(?:小时|h)", user_text)
+        if session_match:
+            time_session = int(session_match.group(1))
+
+        reasoning = await _show_business_reasoning(
+            "预报检验与模式评估",
+            ["检验API数据"],
+            "将对比各家模式预报评分并给出结论",
+        )
+        await generate_fast_path_thinking(
+            thinking_chain, user_text, "预报检验与模式评估", ["检验API数据"], reasoning
+        )
+        await reasoning.stage("📡 查询数据", "正在查询预报检验数据...")
+
+        result = await _invoke_tool_for_fast_path(
+            "evaluate_forecast",
+            tool,
+            {
+                "element": element,
+                "test_type": test_type,
+                "rain_type": rain_type,
+                "time_session": time_session,
+            },
+            user_text,
+        )
+        data = _unwrap_tool_result(result)
+        if not isinstance(data, dict):
+            await _emit_fast_path_result(
+                "抱歉，预报检验数据查询结果格式异常，请稍后重试。",
+                messages, user_text, reasoning=reasoning,
+            )
+            return True
+
+        if "error" in data:
+            await _emit_fast_path_result(
+                f"抱歉，预报检验查询失败：{data['error']}",
+                messages, user_text, reasoning=reasoning,
+            )
+            return True
+
+        # 构建业务化回答
+        text = _build_forecast_evaluate_answer(data, user_text)
+        await _emit_fast_path_result(text, messages, user_text, reasoning=reasoning)
+        return True
+
+    except Exception as e:
+        print(f"[预报检验快速路径] 失败：{e}")
+        traceback.print_exc()
+        return False
+    finally:
+        if reasoning is not None:
+            await reasoning.close()
+
+
+def _build_forecast_evaluate_answer(data: dict, user_text: str) -> str:
+    """基于 evaluate_forecast 工具返回构建 Markdown 回答。"""
+    element = data.get("element", "")
+    test_type = data.get("test_type", "")
+    time_range = data.get("time_range", {})
+    begin = time_range.get("begin", "")[:10] if time_range.get("begin") else ""
+    end = time_range.get("end", "")[:10] if time_range.get("end") else ""
+
+    lines = [
+        f"## {element}预报检验结果",
+        "",
+        f"**检验维度**: {test_type}　**时段**: {begin} ~ {end}　**数据来源**: 检验API",
+        "",
+    ]
+
+    metrics = data.get("metrics", {})
+    if not metrics:
+        lines.append("暂无有效检验数据。")
+        return "\n".join(lines)
+
+    # 排名表格
+    for metric_name, metric_data in metrics.items():
+        ranking = metric_data.get("ranking", [])
+        if not ranking:
+            continue
+        unit = metric_data.get("unit", "")
+        lines.append(f"### {metric_name}")
+        lines.append("")
+        # 表头
+        cols = ["| 排名 | 产品 | 数值 |", "| :--- | :--- | :--- |"]
+        lines.extend(cols)
+        for i, (name, value) in enumerate(ranking, 1):
+            val_str = f"{value:.2f}{unit}" if unit else f"{value:.2f}"
+            prefix = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}"
+            lines.append(f"| {prefix} | **{name}** | {val_str} |")
+        lines.append("")
+
+    # 总结
+    summary = data.get("summary", "")
+    if summary:
+        lines.append("### 总结")
+        lines.append("")
+        lines.append(summary)
+
+    return "\n".join(lines)
+
+
 async def _try_general_weather_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
     """
     通用天气快速路径：
@@ -3862,6 +4028,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         # 通用天气快速路径（今天/明天/后天/未来N天天气）
         if await _try_general_weather_fast_path(message.content, thinking_chain, tools, messages, callbacks):
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            return
+
+        # 预报检验评估快速路径（TS评分/晴雨/模式对比/误差分析）
+        if await _try_forecast_evaluate_fast_path(message.content, thinking_chain, tools, messages, callbacks):
             _log_query_exit(query_start_time, session_id, query_summary, "ok")
             return
 
