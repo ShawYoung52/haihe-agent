@@ -224,6 +224,17 @@ class AreaConfig:
         '120119': '蓟州区'
     }
     
+    # 海河流域行政区划代码（七省一市）
+    HAIHE_AREA_CODES = {
+        '110000': '北京市',         # 永定河
+        '120000': '天津市',         # 海河干流
+        '130000': '河北省',         # 大清河/子牙河/漳卫南运河等
+        '140000': '山西省',         # 上游
+        '150000': '内蒙古自治区',   # 滦河上游
+        '370000': '山东省',         # 漳卫南运河下游
+        '410000': '河南省',         # 漳卫南运河上游
+    }
+
     # 天津市内六区代码
     TJ_CENTER_AREAS = {'120101', '120102', '120103', '120104', '120105', '120106'}
     
@@ -243,9 +254,11 @@ class DefaultConfig:
     END_TIME = _DEFAULT_END_TIME
     PREDICT_HOURS = '08,20'
     COLLECTION_CODE = 'county_jy'
-    AREA_CODES = '120000'
+    AREA_CODES = '110000,120000,130000,140000,150000,370000,410000'
     STATIONS = 'all'
     DATA_CODES = ','.join(ProductConfig.PRODUCT_NAMES.keys())
+    # 海河流域默认区划代码
+    HAIHE_DEFAULT_AREA_CODES = '120000'  # 默认天津，待API支持海河流域后扩展
     # GUIDE_MODE = list(ProductConfig.PRODUCT_NAMES.keys())[0] # 可以缺省
     STATIS_TYPES = 'all'
     SAMPLE_FIELDS = 'all'

@@ -14,6 +14,7 @@ from custom_tools import (
     register_safe_emergency_response_tool,
     register_year_to_date_areal_rainfall_tool,
 )
+from forecast_evaluate_tool import register_forecast_evaluate_tool
 
 
 class HaiheWeatherAnalyzerMCP:
@@ -39,6 +40,7 @@ class HaiheWeatherAnalyzerMCP:
         register_poi_nearest_observation_tool(self.mcp)
         register_risk_warning_tool(self.mcp)
         register_safe_emergency_response_tool(self.mcp)
+        register_forecast_evaluate_tool(self.mcp)
 
         @self.mcp.tool()
         def get_service_info() -> dict:

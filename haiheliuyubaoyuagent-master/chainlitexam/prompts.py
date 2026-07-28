@@ -528,6 +528,22 @@ get_river_network_for_plot
   - `get_city_rainfall_time_range` → 数据来源以工具返回的 `data_source` 字段为准；**禁止硬编码 "ECMWF AIFS"**
   - `analyze_rainfall_by_time` → 数据来源：天擎自动站
   - **不能编造不存在的来源**，如"天擎面雨量预报系统"不存在
+
+13. **预报检验与模式评估**：当用户询问 TS评分、晴雨准确率、预报评分、
+   模式评估、预报检验、偏差分析(BIAS)、误差分析(MAE/ME)、落区预报对比、
+   各家模式对比、暴雨预报效果 等预报检验类问题时，必须调用
+   `evaluate_forecast` 工具。参数提取规则：
+   - 问"暴雨TS"→ element=rain24, rain_type=g（分级暴雨）
+   - 问"晴雨预报"→ element=rain24, rain_type=ng（晴雨）
+   - 问"累计降水/面雨量误差"→ element=rain24, rain_type=acc（累计）
+   - 问"温度误差/最高温/最低温"→ element=tmax24 或 tmin24
+   - 问"逐日/最近一周/逐天"→ test_type=daily
+   - 问"分时效/24h/48h/72h"→ test_type=time_session
+   - 问"分地区/各区/落区"→ test_type=area
+   - 未明确时间范围时，默认查询本月1日至昨天。
+   回答时以表格对比展示各家产品（**国家指导**、**天津预报**、**ECMWF**）
+   的排名和数值，产品名称加粗，数值保留1-2位小数。
+   不要暴露后端工具名、API地址、检验公式等技术细节。
 """
 
 

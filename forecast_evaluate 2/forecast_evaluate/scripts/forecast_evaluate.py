@@ -408,7 +408,8 @@ def create_temp_test_json(test_type, time_session=None, **kwargs):
 def run_rain_eva(test_type, rain_type='ng', threshold=None,
                  begin_time=None, end_time=None,
                  save_json=True, base_dir=None,
-                 time_session=None, predict_hours=None):
+                 time_session=None, predict_hours=None,
+                 area_codes=None):
     """运行降水检验并获取结果
 
     Args:
@@ -434,6 +435,8 @@ def run_rain_eva(test_type, rain_type='ng', threshold=None,
         api_kwargs['endTime'] = end_time
     if predict_hours is not None:
         api_kwargs['predictHours'] = predict_hours
+    if area_codes is not None:
+        api_kwargs['areaCodes'] = area_codes
 
     try:
         json_data = create_rain_test_json(test_type, rain_type, threshold, time_session=time_session, **api_kwargs)
@@ -513,7 +516,8 @@ def run_rain_eva(test_type, rain_type='ng', threshold=None,
 def run_temp_eva(test_type,
                  begin_time=None, end_time=None,
                  save_json=True, base_dir=None,
-                 time_session=None, predict_hours=None):
+                 time_session=None, predict_hours=None,
+                 area_codes=None):
     """运行温度检验并获取结果
 
     Args:
