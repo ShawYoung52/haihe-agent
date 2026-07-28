@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from haihe_mcp_tools import TIANJIN_TIMEZONE
+
 from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
@@ -142,7 +144,7 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
             rain_type = None  # type: ignore[assignment]
 
         # 默认时间：本月 1 日 ~ 昨天
-        now = datetime.now()
+        now = datetime.now(TIANJIN_TIMEZONE)
         month_begin = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         yesterday_end = (now - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
 
@@ -188,4 +190,4 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
 
         except Exception as exc:
             logger.exception("[forecast_evaluate] 工具执行异常")
-            return {"error": f"预报检验查询失败: {type(exc).__name__}: {exc}"}
+            return {"error": "预报检验查询失败，请稍后重试。"}
