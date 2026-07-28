@@ -1008,11 +1008,11 @@ def _resolve_edge_features(
         # 基准时间 T0：直接段=trigger_rain_end_time，下游段=t0_source_time（待实现）
         t0 = edge.get("trigger_rain_end_time" if is_direct else "t0_source_time")
         # 传播距离
-        prop_distance = (
-            float(edge.get("end_distance_km") or 0)
-            if not is_direct
-            else _feature_length_km(row, edge, impact_type)
-        )
+        if not is_direct:
+            # 下游段：本段距离（keep_km），非累计。链式语义。
+            prop_distance = float(edge.get("keep_km") or 0)
+        else:
+            prop_distance = _feature_length_km(row, edge, impact_type)
         if velocity_kmh > 0 and math.isfinite(prop_distance):
             prop_time = round(prop_distance / velocity_kmh, 1)
         else:

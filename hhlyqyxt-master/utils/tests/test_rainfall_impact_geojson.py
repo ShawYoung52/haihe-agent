@@ -259,9 +259,9 @@ def test_downstream_feature_length_km_reports_keep_km():
     props = geojson["features"][0]["properties"]
     assert props["length_km"] == 10.0
     assert props["geometry_source"] == f"full_{rig.RIVER_TABLE_VERSION}_downstream_clipped"
-    # per-edge 传播时间：下游用 end_distance_km
-    assert props["propagation_distance_km"] == 50.0
-    assert props["propagation_time_hours"] == pytest.approx(6.9, abs=0.1)  # 50/7.2
+    # per-edge 传播时间：下游用 keep_km（本段距离，链式语义）
+    assert props["propagation_distance_km"] == 10.0
+    assert props["propagation_time_hours"] == pytest.approx(1.4, abs=0.1)  # 10/7.2
 
 
 def test_geojson_direct_feature_has_per_edge_propagation():
