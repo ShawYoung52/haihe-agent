@@ -2953,7 +2953,6 @@ async def _try_forecast_evaluate_fast_path(
             rain_type = ""
 
         # 预报时效
-        import re
         session_match = re.search(r"(\d{2,3})\s*(?:小时|h)", user_text)
         if session_match:
             time_session = int(session_match.group(1))
@@ -3002,7 +3001,11 @@ async def _try_forecast_evaluate_fast_path(
     except Exception as e:
         print(f"[预报检验快速路径] 失败：{e}")
         traceback.print_exc()
-        return False
+        await _emit_fast_path_result(
+            "预报检验查询遇到异常，请稍后重试。",
+            messages, user_text, reasoning=reasoning,
+        )
+        return True
     finally:
         if reasoning is not None:
             await reasoning.close()
@@ -3015,11 +3018,12 @@ def _build_forecast_evaluate_answer(data: dict, user_text: str) -> str:
     time_range = data.get("time_range", {})
     begin = time_range.get("begin", "")[:10] if time_range.get("begin") else ""
     end = time_range.get("end", "")[:10] if time_range.get("end") else ""
+    time_str = f"{begin} ~ {end}" if begin and end else "本月至昨日"
 
     lines = [
         f"## {element}预报检验结果",
         "",
-        f"**检验维度**: {test_type}　**时段**: {begin} ~ {end}　**数据来源**: 检验API",
+        f"**检验维度**: {test_type}　**时段**: {time_str}　**数据来源**: 检验API",
         "",
     ]
 
