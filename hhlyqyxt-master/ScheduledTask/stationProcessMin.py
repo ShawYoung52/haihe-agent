@@ -21,6 +21,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 tempfile = "./24hourmindata.csv"
+hhly_tempfile = "./hhly_24hourmindata.csv"  # 应急响应 HHLY 独立累积
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
@@ -440,15 +441,10 @@ def calcmaxdataseg5min():
     minute_monitor_id = qmm.id
     session.close()
 
-    # 应急响应监测入库：独立拉取 HHLY 流域分钟降水（不再读共享 24hourmindata.csv / HHLY_JUECE）。
-    # timeRange 用 UTC（HHLY 接口口径），_fetch 内部把返回 Datetime +8h 转北京时间，
-    # 与下方 datatime=end_time（BJT）的 12h/24h 窗口对齐。
-    _emergency_timerange = (
-        f"[{(end_time - timedelta(hours=32)).strftime('%Y%m%d%H%M%S')},"
-        f"{(end_time - timedelta(hours=8)).strftime('%Y%m%d%H%M%S')}]"
-    )
+    # 应急响应监测入库：从 HHLY 5 分钟累积 CSV 读取（由 circleadd5min 每 5 分钟追加），
+    # 与 24hourmindata.csv 同节奏、同 end_time 对齐。
     record = run_emergency_response_monitor(
-        timerange=_emergency_timerange,
+        csv_path=hhly_tempfile,
         datatime=end_time,
         minute_monitor_id=minute_monitor_id,
     )
@@ -506,6 +502,28 @@ def circleadd5min():
     df_new= df_new.sort_values(by=['Station_Id_C', 'Datetime'], ascending=[True, False])
 
     df_new.to_csv(tempfile, index=False)
+
+    # ---- HHLY 5 分钟累积（供应急响应独立数据源）----
+    try:
+        from ScheduledTask.emergency_response_monitor import _fetch_hhly_rainfall_for_emergency
+        hhly_timerange = (
+            f"[{(end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime('%Y%m%d%H%M%S')},"
+            f"{(end_time - pd.Timedelta(hours=8)).strftime('%Y%m%d%H%M%S')}]"
+        )
+        hhly_df = _fetch_hhly_rainfall_for_emergency(hhly_timerange)
+        if hhly_df is not None and not hhly_df.empty:
+            if os.path.exists(hhly_tempfile):
+                hhly_existing = pd.read_csv(hhly_tempfile)
+                hhly_existing["Datetime"] = pd.to_datetime(hhly_existing["Datetime"])
+                hhly_24h_ago = end_time - pd.Timedelta(hours=24)
+                hhly_existing = hhly_existing[hhly_existing["Datetime"] > hhly_24h_ago]
+                hhly_new = pd.concat([hhly_existing, hhly_df], ignore_index=True)
+            else:
+                hhly_new = hhly_df
+            hhly_new = hhly_new.sort_values(by=['Station_Id_C', 'Datetime'], ascending=[True, False])
+            hhly_new.to_csv(hhly_tempfile, index=False)
+    except Exception as e:
+        print("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e)
 
     return end_time.to_pydatetime()
 
