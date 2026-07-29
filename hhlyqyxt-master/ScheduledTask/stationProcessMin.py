@@ -49,14 +49,14 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
         if hhly_df is None or hhly_df.empty:
             return
         if os.path.exists(hhly_tempfile):
-            hhly_existing = pd.read_csv(hhly_tempfile)
+            hhly_existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
             hhly_existing["Datetime"] = pd.to_datetime(hhly_existing["Datetime"])
             hhly_existing = hhly_existing[hhly_existing["Datetime"] > end_time - pd.Timedelta(hours=24)]
             hhly_new = pd.concat([hhly_existing, hhly_df], ignore_index=True)
         else:
             hhly_new = hhly_df
         hhly_new = hhly_new.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
-        hhly_new.to_csv(hhly_tempfile, index=False)
+        hhly_new.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
     except (OSError, requests.exceptions.RequestException, ValueError, KeyError) as e:
         logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e)
 
@@ -147,7 +147,7 @@ def unionmindataby10minuteto24h(endtimestr):
     print(df_5min)
     # df.to_csv("testmin.csv")
 
-    df_5min.to_csv(tempfile)
+    df_5min.to_csv(tempfile, encoding="utf-8-sig")
 
 
 def calchourmaxpre(df_5min):
@@ -240,7 +240,7 @@ def countstationnumbylevel(df_5min):
 
 def calcmaxdataseg5min():
 
-    df_5min = pd.read_csv(tempfile)
+    df_5min = pd.read_csv(tempfile, encoding="utf-8-sig", low_memory=False)
 
     df_5min["Lon"] = df_5min["Lon"].astype("float")
     df_5min["Lat"] = df_5min["Lat"].astype("float")
@@ -491,7 +491,7 @@ def calcmaxdataseg5min():
 
 
 def circleadd5min():
-    df_5min = pd.read_csv(tempfile)
+    df_5min = pd.read_csv(tempfile, encoding="utf-8-sig", low_memory=False)
     if "Station_levl" not in df_5min.columns:
         df_5min["Station_levl"] = ""
     df_5min = df_5min[["Station_Id_C","Datetime","PRE","Station_levl","Lat","Lon","City","Station_Name","Cnty","Province","Town"]]
@@ -540,7 +540,7 @@ def circleadd5min():
 
     df_new= df_new.sort_values(by=['Station_Id_C', 'Datetime'], ascending=[True, False])
 
-    df_new.to_csv(tempfile, index=False)
+    df_new.to_csv(tempfile, index=False, encoding="utf-8-sig")
 
     # HHLY 5 分钟累积（供应急响应独立数据源）
     _append_hhly_5min_to_rolling_csv(end_time)

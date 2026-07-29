@@ -146,7 +146,7 @@ def compute_emergency_response_stats(
         df = source.copy()
     else:
         try:
-            df = pd.read_csv(source)
+            df = pd.read_csv(source, encoding="utf-8-sig", low_memory=False)
         except pd.errors.EmptyDataError:
             return None
     if df is None or df.empty:
