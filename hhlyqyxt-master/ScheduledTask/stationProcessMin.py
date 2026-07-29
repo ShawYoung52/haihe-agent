@@ -40,21 +40,31 @@ def _music_timerange_5min(end_time: pd.Timestamp) -> str:
 
 
 def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
-    """拉取 HHLY 5 分钟数据，追加到 hhly_tempfile；保留 24h 窗口，失败仅记 WARNING。
-
-    与 HHLY_JUECE 主链路同节奏、同 end_time 对齐。首次运行时 CSV 不存在，直接落盘。
-    """
+    """拉取 HHLY 分钟数据，5 分钟聚合后追加到 hhly_tempfile；保留 24h 窗口。"""
     try:
-        hhly_df = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
-        if hhly_df is None or hhly_df.empty:
+        hhly_raw = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
+        if hhly_raw is None or hhly_raw.empty:
             return
+        # 5 分钟聚合，与 HHLY_JUECE 主链路同口径
+        hhly_5min = (
+            hhly_raw.set_index("Datetime")
+            .groupby("Station_Id_C")
+            .resample("5min", label="right", closed="right")
+            .agg({"PRE": "sum"})
+            .reset_index()
+        )
+        # 补回其他列（取首条）
+        for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"):
+            if col in hhly_raw.columns:
+                first_vals = hhly_raw.groupby(["Station_Id_C", pd.Grouper(key="Datetime", freq="5min", label="right")])[col].first().reset_index()
+                hhly_5min = hhly_5min.merge(first_vals, on=["Station_Id_C", "Datetime"], how="left")
         if os.path.exists(hhly_tempfile):
-            hhly_existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
-            hhly_existing["Datetime"] = pd.to_datetime(hhly_existing["Datetime"])
-            hhly_existing = hhly_existing[hhly_existing["Datetime"] > end_time - pd.Timedelta(hours=24)]
-            hhly_new = pd.concat([hhly_existing, hhly_df], ignore_index=True)
+            existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
+            existing["Datetime"] = pd.to_datetime(existing["Datetime"])
+            existing = existing[existing["Datetime"] > end_time - pd.Timedelta(hours=24)]
+            hhly_new = pd.concat([existing, hhly_5min], ignore_index=True)
         else:
-            hhly_new = hhly_df
+            hhly_new = hhly_5min
         hhly_new = hhly_new.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
         hhly_new.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
     except (OSError, requests.exceptions.RequestException, ValueError, KeyError) as e:
@@ -542,7 +552,7 @@ def circleadd5min():
 
     df_new.to_csv(tempfile, index=False, encoding="utf-8-sig")
 
-    # HHLY 5 分钟累积（供应急响应独立数据源）
+    # HHLY 5 分钟聚合（供应急响应独立数据源）
     _append_hhly_5min_to_rolling_csv(end_time)
 
     return end_time.to_pydatetime()
@@ -826,12 +836,20 @@ def scheduler_listener(event):
         )
 
 def process_task():
-    endtime = datetime.now()
+    # 每个 tick 最多处理 4 分钟，追不完就退出让下一个 tick 继续。
+    # circleadd5min 基于 CSV 的 Datetime.max() 推进，退出后下次接着追不会漏。
+    # 上一版本用循环外固定 endtime 无预算，慢查询期间 CSV 一直追不上，
+    # 触发 APScheduler max_instances=1 一直挡住新 tick，越拖越远。
+    tick_start = datetime.now()
+    max_tick_seconds = 240  # 单次 tick 最多 4 分钟
 
     datatime = circleadd5min()
     calcmaxdataseg5min()
 
-    while endtime > datatime:
+    while datetime.now() > datatime:
+        if (datetime.now() - tick_start).total_seconds() > max_tick_seconds:
+            print(f"process_task 单次预算 {max_tick_seconds}s 用尽（datatime={datatime}），退出让下一 tick 继续追赶")
+            break
         datatime = circleadd5min()
         calcmaxdataseg5min()
 
