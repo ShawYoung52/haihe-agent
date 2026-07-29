@@ -447,11 +447,15 @@ def calcmaxdataseg5min():
         f"[{(end_time - timedelta(hours=32)).strftime('%Y%m%d%H%M%S')},"
         f"{(end_time - timedelta(hours=8)).strftime('%Y%m%d%H%M%S')}]"
     )
-    run_emergency_response_monitor(
+    record = run_emergency_response_monitor(
         timerange=_emergency_timerange,
         datatime=end_time,
         minute_monitor_id=minute_monitor_id,
     )
+    # I-IV 级应急响应触发天河报告生成
+    if record is not None:
+        from ScheduledTask.report_generator import trigger_weather_bulletin_report
+        trigger_weather_bulletin_report(record.response_level)
 
 
 def circleadd5min():
