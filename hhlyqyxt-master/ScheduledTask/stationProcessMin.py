@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import signal
 from datetime import datetime, timedelta
@@ -12,7 +13,11 @@ from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_ERROR
 from sqlalchemy import text
 
 from Models.QyMinuteMonitor import QyMinuteMonitor
-from ScheduledTask.emergency_response_monitor import run_emergency_response_monitor
+from ScheduledTask.emergency_response_monitor import (
+    _fetch_hhly_rainfall_for_emergency,
+    run_emergency_response_monitor,
+)
+from ScheduledTask.report_generator import trigger_weather_bulletin_report
 from utils import create_rainstorm_impact_map
 from utils.MusicTool import MusicClient, MusicConfig
 from utils.db import Session, engine
@@ -22,6 +27,38 @@ from apscheduler.triggers.cron import CronTrigger
 
 tempfile = "./24hourmindata.csv"
 hhly_tempfile = "./hhly_24hourmindata.csv"  # 应急响应 HHLY 独立累积
+
+logger = logging.getLogger(__name__)
+
+
+def _music_timerange_5min(end_time: pd.Timestamp) -> str:
+    """构造 Music 接口 5 分钟时间窗（UTC，`end_time` 为 BJT），前后-8h 转 UTC。"""
+    return (
+        f"[{(end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime('%Y%m%d%H%M%S')},"
+        f"{(end_time - pd.Timedelta(hours=8)).strftime('%Y%m%d%H%M%S')}]"
+    )
+
+
+def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
+    """拉取 HHLY 5 分钟数据，追加到 hhly_tempfile；保留 24h 窗口，失败仅记 WARNING。
+
+    与 HHLY_JUECE 主链路同节奏、同 end_time 对齐。首次运行时 CSV 不存在，直接落盘。
+    """
+    try:
+        hhly_df = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
+        if hhly_df is None or hhly_df.empty:
+            return
+        if os.path.exists(hhly_tempfile):
+            hhly_existing = pd.read_csv(hhly_tempfile)
+            hhly_existing["Datetime"] = pd.to_datetime(hhly_existing["Datetime"])
+            hhly_existing = hhly_existing[hhly_existing["Datetime"] > end_time - pd.Timedelta(hours=24)]
+            hhly_new = pd.concat([hhly_existing, hhly_df], ignore_index=True)
+        else:
+            hhly_new = hhly_df
+        hhly_new = hhly_new.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
+        hhly_new.to_csv(hhly_tempfile, index=False)
+    except (OSError, requests.exceptions.RequestException, ValueError, KeyError) as e:
+        logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e)
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
@@ -450,7 +487,6 @@ def calcmaxdataseg5min():
     )
     # I-IV 级应急响应触发天河报告生成
     if record is not None:
-        from ScheduledTask.report_generator import trigger_weather_bulletin_report
         trigger_weather_bulletin_report(record.response_level)
 
 
@@ -470,7 +506,10 @@ def circleadd5min():
         (df_5min["Datetime"] <= end_time)
         ].copy()
 
-    res = readmindatabytimerange((end_time-pd.Timedelta(minutes=4)-pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"), (end_time-pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"))
+    res = readmindatabytimerange(
+        (end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
+        (end_time - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
+    )
 
 
     res["Datetime"] = pd.to_datetime(res["Datetime"], format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=8)
@@ -503,27 +542,8 @@ def circleadd5min():
 
     df_new.to_csv(tempfile, index=False)
 
-    # ---- HHLY 5 分钟累积（供应急响应独立数据源）----
-    try:
-        from ScheduledTask.emergency_response_monitor import _fetch_hhly_rainfall_for_emergency
-        hhly_timerange = (
-            f"[{(end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime('%Y%m%d%H%M%S')},"
-            f"{(end_time - pd.Timedelta(hours=8)).strftime('%Y%m%d%H%M%S')}]"
-        )
-        hhly_df = _fetch_hhly_rainfall_for_emergency(hhly_timerange)
-        if hhly_df is not None and not hhly_df.empty:
-            if os.path.exists(hhly_tempfile):
-                hhly_existing = pd.read_csv(hhly_tempfile)
-                hhly_existing["Datetime"] = pd.to_datetime(hhly_existing["Datetime"])
-                hhly_24h_ago = end_time - pd.Timedelta(hours=24)
-                hhly_existing = hhly_existing[hhly_existing["Datetime"] > hhly_24h_ago]
-                hhly_new = pd.concat([hhly_existing, hhly_df], ignore_index=True)
-            else:
-                hhly_new = hhly_df
-            hhly_new = hhly_new.sort_values(by=['Station_Id_C', 'Datetime'], ascending=[True, False])
-            hhly_new.to_csv(hhly_tempfile, index=False)
-    except Exception as e:
-        print("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e)
+    # HHLY 5 分钟累积（供应急响应独立数据源）
+    _append_hhly_5min_to_rolling_csv(end_time)
 
     return end_time.to_pydatetime()
 

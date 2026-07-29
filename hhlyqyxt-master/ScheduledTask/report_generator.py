@@ -43,9 +43,8 @@ def trigger_weather_bulletin_report(
         logger.warning("天河报告接口调用失败：%s，应急%d级", e, response_level)
         return False
 
-    if resp.status_code < 400:
-        logger.info("天河报告触发成功（应急%d级），status=%s", response_level, resp.status_code)
-        return True
-    else:
+    if resp.status_code >= 400:
         logger.warning("天河报告接口返回非成功状态码：%s，body=%s", resp.status_code, resp.text[:200])
         return False
+    logger.info("天河报告触发成功（应急%d级），status=%s", response_level, resp.status_code)
+    return True
