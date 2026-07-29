@@ -40,24 +40,38 @@ def _music_timerange_5min(end_time: pd.Timestamp) -> str:
 
 
 def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
-    """拉取 HHLY 分钟数据，5 分钟聚合后追加到 hhly_tempfile；保留 24h 窗口。"""
+    """拉取 HHLY 分钟数据，5 分钟聚合后追加到 hhly_tempfile；保留 24h 窗口。
+
+    5 分钟聚合与 HHLY_JUECE 主链路（circleadd5min）同口径：PRE=sum，其他列取 first。
+    一次 agg 搞定所有列，避免 resample 和 Grouper 的 closed 默认值不一致导致
+    merge 全部落 NaN 的陷阱（C1 修复）。
+    """
     try:
         hhly_raw = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
         if hhly_raw is None or hhly_raw.empty:
             return
-        # 5 分钟聚合，与 HHLY_JUECE 主链路同口径
+        # 补齐可能缺失的元信息列，agg 前 setdefault 避免 KeyError
+        for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"):
+            if col not in hhly_raw.columns:
+                hhly_raw[col] = ""
+        # 5 分钟聚合：一次 agg 搞定 PRE 累加 + 其他列 first
         hhly_5min = (
             hhly_raw.set_index("Datetime")
             .groupby("Station_Id_C")
             .resample("5min", label="right", closed="right")
-            .agg({"PRE": "sum"})
+            .agg({
+                "PRE": "sum",
+                "Station_levl": "first",
+                "Lat": "first",
+                "Lon": "first",
+                "City": "first",
+                "Station_Name": "first",
+                "Cnty": "first",
+                "Province": "first",
+                "Town": "first",
+            })
             .reset_index()
         )
-        # 补回其他列（取首条）
-        for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"):
-            if col in hhly_raw.columns:
-                first_vals = hhly_raw.groupby(["Station_Id_C", pd.Grouper(key="Datetime", freq="5min", label="right")])[col].first().reset_index()
-                hhly_5min = hhly_5min.merge(first_vals, on=["Station_Id_C", "Datetime"], how="left")
         if os.path.exists(hhly_tempfile):
             existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
             existing["Datetime"] = pd.to_datetime(existing["Datetime"])
@@ -68,7 +82,7 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
         hhly_new = hhly_new.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
         hhly_new.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
     except (OSError, requests.exceptions.RequestException, ValueError, KeyError) as e:
-        logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e)
+        logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
