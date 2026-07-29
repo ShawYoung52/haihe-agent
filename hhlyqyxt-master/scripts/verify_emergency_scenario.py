@@ -84,7 +84,7 @@ def _fetch_juece_24h(end_time_bjt: datetime) -> pd.DataFrame:
 
 
 def _fetch_hhly_24h(end_time_bjt: datetime) -> pd.DataFrame:
-    """按小时循环拉 24h HHLY 分钟降水（应急响应数据源）。"""
+    """按小时循环拉 24h HHLY 分钟降水（应急响应数据源），5min 聚合与生产同口径。"""
     end_utc = end_time_bjt - timedelta(hours=8)
     start_utc = end_utc - timedelta(hours=24)
 
@@ -98,7 +98,27 @@ def _fetch_hhly_24h(end_time_bjt: datetime) -> pd.DataFrame:
             df = res if df is None else pd.concat([df, res], ignore_index=True)
         temptime += timedelta(hours=1)
 
-    return df if df is not None else pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # 5min 聚合，与 stationProcessMin._append_hhly_5min_to_rolling_csv 同口径
+    for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"):
+        if col not in df.columns:
+            df[col] = ""
+    df_5min = (
+        df.set_index("Datetime")
+        .groupby("Station_Id_C")
+        .resample("5min", label="right", closed="right")
+        .agg({
+            "PRE": "sum",
+            "Station_levl": "first",
+            "Lat": "first", "Lon": "first",
+            "City": "first", "Station_Name": "first",
+            "Cnty": "first", "Province": "first", "Town": "first",
+        })
+        .reset_index()
+    )
+    return df_5min
 
 
 def main():
