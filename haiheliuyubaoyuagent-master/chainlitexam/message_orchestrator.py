@@ -2902,6 +2902,7 @@ def _need_forecast_evaluate(user_text: str) -> bool:
         "BIAS", "bias", "MAE", "mae",
         "预报效果", "预报准确性",
         "暴雨TS", "暴雨ts",
+        "预报最准", "暴雨最准", "最准", "最准确", "预报对比", "预报得最准",
     ]
     return any(k in user_text for k in keywords)
 

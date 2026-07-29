@@ -25,6 +25,9 @@ class TestForecastEvaluateKeywordDetection:
         "BIAS偏差怎么样",
         "MAE误差分析",
         "天津预报和ECMWF的TS评分",
+        "哪个模式预报暴雨最准",
+        "哪个模式暴雨预报最准",
+        "暴雨预报哪个模式最准",
     ]
 
     NON_TRIGGER_QUERIES = [
