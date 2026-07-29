@@ -20,7 +20,7 @@ from utils.db import Session, engine
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-tempfile = "./yangxiao.csv"
+tempfile = "./24hourmindata.csv"
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
@@ -440,7 +440,7 @@ def calcmaxdataseg5min():
     minute_monitor_id = qmm.id
     session.close()
 
-    # 应急响应监测入库：独立拉取 HHLY 流域分钟降水（不再读共享 yangxiao.csv / HHLY_JUECE）。
+    # 应急响应监测入库：独立拉取 HHLY 流域分钟降水（不再读共享 24hourmindata.csv / HHLY_JUECE）。
     # timeRange 用 UTC（HHLY 接口口径），_fetch 内部把返回 Datetime +8h 转北京时间，
     # 与下方 datatime=end_time（BJT）的 12h/24h 窗口对齐。
     _emergency_timerange = (
