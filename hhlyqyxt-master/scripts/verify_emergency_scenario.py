@@ -32,12 +32,15 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from ScheduledTask.emergency_response_monitor import _fetch_hhly_rainfall_for_emergency  # noqa: E402
+from ScheduledTask import stationProcessMin as spm  # noqa: E402
 from ScheduledTask.stationProcessMin import (  # noqa: E402
     calcmaxdataseg5min,
-    tempfile,
-    hhly_tempfile,
     readmindatabytimerange,
 )
+
+# 验证专用 CSV（不与生产的 24hourmindata.csv / hhly_24hourmindata.csv 冲突）
+VERIFY_JUECE_CSV = "./verify_juece_24hourmindata.csv"
+VERIFY_HHLY_CSV = "./verify_hhly_24hourmindata.csv"
 
 
 def _fetch_juece_24h(end_time_bjt: datetime) -> pd.DataFrame:
@@ -116,10 +119,10 @@ def main():
         print(f"  ✗ 无 HHLY_JUECE 数据。检查 MUSIC 接口 / 时段。")
         return 1
     print(f"  ✓ 得到 {len(juece_df)} 条 5min 记录，{juece_df['Station_Id_C'].nunique()} 个站点")
-    if os.path.exists(tempfile):
-        os.remove(tempfile)
-    juece_df.to_csv(tempfile, index=False, encoding="utf-8-sig")
-    print(f"  ✓ 写入 {tempfile}")
+    if os.path.exists(VERIFY_JUECE_CSV):
+        os.remove(VERIFY_JUECE_CSV)
+    juece_df.to_csv(VERIFY_JUECE_CSV, index=False, encoding="utf-8-sig")
+    print(f"  ✓ 写入 {VERIFY_JUECE_CSV}（验证专用，不碰生产 CSV）")
 
     # Step 2: 准备 HHLY CSV
     print("\n[2/3] 拉取 HHLY 24h 分钟降水（应急响应数据源）...")
@@ -128,29 +131,37 @@ def main():
         print(f"  ✗ 无 HHLY 数据。应急响应将无法判定。")
     else:
         print(f"  ✓ 得到 {len(hhly_df)} 条记录，{hhly_df['Station_Id_C'].nunique()} 个站点")
-        if os.path.exists(hhly_tempfile):
-            os.remove(hhly_tempfile)
-        hhly_df.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
-        print(f"  ✓ 写入 {hhly_tempfile}")
+        if os.path.exists(VERIFY_HHLY_CSV):
+            os.remove(VERIFY_HHLY_CSV)
+        hhly_df.to_csv(VERIFY_HHLY_CSV, index=False, encoding="utf-8-sig")
+        print(f"  ✓ 写入 {VERIFY_HHLY_CSV}（验证专用，不碰生产 HHLY CSV）")
 
-    # Step 3: 走完整业务流程
+    # Step 3: 临时替换全局变量，让 calcmaxdataseg5min 读我们的 CSV
     print("\n[3/3] 调用 calcmaxdataseg5min()（完整业务流程）...")
     print("  - 5min/1h/24h 站点最大统计入库")
     print("  - 天津分县暴雨等级入库")
     print("  - 河流影响图（如≥50mm 站点存在则生成 GeoJSON）")
     print("  - 应急响应级别判定 + 入库")
     print("  - I-IV 级触发天河报告")
+    _orig_tempfile = spm.tempfile
+    _orig_hhly_tempfile = spm.hhly_tempfile
     try:
+        spm.tempfile = VERIFY_JUECE_CSV
+        spm.hhly_tempfile = VERIFY_HHLY_CSV
         calcmaxdataseg5min()
         print("\n=== ✓ 场景验证完成 ===")
         print(f"检查数据库表 qy_minute_monitor（含 geojsonurl / impact_city）")
         print(f"检查数据库表 qy_emergency_response_monitor（含 response_level）")
+        print(f"验证 CSV（可删除）：{VERIFY_JUECE_CSV} / {VERIFY_HHLY_CSV}")
         return 0
     except Exception as e:
         print(f"\n=== ✗ calcmaxdataseg5min 执行失败：{e} ===")
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        spm.tempfile = _orig_tempfile
+        spm.hhly_tempfile = _orig_hhly_tempfile
 
 
 if __name__ == "__main__":
