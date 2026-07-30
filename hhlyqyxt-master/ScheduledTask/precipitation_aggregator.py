@@ -95,7 +95,8 @@ def aggregate_minute_precipitation(
             continue
 
         dt = _parse_datetime(r)
-        if dt is None or dt > end_time or dt <= max_cutoff:
+        # 保留 [end_time - max_window, end_time]（闭区间），与 CSV 侧 `>=` 边界一致
+        if dt is None or dt > end_time or dt < max_cutoff:
             continue
 
         if not _q_pre_valid(r.get("Q_PRE"), trusted_q_pre):
@@ -116,7 +117,8 @@ def aggregate_minute_precipitation(
             station_meta[sid] = dict(r)
 
         for h, cutoff in window_cutoffs.items():
-            if dt > cutoff:
+            # 闭区间 [end_time - h, end_time]，与 24h 主窗口一致
+            if dt >= cutoff:
                 by_station[sid][f"PRE_{h}h"] += pre
                 by_station[sid][f"pre_count_{h}h"] += 1
 
