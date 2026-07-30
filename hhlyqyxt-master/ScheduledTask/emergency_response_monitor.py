@@ -22,10 +22,15 @@ NATIONAL_STATION_LEVELS = {"11", "12", "13", "16"}
 
 # 应急响应独立数据源：海河流域（HHLY）分钟降水
 HHLY_BASIN_CODES = "HHLY"
-HHLY_MIN_DATA_CODE = "SURF_CHN_MUL_MIN"
+# 数据源改为 SURF_CHN_PRE_MIN（分钟降水专用，含 Q_PRE 质量标志），
+# 与问答智能体 emergency_api 保持一致，避免 SURF_CHN_MUL_MIN 的
+# Station_levl 跨时刻不一致 / PRE 字符串等脏数据问题。
+HHLY_MIN_DATA_CODE = "SURF_CHN_PRE_MIN"
 HHLY_MIN_ELEMENTS = (
-    "Station_levl,Lat,Lon,Alti,Station_Id_C,Datetime,IYMDHM,RYMDHM,UPDATE_TIME,"
-    "City,Station_Name,Cnty,NetCode,Province,REGIONCODE,Town,Year,Mon,Day,Hour,Min,PRE"
+    "Station_Id_C,Station_levl,Lat,Lon,Alti,Admin_Code_CHN,V_ACODE_4SEARCH,Town_code,"
+    "City,Station_Name,Cnty,NetCode,Province,REGIONCODE,Town,Country,COUNTRYCODE,"
+    "Year,Mon,Day,Hour,Min,Datetime,PRE,Q_PRE,PRE_Sensor_Heigh,Station_Type,"
+    "REP_CORR_ID,UPDATE_TIME,D_RETAIN_ID,DATA_ID,D_SOURCE_ID,V08010,RYMDHM,IYMDHM"
 )
 HHLY_MIN_COLUMNS = HHLY_MIN_ELEMENTS.split(",")
 

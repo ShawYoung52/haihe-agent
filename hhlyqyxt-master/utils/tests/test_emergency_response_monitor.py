@@ -387,7 +387,7 @@ def _fake_records(pres=("60.0", "60.0", "60.0"), station_levels=("011", "011", "
 
 
 def test_fetch_hhly_rainfall_uses_hhly_basin_and_min_data_code(monkeypatch):
-    """拉取必须 basin_codes=HHLY、data_code=SURF_CHN_MUL_MIN，并含 Station_levl。"""
+    """拉取必须 basin_codes=HHLY、data_code=SURF_CHN_PRE_MIN，并含 Station_levl / Q_PRE。"""
     captured = {}
 
     class FakeClient:
@@ -399,8 +399,9 @@ def test_fetch_hhly_rainfall_uses_hhly_basin_and_min_data_code(monkeypatch):
 
     df = erm._fetch_hhly_rainfall_for_emergency("[20260715000000,20260715100000]", client=FakeClient())
     assert captured["basin_codes"] == "HHLY"
-    assert captured["data_code"] == "SURF_CHN_MUL_MIN"
+    assert captured["data_code"] == "SURF_CHN_PRE_MIN"
     assert "Station_levl" in captured["elements"]
+    assert "Q_PRE" in captured["elements"]
     assert list(df["Station_Id_C"]) == ["A", "B", "C"]
     assert "Station_levl" in df.columns and "PRE" in df.columns
 
