@@ -75,7 +75,7 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
         if os.path.exists(hhly_tempfile):
             existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
             existing["Datetime"] = pd.to_datetime(existing["Datetime"])
-            existing = existing[existing["Datetime"] > end_time - pd.Timedelta(hours=24)]
+            existing = existing[existing["Datetime"] >= end_time - pd.Timedelta(hours=24)]
             hhly_new = pd.concat([existing, hhly_5min], ignore_index=True)
         else:
             hhly_new = hhly_5min
@@ -526,7 +526,7 @@ def circleadd5min():
     start_time = end_time - pd.Timedelta(hours=24)
 
     df = df_5min[
-        (df_5min["Datetime"] > start_time) &
+        (df_5min["Datetime"] >= start_time) &
         (df_5min["Datetime"] <= end_time)
         ].copy()
 
