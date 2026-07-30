@@ -532,25 +532,23 @@ def circleadd5min():
         (df_5min["Datetime"] <= end_time)
         ].copy()
 
+    end_time_iso = end_time.strftime("%Y-%m-%d %H:%M:%S")
+
     try:
         res = readmindatabytimerange(
             (end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
             (end_time - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
         )
     except MusicApiError as e:
-        # 该时段 MUSIC 无数据（"query success, but no record"）等 → 跳过本次追加，
-        # end_time 仍推进，下一 tick 从新的 end_time 继续（避免卡死在无数据时段）
-        logger.warning("HHLY_JUECE 5分钟拉取失败，本次追加跳过：%s", e)
-        # 直接写回未变的 df（等同于只前进了 end_time 但不新增数据）
-        df.to_csv(tempfile, index=False, encoding="utf-8-sig")
-        _append_hhly_5min_to_rolling_csv(end_time)
-        return end_time.to_pydatetime()
+        # MUSIC 该时段无数据。不推进 end_time：让下 tick 从同一 CSV.max 再拉一次同一时段。
+        # 如果一直无数据（真空档 or 站点未上报），CSV.max 会停留可见，方便观察。
+        # 数据回来后自动追上，无需人工干预。
+        logger.warning("HHLY_JUECE 5分钟拉取失败 (end_time=%s)：%s", end_time_iso, e)
+        return (end_time - pd.Timedelta(minutes=5)).to_pydatetime()
 
     if res is None or (hasattr(res, "empty") and res.empty):
-        logger.warning("HHLY_JUECE 5分钟拉取返回空，本次追加跳过（end_time=%s）", end_time)
-        df.to_csv(tempfile, index=False, encoding="utf-8-sig")
-        _append_hhly_5min_to_rolling_csv(end_time)
-        return end_time.to_pydatetime()
+        logger.warning("HHLY_JUECE 5分钟拉取返回空 (end_time=%s)", end_time_iso)
+        return (end_time - pd.Timedelta(minutes=5)).to_pydatetime()
 
     res["Datetime"] = pd.to_datetime(res["Datetime"], format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=8)
     res["PRE"] = res["PRE"].astype("float")
