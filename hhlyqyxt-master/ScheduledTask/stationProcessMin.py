@@ -534,6 +534,9 @@ def circleadd5min():
 
     end_time_iso = end_time.strftime("%Y-%m-%d %H:%M:%S")
 
+    # HHLY 5 分钟累积（供应急响应，独立于 HHLY_JUECE）——先跑，即使 HHLY_JUECE 失败也不影响
+    _append_hhly_5min_to_rolling_csv(end_time)
+
     try:
         res = readmindatabytimerange(
             (end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
@@ -541,7 +544,6 @@ def circleadd5min():
         )
     except MusicApiError as e:
         # MUSIC 该时段无数据。不推进 end_time：让下 tick 从同一 CSV.max 再拉一次同一时段。
-        # 如果一直无数据（真空档 or 站点未上报），CSV.max 会停留可见，方便观察。
         # 数据回来后自动追上，无需人工干预。
         logger.warning("HHLY_JUECE 5分钟拉取失败 (end_time=%s)：%s", end_time_iso, e)
         return (end_time - pd.Timedelta(minutes=5)).to_pydatetime()
@@ -579,9 +581,6 @@ def circleadd5min():
     df_new= df_new.sort_values(by=['Station_Id_C', 'Datetime'], ascending=[True, False])
 
     df_new.to_csv(tempfile, index=False, encoding="utf-8-sig")
-
-    # HHLY 5 分钟聚合（供应急响应独立数据源）
-    _append_hhly_5min_to_rolling_csv(end_time)
 
     return end_time.to_pydatetime()
 
