@@ -46,7 +46,13 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
 
     与 HHLY_JUECE 主链路一致（`24hourmindata.csv`）：CSV 存 5min 聚合结果，每站每 5min 1 行。
     区别在于聚合前先做 Q_PRE 质量过滤（参考问答智能体，过滤脏数据）。
+
+    CSV 不存在时自动初始化 24h 全量数据（一次性），之后每 5min 追加+滚动。
     """
+    if not os.path.exists(hhly_tempfile):
+        _init_hhly_csv_24h()
+        if not os.path.exists(hhly_tempfile):
+            return  # 初始化失败（24h 内无 HHLY 数据）
     try:
         hhly_raw = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
         if hhly_raw is None or hhly_raw.empty:
@@ -123,6 +129,79 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
     except (OSError, requests.exceptions.RequestException, ValueError, KeyError,
             MusicApiError) as e:
         logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
+
+
+def _init_hhly_csv_24h() -> None:
+    """HHLY CSV 首次初始化：拉 24h 历史数据，Q_PRE 过滤 + 5min 聚合后写入。
+
+    与 unionmindataby10minuteto24h 对应（HHLY_JUECE），确保服务启动时
+    HHLY CSV 已有 24h 全量数据，不需要从零爬 288 个 5min 时刻。
+    """
+    end_bjt = pd.Timestamp(datetime.now()).floor("5min")
+    start_utc = end_bjt - pd.Timedelta(hours=24) - pd.Timedelta(hours=8)
+    end_utc = end_bjt - pd.Timedelta(hours=8)
+
+    logger.info("HHLY CSV 不存在，正在拉 24h 历史数据初始化……")
+
+    temptime = start_utc + pd.Timedelta(hours=1)
+    df = None
+    while temptime <= end_utc:
+        tempstart = temptime - pd.Timedelta(hours=1) + pd.Timedelta(minutes=1)
+        tr = f"[{tempstart.strftime('%Y%m%d%H%M%S')},{temptime.strftime('%Y%m%d%H%M%S')}]"
+        try:
+            res = _fetch_hhly_rainfall_for_emergency(tr)
+            if res is not None and not res.empty:
+                df = res if df is None else pd.concat([df, res], ignore_index=True)
+        except MusicApiError as e:
+            logger.warning("HHLY 初始化：%s 时段无数据（%s）", tempstart, e)
+        temptime += pd.Timedelta(hours=1)
+
+    if df is None or df.empty:
+        logger.warning("HHLY 24h 初始化拉取为空，跳过")
+        return
+
+    # Q_PRE 过滤（与 _append_hhly_5min_to_rolling_csv 同口径）
+    for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name",
+                "Cnty", "Province", "Town", "Q_PRE"):
+        if col not in df.columns:
+            df[col] = ""
+    q_pre_str = df["Q_PRE"].fillna("").astype(str).str.strip()
+    trusted_mask = q_pre_str.isin({"0", "3", "4"}) | (q_pre_str == "")
+    df = df[trusted_mask].copy()
+    if df.empty:
+        return
+
+    df["PRE"] = pd.to_numeric(df["PRE"], errors="coerce").fillna(0.0)
+    df.loc[df["PRE"] > 99988, "PRE"] = 0.0
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
+    df = df.dropna(subset=["Datetime"])
+
+    # 站点元信息 mode 固定（与 _append_hhly_5min_to_rolling_csv 同口径）
+    meta_cols = ["Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"]
+    station_mode = (
+        df.groupby("Station_Id_C")[meta_cols]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s) else ""))
+    )
+    for col in meta_cols:
+        df[col] = df["Station_Id_C"].map(station_mode[col])
+
+    # 5min 聚合
+    df_5min = (
+        df.set_index("Datetime")
+        .groupby("Station_Id_C")
+        .resample("5min", label="right", closed="right")
+        .agg({
+            "PRE": "sum",
+            "Station_levl": "first", "Lat": "first", "Lon": "first",
+            "City": "first", "Station_Name": "first",
+            "Cnty": "first", "Province": "first", "Town": "first",
+        })
+        .reset_index()
+    )
+    df_5min.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
+    logger.info("HHLY 24h 初始化完成：%d 行，%d 个唯一时刻，时间范围 %s ~ %s",
+                len(df_5min), df_5min["Datetime"].nunique(),
+                df_5min["Datetime"].min(), df_5min["Datetime"].max())
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
