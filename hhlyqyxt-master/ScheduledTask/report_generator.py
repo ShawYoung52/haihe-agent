@@ -7,7 +7,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-REPORT_API_URL = "http://10.226.188.156:8000/api/report/generate"
+REPORT_API_URL = "http://10.226.188.156:8001/api/report/generate"
 REPORT_TEMPLATE = "haihe_weather_bulletin"
 DEFAULT_TIMEOUT = 30
 

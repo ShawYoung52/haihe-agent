@@ -121,7 +121,7 @@ df_5min = (
 
 ## 天河报告接口
 
-POST `http://10.226.188.156:8000/api/report/generate`
+POST `http://10.226.188.156:8001/api/report/generate`
 body: `{"template": "haihe_weather_bulletin"}`（只传 template，其他默认）
 
 在 `stationProcessMin.py:calcmaxdataseg5min()` 中 `run_emergency_response_monitor` 之后调用 `trigger_weather_bulletin_report(record.response_level)`。仅 I-IV 级触发。失败**不阻塞主流程**（只记 WARNING）。
