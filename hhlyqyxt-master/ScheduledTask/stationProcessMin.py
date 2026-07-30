@@ -55,7 +55,23 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
         for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"):
             if col not in hhly_raw.columns:
                 hhly_raw[col] = ""
-        # 5 分钟聚合：一次 agg 搞定 PRE 累加 + 其他列 first
+        # PRE 强制转 float（MUSIC 返回字符串，不转会导致 sum 变字符串拼接 "0"+"0"="00"）
+        hhly_raw["PRE"] = pd.to_numeric(hhly_raw["PRE"], errors="coerce").fillna(0.0)
+        hhly_raw.loc[hhly_raw["PRE"] > 99988, "PRE"] = 0.0  # 缺测哨兵
+
+        # 站点元信息去噪：同一 Station_Id_C 在 MUSIC 里可能有多条脏记录（Station_levl 不一致等），
+        # 先按站取"最常出现的值"作为该站唯一 meta，再合回原表。避免每 5min resample.first 拿到不同值。
+        meta_cols = ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town")
+        station_meta = (
+            hhly_raw.groupby("Station_Id_C")[list(meta_cols)]
+            .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s) else ""))
+            .reset_index()
+        )
+        hhly_raw = hhly_raw[["Station_Id_C", "Datetime", "PRE"]].merge(
+            station_meta, on="Station_Id_C", how="left"
+        )
+
+        # 5 分钟聚合：PRE 累加 + 站点 meta 取 first（现在 meta 已按站唯一，first 即最终值）
         hhly_5min = (
             hhly_raw.set_index("Datetime")
             .groupby("Station_Id_C")
