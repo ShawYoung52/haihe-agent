@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -166,6 +166,169 @@ def _decision_pick_first_poi(poi_payload: dict) -> dict | None:
         except Exception:
             continue
     return None
+
+
+def _decision_period_overlaps(period: dict, start_dt: datetime, end_dt: datetime) -> bool:
+    """判断单个预报时段是否与目标时段存在重叠。"""
+    p_start = _parse_decision_dt(period.get("start_time"))
+    p_end = _parse_decision_dt(period.get("end_time"))
+    if not p_start or not p_end:
+        return True
+    return p_start < end_dt and p_end > start_dt
+
+
+def _compact_decision_period(period: dict) -> dict:
+    return {
+        "region": period.get("region"),
+        "start_time": period.get("start_time"),
+        "end_time": period.get("end_time"),
+        "weather": period.get("WEA"),
+        "tmax": period.get("TMAX"),
+        "tmin": period.get("TMIN"),
+        "wind": period.get("EDA"),
+        "visibility_min": period.get("VISMIN"),
+        "rain_1h": period.get("TP1H"),
+    }
+
+
+def _sum_decision_rain(periods: list[dict], start_dt: datetime, end_dt: datetime) -> tuple[float | None, int]:
+    values: list[float] = []
+    for p in periods:
+        p_start = _parse_decision_dt(p.get("start_time"))
+        p_end = _parse_decision_dt(p.get("end_time"))
+        if not p_start or not p_end:
+            continue
+        if p_start >= start_dt and p_end <= end_dt:
+            rain = _decision_rain_value(p)
+            if rain is not None:
+                values.append(rain)
+    if not values:
+        return None, 0
+    return round(sum(values), 2), len(values)
+
+
+def _build_decision_hourly_facts(periods: list[dict], hourly_request: dict | None) -> dict | None:
+    if not hourly_request:
+        return None
+    mode = hourly_request.get("mode")
+    if mode == "rain_now":
+        cutoff = hourly_request["cutoff_time"]
+        hourly_rain: dict[str, Any] = {}
+        for hours in (1, 3, 6):
+            value, _count = _sum_decision_rain(periods, cutoff - timedelta(hours=hours), cutoff)
+            hourly_rain[f"rain_{hours}h_mm"] = value
+            hourly_rain[f"rain_{hours}h_text"] = _decision_rain_text(value)
+        return {
+            "mode": "rain_now",
+            "cutoff_time": cutoff.strftime("%Y-%m-%d %H:%M:%S"),
+            "cutoff_label": cutoff.strftime("%m月%d日%H时"),
+            **hourly_rain,
+            "is_raining_now": (
+                hourly_rain["rain_1h_mm"] is not None
+                and hourly_rain["rain_1h_mm"] > 0.1
+            ),
+        }
+
+    if mode == "rain_next_hours":
+        target_start = hourly_request["target_start"]
+        target_end = hourly_request["target_end"]
+        selected = []
+        rain_values: list[float] = []
+        for p in periods:
+            p_start = _parse_decision_dt(p.get("start_time"))
+            p_end = _parse_decision_dt(p.get("end_time"))
+            if p_start and p_end and p_start >= target_start and p_end <= target_end:
+                selected.append(p)
+                if (rain := _decision_rain_value(p)) is not None:
+                    rain_values.append(rain)
+        total = round(sum(rain_values), 2) if rain_values else None
+        return {
+            "mode": "rain_next_hours",
+            "hours": int(hourly_request.get("hours") or 3),
+            "target_start_time": target_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "target_end_time": target_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_rain_mm": total,
+            "total_rain_text": _decision_rain_text(total),
+            "rain_level": _decision_future_rain_level(total),
+            "hourly_periods": [_compact_decision_period(p) for p in selected],
+        }
+    return None
+
+
+def _select_decision_periods(
+    periods: list[dict],
+    target_start: datetime,
+    target_end: datetime,
+    hourly_request: dict | None,
+    hourly_facts: dict | None,
+) -> list[dict]:
+    if hourly_facts and hourly_facts.get("mode") == "rain_now":
+        cutoff = hourly_request["cutoff_time"]
+        return [p for p in periods if _parse_decision_dt(p.get("end_time")) == cutoff]
+
+    if hourly_facts and hourly_facts.get("mode") == "rain_next_hours":
+        start = hourly_request["target_start"]
+        end = hourly_request["target_end"]
+        return [
+            p for p in periods
+            if (p_start := _parse_decision_dt(p.get("start_time")))
+            and (p_end := _parse_decision_dt(p.get("end_time")))
+            and p_start >= start
+            and p_end <= end
+        ]
+
+    selected = [p for p in periods if _decision_period_overlaps(p, target_start, target_end)]
+    return selected or periods[:8]
+
+
+def _compact_decision_forecast_facts(
+    forecast_payload: dict,
+    target_start: datetime | None = None,
+    target_end: datetime | None = None,
+    hourly_request: dict | None = None,
+) -> dict:
+    """将滚动预报 payload 压缩为确定性业务事实。
+
+    target_start/target_end 为 None 时，从 forecast_payload 自身推导默认窗口。
+    """
+    periods = forecast_payload.get("periods") if isinstance(forecast_payload, dict) else []
+    if not isinstance(periods, list):
+        periods = []
+    periods = [p for p in periods if isinstance(p, dict)]
+
+    if target_start is None:
+        fcst_time_str = forecast_payload.get("fcst_time")
+        target_start = _parse_decision_dt(fcst_time_str) or datetime.now()
+    if target_end is None:
+        target_end = target_start + timedelta(hours=24)
+
+    hourly_facts = _build_decision_hourly_facts(periods, hourly_request)
+    selected = _select_decision_periods(periods, target_start, target_end, hourly_request, hourly_facts)
+
+    compact_periods = []
+    total_rain = 0.0
+    has_rain = False
+    for p in selected[:12]:
+        if (rain_value := _decision_rain_value(p)) is not None:
+            total_rain += rain_value
+            if rain_value > 0.1:
+                has_rain = True
+        compact_periods.append(_compact_decision_period(p))
+
+    facts = {
+        "data_source": forecast_payload.get("data_source"),
+        "query_mode": forecast_payload.get("query_mode"),
+        "fcst_time": forecast_payload.get("fcst_time"),
+        "interval_hours": forecast_payload.get("interval_hours"),
+        "target_start_time": target_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "target_end_time": target_end.strftime("%Y-%m-%d %H:%M:%S"),
+        "has_rain_signal": has_rain,
+        "total_rain_mm": round(total_rain, 2),
+        "periods": compact_periods,
+    }
+    if hourly_facts:
+        facts["hourly_rain"] = hourly_facts
+    return facts
 
 
 def _decision_rain_value(period: dict) -> float | None:
