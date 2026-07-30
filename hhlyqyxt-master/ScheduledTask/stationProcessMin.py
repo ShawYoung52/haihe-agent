@@ -73,6 +73,16 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
         if hhly_raw.empty:
             return
 
+        # 站点元信息按站取众数（mode），覆盖回原表——避免 MUSIC 脏数据里同站 Station_levl 12/13
+        # 交替，让下面 resample.first() 每 5min 桶拿到不同值（老 bug）
+        meta_cols = ["Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"]
+        station_mode = (
+            hhly_raw.groupby("Station_Id_C")[meta_cols]
+            .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s) else ""))
+        )
+        for col in meta_cols:
+            hhly_raw[col] = hhly_raw["Station_Id_C"].map(station_mode[col])
+
         # 5min 聚合（PRE=sum，元信息=first），与 HHLY_JUECE 主链路同口径
         hhly_5min = (
             hhly_raw.set_index("Datetime")
