@@ -41,66 +41,46 @@ def _music_timerange_5min(end_time: pd.Timestamp) -> str:
 
 
 def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
-    """拉取 HHLY 分钟数据，5 分钟聚合后追加到 hhly_tempfile；保留 24h 窗口。
+    """拉取 HHLY 分钟降水原始数据（1min 粒度），追加到 hhly_tempfile 并滚动 24h 窗口。
 
-    5 分钟聚合与 HHLY_JUECE 主链路（circleadd5min）同口径：PRE=sum，其他列取 first。
-    一次 agg 搞定所有列，避免 resample 和 Grouper 的 closed 默认值不一致导致
-    merge 全部落 NaN 的陷阱（C1 修复）。
+    存原始数据不做 5min 聚合，聚合搬到应急判定时（emergency_response_monitor）做。
+    避免 resample 引入的 PRE 字符串拼接、Station_levl 不一致等 bug。
     """
     try:
         hhly_raw = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
         if hhly_raw is None or hhly_raw.empty:
             return
-        # 补齐可能缺失的元信息列，agg 前 setdefault 避免 KeyError
-        for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"):
+
+        # 补齐可能缺失的元信息列
+        for col in ("Station_levl", "Lat", "Lon", "City", "Station_Name",
+                    "Cnty", "Province", "Town", "Q_PRE"):
             if col not in hhly_raw.columns:
                 hhly_raw[col] = ""
-        # PRE 强制转 float（MUSIC 返回字符串，不转会导致 sum 变字符串拼接 "0"+"0"="00"）
+
+        # PRE 转 float（避免字符串拼接），缺测哨兵置 0
         hhly_raw["PRE"] = pd.to_numeric(hhly_raw["PRE"], errors="coerce").fillna(0.0)
-        hhly_raw.loc[hhly_raw["PRE"] > 99988, "PRE"] = 0.0  # 缺测哨兵
+        hhly_raw.loc[hhly_raw["PRE"] > 99988, "PRE"] = 0.0
 
-        # 站点元信息去噪：同一 Station_Id_C 在 MUSIC 里可能有多条脏记录（Station_levl 不一致等），
-        # 先按站取"最常出现的值"作为该站唯一 meta，再合回原表。避免每 5min resample.first 拿到不同值。
-        meta_cols = ("Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town")
-        station_meta = (
-            hhly_raw.groupby("Station_Id_C")[list(meta_cols)]
-            .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s) else ""))
-            .reset_index()
-        )
-        hhly_raw = hhly_raw[["Station_Id_C", "Datetime", "PRE"]].merge(
-            station_meta, on="Station_Id_C", how="left"
-        )
-
-        # 5 分钟聚合：PRE 累加 + 站点 meta 取 first（现在 meta 已按站唯一，first 即最终值）
-        hhly_5min = (
-            hhly_raw.set_index("Datetime")
-            .groupby("Station_Id_C")
-            .resample("5min", label="right", closed="right")
-            .agg({
-                "PRE": "sum",
-                "Station_levl": "first",
-                "Lat": "first",
-                "Lon": "first",
-                "City": "first",
-                "Station_Name": "first",
-                "Cnty": "first",
-                "Province": "first",
-                "Town": "first",
-            })
-            .reset_index()
-        )
+        # 追加到 CSV + 滚动 24h 窗口
         if os.path.exists(hhly_tempfile):
             existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
             existing["Datetime"] = pd.to_datetime(existing["Datetime"])
             existing = existing[existing["Datetime"] >= end_time - pd.Timedelta(hours=24)]
-            hhly_new = pd.concat([existing, hhly_5min], ignore_index=True)
+            hhly_new = pd.concat([existing, hhly_raw], ignore_index=True)
         else:
-            hhly_new = hhly_5min
-        hhly_new = hhly_new.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
+            hhly_new = hhly_raw
+
+        # 去除完全重复行（同一站同一分钟多次追加）
+        hhly_new = hhly_new.drop_duplicates(
+            subset=["Station_Id_C", "Datetime"], keep="last"
+        )
+        hhly_new = hhly_new.sort_values(
+            by=["Station_Id_C", "Datetime"], ascending=[True, False]
+        )
         hhly_new.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
     except (OSError, requests.exceptions.RequestException, ValueError, KeyError,
             MusicApiError) as e:
-        logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
+        logger.warning("HHLY 分钟数据累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
