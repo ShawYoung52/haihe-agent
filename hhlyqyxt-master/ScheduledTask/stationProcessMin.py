@@ -523,6 +523,19 @@ def circleadd5min():
     df_5min = df_5min[["Station_Id_C","Datetime","PRE","Station_levl","Lat","Lon","City","Station_Name","Cnty","Province","Town"]]
     df_5min["Datetime"] = pd.to_datetime(df_5min["Datetime"], format="%Y-%m-%d %H:%M:%S")
     end_time = df_5min["Datetime"].max()+pd.Timedelta(minutes=5)
+
+    # 不允许拉未来数据：MUSIC 数据入库通常延时 1-5 分钟，end_time 必须 <= 墙钟 - 5min。
+    # 如果 CSV.max 已经追到接近墙钟，end_time 会跑到未来，MUSIC 返回空 → CSV.max 卡住。
+    now_bjt = pd.Timestamp(datetime.now())
+    max_allowed_end = now_bjt.floor("5min")  # 向下取整到最近的 5min（防止拉尚未入库的时段）
+    if end_time > max_allowed_end:
+        logger.info(
+            "end_time=%s 超前墙钟 %s，跳过本轮（等 MUSIC 入库）",
+            end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            max_allowed_end.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        return (end_time - pd.Timedelta(minutes=5)).to_pydatetime()
+
     end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
 
     start_time = end_time - pd.Timedelta(hours=24)
