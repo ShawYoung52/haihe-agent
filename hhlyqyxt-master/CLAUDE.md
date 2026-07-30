@@ -21,18 +21,24 @@
 
 **为什么分开**：两个 basin 的站点集合不同，应急响应对国家站口径要求严格。合并会破坏 12h/24h 占比分母。
 
-### HHLY 数据源：SURF_CHN_PRE_MIN + Q_PRE 过滤 + 内存聚合
+### HHLY 数据源：SURF_CHN_PRE_MIN + Q_PRE 过滤 + 5min 聚合
 
-**从 2026-07-30 开始**（commits `5c250e9`-`80c2477`）：
+**从 2026-07-30 开始**（commits `5c250e9`-`80c2477`，后续 v3 简化）：
 - HHLY 数据源用 **`SURF_CHN_PRE_MIN`**（含 `Q_PRE` 质量标志），不是 `SURF_CHN_MUL_MIN`
-- `hhly_24hourmindata.csv` 存**原始 1min 记录**（不 resample！）
-- 应急响应判定时调 `ScheduledTask.precipitation_aggregator.aggregate_minute_precipitation`：
-  - Q_PRE 过滤：默认可信 `{"0","3","4"}`
-  - 内存里按 `Station_Id_C` 聚合 12h/24h 累计
+- `hhly_24hourmindata.csv` 存 **5min 聚合结果**（每站每 5min 1 行，与 HHLY_JUECE 一致）
+- **聚合前**先做 Q_PRE 过滤：默认可信 `{"0","3","4"}`，脏数据不进入 sum
+- 5min 聚合逻辑：`resample("5min", label="right", closed="right").agg({"PRE":"sum", "Station_levl":"first", ...})`
+- 应急响应判定读 CSV → `aggregate_minute_precipitation` 按 12h/24h 窗口累加 5min 记录
 - 分子统计用**区间语义**（`baoyu ∈ [50,100)` / `dabaoyu ∈ [100,250)` / `tedabaoyu ∈ [250,∞)`）
-- 参考问答智能体 `haihe-weather-analyzer-mcp/haihe_mcp_tools.aggregate_minute_precipitation`，牵引侧**独立实现**（不跨仓库 import）
 
-**不要重新引入 5min resample**——那是老架构，会导致 `PRE="000"` 字符串拼接、`Station_levl` 跨时刻不一致等 bug。详见 `[[traction-hhly-pre-min-refactor]]` 记忆。
+**关键决策**：Q_PRE 过滤放在**聚合前**（保留每条 1min 的独立质量标志），5min 聚合存储（跟 HHLY_JUECE 一致，避免 CSV 膨胀 5 倍）。
+
+**不要**：
+- 再改回 `SURF_CHN_MUL_MIN`（那是老架构，`Station_levl` 会乱变）
+- 存原始 1min 数据（CSV 会膨胀 5 倍，每 tick 处理 288K 行）
+- 在聚合后再做 Q_PRE 过滤（聚合已丢失 Q_PRE 信息）
+
+详见 `[[traction-hhly-pre-min-refactor]]` 记忆。
 
 ### 24h 滚动窗口边界（用 `>=` 不是 `>`）
 

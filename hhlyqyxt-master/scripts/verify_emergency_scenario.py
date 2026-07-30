@@ -84,10 +84,10 @@ def _fetch_juece_24h(end_time_bjt: datetime) -> pd.DataFrame:
 
 
 def _fetch_hhly_24h(end_time_bjt: datetime) -> pd.DataFrame:
-    """按小时循环拉 24h HHLY 分钟降水（应急响应数据源），返回原始 1min 数据。
+    """按小时循环拉 24h HHLY 分钟降水，Q_PRE 过滤后 5min 聚合。
 
-    与 stationProcessMin._append_hhly_5min_to_rolling_csv 同口径：存原始数据不 resample，
-    应急判定时由 aggregate_minute_precipitation 做 Q_PRE 过滤 + 内存聚合。
+    与 stationProcessMin._append_hhly_5min_to_rolling_csv 同口径：
+    先 Q_PRE 过滤（可信 {"0","3","4"}），再 5min 聚合（PRE=sum, 元信息=first）。
     """
     end_utc = end_time_bjt - timedelta(hours=8)
     start_utc = end_utc - timedelta(hours=24)
@@ -111,13 +111,36 @@ def _fetch_hhly_24h(end_time_bjt: datetime) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
 
-    # PRE 转 float（避免字符串拼接），缺测哨兵置 0
+    # Q_PRE 过滤（可信 {"0","3","4"}，空视为可信）
+    q_pre_str = df["Q_PRE"].fillna("").astype(str).str.strip()
+    trusted_mask = q_pre_str.isin({"0", "3", "4"}) | (q_pre_str == "")
+    df = df[trusted_mask].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    # PRE 转 float，缺测哨兵置 0
     df["PRE"] = pd.to_numeric(df["PRE"], errors="coerce").fillna(0.0)
     df.loc[df["PRE"] > 99988, "PRE"] = 0.0
+    df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
+    df = df.dropna(subset=["Datetime"])
+    if df.empty:
+        return pd.DataFrame()
 
-    # 去除完全重复行（同一站同一分钟多次拉取）
-    df = df.drop_duplicates(subset=["Station_Id_C", "Datetime"], keep="last")
-    return df.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
+    # 5min 聚合，与 HHLY_JUECE 主链路 & 生产同口径
+    df_5min = (
+        df.set_index("Datetime")
+        .groupby("Station_Id_C")
+        .resample("5min", label="right", closed="right")
+        .agg({
+            "PRE": "sum",
+            "Station_levl": "first",
+            "Lat": "first", "Lon": "first",
+            "City": "first", "Station_Name": "first",
+            "Cnty": "first", "Province": "first", "Town": "first",
+        })
+        .reset_index()
+    )
+    return df_5min
 
 
 def main():

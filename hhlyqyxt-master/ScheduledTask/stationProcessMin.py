@@ -41,10 +41,10 @@ def _music_timerange_5min(end_time: pd.Timestamp) -> str:
 
 
 def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
-    """拉取 HHLY 分钟降水原始数据（1min 粒度），追加到 hhly_tempfile 并滚动 24h 窗口。
+    """拉取 HHLY 分钟降水，Q_PRE 过滤后 5min 聚合，追加到 hhly_tempfile 并滚动 24h 窗口。
 
-    存原始数据不做 5min 聚合，聚合搬到应急判定时（emergency_response_monitor）做。
-    避免 resample 引入的 PRE 字符串拼接、Station_levl 不一致等 bug。
+    与 HHLY_JUECE 主链路一致（`24hourmindata.csv`）：CSV 存 5min 聚合结果，每站每 5min 1 行。
+    区别在于聚合前先做 Q_PRE 质量过滤（参考问答智能体，过滤脏数据）。
     """
     try:
         hhly_raw = _fetch_hhly_rainfall_for_emergency(_music_timerange_5min(end_time))
@@ -57,20 +57,51 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
             if col not in hhly_raw.columns:
                 hhly_raw[col] = ""
 
+        # Q_PRE 过滤（可信标志 {"0","3","4"}，与问答智能体一致）
+        q_pre_str = hhly_raw["Q_PRE"].fillna("").astype(str).str.strip()
+        trusted_mask = q_pre_str.isin({"0", "3", "4"}) | (q_pre_str == "")
+        hhly_raw = hhly_raw[trusted_mask]
+        if hhly_raw.empty:
+            return
+
         # PRE 转 float（避免字符串拼接），缺测哨兵置 0
+        hhly_raw = hhly_raw.copy()
         hhly_raw["PRE"] = pd.to_numeric(hhly_raw["PRE"], errors="coerce").fillna(0.0)
         hhly_raw.loc[hhly_raw["PRE"] > 99988, "PRE"] = 0.0
+        hhly_raw["Datetime"] = pd.to_datetime(hhly_raw["Datetime"], errors="coerce")
+        hhly_raw = hhly_raw.dropna(subset=["Datetime"])
+        if hhly_raw.empty:
+            return
+
+        # 5min 聚合（PRE=sum，元信息=first），与 HHLY_JUECE 主链路同口径
+        hhly_5min = (
+            hhly_raw.set_index("Datetime")
+            .groupby("Station_Id_C")
+            .resample("5min", label="right", closed="right")
+            .agg({
+                "PRE": "sum",
+                "Station_levl": "first",
+                "Lat": "first",
+                "Lon": "first",
+                "City": "first",
+                "Station_Name": "first",
+                "Cnty": "first",
+                "Province": "first",
+                "Town": "first",
+            })
+            .reset_index()
+        )
 
         # 追加到 CSV + 滚动 24h 窗口
         if os.path.exists(hhly_tempfile):
             existing = pd.read_csv(hhly_tempfile, encoding="utf-8-sig", low_memory=False)
             existing["Datetime"] = pd.to_datetime(existing["Datetime"])
             existing = existing[existing["Datetime"] >= end_time - pd.Timedelta(hours=24)]
-            hhly_new = pd.concat([existing, hhly_raw], ignore_index=True)
+            hhly_new = pd.concat([existing, hhly_5min], ignore_index=True)
         else:
-            hhly_new = hhly_raw
+            hhly_new = hhly_5min
 
-        # 去除完全重复行（同一站同一分钟多次追加）
+        # 去重（同站同 5min 桶重复追加）
         hhly_new = hhly_new.drop_duplicates(
             subset=["Station_Id_C", "Datetime"], keep="last"
         )
@@ -80,7 +111,7 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
         hhly_new.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
     except (OSError, requests.exceptions.RequestException, ValueError, KeyError,
             MusicApiError) as e:
-        logger.warning("HHLY 分钟数据累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
+        logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
 
 def readmindata(timestr):
     client = MusicClient(MusicConfig())
