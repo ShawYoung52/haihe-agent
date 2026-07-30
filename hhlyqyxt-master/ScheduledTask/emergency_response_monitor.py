@@ -13,6 +13,7 @@ from typing import Any, Optional, Union
 import pandas as pd
 
 from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
+from ScheduledTask.precipitation_aggregator import aggregate_minute_precipitation
 from utils.MusicTool import MusicClient, MusicConfig
 from utils.db import Session
 
@@ -62,14 +63,18 @@ def _parse_datatime(datatime: Union[str, datetime]) -> datetime:
 
 
 def _sum_precip_by_station(df: pd.DataFrame) -> pd.DataFrame:
-    """按站点汇总降水量，返回包含 Station_Id_C 与 PRE 的 DataFrame。"""
+    """按站点汇总降水量，返回包含 Station_Id_C 与 PRE 的 DataFrame。
+
+    保留供旧测试或外部调用兼容；新版 compute_emergency_response_stats
+    不再使用该函数，聚合改由 aggregate_minute_precipitation 完成。
+    """
     return df.groupby("Station_Id_C")["PRE"].sum().reset_index()
 
 
 def _count_by_threshold(
     series: pd.Series, lower: float, upper: Optional[float] = None
 ) -> int:
-    """统计满足阈值区间的元素个数。"""
+    """统计满足阈值区间的元素个数（保留兼容旧调用方）。"""
     if upper is None:
         return int((series >= lower).sum())
     return int(((series >= lower) & (series < upper)).sum())
@@ -138,6 +143,10 @@ def compute_emergency_response_stats(
 ) -> Optional[dict]:
     """从 CSV 路径或 DataFrame 计算应急响应统计指标。
 
+    改为读入后转 list[dict] → 调 `aggregate_minute_precipitation`（Q_PRE 过滤 +
+    内存聚合 PRE_12h / PRE_24h）→ 按 12h/24h 阈值统计国家站触发数与占比。
+    分子分母口径与旧实现保持一致（区间语义 + 12h 分母用 12h 窗口国家站数）。
+
     Args:
         source: 5 分钟降水 CSV 文件路径，或已含 Station_Id_C/Datetime/PRE/Station_levl
             等列的 DataFrame（用于应急响应独立拉取 HHLY 后直接消费，跳过读文件）。
@@ -161,48 +170,66 @@ def compute_emergency_response_stats(
         logger.warning("数据缺少 Station_levl 列，全部站点按非国家站处理: %s", source)
         df["Station_levl"] = ""
 
+    # 解析 Datetime 并丢弃解析失败的行
     df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
     df = df.dropna(subset=["Datetime"])
     if df.empty:
         return None
+
     if datatime is None:
-        datatime = df["Datetime"].max()
+        end_time = df["Datetime"].max()
+    else:
+        end_time = datatime
+    end_time = _parse_datatime(end_time)
 
-    end_time = _parse_datatime(datatime)
-    start_12h = end_time - timedelta(hours=12)
-    start_24h = end_time - timedelta(hours=24)
-
+    # PRE 清洗：非数值 → 剔除（不进 total 分母）；缺测哨兵 → 视为 0
     df["PRE"] = pd.to_numeric(df["PRE"], errors="coerce")
-    # 缺失降水标识：大于 99988 的值视为缺测，按 0 处理
     df.loc[df["PRE"] > 99988, "PRE"] = 0.0
-    # 剔除仍无法解析为数值的记录，避免全 NaN 站点计入 total
     df = df.dropna(subset=["PRE"])
-    df["Station_levl_norm"] = df["Station_levl"].apply(_normalize_station_level)
+    if df.empty:
+        return None
 
-    national_df = df[df["Station_levl_norm"].isin(NATIONAL_STATION_LEVELS)].copy()
-
-    window_24h = national_df[
-        (national_df["Datetime"] > start_24h) & (national_df["Datetime"] <= end_time)
-    ]
-    window_12h = national_df[
-        (national_df["Datetime"] > start_12h) & (national_df["Datetime"] <= end_time)
-    ]
-
-    sum_pre_24h = _sum_precip_by_station(window_24h)
-    sum_pre_12h = _sum_precip_by_station(window_12h)
-
-    total = len(sum_pre_24h)  # 24h 国家站数，作为 total_national_stations 与 24h 占比分母
-
-    station_12h_baoyu = _count_by_threshold(sum_pre_12h["PRE"], BAOYU_LOWER, DABAOYU_LOWER)
-    station_24h_baoyu = _count_by_threshold(sum_pre_24h["PRE"], BAOYU_LOWER, DABAOYU_LOWER)
-    station_24h_dabaoyu = _count_by_threshold(
-        sum_pre_24h["PRE"], DABAOYU_LOWER, TEDABAOYU_LOWER
+    # 转 list[dict] 传给聚合器（Q_PRE 过滤 + 内存聚合）
+    records = df.to_dict(orient="records")
+    aggregated = aggregate_minute_precipitation(
+        records, end_time=end_time, windows_hours=(12, 24),
     )
-    station_24h_tedabaoyu = _count_by_threshold(sum_pre_24h["PRE"], TEDABAOYU_LOWER)
 
-    # 12h 占比分母用 12h 窗口国家站数（"过去 12h 暴雨国家站占比"按 12h 口径），
-    # 24h 各占比沿用 24h 国家站数；停报站点不应进 12h 分母压低占比、漏 Ⅲ 级触发。
-    ratio_12h_baoyu = _ratio(station_12h_baoyu, len(sum_pre_12h))
+    # 国家站过滤（Station_levl in {"11","12","13","16"}）
+    national = [
+        r for r in aggregated
+        if _normalize_station_level(r.get("Station_levl", "")) in NATIONAL_STATION_LEVELS
+    ]
+    total = len(national)  # 24h 国家站数 = total_national_stations = 24h 占比分母
+
+    # 12h 分母 = 有 12h 数据的国家站数（P2-1 修复，避免停报站压低 12h 占比）
+    stations_12h = [r for r in national if int(r.get("pre_count_12h", 0)) > 0]
+    total_12h = len(stations_12h)
+
+    # 区间语义计数（与旧 _count_by_threshold(lower, upper) 一致）
+    def _in_range(v: float, lower: float, upper: Optional[float]) -> bool:
+        if upper is None:
+            return v >= lower
+        return (v >= lower) and (v < upper)
+
+    station_12h_baoyu = sum(
+        1 for r in stations_12h
+        if _in_range(float(r.get("PRE_12h", 0.0)), BAOYU_LOWER, DABAOYU_LOWER)
+    )
+    station_24h_baoyu = sum(
+        1 for r in national
+        if _in_range(float(r.get("PRE_24h", 0.0)), BAOYU_LOWER, DABAOYU_LOWER)
+    )
+    station_24h_dabaoyu = sum(
+        1 for r in national
+        if _in_range(float(r.get("PRE_24h", 0.0)), DABAOYU_LOWER, TEDABAOYU_LOWER)
+    )
+    station_24h_tedabaoyu = sum(
+        1 for r in national
+        if _in_range(float(r.get("PRE_24h", 0.0)), TEDABAOYU_LOWER, None)
+    )
+
+    ratio_12h_baoyu = _ratio(station_12h_baoyu, total_12h)
     ratio_24h_baoyu = _ratio(station_24h_baoyu, total)
     ratio_24h_dabaoyu = _ratio(station_24h_dabaoyu, total)
     ratio_24h_tedabaoyu = _ratio(station_24h_tedabaoyu, total)
