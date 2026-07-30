@@ -1,5 +1,5 @@
 from pydantic import ConfigDict
-from sqlalchemy import Column, DateTime, Integer, Numeric, SmallInteger, text
+from sqlalchemy import Column, DateTime, Integer, Numeric, SmallInteger, String, text
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -21,6 +21,9 @@ class QyEmergencyResponseMonitor(Base):
     station_24h_tedabaoyu = Column(Integer, nullable=False, default=0)
     ratio_24h_tedabaoyu = Column(Numeric(6, 4), nullable=False, default=0)
     response_level = Column(SmallInteger, nullable=False, default=0)
+    # 天河报告 URL（I-IV 级触发后回填；0 级为空）
+    report_docx_url = Column(String(512))
+    report_pdf_url = Column(String(512))
     create_time = Column(DateTime, server_default=text('CURRENT_TIMESTAMP'))
 
     model_config = ConfigDict(from_attributes=True)
@@ -44,9 +47,16 @@ CREATE TABLE qy_emergency_response_monitor (
     station_24h_tedabaoyu INTEGER NOT NULL DEFAULT 0,
     ratio_24h_tedabaoyu NUMERIC(6,4) NOT NULL DEFAULT 0,
     response_level SMALLINT NOT NULL DEFAULT 0,
+    report_docx_url VARCHAR(512),
+    report_pdf_url VARCHAR(512),
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_qy_emergency_response_monitor_datatime
     ON qy_emergency_response_monitor(datatime DESC);
+
+-- 迁移（若表已存在）：
+ALTER TABLE qy_emergency_response_monitor ADD COLUMN report_docx_url VARCHAR(512);
+ALTER TABLE qy_emergency_response_monitor ADD COLUMN report_pdf_url VARCHAR(512);
 """
+

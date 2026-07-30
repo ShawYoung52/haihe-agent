@@ -126,6 +126,15 @@ def _fetch_hhly_24h(end_time_bjt: datetime) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
+    # 站点元信息按站取众数，覆盖回原表（与生产 _append_hhly_5min_to_rolling_csv 同口径）
+    meta_cols = ["Station_levl", "Lat", "Lon", "City", "Station_Name", "Cnty", "Province", "Town"]
+    station_mode = (
+        df.groupby("Station_Id_C")[meta_cols]
+        .agg(lambda s: s.mode().iat[0] if not s.mode().empty else (s.iloc[0] if len(s) else ""))
+    )
+    for col in meta_cols:
+        df[col] = df["Station_Id_C"].map(station_mode[col])
+
     # 5min 聚合，与 HHLY_JUECE 主链路 & 生产同口径
     df_5min = (
         df.set_index("Datetime")

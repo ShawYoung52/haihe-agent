@@ -13,6 +13,7 @@ from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_ERROR
 from sqlalchemy import text
 
 from Models.QyMinuteMonitor import QyMinuteMonitor
+from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
 from ScheduledTask.emergency_response_monitor import (
     _fetch_hhly_rainfall_for_emergency,
     run_emergency_response_monitor,
@@ -564,7 +565,24 @@ def calcmaxdataseg5min():
             logger.info("应急响应 %d 级，触发天河报告生成 → %s",
                         record.response_level,
                         "http://10.226.188.156:8001/api/report/generate")
-            trigger_weather_bulletin_report(record.response_level)
+            report_result = trigger_weather_bulletin_report(record.response_level)
+            # 拿到 docx/pdf URL 后回写 qy_emergency_response_monitor 表
+            if report_result and (report_result.get("docx_url") or report_result.get("pdf_url")):
+                _session = Session()
+                try:
+                    _session.query(QyEmergencyResponseMonitor).filter(
+                        QyEmergencyResponseMonitor.id == record.id
+                    ).update({
+                        "report_docx_url": report_result.get("docx_url"),
+                        "report_pdf_url": report_result.get("pdf_url"),
+                    })
+                    _session.commit()
+                    logger.info("报告 URL 已回写到 qy_emergency_response_monitor.id=%d", record.id)
+                except Exception as e:
+                    _session.rollback()
+                    logger.warning("报告 URL 回写数据库失败：%s", e)
+                finally:
+                    _session.close()
 
 
 def circleadd5min():
