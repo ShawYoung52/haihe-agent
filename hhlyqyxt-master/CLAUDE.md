@@ -21,6 +21,19 @@
 
 **为什么分开**：两个 basin 的站点集合不同，应急响应对国家站口径要求严格。合并会破坏 12h/24h 占比分母。
 
+### HHLY 数据源：SURF_CHN_PRE_MIN + Q_PRE 过滤 + 内存聚合
+
+**从 2026-07-30 开始**（commits `5c250e9`-`80c2477`）：
+- HHLY 数据源用 **`SURF_CHN_PRE_MIN`**（含 `Q_PRE` 质量标志），不是 `SURF_CHN_MUL_MIN`
+- `hhly_24hourmindata.csv` 存**原始 1min 记录**（不 resample！）
+- 应急响应判定时调 `ScheduledTask.precipitation_aggregator.aggregate_minute_precipitation`：
+  - Q_PRE 过滤：默认可信 `{"0","3","4"}`
+  - 内存里按 `Station_Id_C` 聚合 12h/24h 累计
+- 分子统计用**区间语义**（`baoyu ∈ [50,100)` / `dabaoyu ∈ [100,250)` / `tedabaoyu ∈ [250,∞)`）
+- 参考问答智能体 `haihe-weather-analyzer-mcp/haihe_mcp_tools.aggregate_minute_precipitation`，牵引侧**独立实现**（不跨仓库 import）
+
+**不要重新引入 5min resample**——那是老架构，会导致 `PRE="000"` 字符串拼接、`Station_levl` 跨时刻不一致等 bug。详见 `[[traction-hhly-pre-min-refactor]]` 记忆。
+
 ### 24h 滚动窗口边界（用 `>=` 不是 `>`）
 
 ```python
