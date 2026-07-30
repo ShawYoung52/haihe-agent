@@ -892,9 +892,9 @@ def process_task():
             break
         prev_datatime = datatime
         datatime = circleadd5min()
-        # 数据无变化（MUSIC 空档）：立即退出让下 tick 隔 5 分钟再试，避免同 tick 内高频重试
+        # CSV.max 未推进（MUSIC 空档 or 墙钟保护）：退出让下 tick 重试
         if datatime <= prev_datatime:
-            print(f"circleadd5min 未推进（MUSIC 无数据 end_time={datatime}），退出让下 tick 重试")
+            print(f"circleadd5min 未推进 (CSV.max={datatime}) — MUSIC 空档 or 已追平墙钟，退出让下 tick 重试")
             break
         calcmaxdataseg5min()
 
