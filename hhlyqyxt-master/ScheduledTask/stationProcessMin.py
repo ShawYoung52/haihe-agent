@@ -539,8 +539,22 @@ def calcmaxdataseg5min():
         minute_monitor_id=minute_monitor_id,
     )
     # I-IV 级应急响应触发天河报告生成
-    if record is not None:
-        trigger_weather_bulletin_report(record.response_level)
+    if record is None:
+        logger.info("应急响应未入库（数据为空或 CSV 缺失），跳过报告触发")
+    else:
+        logger.info(
+            "应急响应级别=%d, 12h暴雨站=%d, 24h暴雨站=%d, 24h大暴雨站=%d, 24h特大暴雨站=%d",
+            record.response_level,
+            record.station_12h_baoyu, record.station_24h_baoyu,
+            record.station_24h_dabaoyu, record.station_24h_tedabaoyu,
+        )
+        if record.response_level < 1:
+            logger.info("应急响应 0 级（无预警），跳过天河报告触发")
+        else:
+            logger.info("应急响应 %d 级，触发天河报告生成 → %s",
+                        record.response_level,
+                        "http://10.226.188.156:8001/api/report/generate")
+            trigger_weather_bulletin_report(record.response_level)
 
 
 def circleadd5min():
