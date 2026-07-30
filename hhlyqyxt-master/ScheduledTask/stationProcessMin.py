@@ -18,6 +18,7 @@ from ScheduledTask.emergency_response_monitor import (
     run_emergency_response_monitor,
 )
 from ScheduledTask.report_generator import trigger_weather_bulletin_report
+from utils.MusicTool import MusicApiError
 from utils import create_rainstorm_impact_map
 from utils.MusicTool import MusicClient, MusicConfig
 from utils.db import Session, engine
@@ -81,7 +82,8 @@ def _append_hhly_5min_to_rolling_csv(end_time: pd.Timestamp) -> None:
             hhly_new = hhly_5min
         hhly_new = hhly_new.sort_values(by=["Station_Id_C", "Datetime"], ascending=[True, False])
         hhly_new.to_csv(hhly_tempfile, index=False, encoding="utf-8-sig")
-    except (OSError, requests.exceptions.RequestException, ValueError, KeyError) as e:
+    except (OSError, requests.exceptions.RequestException, ValueError, KeyError,
+            MusicApiError) as e:
         logger.warning("HHLY 5分钟累积失败（应急响应将跳过本次）：%s", e, exc_info=True)
 
 def readmindata(timestr):
@@ -530,11 +532,25 @@ def circleadd5min():
         (df_5min["Datetime"] <= end_time)
         ].copy()
 
-    res = readmindatabytimerange(
-        (end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
-        (end_time - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
-    )
+    try:
+        res = readmindatabytimerange(
+            (end_time - pd.Timedelta(minutes=4) - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
+            (end_time - pd.Timedelta(hours=8)).strftime("%Y%m%d%H%M%S"),
+        )
+    except MusicApiError as e:
+        # 该时段 MUSIC 无数据（"query success, but no record"）等 → 跳过本次追加，
+        # end_time 仍推进，下一 tick 从新的 end_time 继续（避免卡死在无数据时段）
+        logger.warning("HHLY_JUECE 5分钟拉取失败，本次追加跳过：%s", e)
+        # 直接写回未变的 df（等同于只前进了 end_time 但不新增数据）
+        df.to_csv(tempfile, index=False, encoding="utf-8-sig")
+        _append_hhly_5min_to_rolling_csv(end_time)
+        return end_time.to_pydatetime()
 
+    if res is None or (hasattr(res, "empty") and res.empty):
+        logger.warning("HHLY_JUECE 5分钟拉取返回空，本次追加跳过（end_time=%s）", end_time)
+        df.to_csv(tempfile, index=False, encoding="utf-8-sig")
+        _append_hhly_5min_to_rolling_csv(end_time)
+        return end_time.to_pydatetime()
 
     res["Datetime"] = pd.to_datetime(res["Datetime"], format="%Y-%m-%d %H:%M:%S") + pd.Timedelta(hours=8)
     res["PRE"] = res["PRE"].astype("float")
