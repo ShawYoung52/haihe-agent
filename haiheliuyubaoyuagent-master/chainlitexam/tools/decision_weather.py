@@ -7,22 +7,18 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
 from langchain_core.tools import tool
 
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
-    _decision_hourly_window,
-    _decision_period_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
     _extract_decision_weather_slots,
     _generate_decision_weather_answer,
     _nearest_decision_station,
     _normalize_decision_weather_slots,
-    _select_decision_fcst_time,
 )
 
 from message_orchestrator import _clean_table_cell, _find_tool, _sanitize_display_text
@@ -41,16 +37,16 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
 
         调用本工具时，只需传入用户原始问题文本；工具内部会自动完成：
         1. 意图前置过滤；
-        2. 使用 LLM 抽取位置名称、目标时段、问题类型等槽位；
+        2. 使用 LLM 只抽取位置名称和问题类型；
         3. POI 检索与定位；
         4. 匹配最近的滚动预报代表区域；
-        5. 调用滚动预报数据；
+        5. 将用户原问和 POI 经纬度交给滚动预报服务，由服务统一计算时区、起报时次和查询窗口；
         6. 格式化并生成面向用户的 Markdown 回答。
-        
+
         本工具已完整封装上述流程。Planner 选择本工具后，不得同轮并列调用
         search_poi、query_rolling_forecast、get_server_time 或 analyze_rainfall_by_time。
 
-        如果问题不属于点位决策天气范围，或缺少必要的位置/时间信息，
+        如果问题不属于点位决策天气范围，或缺少必要的位置信息，
         工具会返回中文提示说明。
 
         Args:
@@ -78,29 +74,16 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 return "问题理解失败，请尝试换一种更明确的说法。"
 
             if not slots.get("is_decision_weather"):
-                return "该问题看起来不是具体点位的天气问题，请补充具体地点或天气时段。"
+                return "该问题看起来不是具体点位的天气问题，请补充具体地点。"
 
             if slots.get("need_clarification"):
-                return str(slots.get("clarification_question") or "请补充具体位置和查询时段。").strip()
+                return str(slots.get("clarification_question") or "请补充具体位置。").strip()
 
-            hourly_request = _decision_hourly_window(user_text, slots.get("question_type"), datetime.now())
-            normalized = _normalize_decision_weather_slots(slots, hourly_request)
+            normalized = _normalize_decision_weather_slots(slots)
             if normalized.get("error"):
                 return normalized["error"]
 
             location_name = normalized["location_name"]
-            target_start = normalized["target_start"]
-            target_end = normalized["target_end"]
-            interval = normalized["interval"]
-            fcst_time = _select_decision_fcst_time()
-            start_period, end_period = _decision_period_args(fcst_time, target_start, target_end)
-
-            print(
-                "[DecisionWeatherTool] normalized time: "
-                f"target_start={target_start}, target_end={target_end}, "
-                f"interval={interval}, fcst_time={fcst_time}, "
-                f"startPeriod={start_period}, endPeriod={end_period}"
-            )
 
             poi_raw = await poi_tool.ainvoke({"keyword": location_name, "size": 5})
             poi_payload = _unwrap_tool_result(poi_raw)
@@ -124,14 +107,9 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             forecast_args = {
                 "user_query": user_text,
                 "regions": "",
-                "lon": nearest["lon"],
-                "lat": nearest["lat"],
-                "point_name": f"{point_name}附近（{nearest['region']}代表点）",
-                "matched_region": nearest["region"],
-                "fcst_time": fcst_time,
-                "start_period": start_period,
-                "end_period": end_period,
-                "interval": interval,
+                "lon": poi_lon,
+                "lat": poi_lat,
+                "point_name": point_name,
             }
             print(f"[DecisionWeatherTool] query_rolling_forecast args: {json.dumps(forecast_args, ensure_ascii=False)}")
 
@@ -141,10 +119,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 print(f"[DecisionWeatherTool] forecast raw payload: {forecast_payload}")
 
             facts = _compact_decision_forecast_facts(
-                forecast_payload if isinstance(forecast_payload, dict) else {},
-                target_start,
-                target_end,
-                hourly_request,
+                forecast_payload if isinstance(forecast_payload, dict) else {}
             )
             facts["poi"] = {
                 "name": point_name,
@@ -153,9 +128,8 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 "lat": poi_lat,
             }
             facts["matched_station"] = nearest
-            facts["question_type"] = slots.get("question_type") or "general_weather"
-            if hourly_request:
-                facts["question_type"] = hourly_request["mode"]
+            facts["question_type"] = normalized["question_type"]
+
 
             final_text = await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
             append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)

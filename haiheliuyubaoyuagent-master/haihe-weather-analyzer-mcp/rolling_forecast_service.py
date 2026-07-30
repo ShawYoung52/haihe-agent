@@ -45,7 +45,7 @@ ROLLING_FORECAST_ELEMENT_NAMES = {
     "RHMIN": "最小相对湿度",
     "TCCMAX": "最大总云量",
     "TCCMIN": "最小总云量",
-    "VISMIN": "最小能见度",
+    "VISMIN": "最小能见度（千米）",
     "TP1H": "时段累计降水量",
 }
 ROLLING_FORECAST_COORDS = {
@@ -93,7 +93,24 @@ RAINSTORM_24H_MM = 50.0
 SEVERE_RAINSTORM_24H_MM = 100.0
 EXTRAORDINARY_RAINSTORM_24H_MM = 250.0
 MAX_FORECAST_PERIOD_HOURS = 240
+DEFAULT_ROLLING_FORECAST_REGION = "天津市区"
 
+DEFAULT_SEVEN_DAY_QUERY_KEYWORDS = (
+    "未来一周",
+    "未来七天",
+    "未来7天",
+    "最近",
+    "近期",
+    "未来几天",
+)
+PAST_QUERY_KEYWORDS = (
+    "过去",
+    "历史",
+    "发生过",
+    "已发生",
+    "已经出现",
+    "实况",
+)
 
 def _display_region(region: str) -> str:
     return REGION_DISPLAY_NAMES.get(region, region)
@@ -180,7 +197,7 @@ def resolve_weekend_query_window(
     周日只包含当天。下周末表示下一个自然周的周六、周日。
     历史的“上周末”不在此函数中处理。
     """
-    query = str(user_query or "").strip()
+    query = re.sub(r"\s+", "", str(user_query or ""))
     if "周末" not in query or any(word in query for word in ("上周末", "上个周末")):
         return None
 
@@ -204,6 +221,60 @@ def resolve_weekend_query_window(
 
     return resolve_calendar_query_window(start_date, days, now=now)
 
+_CN_SMALL_NUMBERS = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+
+
+def _parse_small_number(value: str) -> int | None:
+    raw = str(value or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    if raw in _CN_SMALL_NUMBERS:
+        return _CN_SMALL_NUMBERS[raw]
+    if raw.startswith("十") and len(raw) == 2 and raw[1] in _CN_SMALL_NUMBERS:
+        return 10 + _CN_SMALL_NUMBERS[raw[1]]
+    if raw.endswith("十") and len(raw) == 2 and raw[0] in _CN_SMALL_NUMBERS:
+        return _CN_SMALL_NUMBERS[raw[0]] * 10
+    return None
+
+
+def _extract_explicit_query_dates(user_query: str, current: datetime) -> list[date]:
+    """从用户原问中提取明确公历日期，未写年份时取最近的未来同月同日。"""
+    text = str(user_query or "")
+    matches: list[tuple[int, date]] = []
+    occupied_spans: list[tuple[int, int]] = []
+    full_pattern = re.compile(r"(\d{4})\s*(?:年|[-/])\s*(\d{1,2})\s*(?:月|[-/])\s*(\d{1,2})\s*日?")
+    for match in full_pattern.finditer(text):
+        try:
+            matches.append((match.start(), date(int(match.group(1)), int(match.group(2)), int(match.group(3)))))
+            occupied_spans.append(match.span())
+        except ValueError:
+            continue
+
+    short_pattern = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+    for match in short_pattern.finditer(text):
+        if any(start <= match.start() < end for start, end in occupied_spans):
+            continue
+        try:
+            candidate = date(current.year, int(match.group(1)), int(match.group(2)))
+            if candidate < current.date():
+                candidate = date(current.year + 1, candidate.month, candidate.day)
+            matches.append((match.start(), candidate))
+        except ValueError:
+            continue
+    return [item for _, item in sorted(matches, key=lambda pair: pair[0])]
+
 
 def resolve_requested_calendar_window(
     user_query: str,
@@ -215,12 +286,151 @@ def resolve_requested_calendar_window(
     weekend_window = resolve_weekend_query_window(user_query, now=now)
     if weekend_window is not None:
         return weekend_window
+    query = re.sub(r"\s+", "", str(user_query or ""))
+    if (
+        any(keyword in query for keyword in DEFAULT_SEVEN_DAY_QUERY_KEYWORDS)
+        and not any(keyword in query for keyword in PAST_QUERY_KEYWORDS)
+    ):
+        current = now or datetime.now(TIANJIN_TIMEZONE)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+        return resolve_calendar_query_window(current.date() + timedelta(days=1), 7, now=current)
+    current = now or datetime.now(TIANJIN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+    future_days_match = re.search(r"未来\s*([0-9一二两三四五六七八九十]+)\s*(?:个)?天", query)
+    if future_days_match:
+        days = _parse_small_number(future_days_match.group(1))
+        if days is not None and 1 <= days <= 10:
+            return resolve_calendar_query_window(current.date() + timedelta(days=1), days, now=current)
+    if "后天" in query:
+        return resolve_calendar_query_window(current.date() + timedelta(days=2), 1, now=current)
+    if "明天" in query or "明日" in query:
+        return resolve_calendar_query_window(current.date() + timedelta(days=1), 1, now=current)
+    if "今天" in query or "今日" in query:
+        return resolve_calendar_query_window(current.date(), 1, now=current)
+    explicit_dates = _extract_explicit_query_dates(user_query, current)
+    if explicit_dates:
+        start_date = explicit_dates[0]
+        days = 1
+        if len(explicit_dates) >= 2 and explicit_dates[1] >= start_date:
+            days = min((explicit_dates[1] - start_date).days + 1, 10)
+        return resolve_calendar_query_window(start_date, days, now=current)
     if forecast_start_date or forecast_days:
         if not forecast_start_date or not forecast_days:
             raise ValueError("日历日查询必须同时提供 forecast_start_date 和 forecast_days")
         return resolve_calendar_query_window(forecast_start_date, forecast_days, now=now)
     return None
 
+
+def _parse_future_hours(user_query: str) -> int | None:
+    """识别“未来/接下来 N 小时”，返回 1 至 24 小时的查询时长。"""
+    match = re.search(
+        r"(?:未来|接下来|随后|后面|之后)\s*([0-9一二两三四五六七八九十]+)\s*(?:个)?小时",
+        str(user_query or ""),
+    )
+    if not match:
+        return None
+    raw = match.group(1)
+    value = _parse_small_number(raw)
+    return value if value is not None and 1 <= value <= 24 else None
+
+
+def resolve_future_hour_query_window(
+    user_query: str,
+    now: datetime | None = None,
+) -> dict | None:
+    """将未来 N 小时查询换算为从下一整点开始、1 小时步长的底层时效参数。"""
+    hours = _parse_future_hours(user_query)
+    if hours is None:
+        return None
+    current = now or datetime.now(TIANJIN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+    target_start = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    target_end = target_start + timedelta(hours=hours)
+    selected_fcst = _select_fcst_for_target(target_start, current)
+    start_period = int((target_start - selected_fcst).total_seconds() // 3600)
+    end_period = int((target_end - selected_fcst).total_seconds() // 3600)
+    if start_period < 0 or end_period > MAX_FORECAST_PERIOD_HOURS:
+        raise ValueError("未来小时查询范围超出滚动预报有效时效")
+    return {
+        "hours": hours,
+        "target_start": target_start,
+        "target_end": target_end,
+        "fcst_time": selected_fcst.strftime("%Y%m%d%H%M%S"),
+        "start_period": start_period,
+        "end_period": end_period,
+        "interval": 1,
+    }
+
+
+def resolve_current_hour_query_window(
+    user_query: str,
+    now: datetime | None = None,
+) -> dict | None:
+    """将“现在/当前”天气查询换算为当前整点至下一整点的1小时预报窗口。"""
+    query = str(user_query or "")
+    # 旧版滚动预报双窗口兼容：当前实况问答现已改用天擎聚合工具，
+    # 这里继续避免把该固定问法误判为普通“当前天气”查询。
+    if "滚动" in query and "实况" in query:
+        return None
+    if not any(keyword in query for keyword in ("现在", "当前", "目前", "此刻", "这会", "正在")):
+        return None
+    if not any(keyword in query for keyword in ("天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风", "能见度", "雾", "霾")):
+        return None
+    current = now or datetime.now(TIANJIN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+    target_start = current.replace(minute=0, second=0, microsecond=0)
+    target_end = target_start + timedelta(hours=1)
+    selected_fcst = _select_fcst_for_target(target_start, current)
+    start_period = int((target_start - selected_fcst).total_seconds() // 3600)
+    return {
+        "mode": "current_hour",
+        "hours": 1,
+        "target_start": target_start,
+        "target_end": target_end,
+        "fcst_time": selected_fcst.strftime("%Y%m%d%H%M%S"),
+        "start_period": start_period,
+        "end_period": start_period + 1,
+        "interval": 1,
+    }
+
+
+def resolve_named_hour_query_window(
+    query_window: str,
+    now: datetime | None = None,
+) -> dict | None:
+    """将内部语义窗口转换为底层时效参数，调用方不得自行计算起报时间。"""
+    role = str(query_window or "").strip()
+    if role not in {"current_hour", "next_12_hours"}:
+        return None
+    current = now or datetime.now(TIANJIN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+    current_hour = current.replace(minute=0, second=0, microsecond=0)
+    if role == "current_hour":
+        target_start = current_hour
+        target_end = target_start + timedelta(hours=1)
+        interval = 1
+    else:
+        target_start = current_hour + timedelta(hours=1)
+        target_end = target_start + timedelta(hours=12)
+        interval = 12
+    selected_fcst = _select_fcst_for_target(target_start, current)
+    start_period = int((target_start - selected_fcst).total_seconds() // 3600)
+    end_period = int((target_end - selected_fcst).total_seconds() // 3600)
+    return {
+        "mode": role,
+        "hours": int((target_end - target_start).total_seconds() // 3600),
+        "target_start": target_start,
+        "target_end": target_end,
+        "fcst_time": selected_fcst.strftime("%Y%m%d%H%M%S"),
+        "start_period": start_period,
+        "end_period": end_period,
+        "interval": interval,
+    }
 
 def select_rolling_forecast_time(now: datetime | None = None) -> str:
     now = now or datetime.now(TIANJIN_TIMEZONE)
@@ -260,8 +470,6 @@ def is_basin_weather_query(user_query: str) -> bool:
 
 def parse_rolling_forecast_regions(region_text: str | None) -> list[str]:
     text = (region_text or "").strip()
-    if not text or any(key in text for key in ("全市", "我市", "天津市", "天津")):
-        return list(ROLLING_FORECAST_COORDS.keys())
     matched: list[str] = []
     for alias, region in ROLLING_FORECAST_REGION_ALIASES.items():
         if alias in text and region not in matched:
@@ -269,7 +477,11 @@ def parse_rolling_forecast_regions(region_text: str | None) -> list[str]:
     for region in ROLLING_FORECAST_COORDS:
         if region in text and region not in matched:
             matched.append(region)
-    return matched or list(ROLLING_FORECAST_COORDS.keys())
+    if matched:
+        return matched
+    # “我市”“全市”“天津”或未说明地区时统一使用天津市区代表点，
+    # 避免把11个区域的空间差异聚合成一个容易误解的天气演变结论。
+    return [DEFAULT_ROLLING_FORECAST_REGION]
 
 
 def _rolling_forecast_series(values: Any) -> list:
@@ -432,6 +644,7 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for (start, end), items in sorted(groups.items(), key=lambda pair: _parse_period_time(pair[0][0]) or datetime.min):
         weather: list[str] = []
+        raw_weather: list[str] = []
         tmax_values: list[tuple[float, Any]] = []
         tmin_values: list[tuple[float, Any]] = []
         visibility_values: list[tuple[str, float, Any]] = []
@@ -440,7 +653,10 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
         wind_levels: list[int] = []
         for item in items:
             region = str(item.get("region_display") or item.get("region") or "")
-            weather.extend(_weather_tokens(item.get("WEA")))
+            weather_text = str(item.get("WEA") or "").strip()
+            if weather_text and weather_text != "--":
+                raw_weather.append(weather_text)
+                weather.extend(_weather_tokens(weather_text))
             if (value := _to_float(item.get("TMAX"))) is not None:
                 tmax_values.append((value, item.get("TMAX")))
             if (value := _to_float(item.get("TMIN"))) is not None:
@@ -479,7 +695,13 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
             "date_label": f"{start_dt.month}月{start_dt.day}日" if start_dt else start[:10],
             "start_time": start,
             "end_time": end,
-            "weather": "、".join(_top_items(weather)) if weather else None,
+            # 单地区查询保留接口原始天气演变（如“小雨转多云”）；
+            # 只有多地区查询才拆词聚合，避免把“转”的先后关系丢掉。
+            "weather": (
+                raw_weather[0]
+                if len(raw_weather) == 1
+                else "、".join(_top_items(weather)) if weather else None
+            ),
             "tmax_c": tmax,
             "tmin_c": tmin,
             "tmax_display": tmax_display,
@@ -494,8 +716,9 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
             ),
             "wind_force": f"{min(wind_levels)}-{max(wind_levels)}级" if wind_levels else None,
             "wind_direction": "、".join(_top_items(wind_directions)) if wind_directions else None,
-            "visibility_min_m": round(min_visibility, 1) if min_visibility is not None else None,
+            "visibility_min_km": round(min_visibility, 1) if min_visibility is not None else None,
             "visibility_min_display": min_visibility_display,
+            "visibility_unit": "千米",
             "visibility_min_regions": list(dict.fromkeys(min_visibility_regions)),
             "rainfall_max_24h_mm": round(max_rain, 1) if max_rain is not None else None,
             "rainfall_max_24h_display": max_rain_display,
@@ -549,24 +772,30 @@ def _temperature_analysis(daily: list[dict]) -> dict:
 
 
 def _visibility_analysis(daily: list[dict]) -> dict:
-    valid = [row for row in daily if row.get("visibility_min_m") is not None]
-    low = [row for row in valid if float(row["visibility_min_m"]) < 1000]
-    minimum = min(valid, key=lambda row: float(row["visibility_min_m"])) if valid else None
+    """按照接口原始单位千米分析最低能见度，低于 1 表示不足 1 千米。"""
+    valid = [row for row in daily if row.get("visibility_min_km") is not None]
+    low = [row for row in valid if float(row["visibility_min_km"]) < 1]
+    minimum = min(valid, key=lambda row: float(row["visibility_min_km"])) if valid else None
     return {
         "minimum": (
             {
                 "date": minimum["date"],
                 "date_label": minimum["date_label"],
-                "visibility_m": minimum["visibility_min_m"],
+                "visibility_km": minimum["visibility_min_km"],
                 "regions": minimum["visibility_min_regions"],
             }
             if minimum else None
         ),
         "below_1km_dates": [
-            {"date": row["date"], "date_label": row["date_label"], "visibility_m": row["visibility_min_m"]}
+            {
+                "date": row["date"],
+                "date_label": row["date_label"],
+                "visibility_km": row["visibility_min_km"],
+            }
             for row in low
         ],
         "has_persistent_low_visibility": len(low) >= 3,
+        "unit": "千米",
         "air_quality_available": False,
         "note": "滚动预报未返回 AQI/PM2.5，不得仅依据能见度判定空气质量。",
     }
@@ -728,6 +957,7 @@ def query_rolling_forecast_core(
     interval: int = 12,
     forecast_start_date: str = "",
     forecast_days: int = 0,
+    query_window: str = "",
     now: datetime | None = None,
 ) -> dict:
     """执行滚动预报查询，日历日入参存在时覆盖底层时效参数。"""
@@ -765,13 +995,25 @@ def query_rolling_forecast_core(
         lons = [coord.split("_")[0] for coord in coords]
         lats = [coord.split("_")[1] for coord in coords]
 
+    hourly_window = (
+        resolve_named_hour_query_window(query_window=query_window, now=now)
+        or resolve_future_hour_query_window(user_query=user_query, now=now)
+        or resolve_current_hour_query_window(user_query=user_query, now=now)
+    )
     calendar_window = resolve_requested_calendar_window(
         user_query=user_query,
         forecast_start_date=forecast_start_date,
         forecast_days=forecast_days,
         now=now,
-    )
-    if calendar_window:
+    ) if hourly_window is None else None
+    if hourly_window:
+        selected_fcst_time = hourly_window["fcst_time"]
+        start_period = hourly_window["start_period"]
+        end_period = hourly_window["end_period"]
+        interval = int(hourly_window["interval"])
+        mode_prefix = hourly_window.get("mode") or "future_hour"
+        query_mode = f"{mode_prefix}_{'point' if point_mode else 'region'}"
+    elif calendar_window:
         selected_fcst_time = calendar_window["fcst_time"]
         start_period = calendar_window["start_period"]
         end_period = calendar_window["end_period"]
@@ -823,15 +1065,39 @@ def query_rolling_forecast_core(
         "end_period": end_period,
         "interval_hours": interval,
         "forecast_start_date": calendar_window["forecast_start_date"] if calendar_window else None,
-        "forecast_days": calendar_window["forecast_days"] if calendar_window else None,
-        "forecast_start_time": calendar_window["target_start"].strftime("%Y-%m-%d %H:%M") if calendar_window else None,
-        "forecast_end_time": calendar_window["target_end"].strftime("%Y-%m-%d %H:%M") if calendar_window else None,
+        "forecast_start_time": (
+            (hourly_window or calendar_window)["target_start"].strftime("%Y-%m-%d %H:%M")
+            if hourly_window or calendar_window else None
+        ),
+        "forecast_end_time": (
+            (hourly_window or calendar_window)["target_end"].strftime("%Y-%m-%d %H:%M")
+            if hourly_window or calendar_window else None
+        ),
         "api_code": payload.get("code"),
         "api_message": payload.get("message"),
         "periods": periods,
     }
+    if hourly_window:
+        result["hourly_summary"] = [
+            {
+                "region": item.get("region_display") or item.get("region"),
+                "start_time": item.get("start_time"),
+                "end_time": item.get("end_time"),
+                "period_label": item.get("period_label"),
+                "weather": item.get("WEA"),
+                "tmax": item.get("TMAX"),
+                "tmin": item.get("TMIN"),
+                "wind": item.get("EDA"),
+                "rainfall_mm": item.get("TP1H"),
+                "visibility_min_km": item.get("VISMIN"),
+                "visibility_unit": "千米",
+            }
+            for item in periods
+            if isinstance(item, dict)
+        ]
     if calendar_window:
         result.update(analyze_rolling_forecast_periods(periods))
     if os.getenv("DEBUG_ROLLING_FORECAST", "").strip().lower() in {"1", "true", "yes", "on"}:
-        print("[query_rolling_forecast] full result:\n" + json.dumps(result, ensure_ascii=False, default=str, indent=2), flush=True)
+        print("[query_rolling_forecast] full result:\n" + json.dumps(result, ensure_ascii=False, default=str, indent=2),
+              flush=True)
     return result

@@ -1,7 +1,8 @@
 """预警查询、装配与回答工作流。
 
 无论查询由快捷路径的专用路由器触发，还是由 Planner 触发，最终均在本模块
-完成：代码生成预警清单和原始正文，模型仅生成核心结论与防范建议。
+完成：代码生成预警清单和原始正文；模型从生效预警正文中提取防范建议，
+代码校验提取内容后去重并组装，同时将模型核心结论收口为严格一句。
 """
 from __future__ import annotations
 
@@ -187,6 +188,55 @@ def _filter_warning_records_for_user(records: list[dict[str, str]], user_text: s
         filtered = [r for r in filtered if "解除" in str(r.get("msgType") or "")]
     return filtered
 
+def _warning_publisher_rank(record: dict[str, str]) -> int:
+    """中央气象台在前，天津市气象台其次，其他发布单位最后。"""
+    department = re.sub(r"\s+", "", str(record.get("department") or ""))
+    if (
+        record.get("_source_tool") == "get_national_warning_info"
+        or "中央气象台" in department
+        or "国家气象中心" in department
+    ):
+        return 0
+    if "天津市气象台" in department:
+        return 1
+    return 2
+
+
+def _warning_time_sort_value(value: Any) -> float:
+    """将常见预警发布时间转成可降序比较的数值；无法解析时稳定排在组内末尾。"""
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    normalized = re.sub(r"[年月/.]", "-", text).replace("日", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H",
+        "%Y-%m-%d",
+        "%Y%m%d%H%M%S",
+        "%Y%m%d%H%M",
+    ):
+        try:
+            return datetime.strptime(normalized, fmt).timestamp()
+        except ValueError:
+            continue
+    digits = re.sub(r"\D", "", text)
+    return float(digits[:14]) if len(digits) >= 8 else 0.0
+
+
+def _sort_warning_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
+    """统一显示顺序，保证表格、预警正文和防范建议使用同一记录序列。"""
+    indexed_records = list(enumerate(records))
+    indexed_records.sort(
+        key=lambda pair: (
+            _warning_publisher_rank(pair[1]),
+            -_warning_time_sort_value(pair[1].get("time")),
+            pair[0],
+        )
+    )
+    return [record for _, record in indexed_records]
+
 
 def _build_warning_table_markdown(records: list[dict[str, str]], title: str) -> str:
     if not records:
@@ -228,11 +278,44 @@ def _is_warning_record_released(record: dict[str, str]) -> bool:
     return "解除" in str(record.get("msgType") or "") or "解除" in str(record.get("content") or "")
 
 
+def _enforce_single_warning_core(core_text: Any) -> str:
+    """将预警核心结论确定性收口为严格一句，并统一使用一个中文句号。"""
+    body = re.sub(
+        r"^\s*【核心结论】\s*",
+        "",
+        str(core_text or ""),
+        count=1,
+    )
+    body = re.sub(r"\s+", " ", body).strip()
+    if not body:
+        body = "已获取预警信息"
+
+    first_sentence = re.match(r"^.*?[。！？!?](?:[”’」』])?", body)
+    sentence = first_sentence.group(0).strip() if first_sentence else body
+    sentence = re.sub(r"[。！？!?](?:[”’」』])?$", "", sentence).strip()
+    sentence = sentence.rstrip("；;，,、 ")
+    if sentence.count("**") % 2:
+        sentence += "**"
+    return f"【核心结论】\n{sentence}。"
+
+
+def _build_warning_contents(records: list[dict[str, str]], sanitize_text: Callable[[str], str]) -> str:
+    """逐条输出正文；缺失正文也保留占位，确保与表格序号一一对应。"""
+    if not records:
+        return ""
+    lines = []
+    for index, record in enumerate(records, 1):
+        content = str(record.get("content") or "").strip()
+        display_content = sanitize_text(content) if content else "接口未返回预警正文。"
+        lines.append(f"{index}. {display_content}")
+    return "【预警内容】\n" + "\n".join(lines)
+
+
 def _build_warning_code_fallback(bundles: list[dict[str, Any]], user_text: str, sanitize_text: Callable[[str], str]) -> str:
     merged = _merge_warning_bundles(bundles)
-    records = _filter_warning_records_for_user(merged["records"], user_text)
+    records = _sort_warning_records(_filter_warning_records_for_user(merged["records"], user_text))
     if not records:
-        return "【核心结论】\n未检索到符合条件的预警记录。"
+        return _enforce_single_warning_core("未检索到符合条件的预警记录。")
     active = [r for r in records if not _is_warning_record_released(r)]
     labels = list(dict.fromkeys(
         f"{r.get('eventType') or '预警'}{'' if not r.get('severity') or r.get('severity') in str(r.get('eventType')) else r.get('severity')}"
@@ -244,24 +327,28 @@ def _build_warning_code_fallback(bundles: list[dict[str, Any]], user_text: str, 
         core += f"，主要包括 **{'、'.join(labels[:5])}**"
     if areas:
         core += f"，涉及{'、'.join(areas[:6])}"
-    sections = ["【核心结论】\n" + core + "。", _build_warning_table_markdown(records, merged["title"])]
-    contents = [f"{idx}. {sanitize_text(str(r.get('content') or '').strip())}" for idx, r in enumerate(records, 1) if str(r.get("content") or "").strip()]
-    if contents:
-        sections.append("【预警内容】\n" + "\n".join(contents))
-    advice: list[str] = []
-    for record in active:
-        for part in re.split(r"[。；;！!？?]\s*", str(record.get("content") or "")):
-            if any(k in part for k in ["请", "注意", "加强", "避免", "防范", "转移", "做好", "减少", "远离"]):
-                advice.append(part.strip().rstrip("。") + "。")
-    if advice:
-        sections.append("【防范建议】\n" + "\n".join(f"{idx}. {item}" for idx, item in enumerate(dict.fromkeys(advice), 1)))
+    sections = [_enforce_single_warning_core(core), _build_warning_table_markdown(records, merged["title"])]
+    sections.append(_build_warning_contents(records, sanitize_text))
     return "\n\n".join(sections)
+
+
+def _is_high_temperature_warning_value_query(user_text: str) -> bool:
+    text = user_text or ""
+    knowledge_words = ("发布标准", "预警标准", "阈值", "分几级", "颜色等级", "定义", "区别", "达到多少度发布")
+    if any(word in text for word in knowledge_words):
+        return False
+    return (
+        "高温预警" in text
+        and any(word in text for word in ("最高会到", "最高气温", "最高温度", "多少度"))
+    )
 
 
 def _is_warning_fact_query(user_text: str) -> bool:
     text = user_text or ""
     if "预警" not in text:
         return False
+    if _is_high_temperature_warning_value_query(text):
+        return True
     forecast_values = ("最高气温", "最低气温", "最高会到", "多少度", "温度", "雨量", "降水量", "风力几级", "风力多大", "影响时段", "未来几天", "未来一周", "未来七天", "未来7天")
     knowledge_words = ("发布标准", "预警标准", "阈值", "分几级", "颜色等级", "定义", "区别")
     return not any(word in text for word in forecast_values + knowledge_words)
@@ -318,6 +405,9 @@ async def _route_warning_tools(answer_chain: Any, user_text: str, callbacks: dic
     )
     result = await callbacks["ainvoke_chain"](answer_chain, {"messages": [HumanMessage(content=prompt)]})
     route = _normalize_warning_route(_extract_first_json_object(getattr(result, "content", None) or str(result)))
+    if _is_high_temperature_warning_value_query(user_text) and "get_effective_warning_info" not in route["tool_names"]:
+        # 保留模型原有选择与顺序，仅补齐该业务问法明确要求的生效预警接口。
+        route["tool_names"].append("get_effective_warning_info")
     if "get_national_warning_info" in route["tool_names"]:
         route["national_keywords"] = _infer_national_warning_keywords(user_text, route.get("national_keywords"))
     print(f"[WarningWorkflow] route={json.dumps(route, ensure_ascii=False)}")
@@ -343,11 +433,106 @@ def _warning_contents_for_llm(records: list[dict[str, str]]) -> str:
     return "\n\n".join(lines) if lines else "无预警正文。"
 
 
-async def _generate_warning_core_and_advice(answer_chain: Any, records: list[dict[str, str]], user_text: str, callbacks: dict[str, Any], runtime: WarningRuntime) -> str:
+def _effective_warning_contents_for_llm(records: list[dict[str, str]]) -> str:
+    """只把生效预警接口正文作为模型可提取防范建议的候选来源。"""
+    effective_records = [
+        record
+        for record in records
+        if record.get("_source_tool") == "get_effective_warning_info"
+        and str(record.get("content") or "").strip()
+    ]
+    if not effective_records:
+        return "无可提取的生效预警正文，必须省略【防范建议】。"
+    return "\n\n".join(
+        f"记录{index}\ncontent：{str(record.get('content') or '').strip()}"
+        for index, record in enumerate(effective_records, 1)
+    )
+
+
+def _normalize_advice_for_validation(text: Any) -> str:
+    """仅忽略排版差异；不改写语义，供原文包含校验与去重使用。"""
+    value = str(text or "").replace("**", "")
+    return re.sub(r"\s+", "", value).strip()
+
+
+def _build_llm_extracted_warning_advice(
+    llm_text: str,
+    records: list[dict[str, str]],
+    sanitize_text: Callable[[str], str],
+) -> str:
+    """校验模型摘录确实来自相应生效预警 content，再按记录顺序去重组装。"""
+    effective_records = [
+        record
+        for record in records
+        if record.get("_source_tool") == "get_effective_warning_info"
+        and str(record.get("content") or "").strip()
+    ]
+    if not effective_records:
+        return ""
+
+    match = re.search(
+        r"【防范建议】\s*(.*?)(?=\n*【(?:核心结论|预警内容|[^】]*清单)】|\Z)",
+        str(llm_text or ""),
+        flags=re.DOTALL,
+    )
+    if not match:
+        return ""
+
+    extracted: list[tuple[int, int, str]] = []
+    for output_order, raw_line in enumerate(match.group(1).splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        item_match = re.match(
+            r"^(?:[-*]\s*)?(?:记录\s*)?(\d+)\s*(?:[|｜:：]|\.\s+)\s*(.+?)\s*$",
+            line,
+        )
+        if not item_match:
+            continue
+        source_index = int(item_match.group(1))
+        if source_index < 1 or source_index > len(effective_records):
+            continue
+        candidate = item_match.group(2).strip().replace("**", "")
+        candidate_normalized = _normalize_advice_for_validation(candidate)
+        source_normalized = _normalize_advice_for_validation(
+            effective_records[source_index - 1].get("content")
+        )
+        if not candidate_normalized or candidate_normalized not in source_normalized:
+            print(
+                f"[WarningWorkflow] 丢弃非原文防范建议：记录{source_index} "
+                f"{candidate[:80]!r}"
+            )
+            continue
+        extracted.append((source_index, output_order, candidate))
+
+    extracted.sort(key=lambda item: (item[0], item[1]))
+    advice_items: list[str] = []
+    seen: set[str] = set()
+    for _, _, candidate in extracted:
+        normalized = _normalize_advice_for_validation(candidate).rstrip("。；;！!？?")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        advice_items.append(sanitize_text(candidate).strip())
+    if not advice_items:
+        return ""
+    return "【防范建议】\n" + "\n".join(
+        f"{index}. {advice}" for index, advice in enumerate(advice_items, 1)
+    )
+
+
+async def _generate_warning_core_and_advice(
+    answer_chain: Any,
+    records: list[dict[str, str]],
+    user_text: str,
+    callbacks: dict[str, Any],
+    runtime: WarningRuntime,
+) -> str:
     prompt = _fill_prompt(
         WARNING_SUMMARY_PROMPT,
         user_query=user_text,
         contents_text=_warning_contents_for_llm(records),
+        advice_contents_text=_effective_warning_contents_for_llm(records),
     )
     result = await callbacks["ainvoke_chain"](answer_chain, {"messages": [HumanMessage(content=prompt)]})
     return runtime.sanitize_display_text(getattr(result, "content", None) or str(result)).strip()
@@ -356,20 +541,29 @@ async def _generate_warning_core_and_advice(answer_chain: Any, records: list[dic
 async def finalize_warning_answer(answer_chain: Any, warning_bundles: list[dict[str, Any]], user_text: str, callbacks: dict[str, Any], runtime: WarningRuntime) -> str:
     """两条触发路径共用的唯一回答装配器。"""
     merged = _merge_warning_bundles(warning_bundles)
-    records = _filter_warning_records_for_user(merged["records"], user_text)
+    records = _sort_warning_records(_filter_warning_records_for_user(merged["records"], user_text))
     try:
-        llm_text = await _generate_warning_core_and_advice(answer_chain, records, user_text, callbacks, runtime)
-        core_match = re.search(r"(【核心结论】.*?)(?=\n*【防范建议】|\Z)", llm_text, flags=re.DOTALL)
-        advice_match = re.search(r"(【防范建议】.*)\Z", llm_text, flags=re.DOTALL)
-        core = core_match.group(1).strip() if core_match else (llm_text or "【核心结论】\n已获取预警信息。")
+        llm_text = await _generate_warning_core_and_advice(
+            answer_chain,
+            records,
+            user_text,
+            callbacks,
+            runtime,
+        )
+        core_match = re.search(r"(【核心结论】.*?)(?=\n*【(?:防范建议|预警内容|[^】]*清单)】|\Z)", llm_text, flags=re.DOTALL)
+        raw_core = core_match.group(1).strip() if core_match else (llm_text or "已获取预警信息。")
+        core = _enforce_single_warning_core(raw_core)
         sections = [core]
         if records:
             sections.append(_build_warning_table_markdown(records, merged["title"]))
-            contents = [f"{idx}. {runtime.sanitize_display_text(str(r.get('content') or '').strip())}" for idx, r in enumerate(records, 1) if str(r.get("content") or "").strip()]
-            if contents:
-                sections.append("【预警内容】\n" + "\n".join(contents))
-        if advice_match:
-            sections.append(advice_match.group(1).strip())
+            sections.append(_build_warning_contents(records, runtime.sanitize_display_text))
+        advice = _build_llm_extracted_warning_advice(
+            llm_text,
+            records,
+            runtime.sanitize_display_text,
+        )
+        if advice:
+            sections.append(advice)
         return "\n\n".join(section for section in sections if section).strip()
     except Exception as exc:
         print(f"[WarningWorkflow] 摘要失败，使用代码兜底：{exc}")

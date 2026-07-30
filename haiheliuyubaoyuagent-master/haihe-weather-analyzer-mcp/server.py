@@ -89,6 +89,7 @@ class HaiheWeatherAnalyzerMCP:
                     "search_poi - 按名称查询 POI 地点/设施/单位",
                     "search_poi_by_distance - 按名称和经纬度范围查询附近 POI",
                     "query_rolling_forecast - 天津滚动预报综合天气查询",
+                    "query_current_weather_observation - 京津冀及海河流域同一时次天擎降水实况",
                 ],
                 "rainfall_impact_rule": {
                     "direct": "20km缓冲区只用于判断直接影响，直接河流完整输出",

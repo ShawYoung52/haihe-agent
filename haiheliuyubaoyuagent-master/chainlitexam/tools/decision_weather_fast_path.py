@@ -4,10 +4,8 @@
 """
 from __future__ import annotations
 
-import json
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Callable
 
 import chainlit as cl
@@ -15,15 +13,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
-    _decision_hourly_window,
-    _decision_period_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
     _extract_decision_weather_slots,
     _generate_decision_weather_answer,
     _nearest_decision_station,
     _normalize_decision_weather_slots,
-    _select_decision_fcst_time,
 )
 from utils.tool_result import _unwrap_tool_result
 
@@ -65,27 +60,16 @@ class DecisionWeatherQAService:
             return False
 
         if bool(slots.get("need_clarification")):
-            question = str(slots.get("clarification_question") or "请补充具体位置和查询时段。").strip()
+            question = str(slots.get("clarification_question") or "请补充具体位置。").strip()
             await self._emit(question, user_text, messages)
             return True
 
-        hourly_request = _decision_hourly_window(user_text, slots.get("question_type"), datetime.now())
-        normalized = _normalize_decision_weather_slots(slots, hourly_request)
+        normalized = _normalize_decision_weather_slots(slots)
         if normalized.get("error"):
             await self._emit(str(normalized["error"]), user_text, messages)
             return True
 
         location_name = normalized["location_name"]
-        target_start = normalized["target_start"]
-        target_end = normalized["target_end"]
-        interval = normalized["interval"]
-        fcst_time = _select_decision_fcst_time()
-        start_period, end_period = _decision_period_args(fcst_time, target_start, target_end)
-        print(
-            "[DecisionWeather] normalized time: "
-            f"target_start={target_start}, target_end={target_end}, interval={interval}, "
-            f"fcst_time={fcst_time}, startPeriod={start_period}, endPeriod={end_period}"
-        )
 
         poi_raw = await self.runtime.invoke_fast_tool(
             poi_tool.name, poi_tool, {"keyword": location_name, "size": 5}, user_text
@@ -111,14 +95,9 @@ class DecisionWeatherQAService:
         forecast_args = {
             "user_query": user_text,
             "regions": "",
-            "lon": nearest["lon"],
-            "lat": nearest["lat"],
-            "point_name": f"{point_name}附近（{nearest['region']}代表点）",
-            "matched_region": nearest["region"],
-            "fcst_time": fcst_time,
-            "start_period": start_period,
-            "end_period": end_period,
-            "interval": interval,
+            "lon": poi_lon,
+            "lat": poi_lat,
+            "point_name": point_name,
         }
         forecast_raw = await self.runtime.invoke_fast_tool(
             forecast_tool.name, forecast_tool, forecast_args, user_text
@@ -128,11 +107,11 @@ class DecisionWeatherQAService:
             print(f"[DecisionWeather] forecast raw payload: {forecast_payload}")
 
         facts = _compact_decision_forecast_facts(
-            forecast_payload if isinstance(forecast_payload, dict) else {}, target_start, target_end, hourly_request
+            forecast_payload if isinstance(forecast_payload, dict) else {}
         )
         facts["poi"] = {"name": point_name, "address": poi_address, "lon": poi_lon, "lat": poi_lat}
         facts["matched_station"] = nearest
-        facts["question_type"] = hourly_request["mode"] if hourly_request else (slots.get("question_type") or "general_weather")
+        facts["question_type"] = normalized["question_type"]
 
         final_text = await _generate_decision_weather_answer(user_text, facts, self.answer_chain, self.callbacks)
         final_text = self.runtime.sanitize_display_text(

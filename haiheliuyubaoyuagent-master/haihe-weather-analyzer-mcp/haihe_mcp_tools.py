@@ -18,6 +18,7 @@ import requests
 from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_DATA_CODE, DEFAULT_OBS_ELEMENTS, DEFAULT_THRESHOLDS_MM, DEFAULT_MIN_PRE_DATA_CODE, DEFAULT_MIN_PRE_ELEMENTS
+from current_weather_observation_service import query_current_weather_observation_core
 from rolling_forecast_service import is_basin_weather_query, query_rolling_forecast_core
 
 try:
@@ -111,7 +112,7 @@ ROLLING_FORECAST_ELEMENT_NAMES = {
     "RHMIN": "最小相对湿度",
     "TCCMAX": "最大总云量",
     "TCCMIN": "最小总云量",
-    "VISMIN": "最小能见度",
+    "VISMIN": "最小能见度（千米）",
     "TP1H": "1小时降水量",
 }
 ROLLING_FORECAST_COORDS = {
@@ -2652,6 +2653,24 @@ def _search_poi_by_distance_core(
 
 def register_haihe_tools(mcp: FastMCP) -> None:
     @mcp.tool()
+    def query_current_weather_observation(hours_back: int = 6) -> dict:
+        """查询当前京津冀及海河流域降水实况并完成确定性统计。
+
+        仅用于“请输出当前时刻的滚动气象信息实况”及同义问题。工具按北京时间
+        转换为天擎 UTC+0 整点时次，并逐小时回退；同一候选时次同时调用
+        getSurfEleInRegionByTime 和 getSurfEleInBasinByTime，只有两类数据均成功
+        时才进行统计。返回天津、中心城区、蓟州、北京、河北和海河流域的平均
+        降水量、最大降水量、最大小时降水量、对应站点及代码判定的降水等级。
+
+        Args:
+            hours_back: 无数据时最多向前尝试的整点数，默认6。正常问答不要修改。
+        """
+        return query_current_weather_observation_core(
+            lambda: MusicClient(MusicConfig()),
+            hours_back=hours_back,
+        )
+
+    @mcp.tool()
     def search_poi(keyword: str, size: int = 10) -> dict:
         """
         根据名称查询地点、设施、单位等兴趣点,返回经纬度信息。
@@ -2730,55 +2749,51 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         interval: int = 12,
         forecast_start_date: str = "",
         forecast_days: int = 0,
+        query_window: str = "",
     ) -> dict:
         """查询天津滚动预报。适合未来天气、未来一周、明后天、周末、升降温、强降雨、大暴雨、雾霾/能见度、户外活动适宜性等预报类问题。
 
-        **适用范围仅限天津及天津区级区域。禁止**用于"海河流域""流域"或具体河系/子流域
-        （大清河、子牙河、永定河、北三河、漳卫南运河、徒骇马颊河、黑龙港、滦河、潮白河、蓟运河等）
-        对象的天气/降雨问题——无论今天、明天还是未来，这些问题必须改用
-        `get_river_system_rainfall_forecast`（九大分区河系级降雨预报）。
-        本工具是天津 11 站点接口，不覆盖海河流域；误用时工具会直接报错。
-
-        当问题询问“高温/暴雨/大风预警期间”的实际最高气温、雨量、风力、影响时段或影响区域时，
-        仍属于动态预报查询，应调用本工具；例如“高温预警期间最高会到多少度？”。
+        当问题询问“暴雨/大风预警期间”的实际雨量、风力、影响时段或影响区域时，
+        仍属于动态预报查询，应调用本工具。
+        “高温预警期间最高会到多少度/最高气温多少”应调用 get_effective_warning_info，
+        依据当前生效高温预警正文回答，不属于本工具。
         只有询问预警发布标准、颜色等级、阈值、定义或各级区别时，才不属于本工具的预报查询范围。
 
-        未来自然日问题由大模型选择本工具，并传入 forecast_start_date 和 forecast_days。
+        未来自然日问题由大模型选择本工具；周末、默认未来7天、今天/明天/后天、
+        未来N天以及明确公历日期均由后端代码直接从 user_query 识别。
         “本周末/这个周末/周末天气”查询当周尚未过去的周六、周日；“下周末”查询下一个自然周的周六、周日。
         其他“最近会……/近期会……/未来一周/未来七天/未来几天”必须从明天 00:00 开始查 7 个自然日；
         “未来N天”明确了数量时从明天开始查 N 天。预警过程的动态预报值未说明日期时也按明天起 7 天处理。
-        不要由模型传底层时效参数代替这两个业务参数。
+        普通问答只需传 user_query 和可选地区/点位信息，不得由模型计算或传入底层时效参数。
 
         Args:
-            user_query: 用户原始问题，用于解析区域；未说明地点时默认查询天津全部区域。
+            user_query: 用户原始问题，用于解析区域；只说“我市/全市/天津”或未说明地区时默认查询天津市区代表点。
             regions: 可选的区域文本，例如“西青”“西青和津南”；为空时从 user_query 解析。
             lon: 可选点位经度；传入 lon/lat 时进入点位模式，按指定坐标查询。
             lat: 可选点位纬度；传入 lon/lat 时进入点位模式，按指定坐标查询。
             point_name: 点位名称，用于返回结果标注，例如“梅江会展中心附近代表点”。
             matched_region: 点位匹配到的滚动预报代表区域，例如“西青”。
             fcst_time: 可选起报时间，格式 YYYYMMDDHHMMSS；默认按当前时间自动选择最新可用起报时次。
-            start_period: 起始预报时效，单位小时。
-            end_period: 结束预报时效，单位小时，默认 240。
-            interval: 时间步长，单位小时，默认 12。
-            forecast_start_date: 自然日查询的开始日期，格式 YYYY-MM-DD。除明确的周末查询外，未来类问题从明天开始。
-            forecast_days: 从 forecast_start_date 起连续查询的自然日数。与 forecast_start_date 同时传入时，
-                工具自动使用每日 00:00-24:00、24 小时步长，并覆盖 fcst_time/start_period/end_period/interval。
+            start_period: 兼容专用内部流程的底层起始时效；普通问答不得由模型填写。
+            end_period: 兼容专用内部流程的底层结束时效；普通问答不得由模型填写。
+            interval: 兼容专用内部流程的底层时间步长；普通问答不得由模型填写。
+            forecast_start_date: 兼容旧调用方的自然日开始日期；普通问答由后端从 user_query 解析。
+            forecast_days: 兼容旧调用方的自然日天数；普通问答由后端从 user_query 解析。
+            query_window: 兼容内部滚动预报窗口的参数，模型不得填写；当前气象实况问题
+                已改用 query_current_weather_observation，不再通过本参数查询。
 
         未来日历日参数规则：
         - “本周末”“这个周末”“周末天气”：周一至周五从当周周六开始查2天；周六从当天开始查2天；周日从当天开始查1天。
-        - “下周末”：forecast_start_date=下一个自然周的周六，forecast_days=2。
-        - “最近会……”“近期会……”“未来一周”“未来七天/7天”“未来几天”：从明天开始，forecast_days=7。
-        - “未来N天”明确了数量时：从明天开始，forecast_days=N。
-        - “明天”：forecast_start_date=明天，forecast_days=1；“后天”则从后天开始查 1 天。
+        - “下周末”：后端自动查询下一个自然周的周六、周日。
+        - “最近会……”“近期会……”“未来一周”“未来七天/7天”“未来几天”：后端自动从明天开始查7天，interval=24。
+        - “未来N小时”“接下来N小时”：后端自动从下一整点开始查N小时，interval=1。
+        - “未来N天”明确了数量时：后端自动从明天开始查N天。
+        - “今天/明天/后天”及明确公历日期：后端自动换算自然日窗口。
         - 日历日模式会返回 daily_summary、temperature_analysis、visibility_analysis、
           rainstorm_analysis 和 weather_focus，回答时应优先使用这些代码统计结果，不要由模型重新比较数组。
 
-        当前滚动气象信息专用规则：
-        - “请输出当前时刻的滚动气象信息实况”由调用方对本工具调用两次。
-        - 第一次查当前整点至下一整点，interval=1，end_period=start_period+1。
-        - 第二次从下一整点起查未来12小时，interval=12，end_period=start_period+12。
-        - 两次必须使用同一 fcst_time，regions 留空以查询全市11个代表区域，不传 forecast_start_date/forecast_days。
-        - 调用方由代码计算 TP1H 平均值、最大值和对应地区；模型使用接口返回与代码统计撰写总结，表格仅由代码生成。
+        “请输出当前时刻的滚动气象信息实况”不使用本工具，应调用
+        query_current_weather_observation 获取天擎京津冀及海河流域同一时次实况。
         """
         # 点位模式（调用方已解析出明确经纬度，如决策天气 POI）不做流域拦截，
         # 避免"潮白河湿地公园"类点位问题被误伤。
@@ -2802,6 +2817,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             interval=interval,
             forecast_start_date=forecast_start_date,
             forecast_days=forecast_days,
+            query_window=query_window,
         )
 
     @mcp.tool()
@@ -3369,6 +3385,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         """
         查询当前仍在生效的预警信息
         当用户询问"现在有什么预警"、"当前预警"、"正在生效的预警"、"目前有哪些预警"等实时预警问题时调用。
+        当用户询问“高温预警期间最高会到多少度/最高气温多少”时也必须调用，并依据 content 中的温度信息回答。
         默认仅返回 content/eventType/department/time/severity/msgType 等问答所需字段，count 为预警条数，
         query_time/query_hour_text 为查询时刻，severity_order 给出蓝色、黄色、橙色、红色从低到高的等级顺序。
         include_raw=True 仅用于接口排查，会额外返回 raw_response/raw_data，正常问答不要开启。

@@ -37,12 +37,13 @@ except Exception:
             return str(text)[:max_len] if text else ""
 
 from utils.tool_result import _unwrap_tool_result
+from tools.current_weather_observation_response import (
+    build_current_weather_observation_answer,
+    build_current_weather_observation_summary_prompt,
+)
 from tools.rolling_forecast_response import (
     assemble_rolling_forecast_answer,
     build_rolling_forecast_bundle,
-    build_current_rolling_weather_answer,
-    build_current_rolling_weather_query_plan,
-    build_current_rolling_weather_summary_prompt,
     compact_rolling_forecast_facts,
     is_current_rolling_weather_query,
     rolling_forecast_llm_instruction,
@@ -53,18 +54,9 @@ from tools import decision_weather_fast_path, warning_workflow
 ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
 
 from tools.decision_weather_core import (
-    _compact_decision_forecast_facts,
-    _decision_hourly_window,
-    _decision_period_args,
-    _decision_pick_first_poi,
     _decision_weather_prefilter,
-    _extract_decision_weather_slots,
     _extract_first_json_object,
-    _generate_decision_weather_answer,
-    _nearest_decision_station,
-    _normalize_decision_weather_slots,
     _parse_decision_dt,
-    _select_decision_fcst_time,
     filter_redundant_decision_weather_calls,
 )
 
@@ -663,6 +655,43 @@ def _ensure_tool_calls_from_content(planner_msg):
     return planner_msg
 
 
+def _is_future_hour_weather_query(user_text: str) -> bool:
+    text = str(user_text or "")
+    has_hour_window = bool(re.search(
+        r"(?:未来|接下来|随后|后面|之后)\s*[0-9一二两三四五六七八九十]+\s*(?:个)?小时",
+        text,
+    ))
+    weather_keywords = (
+        "天气", "下雨", "有雨", "降雨", "降水", "雨量", "气温", "温度",
+        "风力", "风向", "大风", "能见度", "雾", "霾", "暴雨", "雷阵雨",
+    )
+    return has_hour_window and any(keyword in text for keyword in weather_keywords)
+
+
+def _enforce_initial_future_hour_weather_route(planner_msg, user_text: str):
+    """未来 N 小时问题使用确定性路由，避免被时间工具或短临合作方抢占。"""
+    if not _is_future_hour_weather_query(user_text):
+        return planner_msg
+    if _decision_weather_prefilter(user_text):
+        calls = [{
+            "id": f"forced_poi_weather_{uuid.uuid4().hex}",
+            "name": "query_decision_weather_for_poi",
+            "args": {"user_text": user_text},
+            "type": "tool_call",
+        }]
+    else:
+        calls = [{
+            "id": f"forced_rolling_weather_{uuid.uuid4().hex}",
+            "name": "query_rolling_forecast",
+            "args": {"user_query": user_text, "regions": ""},
+            "type": "tool_call",
+        }]
+    _set_tool_calls(planner_msg, calls)
+    planner_msg.content = ""
+    print(f"[未来小时天气路由] 强制使用工具: {calls[0]['name']}")
+    return planner_msg
+
+
 def _tool_call_names(planner_msg) -> set[str]:
     """Extract tool-call names from a planner message, tolerating dicts and objects."""
     calls = getattr(planner_msg, "tool_calls", None) or []
@@ -785,6 +814,17 @@ async def _show_business_reasoning(intent_text: str, data_sources: list[str],
     await reasoning.stage("📡 查询数据", "将查询以下数据：" + "、".join(data_sources))
     await reasoning.stage("✍️ 生成结论", conclusion_hint)
     return reasoning
+
+async def _report_reasoning_stage(
+    reasoning: ReasoningStep,
+    title: str,
+    detail: str,
+    *,
+    log_tag: str,
+) -> None:
+    """用同一份阶段信息同步更新前端思考过程和后端运行日志。"""
+    print(f"[{log_tag}] {title}：{detail}", flush=True)
+    await reasoning.stage(title, detail)
 
 
 async def generate_fast_path_thinking(
@@ -1545,6 +1585,7 @@ TOOL_DISPLAY_NAMES = {
     "locate_region_rivers": "定位区域河道",
     "estimate_river_impact_time": "估算河道影响时间",
     "get_tianjin_wind_warning_assessment": "天津大风预警评估",
+    "query_current_weather_observation": "查询京津冀及海河流域当前气象实况",
     "route_partner_skill": "调度合作单位技能",
     "invoke_partner_skill_alpha_hydro": "调用水文合作单位",
     "invoke_partner_skill_beta_emergency": "调用应急合作单位",
@@ -1699,12 +1740,21 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     elif tool_name == "analyze_rainstorm_impact" and callbacks["should_force_structured_impact_reply"](user_text):
                         forced_final_text = callbacks["build_structured_impact_reply"](observation)
 
-                    if warning_workflow.is_warning_tool(tool_name):
+                    if tool_name == "query_decision_weather_for_poi":
+                        decision_result = _unwrap_tool_result(observation)
+                        observation_text = (
+                            decision_result
+                            if isinstance(decision_result, str)
+                            else callbacks["tool_observation_to_text"](decision_result)
+                        )
+                        forced_final_text = _sanitize_display_text(str(observation_text or ""))
+                    elif warning_workflow.is_warning_tool(tool_name):
                         warning_bundles.append(warning_workflow.build_warning_bundle(tool_name, observation))
                         observation_text = (
                             "预警数据已进入专用组装流程：预警清单表格由代码根据 "
                             "eventType、department、time、severity、locationName 生成；"
-                            "预警内容由 content 组装，核心结论和防范建议由大模型基于 content 生成。"
+                            "预警内容由 content 组装，核心结论由大模型基于 content 生成，"
+                            "防范建议由大模型从生效预警 content 原文中提取，再由代码校验、去重和组装。"
                         )
                     elif tool_name == "get_river_network_for_plot":
                         river_name = tool_args.get("start_river", "全流域")
@@ -1756,6 +1806,8 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         bundle = build_rolling_forecast_bundle(user_text, data)
                         if bundle:
                             rolling_forecast_bundles.append(bundle)
+                            if bundle.get("forced_core_conclusion"):
+                                forced_final_text = str(bundle["forced_core_conclusion"])
                         compact_facts = compact_rolling_forecast_facts(data)
                         observation_text = (
                             json.dumps(compact_facts, ensure_ascii=False, default=str)
@@ -3882,64 +3934,136 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     cl.user_session.set("query_timing_logged", False)
     cl.user_session.set("has_chart_generated", False)
 
-    # 当前滚动气象信息专用双调用路径：无论是否开启快捷路径，均使用同一套
-    # 代码统计与表格生成逻辑，避免 Planner 少调、多调或自行计算平均值。
+    # 当前滚动气象信息实况专用路径：一次调用聚合天擎工具，由后端保证地区与
+    # 海河流域使用同一 UTC 时次，并完成平均值、最大值和降水等级统计。
     if is_current_rolling_weather_query(message.content):
-        rolling_tool = _find_tool(tools, "query_rolling_forecast")
-        if rolling_tool is not None:
+        observation_tool = _find_tool(tools, "query_current_weather_observation")
+        if observation_tool is not None:
+            reasoning = ReasoningStep("🤔 思考过程")
+            await reasoning.__aenter__()
             try:
-                query_plan = build_current_rolling_weather_query_plan(message.content, now=datetime.now())
-                payloads = []
-                for args in query_plan:
-                    raw = await asyncio.wait_for(
-                        _invoke_tool_for_fast_path(
-                            "query_rolling_forecast",
-                            rolling_tool,
-                            args,
-                            message.content,
-                        ),
-                        timeout=130,
-                    )
-                    payloads.append(_unwrap_tool_result(raw))
-                summaries = {}
-                try:
-                    summary_prompt = build_current_rolling_weather_summary_prompt(
+                await _report_reasoning_stage(
+                    reasoning,
+                    "🔍 理解问题",
+                    "识别为当前滚动气象实况查询，将统计天津、中心城区、蓟州、北京、河北和海河流域。",
+                    log_tag="当前气象实况",
+                )
+                await _report_reasoning_stage(
+                    reasoning,
+                    "📡 查询数据",
+                    "正在查询天擎地区与海河流域同一成功时次的地面降水实况。",
+                    log_tag="当前气象实况",
+                )
+                raw = await asyncio.wait_for(
+                    _invoke_tool_for_fast_path(
+                        "query_current_weather_observation",
+                        observation_tool,
+                        {},
                         message.content,
-                        payloads,
+                    ),
+                    timeout=130,
+                )
+                payload = _unwrap_tool_result(raw)
+                payload_dict = payload if isinstance(payload, dict) else {}
+                status = str(payload_dict.get("status") or "unknown")
+                observation_time = str(
+                    payload_dict.get("observation_time_label")
+                    or payload_dict.get("observation_time_beijing")
+                    or "未取得有效时次"
+                )
+                record_counts = payload_dict.get("record_counts")
+                count_detail = (
+                    f"，地区站 {record_counts.get('region', 0)} 条、流域站 "
+                    f"{record_counts.get('basin', 0)} 条"
+                    if isinstance(record_counts, dict)
+                    else ""
+                )
+                await _report_reasoning_stage(
+                    reasoning,
+                    "📊 处理数据",
+                    f"数据查询状态为 {status}，{observation_time}{count_detail}；"
+                    "代码已完成缺测过滤、站点去重、平均值和极值统计。",
+                    log_tag="当前气象实况",
+                )
+                summaries = {}
+                if isinstance(payload, dict) and payload.get("status") == "ok":
+                    try:
+                        await _report_reasoning_stage(
+                            reasoning,
+                            "✍️ 生成结论",
+                            "统计已完成，大模型正在依据代码统计组织各地区实况描述和关注建议。",
+                            log_tag="当前气象实况",
+                        )
+                        summary_prompt = build_current_weather_observation_summary_prompt(
+                            message.content,
+                            payload,
+                        )
+                        summary_result = await callbacks["ainvoke_chain"](
+                            answer_chain,
+                            {"messages": [HumanMessage(content=summary_prompt)]},
+                        )
+                        summaries = _extract_first_json_object(
+                            getattr(summary_result, "content", None) or str(summary_result)
+                        )
+                        if not summaries:
+                            print("[当前气象实况] 模型未返回有效总结 JSON，使用代码兜底")
+                        else:
+                            print("[当前气象实况] 大模型实况总结完成")
+                    except Exception as summary_exc:
+                        print(f"[当前气象实况] 模型总结失败，使用代码兜底: {summary_exc}")
+                        traceback.print_exc()
+                else:
+                    await _report_reasoning_stage(
+                        reasoning,
+                        "✍️ 生成结论",
+                        "当前未取得可统计的同一时次数据，正在生成明确的数据状态说明。",
+                        log_tag="当前气象实况",
                     )
-                    summary_result = await callbacks["ainvoke_chain"](
-                        answer_chain,
-                        {"messages": [HumanMessage(content=summary_prompt)]},
-                    )
-                    summaries = _extract_first_json_object(
-                        getattr(summary_result, "content", None) or str(summary_result)
-                    )
-                    if not summaries:
-                        print("[当前滚动气象信息] 模型未返回有效总结 JSON")
-                except Exception as summary_exc:
-                    print(f"[当前滚动气象信息] 模型总结失败: {summary_exc}")
-                    traceback.print_exc()
-                final_text = build_current_rolling_weather_answer(payloads, summaries)
+                final_text = build_current_weather_observation_answer(
+                    payload_dict,
+                    summaries,
+                )
+                await _report_reasoning_stage(
+                    reasoning,
+                    "✅ 完成回答",
+                    "已完成实况结果校验和回答组装。",
+                    log_tag="当前气象实况",
+                )
                 await _emit_fast_path_result(
                     final_text,
                     messages,
                     message.content,
                     append_followup=False,
+                    reasoning=reasoning,
                 )
                 _log_query_exit(query_start_time, session_id, query_summary, "ok")
                 return
             except asyncio.TimeoutError:
+                await _report_reasoning_stage(
+                    reasoning,
+                    "⏱️ 查询超时",
+                    "天擎实况查询在限定时间内未完成，正在返回超时提示。",
+                    log_tag="当前气象实况",
+                )
                 await _emit_fast_path_result(
-                    "滚动气象信息查询超时，请稍后重试。",
+                    "当前气象实况查询超时，请稍后重试。",
                     messages,
                     message.content,
                     append_followup=False,
+                    reasoning=reasoning,
                 )
                 _log_query_exit(query_start_time, session_id, query_summary, "fail")
                 return
             except Exception as exc:
                 print(f"[当前滚动气象信息] 专用路径失败，回退 Planner：{exc}")
                 traceback.print_exc()
+                await _report_reasoning_stage(
+                    reasoning,
+                    "⚠️ 切换查询方式",
+                    "专用实况链路出现异常，正在转入通用查询流程。",
+                    log_tag="当前气象实况",
+                )
+                await _maybe_close_reasoning(reasoning)
 
     if ENABLE_FAST_PATHS:
         # 降雨分布图快速路径（优先判断，避免误入河网路径）
@@ -4082,10 +4206,17 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     try:
         _compress_messages(messages)
-        planner_msg = await callbacks["astream_planner_think"](
-            planner_chain, {"messages": messages}, reasoning
-        )
-        planner_msg = _ensure_tool_calls_from_content(planner_msg)
+        if _is_future_hour_weather_query(message.content):
+            # 规则明确的未来小时天气不依赖 Planner 选工具，避免模型服务波动或路由冲突。
+            planner_msg = _enforce_initial_future_hour_weather_route(
+                AIMessage(content=""),
+                message.content,
+            )
+        else:
+            planner_msg = await callbacks["astream_planner_think"](
+                planner_chain, {"messages": messages}, reasoning
+            )
+            planner_msg = _ensure_tool_calls_from_content(planner_msg)
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
         await reasoning.__aexit__(None, None, None)
@@ -4247,7 +4378,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             break
 
         if warning_bundles and not has_emergency_response_tool:
-            await reasoning.stage("✅ 评估结果", "预警数据已获取完整，正在整理预警清单并生成防范建议...")
+            await reasoning.stage(
+                "✅ 评估结果",
+                "预警数据已获取完整，大模型正在从生效预警正文提取防范建议并生成核心结论...",
+            )
             await reasoning.stage("✍️ 生成结论", "正在生成回答...")
             final_text = await warning_workflow.finalize_warning_answer(
                 answer_chain, warning_bundles, message.content, callbacks, _warning_runtime()
@@ -4282,6 +4416,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 planner_chain, {"messages": messages}, reasoning
             )
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
+            if _is_future_hour_weather_query(message.content) and planner_msg.tool_calls:
+                print("[未来小时天气路由] 已取得滚动预报，忽略后续重复工具调用并进入回答生成。")
+                _set_tool_calls(planner_msg, [])
 
             print(f"\n=== 第 {iteration} 轮 Planner 调用结果 ===")
             print(f"Planner Message: {planner_msg}")

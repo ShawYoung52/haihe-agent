@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 
@@ -15,7 +15,9 @@ _CODE_OWNED_HEADERS = {
     "【逐日天气预报】",
     "【未来一周气温预报】",
     "【明日气温预报】",
+    "【逐日能见度】",
     "【逐日能见度与空气质量】",
+    "【未来小时预报】",
     "【周末详细预报】",
     "【逐日活动预报】",
     "【过程详情】",
@@ -26,7 +28,7 @@ _CODE_OWNED_HEADERS = {
 
 
 def is_current_rolling_weather_query(user_text: str) -> bool:
-    """识别“当前时刻的滚动气象信息实况”类专用双时段查询。"""
+    """识别需改走天擎聚合实况工具的固定问法。"""
     text = str(user_text or "")
     return (
         "滚动" in text
@@ -38,35 +40,20 @@ def is_current_rolling_weather_query(user_text: str) -> bool:
 
 def build_current_rolling_weather_query_plan(
     user_text: str,
-    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """按滚动预报接口规则生成当前1小时和未来12小时两次调用参数。"""
-    now = now or datetime.now()
-    current_hour = now.replace(minute=0, second=0, microsecond=0)
-    if now.hour >= 8:
-        fcst_dt = now.replace(hour=8, minute=0, second=0, microsecond=0)
-    else:
-        fcst_dt = (now - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
-
-    current_start = int((current_hour - fcst_dt).total_seconds() // 3600)
-    future_start = current_start + 1
+    """旧版滚动预报双窗口计划，仅保留兼容；当前实况问答已不再调用。"""
     common = {
         "user_query": user_text,
         "regions": "",
-        "fcst_time": fcst_dt.strftime("%Y%m%d%H%M%S"),
     }
     return [
         {
             **common,
-            "start_period": current_start,
-            "end_period": current_start + 1,
-            "interval": 1,
+            "query_window": "current_hour",
         },
         {
             **common,
-            "start_period": future_start,
-            "end_period": future_start + 12,
-            "interval": 12,
+            "query_window": "next_12_hours",
         },
     ]
 
@@ -191,8 +178,10 @@ def build_current_rolling_weather_summary_prompt(user_text: str, payloads: list[
         "1. 平均降水量、最大降水量及对应地区必须逐字使用“代码统计”，不得重新计算或改变数值。\n"
         "2. 平均降水量为0时，在说明平均值和最大值后，重点总结主要天气现象和气温范围。\n"
         "3. 有降水时，重点总结平均降水、最大降水及地区，可结合接口内容概括天气现象。\n"
-        "4. 每段1-2句，不得生成标题、Markdown表格、逐地区清单、数据来源或技术参数。\n"
-        "5. 只输出一个 JSON 对象，格式为："
+        "4. 每段严格且只能有1句，只回答对应时段最重要的天气事实，不得扩展背景、建议或风险。\n"
+        "5. “晴”“多云”“阴”不得互换；无降雨不等于晴，只有接口明确返回“晴”时才可写晴或转晴。\n"
+        "6. 不得生成标题、Markdown表格、逐地区清单、数据来源或技术参数。\n"
+        "7. 只输出一个 JSON 对象，格式为："
         '{"weather_observation_summary":"...","weather_forecast_summary":"..."}\n\n'
         f"用户问题：{user_text}\n\n"
         f"业务事实：{json.dumps(facts, ensure_ascii=False, default=str)}"
@@ -231,7 +220,7 @@ def _clean_rolling_weather_summary(value: Any, fallback: str) -> str:
         if stripped.startswith("|") or stripped.startswith("数据来源"):
             continue
         lines.append(stripped)
-    return " ".join(lines).strip() or fallback
+    return _first_sentence(" ".join(lines).strip()) or fallback
 
 
 def build_current_rolling_weather_answer(
@@ -355,15 +344,64 @@ def _temperature_sections(daily: list[dict], analysis: dict) -> str:
     return "\n\n".join(sections)
 
 
+def _visibility_value_km(item: dict) -> Any:
+    """读取千米制能见度；兼容前后端分步部署期间的旧字段名。"""
+    if item.get("visibility_min_km") is not None:
+        return item.get("visibility_min_km")
+    return item.get("visibility_min_m")
+
+
 def _visibility_table(daily: list[dict]) -> str:
     rows = [
         [
             item.get("date_label"),
-            _with_unit(item.get("visibility_min_display") or item.get("visibility_min_m"), "米"),
+            _with_unit(
+                item.get("visibility_min_display")
+                if item.get("visibility_min_display") is not None
+                else _visibility_value_km(item),
+                "千米",
+            ),
         ]
         for item in daily
     ]
-    return "【逐日能见度与空气质量】\n" + _markdown_table(["日期", "能见度"], rows)
+    return "【逐日能见度】\n" + _markdown_table(["日期", "最低能见度"], rows)
+
+
+def _split_hourly_wind(value: Any) -> tuple[str, str]:
+    """从接口风况原文中提取风力和风向，提取不到时不臆造。"""
+    text = str(value or "").strip()
+    direction_match = re.search(r"([东北西南中]{1,3}风)", text)
+    force_match = re.search(r"(\d+\s*[-~～到]\s*\d+\s*级|\d+\s*级)", text)
+    return (
+        force_match.group(1).replace(" ", "") if force_match else "—",
+        direction_match.group(1) if direction_match else "—",
+    )
+
+
+def _hourly_weather_table(hourly: list[dict]) -> str:
+    rows = []
+    for item in hourly:
+        if not isinstance(item, dict):
+            continue
+        wind_force, wind_direction = _split_hourly_wind(item.get("wind"))
+        rows.append([
+            item.get("period_label") or (
+                f"{_format_period_time(item.get('start_time'))}-"
+                f"{_format_period_time(item.get('end_time'))}"
+            ),
+            item.get("weather"),
+            (
+                f"{_cell(item.get('tmin'))}~{_cell(item.get('tmax'))}"
+                if item.get("tmin") is not None and item.get("tmax") is not None
+                else _cell(item.get("tmax") if item.get("tmax") is not None else item.get("tmin"))
+            ),
+            wind_force,
+            wind_direction,
+        ])
+    return "【未来小时预报】\n" + _markdown_table(
+        ["时段", "天气现象", "气温(℃)", "风力", "风向"],
+        rows,
+    )
 
 
 def _max_wind_level(value: Any) -> int:
@@ -373,15 +411,15 @@ def _max_wind_level(value: Any) -> int:
 
 def _activity_advice(item: dict) -> str:
     rain = float(item.get("rainfall_max_24h_mm") or 0)
-    visibility = float(item.get("visibility_min_m") or 999999)
+    visibility_value = _visibility_value_km(item)
+    visibility_km = float(visibility_value) if visibility_value is not None else float("inf")
     wind = _max_wind_level(item.get("wind_force"))
     weather = str(item.get("weather") or "")
     if rain >= 50 or any(word in weather for word in ("暴雨", "雷暴")) or wind >= 7:
         return "不适宜"
-    if rain >= 10 or visibility < 1000 or wind >= 5 or any(word in weather for word in ("雨", "雪", "雾")):
+    if rain >= 10 or visibility_km < 1 or wind >= 5 or any(word in weather for word in ("雨", "雪", "雾")):
         return "需谨慎安排"
     return "较适宜"
-
 
 def _activity_table(daily: list[dict], user_text: str) -> str:
     title = "【周末详细预报】" if "周末" in str(user_text or "") else "【逐日活动预报】"
@@ -396,7 +434,6 @@ def _activity_table(daily: list[dict], user_text: str) -> str:
         for item in daily
     ]
     return f"{title}\n{_markdown_table(['日期/时段', '天气', '气温(℃)', '风力', '活动建议'], rows)}"
-
 
 def _rainstorm_sections(analysis: dict) -> str:
     if not isinstance(analysis, dict):
@@ -423,8 +460,19 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
     if not isinstance(payload, dict):
         return None
     daily = [item for item in (payload.get("daily_summary") or []) if isinstance(item, dict)]
+    hourly = [item for item in (payload.get("hourly_summary") or []) if isinstance(item, dict)]
     category = _query_category(user_text)
-    if category == "rainstorm":
+    forced_core_conclusion = ""
+    if hourly:
+        code_section = _hourly_weather_table(hourly)
+    elif category == "rainstorm":
+        analysis = payload.get("rainstorm_analysis") or {}
+        if (
+            "大暴雨" in str(user_text or "")
+            and analysis.get("has_valid_rainfall_data")
+            and not analysis.get("has_severe_rainstorm")
+        ):
+            forced_core_conclusion = "【核心结论】\n当前没有大暴雨过程发生。"
         code_section = _rainstorm_sections(payload.get("rainstorm_analysis") or {})
     elif category == "visibility":
         code_section = _visibility_table(daily) if daily else ""
@@ -438,7 +486,9 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         "category": category,
         "code_section": code_section,
         "data_source": _cell(payload.get("data_source"), "天津市气象台滚动预报"),
+        "forced_core_conclusion": forced_core_conclusion,
     }
+
 
 
 def compact_rolling_forecast_facts(payload: Any) -> Any:
@@ -462,6 +512,7 @@ def compact_rolling_forecast_facts(payload: Any) -> Any:
         "visibility_analysis",
         "rainstorm_analysis",
         "weather_focus",
+        "hourly_summary",
     )
     return {key: payload.get(key) for key in keys if key in payload}
 
@@ -477,11 +528,32 @@ def rolling_forecast_llm_instruction(bundle: dict | None) -> str:
             "其日期必须使用 temperature_analysis.highest.date_label。"
         )
     return (
-        "\n\n系统约束：数据表格、关键节点和过程详情将由代码根据本工具结果生成并插入。"
-        "你只生成【核心结论】以及必要的【重点关注】等纯文字内容；不得生成任何表格、表头、"
+        "你必须生成【核心结论】，其正文严格且只能有一句，句号、问号或感叹号均视为一句结束；"
+        "该句只回答用户最关心的问题，不得追加背景、原因、建议、风险或表格内容。"
+        "除非数据存在与用户问题直接相关且核心结论未覆盖的显著风险，否则不要生成【重点关注】。"
+        "你不得生成任何表格、表头、"
         "逐日数据行、【关键节点】、【过程详情】或数据来源。"
         f"{extra}"
     )
+
+
+def _first_sentence(value: str) -> str:
+    """保留核心结论的第一句，作为提示词之外的确定性兜底。"""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    match = re.match(r"^.*?[。！？!?](?:[”’」』])?", text)
+    return match.group(0).strip() if match else text
+
+
+def _enforce_single_sentence_core(text: str) -> str:
+    pattern = re.compile(r"(【核心结论】)\s*(.*?)(?=\n\s*【[^】]+】|\Z)", re.DOTALL)
+
+    def replace(match: re.Match) -> str:
+        sentence = _first_sentence(match.group(2))
+        return f"{match.group(1)}\n{sentence}".rstrip()
+
+    return pattern.sub(replace, str(text or ""), count=1)
 
 
 def _strip_llm_code_owned_content(llm_text: str) -> str:
@@ -502,7 +574,8 @@ def _strip_llm_code_owned_content(llm_text: str) -> str:
         if stripped.startswith("数据来源：") or stripped.startswith("数据来源:"):
             continue
         kept.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return _enforce_single_sentence_core(cleaned)
 
 
 def _insert_after_core(text: str, code_section: str) -> str:
@@ -524,7 +597,8 @@ def assemble_rolling_forecast_answer(llm_text: str, bundles: list[dict]) -> str:
     if not valid:
         return str(llm_text or "")
     bundle = valid[-1]
-    cleaned = _strip_llm_code_owned_content(llm_text)
+    forced_core = str(bundle.get("forced_core_conclusion") or "").strip()
+    cleaned = forced_core or _strip_llm_code_owned_content(llm_text)
     assembled = _insert_after_core(cleaned, str(bundle.get("code_section") or ""))
     source = f"数据来源：{bundle.get('data_source') or '天津市气象台滚动预报'}。"
     return f"{assembled.rstrip()}\n\n{source}".strip()
