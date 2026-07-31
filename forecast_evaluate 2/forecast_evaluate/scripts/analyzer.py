@@ -31,7 +31,42 @@ class ExamResult:
 
 class ForecastAnalyzer:
     """预报检验分析器"""
-    
+
+    # 较差定义标准 — 从 analyzer_analyze.py 融合
+    THRESHOLDS = {
+        "area": {
+            "daily": {
+                "temperature": {
+                    "accuracy": 80.0, "mae": 1.5, "me": 1.0,
+                },
+                "precipitation": {
+                    "accuracy": 85.0, "ts": "mean",
+                    "bias_low": 0.6, "bias_high": 1.4,
+                },
+            },
+        },
+        "time_session": {
+            "le_72h": {
+                "temperature": {
+                    "accuracy": 80.0, "mae": 1.5, "me": 1.0,
+                },
+                "precipitation": {
+                    "accuracy": 85.0, "ts": "mean",
+                    "bias_low": 0.6, "bias_high": 1.4,
+                },
+            },
+            "gt_72h": {
+                "temperature": {
+                    "accuracy": 70.0, "mae": 3.0, "me": 1.5,
+                },
+                "precipitation": {
+                    "accuracy": 70.0, "ts": "mean",
+                    "bias_low": 0.3, "bias_high": 2.0,
+                },
+            },
+        },
+    }
+
     def __init__(self, response_text: str):
         """初始化分析器
         
@@ -139,7 +174,27 @@ class ForecastAnalyzer:
                 metric_name = Config.EXAM_DESCRIPTIONS.get(examName, examName)
         
         return category, metric_name
-    
+
+    def _get_thresholds(self, element_type: str, test_type: str,
+                        time_session: int = 0) -> dict:
+        """获取当前检验场景的较差判定阈值。
+
+        Args:
+            element_type: 'temperature' | 'precipitation'
+            test_type: 'daily' | 'time_session' | 'area'
+            time_session: 预报时效小时数（逐时效场景用于分 ≤72h vs >72h）
+        """
+        if test_type in ("area", "daily"):
+            dimension_key = "daily"  # area 和 daily 共用通用标准
+        else:
+            if time_session > 72:
+                dimension_key = "gt_72h"
+            else:
+                dimension_key = "le_72h"
+
+        thresholds_section = self.THRESHOLDS.get("area", {}).get(dimension_key, {})
+        return thresholds_section.get(element_type, {})
+
     def rank_products(self, results: List[ExamResult]) -> List[Tuple[str, float]]:
         """对产品进行排名（根据exam_name自动判断排序方向）
         
@@ -191,7 +246,62 @@ class ForecastAnalyzer:
                     parts.append(f" > {product_name}({value:.2f})")
         
         return ''.join(parts)
-    
+
+    def _find_poor_samples(self, results: dict, test_type: str,
+                           element_type: str) -> list[dict]:
+        """识别天津预报在各维度下的较差样本。
+
+        Args:
+            results: parse_results() 返回值
+            test_type: daily | time_session | area
+            element_type: temperature | precipitation
+        Returns:
+            [{name, metric, tj_value, threshold, reason}, ...]
+        """
+        poor = []
+        if element_type != "temperature":
+            return poor  # 降水较差判定后续补充
+
+        for exam_name, exam_results in results.items():
+            for r in exam_results:
+                if r.dataCode != 'NAFP_BETJ_DS_NC':
+                    continue
+                time_session = getattr(r, 'timeSession', 0) or 0
+                thresh = self._get_thresholds(element_type, test_type, time_session)
+
+                # 遍历每个列（区域/日期/时效）
+                for col_idx, col_name in enumerate(self.exam_columns):
+                    val = r.values[col_idx] if col_idx < len(r.values) else None
+                    if val is None or (isinstance(val, float) and np.isnan(val)):
+                        continue
+
+                    # 判断指标类型并检查阈值
+                    if 'MAE' in exam_name:
+                        if val > thresh.get('mae', 1.5):
+                            poor.append({
+                                'name': col_name, 'metric': 'MAE',
+                                'tj_value': round(val, 2),
+                                'threshold': thresh.get('mae', 1.5),
+                                'reason': f"MAE {val:.2f} > {thresh.get('mae', 1.5)}",
+                            })
+                    elif 'ME' in exam_name:
+                        if abs(val) >= thresh.get('me', 1.0):
+                            poor.append({
+                                'name': col_name, 'metric': 'ME',
+                                'tj_value': round(val, 2),
+                                'threshold': thresh.get('me', 1.0),
+                                'reason': f"|ME| {abs(val):.2f} >= {thresh.get('me', 1.0)}",
+                            })
+                    elif any(k in exam_name for k in ('PC', '准确率')):
+                        if val < thresh.get('accuracy', 80):
+                            poor.append({
+                                'name': col_name, 'metric': '准确率',
+                                'tj_value': round(val, 2),
+                                'threshold': thresh.get('accuracy', 80),
+                                'reason': f"准确率 {val:.2f}% < {thresh.get('accuracy', 80)}%",
+                            })
+        return poor
+
     def generate_summary(self, report: Dict = None) -> str:
         """生成综述文字
         
@@ -282,7 +392,12 @@ class ForecastAnalyzer:
             if category not in report['details']:
                 report['details'][category] = {}
             report['details'][category][metric_name] = exam_data
-        
+
+        # 识别较差样本
+        element_type = 'temperature' if elementCode in Config.TEMP_ELEMENTS else 'precipitation'
+        test_type_code = self.metadata.get('test_type_code', '')
+        report['poor_samples'] = self._find_poor_samples(results, test_type_code, element_type)
+
         report['summary'] = self.generate_summary(report)
         return report
     
