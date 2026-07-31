@@ -132,6 +132,72 @@ def _metric_unit(metric_name: str) -> str:
     return ""
 
 
+def _validate_params_and_fetch(
+    element: str, test_type: str, rain_type: str,
+    begin_time: str, end_time: str, time_session: int, area_codes: str,
+) -> dict[str, Any]:
+    """Shared validation + default-time + API fetch for both MCP tools.
+
+    Returns a dict with 'is_rain', 'rain_type', 'b_time', 'e_time',
+    'api_result', or 'error' on failure.
+    """
+    # 参数校验
+    valid_elements = set(EvalConfig.ALL_ELEMENTS.keys())
+    if element not in valid_elements:
+        return {"error": f"无效要素 {element}，可选: {sorted(valid_elements)}"}
+
+    valid_test_types = set(EvalConfig.TEST_TYPE_NAMES.keys())
+    if test_type not in valid_test_types:
+        return {"error": f"无效检验维度 {test_type}，可选: {sorted(valid_test_types)}"}
+
+    is_rain = element in EvalConfig.RAIN_ELEMENTS
+    if is_rain and rain_type not in ("ng", "g", "acc", ""):
+        return {"error": f"降水需要指定 rain_type: ng/g/acc，当前: {rain_type!r}"}
+    if not is_rain:
+        rain_type = None  # type: ignore[assignment]
+
+    # 默认时间：本月 1 日 ~ 昨天
+    now = datetime.now(TIANJIN_TIMEZONE)
+    month_begin = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    yesterday_end = (now - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
+
+    b_time = begin_time if begin_time else month_begin.strftime("%Y-%m-%d %H:%M:%S")
+    e_time = end_time if end_time else yesterday_end.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 实时调用检验API
+    try:
+        area = area_codes if area_codes else None
+        if is_rain:
+            api_result = run_rain_eva(
+                test_type=test_type, rain_type=rain_type,
+                begin_time=b_time, end_time=e_time,
+                time_session=time_session, save_json=False, area_codes=area,
+            )
+        else:
+            api_result = run_temp_eva(
+                test_type=test_type, begin_time=b_time, end_time=e_time,
+                time_session=time_session, save_json=False, area_codes=area,
+            )
+
+        if "error" in api_result:
+            return {"error": api_result["error"]}
+
+        if not api_result.get("request_success"):
+            raw = api_result.get("raw_response", {})
+            return {"error": f"检验API返回失败: {raw.get('code', 'unknown')}"}
+
+        return {
+            "is_rain": is_rain,
+            "rain_type": rain_type,
+            "b_time": b_time,
+            "e_time": e_time,
+            "api_result": api_result,
+        }
+    except Exception as exc:
+        logger.exception("[forecast_evaluate] 检验API调用异常")
+        return {"error": "预报检验查询失败，请稍后重试。"}
+
+
 def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
 
     @mcp.tool()
@@ -156,72 +222,24 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
         :param end_time: 结束时间 YYYY-MM-DD HH:MM:SS，默认昨天
         :param time_session: 预报时效(小时)，24/48/72，默认24
         """
-        # 参数校验
-        valid_elements = set(EvalConfig.ALL_ELEMENTS.keys())
-        if element not in valid_elements:
-            return {"error": f"无效要素 {element}，可选: {sorted(valid_elements)}"}
-
-        valid_test_types = set(EvalConfig.TEST_TYPE_NAMES.keys())
-        if test_type not in valid_test_types:
-            return {"error": f"无效检验维度 {test_type}，可选: {sorted(valid_test_types)}"}
-
-        is_rain = element in EvalConfig.RAIN_ELEMENTS
-        if is_rain and rain_type not in ("ng", "g", "acc", ""):
-            return {"error": f"降水需要指定 rain_type: ng/g/acc，当前: {rain_type!r}"}
-        if not is_rain:
-            rain_type = None  # type: ignore[assignment]
-
-        # 默认时间：本月 1 日 ~ 昨天
-        now = datetime.now(TIANJIN_TIMEZONE)
-        month_begin = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        yesterday_end = (now - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
-
-        b_time = begin_time if begin_time else month_begin.strftime("%Y-%m-%d %H:%M:%S")
-        e_time = end_time if end_time else yesterday_end.strftime("%Y-%m-%d %H:%M:%S")
-
-        # 缓存查找
-        ck = _cache_key(element, test_type, rain_type, b_time, e_time, time_session)
+        # 缓存查找（缓存键覆盖所有参数）
+        ck = _cache_key(element, test_type, rain_type, begin_time, end_time, time_session)
         cached = _cache_get(ck)
         if cached is not None:
             return cached
 
-        # 实时调用检验API
-        try:
-            area = area_codes if area_codes else None
-            if is_rain:
-                api_result = run_rain_eva(
-                    test_type=test_type,
-                    rain_type=rain_type,
-                    begin_time=b_time,
-                    end_time=e_time,
-                    time_session=time_session,
-                    save_json=False,
-                    area_codes=area,
-                )
-            else:
-                api_result = run_temp_eva(
-                    test_type=test_type,
-                    begin_time=b_time,
-                    end_time=e_time,
-                    time_session=time_session,
-                    save_json=False,
-                    area_codes=area,
-                )
+        fetched = _validate_params_and_fetch(
+            element, test_type, rain_type,
+            begin_time, end_time, time_session, area_codes,
+        )
+        if "error" in fetched:
+            return fetched
 
-            if "error" in api_result:
-                return {"error": api_result["error"]}
-
-            if not api_result.get("request_success"):
-                raw = api_result.get("raw_response", {})
-                return {"error": f"检验API返回失败: {raw.get('code', 'unknown')}"}
-
-            formatted = _format_evaluate_result(api_result, element, test_type, rain_type)
-            _cache_set(ck, formatted)
-            return formatted
-
-        except Exception as exc:
-            logger.exception("[forecast_evaluate] 工具执行异常")
-            return {"error": "预报检验查询失败，请稍后重试。"}
+        formatted = _format_evaluate_result(
+            fetched["api_result"], element, test_type, fetched["rain_type"],
+        )
+        _cache_set(ck, formatted)
+        return formatted
 
     @mcp.tool()
     def generate_forecast_charts(
@@ -247,70 +265,33 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
         :param end_time: 结束时间 YYYY-MM-DD HH:MM:SS
         :param time_session: 预报时效(小时)
         """
-        # 参数校验（与 evaluate_forecast 共享逻辑）
-        valid_elements = set(EvalConfig.ALL_ELEMENTS.keys())
-        if element not in valid_elements:
-            return {"error": f"无效要素 {element}，可选: {sorted(valid_elements)}"}
-        valid_test_types = set(EvalConfig.TEST_TYPE_NAMES.keys())
-        if test_type not in valid_test_types:
-            return {"error": f"无效检验维度 {test_type}，可选: {sorted(valid_test_types)}"}
-
-        is_rain = element in EvalConfig.RAIN_ELEMENTS
-        if is_rain and rain_type not in ("ng", "g", "acc", ""):
-            return {"error": f"降水需要指定 rain_type: ng/g/acc"}
-        if not is_rain:
-            rain_type = None  # type: ignore[assignment]
-
-        # 默认时间
-        now = datetime.now(TIANJIN_TIMEZONE)
-        month_begin = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        yesterday_end = (now - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
-        b_time = begin_time if begin_time else month_begin.strftime("%Y-%m-%d %H:%M:%S")
-        e_time = end_time if end_time else yesterday_end.strftime("%Y-%m-%d %H:%M:%S")
-
         # 解析 chart_types
         types = [t.strip() for t in chart_types.split(",") if t.strip()]
         if not types:
             types = ["bar"]
 
-        try:
-            area = area_codes if area_codes else None
-            if is_rain:
-                api_result = run_rain_eva(
-                    test_type=test_type, rain_type=rain_type,
-                    begin_time=b_time, end_time=e_time,
-                    time_session=time_session, save_json=False, area_codes=area,
-                )
-            else:
-                api_result = run_temp_eva(
-                    test_type=test_type, begin_time=b_time, end_time=e_time,
-                    time_session=time_session, save_json=False, area_codes=area,
-                )
+        fetched = _validate_params_and_fetch(
+            element, test_type, rain_type,
+            begin_time, end_time, time_session, area_codes,
+        )
+        if "error" in fetched:
+            return fetched
 
-            if "error" in api_result:
-                return {"error": api_result["error"]}
-            if not api_result.get("request_success"):
-                raw = api_result.get("raw_response", {})
-                return {"error": f"检验API返回失败: {raw.get('code', 'unknown')}"}
+        chart_paths = generate_charts(fetched["api_result"], chart_types=types)
 
-            chart_paths = generate_charts(api_result, chart_types=types)
+        # 拍平: {exam_name: [(type, path), ...]} -> [{exam_name, type, path}]
+        flattened: list[dict[str, str]] = []
+        for exam_name, paths in chart_paths.items():
+            for ct, p in paths:
+                flattened.append({
+                    "exam_name": exam_name,
+                    "chart_type": ct,
+                    "path": str(p),
+                })
 
-            # 拍平: {exam_name: [(type, path), ...]} -> [{exam_name, type, path}]
-            flattened: list[dict[str, str]] = []
-            for exam_name, paths in chart_paths.items():
-                for ct, p in paths:
-                    flattened.append({
-                        "exam_name": exam_name,
-                        "chart_type": ct,
-                        "path": str(p),
-                    })
-
-            return {
-                "element": EvalConfig.ALL_ELEMENTS.get(element, element),
-                "test_type": EvalConfig.TEST_TYPE_NAMES.get(test_type, test_type),
-                "time_range": {"begin": b_time, "end": e_time},
-                "charts": flattened,
-            }
-        except Exception as exc:
-            logger.exception("[forecast_evaluate] 图表生成异常")
-            return {"error": "预报检验图表生成失败，请稍后重试。"}
+        return {
+            "element": EvalConfig.ALL_ELEMENTS.get(element, element),
+            "test_type": EvalConfig.TEST_TYPE_NAMES.get(test_type, test_type),
+            "time_range": {"begin": fetched["b_time"], "end": fetched["e_time"]},
+            "charts": flattened,
+        }

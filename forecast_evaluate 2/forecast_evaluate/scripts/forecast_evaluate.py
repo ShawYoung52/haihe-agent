@@ -46,20 +46,14 @@ except ImportError:
     get_png_save_path = _config_module.get_png_save_path
 
 
-def _configure_chart_style():
-    """统一图表样式配置"""
-    plt.rcParams['font.sans-serif'] = ['SimHei' if platform.system() == 'Windows' else 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
-
-
 def _get_colors(n: int) -> list:
-    """获取 n 种颜色"""
+    """Get n colors for chart series."""
     base = ['#3498db', '#e74c3c', '#2ecc71', '#9b59b6', '#f39c12', '#1abc9c', '#e91e63', '#00bcd4']
     return base[:n]
 
 
-def _format_x_labels(columns, max_display=12):
-    """格式化 X 轴标签（日期简化、过多时抽稀）"""
+def _format_x_labels(columns):
+    """Format X axis labels: truncate YYYY-MM-DD dates to MM-DD."""
     processed = []
     for label in columns:
         if isinstance(label, str) and re.search(r'^\d{4}-\d{2}-\d{2}$', label):
@@ -67,6 +61,13 @@ def _format_x_labels(columns, max_display=12):
         else:
             processed.append(str(label))
     return processed
+
+
+def _predict_hours_display(predict_hours):
+    """Format predict_hours for chart titles."""
+    if predict_hours and predict_hours != '08,20':
+        return f"{predict_hours}起报"
+    return "08,20起报"
 
 
 def _save_chart(element_code, test_type, year_month, rain_type, exam_name, chart_type="chart"):
@@ -114,17 +115,14 @@ def _generate_bar_chart(element_name, exam_name, columns, data_codes, values_lis
 
     test_type_name = Config.TEST_TYPE_NAMES.get(test_type, test_type)
 
-    if predict_hours and predict_hours != '08,20':
-        predict_hours_display = f"{predict_hours}起报"
-    else:
-        predict_hours_display = "08,20起报"
+    pred_display = _predict_hours_display(predict_hours)
 
     if time_session is not None:
         title = f'{element_name}检验  {subtype}({time_session}h) {test_type_name}'
     else:
         title = f'{element_name}检验  {subtype} {test_type_name}'
 
-    plt.title(f'{title} \n {time_range} ({predict_hours_display})', fontsize=16, fontweight='bold', pad=30)
+    plt.title(f'{title} \n {time_range} ({pred_display})', fontsize=16, fontweight='bold', pad=30)
 
     processed_labels = _format_x_labels(columns)
 
@@ -178,10 +176,7 @@ def _generate_line_chart(element_name, exam_name, columns, data_codes, values_li
     ax.set_ylabel(exam_name.split('_')[0].upper(), fontsize=14, fontweight='bold')
     test_type_name = Config.TEST_TYPE_NAMES.get(test_type, test_type)
 
-    if predict_hours and predict_hours != '08,20':
-        ph_display = f"{predict_hours}起报"
-    else:
-        ph_display = "08,20起报"
+    ph_display = _predict_hours_display(predict_hours)
 
     ax.set_title(f'{element_name}检验 {exam_name} {test_type_name}\n{time_range} ({ph_display})',
                  fontsize=16, fontweight='bold', pad=20)
