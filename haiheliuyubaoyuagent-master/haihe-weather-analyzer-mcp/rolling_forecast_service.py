@@ -649,6 +649,7 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
         tmin_values: list[tuple[float, Any]] = []
         visibility_values: list[tuple[str, float, Any]] = []
         rain_values: list[tuple[str, float, Any]] = []
+        raw_eda_values: list[str] = []
         wind_directions: list[str] = []
         wind_levels: list[int] = []
         for item in items:
@@ -665,7 +666,10 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
                 visibility_values.append((region, value, item.get("VISMIN")))
             if (value := _to_float(item.get("TP1H"))) is not None:
                 rain_values.append((region, value, item.get("TP1H")))
-            directions, levels = _wind_parts(item.get("EDA"))
+            eda = _clean_value(item.get("EDA"))
+            if eda is not None and str(eda).strip():
+                raw_eda_values.append(str(eda).strip())
+            directions, levels = _wind_parts(eda)
             wind_directions.extend(directions)
             wind_levels.extend(levels)
 
@@ -714,6 +718,8 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
             "diurnal_range_display": (
                 _difference_text(tmax_item[1], tmin_item[1]) if tmax_item and tmin_item else None
             ),
+            # 展示层直接使用接口 EDA 原文；多地区查询只去重拼接，不拆分或改写内容。
+            "EDA": "；".join(dict.fromkeys(raw_eda_values)) if raw_eda_values else None,
             "wind_force": f"{min(wind_levels)}-{max(wind_levels)}级" if wind_levels else None,
             "wind_direction": "、".join(_top_items(wind_directions)) if wind_directions else None,
             "visibility_min_km": round(min_visibility, 1) if min_visibility is not None else None,
@@ -1087,6 +1093,7 @@ def query_rolling_forecast_core(
                 "weather": item.get("WEA"),
                 "tmax": item.get("TMAX"),
                 "tmin": item.get("TMIN"),
+                "EDA": item.get("EDA"),
                 "wind": item.get("EDA"),
                 "rainfall_mm": item.get("TP1H"),
                 "visibility_min_km": item.get("VISMIN"),

@@ -94,7 +94,7 @@ def build_current_weather_observation_summary_prompt(
     }
     return (
         "你是天津气象业务助手。请根据代码统计结果，为各地区组织简洁的降水实况描述，"
-        "并生成一段关注与建议。\n"
+        "并仅在代码统计包含明确降水风险时生成一段关注与建议。\n"
         "严格要求：\n"
         "1. 只输出一个JSON对象，字段固定为 tianjin、tianjin_central、jizhou、beijing、"
         "hebei、haihe_basin、advice；不要输出标题、表格或数据来源。\n"
@@ -107,9 +107,10 @@ def build_current_weather_observation_summary_prompt(
         "雷电、大风等接口未提供的天气现象。\n"
         "6. 海河流域最大值只写站点名称，禁止补充无法确定的河流名称。\n"
         "7. 代码判断无降水时对应字段只能写“没有降水”；无有效数据时只能写“暂无有效降水数据”。\n"
-        "8. advice限1-2句，只围绕道路积水、早晚高峰或节假日出行、天津海上作业、山区旅游等"
-        "与实际降水等级相符的事项，不得编造预警等级、停工停航命令或具体受灾情况；全部地区"
-        "无降水时 advice 留空。\n\n"
+        "8. advice限1-2句。只有代码降水判断或输入内容明确体现风险时，才围绕道路积水、"
+        "早晚高峰或节假日出行、天津海上作业、山区旅游等与实际降水等级相符的事项生成建议；"
+        "不得编造预警等级、停工停航命令或具体受灾情况。无明确风险或全部地区无降水时，"
+        "advice 留空。\n\n"
         f"用户问题：{user_text}\n"
         f"北京时间：{payload.get('observation_time_beijing') if isinstance(payload, dict) else ''}\n"
         f"代码统计：{json.dumps(compact, ensure_ascii=False, default=str)}"

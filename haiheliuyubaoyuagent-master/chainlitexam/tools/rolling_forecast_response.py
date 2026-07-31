@@ -304,12 +304,11 @@ def _weather_table(daily: list[dict], user_text: str) -> str:
             item.get("date_label"),
             item.get("weather"),
             item.get("temperature_range_c"),
-            item.get("wind_force"),
-            item.get("wind_direction"),
+            item.get("EDA"),
         ]
         for item in daily
     ]
-    return f"{title}\n{_markdown_table(['日期', '天气现象', '气温(℃)', '风力', '风向'], rows)}"
+    return f"{title}\n{_markdown_table(['日期', '天气现象', '气温(℃)', '风力风向'], rows)}"
 
 
 def _temperature_sections(daily: list[dict], analysis: dict) -> str:
@@ -367,23 +366,11 @@ def _visibility_table(daily: list[dict]) -> str:
     return "【逐日能见度】\n" + _markdown_table(["日期", "最低能见度"], rows)
 
 
-def _split_hourly_wind(value: Any) -> tuple[str, str]:
-    """从接口风况原文中提取风力和风向，提取不到时不臆造。"""
-    text = str(value or "").strip()
-    direction_match = re.search(r"([东北西南中]{1,3}风)", text)
-    force_match = re.search(r"(\d+\s*[-~～到]\s*\d+\s*级|\d+\s*级)", text)
-    return (
-        force_match.group(1).replace(" ", "") if force_match else "—",
-        direction_match.group(1) if direction_match else "—",
-    )
-
-
 def _hourly_weather_table(hourly: list[dict]) -> str:
     rows = []
     for item in hourly:
         if not isinstance(item, dict):
             continue
-        wind_force, wind_direction = _split_hourly_wind(item.get("wind"))
         rows.append([
             item.get("period_label") or (
                 f"{_format_period_time(item.get('start_time'))}-"
@@ -395,11 +382,10 @@ def _hourly_weather_table(hourly: list[dict]) -> str:
                 if item.get("tmin") is not None and item.get("tmax") is not None
                 else _cell(item.get("tmax") if item.get("tmax") is not None else item.get("tmin"))
             ),
-            wind_force,
-            wind_direction,
+            item.get("EDA") if item.get("EDA") is not None else item.get("wind"),
         ])
     return "【未来小时预报】\n" + _markdown_table(
-        ["时段", "天气现象", "气温(℃)", "风力", "风向"],
+        ["时段", "天气现象", "气温(℃)", "风力风向"],
         rows,
     )
 
@@ -421,6 +407,7 @@ def _activity_advice(item: dict) -> str:
         return "需谨慎安排"
     return "较适宜"
 
+
 def _activity_table(daily: list[dict], user_text: str) -> str:
     title = "【周末详细预报】" if "周末" in str(user_text or "") else "【逐日活动预报】"
     rows = [
@@ -428,12 +415,13 @@ def _activity_table(daily: list[dict], user_text: str) -> str:
             item.get("date_label"),
             item.get("weather"),
             item.get("temperature_range_c"),
-            item.get("wind_force"),
+            item.get("EDA"),
             _activity_advice(item),
         ]
         for item in daily
     ]
-    return f"{title}\n{_markdown_table(['日期/时段', '天气', '气温(℃)', '风力', '活动建议'], rows)}"
+    return f"{title}\n{_markdown_table(['日期/时段', '天气', '气温(℃)', '风力风向', '活动建议'], rows)}"
+
 
 def _rainstorm_sections(analysis: dict) -> str:
     if not isinstance(analysis, dict):
@@ -490,7 +478,6 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
     }
 
 
-
 def compact_rolling_forecast_facts(payload: Any) -> Any:
     """仅向大模型提供已汇总的权威事实，避免其重新扫描 periods 得到不同结论。"""
     if not isinstance(payload, dict):
@@ -528,6 +515,7 @@ def rolling_forecast_llm_instruction(bundle: dict | None) -> str:
             "其日期必须使用 temperature_analysis.highest.date_label。"
         )
     return (
+        "\n\n系统约束：数据表格、关键节点和过程详情将由代码根据本工具结果生成并插入。"
         "你必须生成【核心结论】，其正文严格且只能有一句，句号、问号或感叹号均视为一句结束；"
         "该句只回答用户最关心的问题，不得追加背景、原因、建议、风险或表格内容。"
         "除非数据存在与用户问题直接相关且核心结论未覆盖的显著风险，否则不要生成【重点关注】。"
