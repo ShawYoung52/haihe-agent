@@ -185,14 +185,16 @@ class ForecastAnalyzer:
             time_session: 预报时效小时数（逐时效场景用于分 ≤72h vs >72h）
         """
         if test_type in ("area", "daily"):
+            threshold_dict = self.THRESHOLDS.get("area", {})
             dimension_key = "daily"  # area 和 daily 共用通用标准
         else:
+            threshold_dict = self.THRESHOLDS.get("time_session", {})
             if time_session > 72:
                 dimension_key = "gt_72h"
             else:
                 dimension_key = "le_72h"
 
-        thresholds_section = self.THRESHOLDS.get("area", {}).get(dimension_key, {})
+        thresholds_section = threshold_dict.get(dimension_key, {})
         return thresholds_section.get(element_type, {})
 
     def rank_products(self, results: List[ExamResult]) -> List[Tuple[str, float]]:
@@ -394,7 +396,12 @@ class ForecastAnalyzer:
             report['details'][category][metric_name] = exam_data
 
         # 识别较差样本
-        element_type = 'temperature' if elementCode in Config.TEMP_ELEMENTS else 'precipitation'
+        # 明确获取 element_code，避免依赖 for 循环闭包变量
+        element_code = self.metadata.get('element_code', '')
+        if not element_code:
+            # 回退：从 for 循环最后一个 elementCode 获取（results 非空时有效）
+            element_code = elementCode if results else ''
+        element_type = 'temperature' if element_code in Config.TEMP_ELEMENTS else 'precipitation'
         test_type_code = self.metadata.get('test_type_code', '')
         report['poor_samples'] = self._find_poor_samples(results, test_type_code, element_type)
 
