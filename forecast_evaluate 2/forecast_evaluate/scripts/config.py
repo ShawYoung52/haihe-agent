@@ -15,6 +15,7 @@
 
 from datetime import datetime
 import calendar
+import os
 from pathlib import Path
 
 
@@ -46,14 +47,16 @@ _DEFAULT_BEGIN_TIME, _DEFAULT_END_TIME = _get_current_month_range()
 # ============================================================
 
 class PathConfig:
-    """路径配置类"""
-    
-    BASE_SAVE_DIR = Path('/Users/merlinq/Workspace/download/JSON')
-    
-    PNG_SAVE_DIR = Path('/Users/merlinq/Workspace/download/PNG')
-    
-    OBSIDIAN_VAULT_PATH = Path('/Users/merlinq/Documents/Obsidian-Vault/检验报告')
-    
+    """路径配置类 — 环境变量优先，回退到平台默认"""
+
+    _BASE = Path(os.environ.get(
+        "FORECAST_EVAL_DIR",
+        Path.home() / "forecast_evaluate_data"
+    ))
+
+    BASE_SAVE_DIR = _BASE / "JSON"
+    PNG_SAVE_DIR = _BASE / "PNG"
+    OBSIDIAN_VAULT_PATH = _BASE / "reports"
     SAVE_DIR = PNG_SAVE_DIR
     
     # 目录结构模板: {element}/{test_type}/{subtype}/{YYYYMM}.json
