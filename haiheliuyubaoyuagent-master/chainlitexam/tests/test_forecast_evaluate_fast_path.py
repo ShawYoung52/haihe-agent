@@ -28,6 +28,12 @@ class TestForecastEvaluateKeywordDetection:
         "哪个模式预报暴雨最准",
         "哪个模式暴雨预报最准",
         "暴雨预报哪个模式最准",
+        # 图表关键词
+        "画个暴雨TS评分对比图",
+        "降水检验趋势图",
+        "各家模式准确率对比图表",
+        "最近的预报评估可视化",
+        "最新降水预报图",
     ]
 
     NON_TRIGGER_QUERIES = [
