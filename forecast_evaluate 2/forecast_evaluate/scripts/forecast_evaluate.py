@@ -46,15 +46,212 @@ except ImportError:
     get_png_save_path = _config_module.get_png_save_path
 
 
-def _parse_and_plot(response_data):
-    """解析响应数据并创建柱状图
-    
+def _configure_chart_style():
+    """统一图表样式配置"""
+    plt.rcParams['font.sans-serif'] = ['SimHei' if platform.system() == 'Windows' else 'Arial Unicode MS']
+    plt.rcParams['axes.unicode_minus'] = False
+
+
+def _get_colors(n: int) -> list:
+    """获取 n 种颜色"""
+    base = ['#3498db', '#e74c3c', '#2ecc71', '#9b59b6', '#f39c12', '#1abc9c', '#e91e63', '#00bcd4']
+    return base[:n]
+
+
+def _format_x_labels(columns, max_display=12):
+    """格式化 X 轴标签（日期简化、过多时抽稀）"""
+    processed = []
+    for label in columns:
+        if isinstance(label, str) and re.search(r'^\d{4}-\d{2}-\d{2}$', label):
+            processed.append(label[5:])  # MM-DD
+        else:
+            processed.append(str(label))
+    return processed
+
+
+def _save_chart(element_code, test_type, year_month, rain_type, exam_name, chart_type="chart"):
+    """统一图表保存路径生成"""
+    return get_png_save_path(
+        element_code=element_code,
+        test_type=test_type,
+        time_stamp=year_month,
+        rain_type=rain_type,
+        metric=f"{chart_type}_{exam_name}"
+    )
+
+
+def _generate_bar_chart(element_name, exam_name, columns, data_codes, values_list,
+                        test_type, year_month, element_code, rain_type, time_range,
+                        predict_hours, time_session):
+    """生成分组柱状图"""
+    if rain_type:
+        subtype_raw = exam_name.split('_')[-1]
+        subtype = Config.RAIN_SUBTYPE_NAMES.get(subtype_raw, subtype_raw)
+    else:
+        subtype = ""
+
+    fig_width, fig_height = 14, 8
+    plt.figure(figsize=(fig_width, fig_height))
+    x = np.arange(len(columns))
+
+    max_width = 0.8
+    width = min(0.25, max_width / len(data_codes))
+    colors = _get_colors(len(data_codes))
+
+    for i, (data_code, values) in enumerate(zip(data_codes, values_list)):
+        color = colors[i % len(colors)]
+        offset = (i - (len(data_codes) - 1) / 2) * width
+        label = Config.PRODUCT_NAMES.get(data_code, data_code)
+        bars = plt.bar(x + offset, values, width, label=label, color=color, alpha=0.85)
+
+        for j, bar in enumerate(bars):
+            height = bar.get_height()
+            if height > 0:
+                plt.text(bar.get_x() + bar.get_width()/2., height * 1.02,
+                        f'{values[j]:.1f}', ha='center', va='bottom', fontsize=10)
+
+    plt.ylabel(f'{exam_name.split("_")[0].upper()}', fontsize=14, fontweight='bold')
+
+    test_type_name = Config.TEST_TYPE_NAMES.get(test_type, test_type)
+
+    if predict_hours and predict_hours != '08,20':
+        predict_hours_display = f"{predict_hours}起报"
+    else:
+        predict_hours_display = "08,20起报"
+
+    if time_session is not None:
+        title = f'{element_name}检验  {subtype}({time_session}h) {test_type_name}'
+    else:
+        title = f'{element_name}检验  {subtype} {test_type_name}'
+
+    plt.title(f'{title} \n {time_range} ({predict_hours_display})', fontsize=16, fontweight='bold', pad=30)
+
+    processed_labels = _format_x_labels(columns)
+
+    num_labels = len(columns)
+    if num_labels > 12:
+        step = max(1, num_labels // 12)
+        display_indices = list(range(0, num_labels, step))
+        display_labels = [processed_labels[i] for i in display_indices]
+        display_positions = [x[i] for i in display_indices]
+        plt.xticks(display_positions, display_labels, rotation=0, ha='center', fontsize=14)
+    else:
+        plt.xticks(x, processed_labels, rotation=0, ha='center', fontsize=14)
+
+    plt.yticks(fontsize=12)
+    plt.grid(axis='y', linestyle='--', alpha=0.2)
+    plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.08), ncol=min(4, len(data_codes)),
+              fancybox=False, shadow=False, frameon=False, fontsize=14)
+    plt.subplots_adjust(top=0.85, bottom=0.2, left=0.08, right=0.98)
+
+    save_path = _save_chart(element_code, test_type, year_month, rain_type,
+                            exam_name, "bar")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    return save_path
+
+
+def _generate_line_chart(element_name, exam_name, columns, data_codes, values_list,
+                         test_type, year_month, element_code, rain_type, time_range,
+                         predict_hours):
+    """生成逐日/逐时效趋势折线图"""
+    x = np.arange(len(columns))
+    colors = _get_colors(len(data_codes))
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    for i, (data_code, values) in enumerate(zip(data_codes, values_list)):
+        label = Config.PRODUCT_NAMES.get(data_code, data_code)
+        color = colors[i % len(colors)]
+        ax.plot(x, values, marker='o', linewidth=2, markersize=4,
+                label=label, color=color, alpha=0.85)
+
+    processed = _format_x_labels(columns)
+    if len(columns) > 15:
+        step = max(1, len(columns) // 12)
+        ax.set_xticks(x[::step])
+        ax.set_xticklabels(processed[::step], rotation=45, ha='right')
+    else:
+        ax.set_xticks(x)
+        ax.set_xticklabels(processed, rotation=45 if len(columns) > 7 else 0, ha='center')
+
+    ax.set_ylabel(exam_name.split('_')[0].upper(), fontsize=14, fontweight='bold')
+    test_type_name = Config.TEST_TYPE_NAMES.get(test_type, test_type)
+
+    if predict_hours and predict_hours != '08,20':
+        ph_display = f"{predict_hours}起报"
+    else:
+        ph_display = "08,20起报"
+
+    ax.set_title(f'{element_name}检验 {exam_name} {test_type_name}\n{time_range} ({ph_display})',
+                 fontsize=16, fontweight='bold', pad=20)
+    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.12),
+              ncol=min(4, len(data_codes)), frameon=False, fontsize=12)
+    plt.tight_layout()
+
+    save_path = _save_chart(element_code, test_type, year_month, rain_type,
+                            exam_name, "line")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    return save_path
+
+
+def _generate_heatmap(element_name, exam_name, columns, data_codes, values_list,
+                      test_type, year_month, element_code, rain_type, time_range,
+                      predict_hours):
+    """生成 产品 x 维度 热力图（仅对多产品场景有效）"""
+    if len(data_codes) < 2:
+        return None
+
+    data = np.array(values_list)
+    products = [Config.PRODUCT_NAMES.get(c, c) for c in data_codes]
+
+    fig, ax = plt.subplots(figsize=(max(10, len(columns) * 0.6),
+                                     max(4, len(data_codes) * 0.5)))
+
+    im = ax.imshow(data, aspect='auto', cmap='RdYlGn_r')
+
+    ax.set_xticks(np.arange(len(columns)))
+    ax.set_yticks(np.arange(len(products)))
+    ax.set_xticklabels(_format_x_labels(columns),
+                       rotation=45 if len(columns) > 8 else 0, ha='center')
+    ax.set_yticklabels(products)
+
+    for i in range(len(products)):
+        for j in range(len(columns)):
+            val = data[i, j]
+            if not np.isnan(val):
+                ax.text(j, i, f'{val:.1f}', ha='center', va='center',
+                        fontsize=8, color='black' if 0.3 < abs(val)/data.max() < 0.7 else 'white')
+
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label(exam_name, fontsize=10)
+
+    test_type_name = Config.TEST_TYPE_NAMES.get(test_type, test_type)
+    ax.set_title(f'{element_name} {exam_name} {test_type_name}\n{time_range}',
+                 fontsize=14, fontweight='bold', pad=20)
+    plt.tight_layout()
+
+    save_path = _save_chart(element_code, test_type, year_month, rain_type,
+                            exam_name, "heat")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    return save_path
+
+
+def _parse_and_plot(response_data, chart_types=None):
+    """解析响应数据并创建图表
+
     Args:
         response_data: API响应数据
-    """    
+        chart_types: 图表类型列表 ['bar', 'line', 'heatmap']，默认 ['bar']
+    """
+    if chart_types is None:
+        chart_types = ['bar']
 
     # rprint(response_data)
-    
+
     # 提取数据
     element_name = response_data.get('element', '')
     element_code = response_data.get('element_code', '')
@@ -62,7 +259,7 @@ def _parse_and_plot(response_data):
     rain_type = response_data.get('rain_type', None)
     time_range = response_data.get('time_range', {})
     raw_response = response_data.get('raw_response', {})
-    
+
     # 从响应数据中获取 predict_hours，如果没有则尝试从 json_file 路径推断
     predict_hours = response_data.get('predict_hours')
     if not predict_hours:
@@ -86,7 +283,7 @@ def _parse_and_plot(response_data):
     if not exam_column_name:
         rprint("[yellow]没有找到 examColumnName 数据[/yellow]")
         return []
-    
+
     # 当test_type为area时，替换列为地区名称
     if test_type == 'area':
         exam_column_name = [Config.TJ_AREA_NAMES.get(str(col), str(col)) for col in exam_column_name]
@@ -98,7 +295,7 @@ def _parse_and_plot(response_data):
     today = datetime.now().strftime('%Y-%m-%d')
     if end_time[:10] > today:
         end_time = today + end_time[10:]
-    time_range = begin_time[:10].replace('-', '') + ' 至 ' + end_time[:10].replace('-', '')
+    time_range_str = begin_time[:10].replace('-', '') + ' 至 ' + end_time[:10].replace('-', '')
 
     # 按 examName 分组
     exam_groups = {}
@@ -110,11 +307,6 @@ def _parse_and_plot(response_data):
 
     save_paths = {}
     for exam_name, items in exam_groups.items():
-        if rain_type:
-            subtype = exam_name.split('_')[-1]
-            subtype = Config.RAIN_SUBTYPE_NAMES.get(subtype, subtype)
-        else:
-            subtype = ""
         time_session = items[0].get('timeSession', None)
 
         data_codes = []
@@ -129,100 +321,61 @@ def _parse_and_plot(response_data):
                 valid_values = valid_values[:len(exam_column_name)]
             values_list.append(valid_values)
 
-        # 创建图表
-        fig_width, fig_height = 14, 8
-        plt.figure(figsize=(fig_width, fig_height))
-        x = np.arange(len(exam_column_name))
+        chart_paths = []
 
-        max_width = 0.8
-        width = min(0.25, max_width / len(data_codes))
-        colors = ['#3498db', '#e74c3c', '#2ecc71', '#9b59b6', '#f39c12', '#1abc9c', '#e91e63', '#00bcd4']
+        # 柱状图（总是生成，用于报告嵌入）
+        if 'bar' in chart_types:
+            bar_path = _generate_bar_chart(
+                element_name, exam_name, exam_column_name, data_codes,
+                values_list, test_type, year_month, element_code, rain_type,
+                time_range_str, predict_hours, time_session
+            )
+            chart_paths.append(('bar', bar_path))
 
-        for i, (data_code, values) in enumerate(zip(data_codes, values_list)):
-            color = colors[i % len(colors)]
-            offset = (i - (len(data_codes) - 1) / 2) * width
-            label = Config.PRODUCT_NAMES.get(data_code, data_code)
-            bars = plt.bar(x + offset, values, width, label=label, color=color, alpha=0.85)
+        # 折线图
+        if 'line' in chart_types and len(exam_column_name) > 1:
+            line_path = _generate_line_chart(
+                element_name, exam_name, exam_column_name, data_codes,
+                values_list, test_type, year_month, element_code, rain_type,
+                time_range_str, predict_hours
+            )
+            if line_path:
+                chart_paths.append(('line', line_path))
 
-            for j, bar in enumerate(bars):
-                height = bar.get_height()
-                if height > 0:
-                    plt.text(bar.get_x() + bar.get_width()/2., height * 1.02,
-                            f'{values[j]:.1f}', ha='center', va='bottom', fontsize=10)
+        # 热力图
+        if 'heatmap' in chart_types and len(data_codes) >= 2:
+            heat_path = _generate_heatmap(
+                element_name, exam_name, exam_column_name, data_codes,
+                values_list, test_type, year_month, element_code, rain_type,
+                time_range_str, predict_hours
+            )
+            if heat_path:
+                chart_paths.append(('heatmap', heat_path))
 
-        plt.ylabel(f'{exam_name.split("_")[0].upper()}', fontsize=14, fontweight='bold')
-
-        test_type = Config.TEST_TYPE_NAMES.get(test_type, test_type)
-        
-        if not predict_hours:
-            predict_hours = response_data.get('predict_hours', '08,20')
-        if predict_hours and predict_hours != '08,20':
-            predict_hours_display = f"{predict_hours}起报"
-        else:
-            predict_hours_display = "08,20起报"
-        
-        if time_session is not None:
-            title = f'{element_name}检验  {subtype}({time_session}h) {test_type}'
-        else:
-            title = f'{element_name}检验  {subtype} {test_type}'
-        
-        plt.title(f'{title} \n {time_range} ({predict_hours_display})',  fontsize=16, fontweight='bold', pad=30)
-
-        # 处理横轴标签
-        processed_labels = []
-        for label in exam_column_name:
-            if isinstance(label, str) and re.search(r'^\d{4}-\d{2}-\d{2}$', label):
-                processed_labels.append(label[5:])
-            else:
-                processed_labels.append(label)
-
-        num_labels = len(exam_column_name)
-        if num_labels > 12:
-            step = max(1, num_labels // 12)
-            display_indices = list(range(0, num_labels, step))
-            display_labels = [processed_labels[i] for i in display_indices]
-            display_positions = [x[i] for i in display_indices]
-            plt.xticks(display_positions, display_labels, rotation=0, ha='center', fontsize=14)
-        else:
-            plt.xticks(x, processed_labels, rotation=0, ha='center', fontsize=14)
-
-        plt.yticks(fontsize=12)
-        plt.grid(axis='y', linestyle='--', alpha=0.2)
-        plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.08), ncol=min(4, len(data_codes)),
-                  fancybox=False, shadow=False, frameon=False, fontsize=14)
-        plt.subplots_adjust(top=0.85, bottom=0.2, left=0.08, right=0.98)
-
-        # 使用新的目录结构生成保存路径（包含指标名称）        
-        save_path = get_png_save_path(
-            element_code=element_code,
-            test_type=test_type,
-            time_stamp=year_month,
-            rain_type=rain_type,
-            metric=exam_name
-        )
-        
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        save_paths[exam_name] = str(save_path)
+        save_paths[exam_name] = chart_paths
 
     return save_paths
 
 
-def generate_charts(response_data):
+def generate_charts(response_data, chart_types=None):
     """从API响应数据生成检验图表
 
     Args:
         response_data: API响应数据（dict格式，即 response_json）
+        chart_types: 图表类型列表，如 ['bar', 'line', 'heatmap']，默认 ['bar']
 
     Returns:
-        list: 图表文件路径列表
+        dict: {exam_name: [(chart_type, file_path), ...], ...}
 
     Example:
         >>> result = request_scores(json_data)
         >>> if result['success']:
         ...     charts = generate_charts(result['response_json'])
+        ...     charts = generate_charts(result['response_json'], chart_types=['bar', 'line'])
     """
-    return _parse_and_plot(response_data)
+    if chart_types is None:
+        chart_types = ['bar']
+    return _parse_and_plot(response_data, chart_types)
 
 
 def request_scores(json_data, topic=None):
