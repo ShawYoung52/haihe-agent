@@ -2955,6 +2955,9 @@ def _need_forecast_evaluate(user_text: str) -> bool:
         "预报效果", "预报准确性",
         "暴雨TS", "暴雨ts",
         "预报最准", "暴雨最准", "最准", "最准确", "预报对比", "预报得最准",
+        # 图表关键词
+        "检验图", "评分图", "预报图", "评估图",
+        "对比图", "趋势图", "热力图", "图表",
     ]
     return any(k in user_text for k in keywords)
 
@@ -3010,6 +3013,19 @@ async def _try_forecast_evaluate_fast_path(
         if session_match:
             time_session = int(session_match.group(1))
 
+        # 检测是否明确要求图表
+        wants_chart = any(k in user_text for k in (
+            "图", "图表", "画图", "可视化", "热力图", "趋势图",
+            "对比图", "柱状图", "折线图",
+        ))
+
+        # 推断图表类型
+        chart_types = "bar,line"
+        if any(k in user_text for k in ("热力图",)):
+            chart_types = "heatmap,bar"
+        elif any(k in user_text for k in ("趋势图", "折线图", "时效")):
+            chart_types = "line,bar"
+
         reasoning = await _show_business_reasoning(
             "预报检验与模式评估",
             ["检验API数据"],
@@ -3018,8 +3034,9 @@ async def _try_forecast_evaluate_fast_path(
         await generate_fast_path_thinking(
             thinking_chain, user_text, "预报检验与模式评估", ["检验API数据"], reasoning
         )
-        await reasoning.stage("📡 查询数据", "正在查询预报检验数据...")
 
+        # 先调 evaluate_forecast 获取数据，供回答文本使用
+        await reasoning.stage("📡 查询数据", "正在查询预报检验数据...")
         result = await _invoke_tool_for_fast_path(
             "evaluate_forecast",
             tool,
@@ -3046,9 +3063,44 @@ async def _try_forecast_evaluate_fast_path(
             )
             return True
 
-        # 构建业务化回答
+        # 构建业务化回答文本（优先使用完整报告）
         text = _build_forecast_evaluate_answer(data, user_text)
-        await _emit_fast_path_result(text, messages, user_text, reasoning=reasoning)
+
+        # 图表分支：调 generate_forecast_charts + cl.Image 渲染
+        image_elements = []
+        if wants_chart:
+            chart_tool = _find_tool(tools, "generate_forecast_charts")
+            if chart_tool:
+                await reasoning.stage("📊 生成图表", "正在生成检验图表...")
+                try:
+                    chart_result = await _invoke_tool_for_fast_path(
+                        "generate_forecast_charts", chart_tool,
+                        {
+                            "element": element,
+                            "test_type": test_type,
+                            "rain_type": rain_type,
+                            "time_session": time_session,
+                            "chart_types": chart_types,
+                        }, user_text,
+                    )
+                    chart_data = _unwrap_tool_result(chart_result)
+
+                    if isinstance(chart_data, dict) and "charts" in chart_data:
+                        for chart in chart_data.get("charts", []):
+                            path = chart.get("path", "")
+                            ctype = chart.get("chart_type", "chart")
+                            if path and os.path.isfile(path):
+                                with open(path, "rb") as f:
+                                    image_elements.append(
+                                        cl.Image(content=f.read(), name=f"forecast_{ctype}")
+                                    )
+                except Exception as chart_exc:
+                    print(f"[预报检验图表] 图表生成失败（继续返回文本结果）：{chart_exc}")
+
+        await _emit_fast_path_result(
+            text, messages, user_text, images=image_elements if image_elements else None,
+            has_chart=bool(image_elements), reasoning=reasoning,
+        )
         return True
 
     except Exception as e:
@@ -3066,6 +3118,12 @@ async def _try_forecast_evaluate_fast_path(
 
 def _build_forecast_evaluate_answer(data: dict, user_text: str) -> str:
     """基于 evaluate_forecast 工具返回构建 Markdown 回答。"""
+    # --- 优先使用完整报告 ---
+    report_md = data.get("report_markdown", "")
+    if report_md:
+        return report_md
+
+    # --- Fallback: 手工拼排名表格 ---
     element = data.get("element", "")
     test_type = data.get("test_type", "")
     time_range = data.get("time_range", {})
