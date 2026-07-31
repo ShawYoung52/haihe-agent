@@ -66,6 +66,7 @@ def _format_evaluate_result(api_result: dict, element: str, test_type: str,
     report = analyzer.generate_detailed_report()
 
     metrics: dict[str, dict[str, Any]] = {}
+    chart_paths_flat: dict[str, dict[str, str]] = {}
     for category, sub_details in report.get("details", {}).items():
         if isinstance(sub_details, dict):
             for metric_name, data in sub_details.items():
@@ -78,21 +79,30 @@ def _format_evaluate_result(api_result: dict, element: str, test_type: str,
                     "unit": _metric_unit(metric_name),
                 }
 
+                # --- 规范化 image_path：Task 3 返回 [(chart_type, path), ...]，
+                #     但 format_report_to_markdown 期望单 string ---
+                image_path = data.get("image_path")
+                if isinstance(image_path, list) and len(image_path) > 0:
+                    # 优选柱状图路径
+                    selected = image_path[0][1]
+                    data["image_path"] = selected
+                    # 同时累积 chart_paths_flat
+                    exam_name = data.get("examName", metric_name)
+                    chart_paths_flat[exam_name] = {}
+                    for ct, p in image_path:
+                        chart_paths_flat[exam_name][ct] = str(p)
+                elif isinstance(image_path, str):
+                    exam_name = data.get("examName", metric_name)
+                    chart_paths_flat[exam_name] = {"bar": image_path}
+
     summary = report.get("summary", "")
     time_range = api_result.get("time_range", {})
 
-    # --- 新增：完整 Markdown 报告 ---
+    # --- 完整 Markdown 报告 ---
     report_markdown = analyzer.format_report_to_markdown(report)
 
-    # --- 新增：较差样本 ---
+    # --- 较差样本 ---
     poor_samples = report.get("poor_samples", [])
-
-    # --- 新增：图表路径（柱状图/折线图自动生成） ---
-    chart_paths = generate_charts(api_result, chart_types=['bar', 'line'])
-    # 拍平：{exam_name: [(type, path), ...]} -> {exam_name: {type: path}}
-    chart_paths_flat: dict[str, dict[str, str]] = {}
-    for exam_name, paths in chart_paths.items():
-        chart_paths_flat[exam_name] = {ct: str(p) for ct, p in paths}
 
     return {
         "element": EvalConfig.ALL_ELEMENTS.get(element, element),
