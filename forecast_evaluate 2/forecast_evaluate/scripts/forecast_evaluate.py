@@ -217,8 +217,13 @@ def _generate_heatmap(element_name, exam_name, columns, data_codes, values_list,
         for j in range(len(columns)):
             val = data[i, j]
             if not np.isnan(val):
+                max_val = data.max()
+                if max_val and not np.isnan(max_val) and max_val > 0:
+                    color = 'black' if 0.3 < abs(val) / max_val < 0.7 else 'white'
+                else:
+                    color = 'black'
                 ax.text(j, i, f'{val:.1f}', ha='center', va='center',
-                        fontsize=8, color='black' if 0.3 < abs(val)/data.max() < 0.7 else 'white')
+                        fontsize=8, color=color)
 
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label(exam_name, fontsize=10)
@@ -273,11 +278,11 @@ def _parse_and_plot(response_data, chart_types=None):
 
     if not exam_data:
         rprint("[yellow]没有找到 examData 数据[/yellow]")
-        return []
+        return {}
 
     if not exam_column_name:
         rprint("[yellow]没有找到 examColumnName 数据[/yellow]")
-        return []
+        return {}
 
     # 当test_type为area时，替换列为地区名称
     if test_type == 'area':

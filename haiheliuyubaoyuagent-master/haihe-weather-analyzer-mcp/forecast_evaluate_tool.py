@@ -222,21 +222,22 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
         :param end_time: 结束时间 YYYY-MM-DD HH:MM:SS，默认昨天
         :param time_session: 预报时效(小时)，24/48/72，默认24
         """
-        # 缓存查找（缓存键覆盖所有参数）
-        ck = _cache_key(element, test_type, rain_type, begin_time, end_time, time_session)
+        # 缓存查找 — 使用解析后的时间值确保缓存正确（原始参数可能为空字符串/默认值）
+        fetched_raw = _validate_params_and_fetch(
+            element, test_type, rain_type,
+            begin_time, end_time, time_session, area_codes,
+        )
+        if "error" in fetched_raw:
+            return fetched_raw
+
+        ck = _cache_key(element, test_type, fetched_raw["rain_type"],
+                        fetched_raw["b_time"], fetched_raw["e_time"], time_session, area_codes)
         cached = _cache_get(ck)
         if cached is not None:
             return cached
 
-        fetched = _validate_params_and_fetch(
-            element, test_type, rain_type,
-            begin_time, end_time, time_session, area_codes,
-        )
-        if "error" in fetched:
-            return fetched
-
         formatted = _format_evaluate_result(
-            fetched["api_result"], element, test_type, fetched["rain_type"],
+            fetched_raw["api_result"], element, test_type, fetched_raw["rain_type"],
         )
         _cache_set(ck, formatted)
         return formatted
