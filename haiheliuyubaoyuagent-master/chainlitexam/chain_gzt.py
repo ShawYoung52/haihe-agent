@@ -488,104 +488,61 @@ def update_user_status(username: str, req: UpdateUserStatusRequest, request: Req
 # ===============================
 # 问答接口（供天河小程序等外部客户端调用）
 # ===============================
-# 实现在 qa_http_api.py。依赖方向是 chain_gzt → qa_http_api（单向）。
-# 端点不走 FastAPI 路由注册（Chainlit 的 --watch reload + SPA 兜底会随机覆盖），
-# 而是挂在 ASGI 中间件上——在请求进入路由表之前直接拦截。
+# 挂在 api_sub_app 上，跟 admin 端点完全一样的注册方式，走双 Mount 对外暴露。
+# 实现在 qa_http_api.py。依赖方向 chain_gzt -> qa_http_api（单向）。
 
 
 class QAAskRequest(BaseModel):
-    question: str = Field(..., description="用户问题", min_length=1, max_length=qa_http_api.MAX_QUESTION_LENGTH)
-    conversation_id: str | None = Field(None, description="多轮会话 id；不传则为单轮问答")
-    include_reasoning: bool = Field(True, description="是否返回思考过程")
-    include_gis: bool = Field(True, description="是否返回 GIS 图层（GeoJSON 可能较大）")
+    question: str = Field(..., min_length=1, max_length=qa_http_api.MAX_QUESTION_LENGTH)
+    conversation_id: str | None = Field(None)
+    include_reasoning: bool = Field(True)
+    include_gis: bool = Field(True)
 
 
+@api_sub_app.post("/qa/ask", tags=["问答"])
+async def _qa_ask(req: QAAskRequest):
+    if not qa_http_api.runtime.configured:
+        qa_http_api.runtime.configure(_build_qa_runtime)
+    _ensure_qa_cleanup_task()
+    try:
+        data = await qa_http_api.runtime.ask(
+            req.question, conversation_id=req.conversation_id,
+            include_reasoning=req.include_reasoning, include_gis=req.include_gis)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"timeout ({qa_http_api.TIMEOUT_SECONDS}s)")
+    except qa_http_api.QANotConfigured:
+        raise HTTPException(503, "not ready")
+    except Exception as e:
+        logging.getLogger("chain_gzt").error("qa_ask: %s", type(e).__name__)
+        raise HTTPException(500, f"internal: {type(e).__name__}")
+    return {"code": 200, "data": data, "message": "success"}
 
 
+@api_sub_app.get("/qa/files/{session_id}/{file_id}", tags=["问答"])
+async def _qa_file(session_id: str, file_id: str):
+    try:
+        path = qa_http_api.resolve_file(session_id, file_id)
+    except qa_http_api.InvalidFileReference as e:
+        raise HTTPException(400, str(e))
+    except qa_http_api.FileExpiredOrMissing:
+        raise HTTPException(404, "file expired")
+    return FileResponse(path)
 
 
-
+# ---- warm up on startup ----
 
 @cl.on_app_startup
-async def _install_qa_middleware():
-    from starlette.types import ASGIApp, Scope, Receive, Send
-
-    class QAMiddleware:
-        def __init__(self, app):
-            self.app = app
-        async def __call__(self, scope, receive, send):
-            if scope.get("type") != "http":
-                await self.app(scope, receive, send)
-                return
-            path = scope.get("path") or ""
-            if scope.get("method") == "GET" and path.startswith("/api/v1/qa/files/"):
-                parts = path[len("/api/v1/qa/files/"):].lstrip("/").split("/")
-                if len(parts) == 2:
-                    try:
-                        fp = qa_http_api.resolve_file(parts[0], parts[1])
-                        from starlette.responses import FileResponse as _FR
-                        await _FR(fp)(scope, receive, send)
-                        return
-                    except qa_http_api.InvalidFileReference:
-                        from starlette.responses import JSONResponse
-                        await JSONResponse({"detail": "非法文件引用"}, 400)(scope, receive, send)
-                        return
-                    except qa_http_api.FileExpiredOrMissing:
-                        from starlette.responses import JSONResponse
-                        await JSONResponse({"detail": "文件不存在或已过期"}, 404)(scope, receive, send)
-                        return
-                from starlette.responses import JSONResponse
-                await JSONResponse({"detail": "文件路径格式错误"}, 400)(scope, receive, send)
-                return
-            if scope.get("method") == "POST" and path == "/api/v1/qa/ask":
-                from starlette.requests import Request
-                from starlette.responses import JSONResponse
-                request = Request(scope, receive)
-                try:
-                    body = await request.json()
-                    req = QAAskRequest(**body)
-                except Exception:
-                    await JSONResponse({"detail": "请求体格式错误，需要 JSON"}, 400)(scope, receive, send)
-                    return
-                if not qa_http_api.runtime.configured:
-                    qa_http_api.runtime.configure(_build_qa_runtime)
-                _ensure_qa_cleanup_task()
-                try:
-                    data = await qa_http_api.runtime.ask(req.question, conversation_id=req.conversation_id, include_reasoning=req.include_reasoning, include_gis=req.include_gis)
-                except ValueError as e:
-                    await JSONResponse({"detail": str(e)}, 400)(scope, receive, send)
-                    return
-                except asyncio.TimeoutError:
-                    await JSONResponse({"detail": f"问答处理超时（{qa_http_api.TIMEOUT_SECONDS}s）"}, 504)(scope, receive, send)
-                    return
-                except qa_http_api.QANotConfigured:
-                    await JSONResponse({"detail": "问答服务尚未就绪"}, 503)(scope, receive, send)
-                    return
-                except Exception as e:
-                    logging.getLogger("chain_gzt").error("问答接口处理失败：%s", type(e).__name__)
-                    await JSONResponse({"detail": f"内部错误: {type(e).__name__}"}, 500)(scope, receive, send)
-                    return
-                await JSONResponse({"code": 200, "data": data, "message": "success"}, 200)(scope, receive, send)
-                return
-            await self.app(scope, receive, send)
-
-    from chainlit.server import app as chainlit_app
-
-    # 幂等防护：热重载时 middleware 会被重新添加，只加一次
-    if not any(isinstance(m.cls, type) and m.cls.__name__ == "QAMiddleware"
-               for m in chainlit_app.user_middleware):
-        chainlit_app.user_middleware.insert(0, Middleware(QAMiddleware))
-        print("[QA-API] 问答 ASGI 中间件已安装")
-
-    # 启动时立即预热 runtime（MCP 连接 + prompt 模板），不要让第一个用户等
+async def _warmup_qa():
     if not qa_http_api.runtime.configured:
         qa_http_api.runtime.configure(_build_qa_runtime)
     try:
-        print("[QA-API] 正在预热问答运行时（MCP 连接 + LLM）...")
+        print("[QA-API] warming up...")
         await qa_http_api.runtime._get_runtime()
-        print("[QA-API] 预热完成，首个请求无需等待")
+        print("[QA-API] ready")
     except Exception as e:
-        print(f"[QA-API] 预热失败（首个请求会懒加载）：{type(e).__name__}")
+        print(f"[QA-API] warmup failed: {type(e).__name__}")
 
 
 async def _build_qa_runtime() -> dict:
