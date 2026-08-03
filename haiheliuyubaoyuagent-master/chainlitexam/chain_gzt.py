@@ -575,7 +575,17 @@ async def _install_qa_middleware():
     if not any(isinstance(m.cls, type) and m.cls.__name__ == "QAMiddleware"
                for m in chainlit_app.user_middleware):
         chainlit_app.user_middleware.insert(0, Middleware(QAMiddleware))
-        print("[QA-API] 问答 ASGI 中间件已安装（拦截 /api/v1/qa/*）")
+        print("[QA-API] 问答 ASGI 中间件已安装")
+
+    # 启动时立即预热 runtime（MCP 连接 + prompt 模板），不要让第一个用户等
+    if not qa_http_api.runtime.configured:
+        qa_http_api.runtime.configure(_build_qa_runtime)
+    try:
+        print("[QA-API] 正在预热问答运行时（MCP 连接 + LLM）...")
+        await qa_http_api.runtime._get_runtime()
+        print("[QA-API] 预热完成，首个请求无需等待")
+    except Exception as e:
+        print(f"[QA-API] 预热失败（首个请求会懒加载）：{type(e).__name__}")
 
 
 async def _build_qa_runtime() -> dict:
