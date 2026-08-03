@@ -38,7 +38,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-from starlette.routing import Mount, Route
+from starlette.routing import Mount
 
 from chainlit.auth import decode_jwt, get_token_from_cookies
 
@@ -570,8 +570,8 @@ def _ensure_qa_cleanup_task() -> None:
 # - 本地 `app`（仅作 uvicorn 兜底；项目统一用 `chainlit run` 启动，见 CLAUDE.md）
 #   直接 mount，否则 uvicorn 入口下 /api/v1/* 会 404。
 # - `chainlit.server.app`（`chainlit run` 入口）的 SPA 兜底路由 `/{full_path:path}`
-#   会吞掉所有请求，`Mount` 插队到它前面也没用。所以 `/qa/*` 直接注册到 chainlit_app
-#   上（不是 Mount，是 Route），在 SPA 兜底之前精确匹配。
+#   会吞掉所有请求。不走 Mount——直接把问答端点注册为 chainlit_app 的原生路由，
+#   插到 routes 头部，在兜底路由之前精确匹配。
 app.mount("/api/v1", api_sub_app)
 
 try:
@@ -583,13 +583,14 @@ try:
     ):
         chainlit_app.router.routes.insert(0, Mount("/api/v1", api_sub_app))
 
-    # 问答接口直接注册到 chainlit_app，绕过 SPA 兜底：
+    # 问答接口直接注册到 chainlit_app（FastAPI），不用 Starlette Route
+    # —— Route 没有 Pydantic 参数解析，QAAskRequest 传不进去。
     _qa_routes_registered = any(
         getattr(r, "path", "") == "/api/v1/qa/ask" for r in chainlit_app.router.routes
     )
     if not _qa_routes_registered:
-        chainlit_app.router.routes.insert(0, Route("/api/v1/qa/ask", qa_ask, methods=["POST"]))
-        chainlit_app.router.routes.insert(1, Route("/api/v1/qa/files/{session_id}/{file_id}", qa_file, methods=["GET"]))
+        chainlit_app.add_api_route("/api/v1/qa/ask", qa_ask, methods=["POST"], tags=["问答"])
+        chainlit_app.add_api_route("/api/v1/qa/files/{session_id}/{file_id}", qa_file, methods=["GET"], tags=["问答"])
 except Exception as _chainlit_mount_err:
     import logging
 
