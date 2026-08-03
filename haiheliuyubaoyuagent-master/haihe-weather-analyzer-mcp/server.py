@@ -140,6 +140,23 @@ class HaiheWeatherAnalyzerMCP:
         self.mcp.run(transport="sse", host=host, port=port)
 
 
+        self.mcp.run(transport="sse", host=host, port=port)
+
+
+def _warmup_forecast_cache():
+    import time as _time
+    from datetime import datetime
+    from rolling_forecast_service import query_rolling_forecast_core
+    started = _time.time()
+    now = datetime.now()
+    print(f"[预热] {now:%H:%M:%S} 正在预加载滚动预报数据缓存...", flush=True)
+    try:
+        query_rolling_forecast_core(user_query="明天天气", regions="", now=now)
+        print(f"[预热] 完成，耗时 {_time.time()-started:.1f}s", flush=True)
+    except Exception as e:
+        print(f"[预热] 失败（首次请求会懒加载）：{type(e).__name__}", flush=True)
+
+
 def main():
     """命令行入口。"""
     import argparse
@@ -151,6 +168,7 @@ def main():
     args = parser.parse_args()
 
     service = HaiheWeatherAnalyzerMCP()
+    _warmup_forecast_cache()
     service.start(args.host, args.port)
 
 
