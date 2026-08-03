@@ -489,6 +489,8 @@ def update_user_status(username: str, req: UpdateUserStatusRequest, request: Req
 # ===============================
 # 实现在 qa_http_api.py。依赖方向是 chain_gzt → qa_http_api（单向）：
 # 该模块不 import 本文件，因此可独立测试。chain / callbacks 在下方 configure() 注入。
+# 端点注册走 @cl.on_app_startup —— 此时 Chainlit app 已完全初始化，SPA 兜底
+# 路由之后才加，早于它插入才能保证我们的 /qa/* 不被截胡。
 
 
 class QAAskRequest(BaseModel):
@@ -498,9 +500,8 @@ class QAAskRequest(BaseModel):
     include_gis: bool = Field(True, description="是否返回 GIS 图层（GeoJSON 可能较大）")
 
 
-@api_sub_app.post("/qa/ask", tags=["问答"])
-async def qa_ask(req: QAAskRequest):
-    """问答接口：返回答案正文、图表图片 URL、GIS 图层与思考过程。"""
+async def _qa_ask_handler(req: QAAskRequest):
+    """注意：这是个 async 普通函数，不是装饰器注册的。由 _register_qa_routes() 手工注册。"""
     if not qa_http_api.runtime.configured:
         qa_http_api.runtime.configure(_build_qa_runtime)
     _ensure_qa_cleanup_task()
@@ -519,17 +520,13 @@ async def qa_ask(req: QAAskRequest):
     except qa_http_api.QANotConfigured:
         raise HTTPException(503, "问答服务尚未就绪，请稍后重试")
     except Exception as e:
-        # 只记异常类型：exc_info=True 的完整 traceback 含内网 IP 与绝对路径，
-        # 违反「内网地址/路径不得进入日志或响应」的约定（见 CLAUDE.md）。
         logging.getLogger("chain_gzt").error("问答接口处理失败：%s", type(e).__name__)
         raise HTTPException(500, f"问答处理失败（{type(e).__name__}）")
 
     return {"code": 200, "data": data, "message": "success"}
 
 
-@api_sub_app.get("/qa/files/{session_id}/{file_id}", tags=["问答"])
-async def qa_file(session_id: str, file_id: str):
-    """返回问答生成的图表图片。超过 TTL 后被清理，届时返回 404。"""
+async def _qa_file_handler(session_id: str, file_id: str):
     try:
         path = qa_http_api.resolve_file(session_id, file_id)
     except qa_http_api.InvalidFileReference as e:
@@ -537,6 +534,40 @@ async def qa_file(session_id: str, file_id: str):
     except qa_http_api.FileExpiredOrMissing:
         raise HTTPException(404, "图片不存在或已过期")
     return FileResponse(path)
+
+
+@cl.on_app_startup
+async def _register_qa_routes():
+    """在 Chainlit app 完全初始化后注册问答端点。
+
+    不能在模块 import 时注册——那时 Chainlit 还没加 SPA 兜底路由
+    `/{full_path:path}`，等它加上去之后我们的路由就被盖了。
+    `@cl.on_app_startup` 在服务器启动前一刻执行，此时路由表已定，
+    把 QA 端点插到 SPA 兜底前面即可。
+    """
+    from chainlit.server import app as chainlit_app
+
+    already = {getattr(r, "path", "") for r in chainlit_app.router.routes}
+    if "/api/v1/qa/ask" not in already:
+        chainlit_app.add_api_route(
+            "/api/v1/qa/ask",
+            _qa_ask_handler,
+            methods=["POST"],
+            tags=["问答"],
+        )
+        chainlit_app.add_api_route(
+            "/api/v1/qa/files/{session_id}/{file_id}",
+            _qa_file_handler,
+            methods=["GET"],
+            tags=["问答"],
+        )
+        print("[QA-API] 问答端点已注册到 chainlit.app")
+
+    # 重新把 QA 路由顶到最前面，确保在 SPA 兜底之前
+    _qa_paths = {"/api/v1/qa/ask", "/api/v1/qa/files/{session_id}/{file_id}"}
+    qa_routes = [r for r in chainlit_app.router.routes if getattr(r, "path", "") in _qa_paths]
+    other_routes = [r for r in chainlit_app.router.routes if getattr(r, "path", "") not in _qa_paths]
+    chainlit_app.router.routes = qa_routes + other_routes
 
 
 async def _build_qa_runtime() -> dict:
@@ -566,12 +597,9 @@ def _ensure_qa_cleanup_task() -> None:
         pass
 
 
-# 把用户管理子应用挂到 `/api/v1`：
-# - 本地 `app`（仅作 uvicorn 兜底；项目统一用 `chainlit run` 启动，见 CLAUDE.md）
-#   直接 mount，否则 uvicorn 入口下 /api/v1/* 会 404。
-# - `chainlit.server.app`（`chainlit run` 入口）的 SPA 兜底路由 `/{full_path:path}`
-#   会吞掉所有请求。不走 Mount——直接把问答端点注册为 chainlit_app 的原生路由，
-#   插到 routes 头部，在兜底路由之前精确匹配。
+# 把用户管理子应用挂到 `/api/v1`。
+# 注意：/qa/* 不走这个 Mount（Chainlit 的 SPA 兜底会截胡），而是走
+# @cl.on_app_startup 钩子在启动前注入到 chainlit_server.app。
 app.mount("/api/v1", api_sub_app)
 
 try:
@@ -582,15 +610,6 @@ try:
         for r in chainlit_app.router.routes
     ):
         chainlit_app.router.routes.insert(0, Mount("/api/v1", api_sub_app))
-
-    # 问答接口直接注册到 chainlit_app（FastAPI），不用 Starlette Route
-    # —— Route 没有 Pydantic 参数解析，QAAskRequest 传不进去。
-    _qa_routes_registered = any(
-        getattr(r, "path", "") == "/api/v1/qa/ask" for r in chainlit_app.router.routes
-    )
-    if not _qa_routes_registered:
-        chainlit_app.add_api_route("/api/v1/qa/ask", qa_ask, methods=["POST"], tags=["问答"])
-        chainlit_app.add_api_route("/api/v1/qa/files/{session_id}/{file_id}", qa_file, methods=["GET"], tags=["问答"])
 except Exception as _chainlit_mount_err:
     import logging
 
