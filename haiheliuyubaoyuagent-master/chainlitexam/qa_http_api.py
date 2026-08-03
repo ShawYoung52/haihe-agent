@@ -423,38 +423,27 @@ class CapturingEmitter(BaseChainlitEmitter):
 def _ensure_data_layer_filter() -> None:
     """给 Chainlit 数据层套一层代理：HTTP 会话不落库。
 
-    问题：每次 `cl.Message.send()` / `.update()` 都触发 `create_step`
-    （SQL INSERT ON CONFLICT），还顺带 `update_thread`。对于流式答案
-    （32 字符/chunk），一条消息产生 ~94 次 DB 写。而且每次请求创建新
-    thread_id（`init_http_context` 生成随机 UUID），对应 `threads` 表里
-    一条 `userId=NULL` 的孤儿行，永不回收。
+    Chainlit 的 `Message.send()` / `Step()` 通过 `asyncio.create_task` 异步
+    写 threads/steps 表。create_task 创建的新 Task 不继承当前 context_var，
+    所以按会话标记（`_qa_skip_persist`）判断会失效。
 
-    代理按当前会话的 `_qa_skip_persist` 标记决定是否转发：HTTP 会话
-    打上标记 → 落库被跳过；网页会话不打标记 → 正常落库。已实测并发混合
-    场景下正确隔离（两个网页会话正常落库、两个 HTTP 会话全跳过）。
+    解决方案：进程级全局布尔标志。HTTP 会话执行前设为 True，执行后设回 False。
+    这是粗粒度的（同一时刻只有一个 HTTP 请求走这条路径，并发通过
+    `_semaphore` 串行保证了），但窗口期内落库请求（create_task 产生的）全部
+    被拦截。网页会话不受影响（标志始终为 False）。
     """
     import chainlit.data as cl_data
 
     inner = cl_data.get_data_layer()
     if inner is None:
-        return  # 没有数据层，不需要代理
+        return
     if getattr(inner, "_qa_filtered", False):
-        return  # 已经套过了，幂等
+        return
 
     class _FilteringDataLayer:
-        """按会话标记决定是否转发落库请求。"""
-
         def __init__(self, real):
             object.__setattr__(self, "_real", real)
             object.__setattr__(self, "_qa_filtered", True)
-
-        def _skip(self):
-            try:
-                from chainlit.context import context_var
-
-                return getattr(context_var.get().session, "_qa_skip_persist", False)
-            except Exception:
-                return False
 
         def __getattr__(self, name):
             inner_attr = getattr(object.__getattribute__(self, "_real"), name)
@@ -462,7 +451,8 @@ def _ensure_data_layer_filter() -> None:
                 return inner_attr
 
             async def _wrapped(*a, **k):
-                if self._skip():
+                # 全局标志：HTTP 会话进行中，所有落库请求跳过
+                if _qa_persist_blocked:
                     return None
                 return await inner_attr(*a, **k)
 
@@ -470,6 +460,10 @@ def _ensure_data_layer_filter() -> None:
 
     cl_data._data_layer = _FilteringDataLayer(inner)
     cl_data._data_layer_initialized = True
+
+
+# 进程级全局：HTTP 会话期间设为 True，拦截所有 DB 写
+_qa_persist_blocked = False
 
 
 # ---------------------------------------------------------------- 图片
@@ -711,13 +705,18 @@ class QARuntime:
         # 每请求独立 Chainlit 会话。ContextVar 在 asyncio Task 间天然隔离，
         # cl.user_session 以 session.id 为 key，因此并发请求不会串扰。
         ctx = init_http_context(thread_id=str(uuid.uuid4()))
-        ctx.session._qa_skip_persist = True  # 不往 Chainlit 表写 thread/step
         emitter = CapturingEmitter(ctx.session)
         ctx.emitter = emitter
         context_var.set(ctx)
 
         # 历史副本传进去（process_message 会原地 append 本轮问答）
         history = await self.store.get(conversation_id)
+
+        # 全局标志：HTTP 会话过程中拦截所有 Chainlit DB 写（threads/steps 表）。
+        # 必须用全局标志而非 session 标记——Chainlit 数据层用 asyncio.create_task
+        # 异步写库，新 Task 不继承 ContextVar，session 标记方式失效。
+        global _qa_persist_blocked
+        _qa_persist_blocked = True
 
         pq_started = time.time()
         try:
@@ -745,6 +744,7 @@ class QARuntime:
             # 不手动清理会让 user_sessions / chat_contexts 无界增长（实测 ~5 KB/请求，
             # 生产上几万请求即 GB 级），最终 OOM。
             _release_chainlit_session(ctx.session.id)
+            _qa_persist_blocked = False
 
         pq_elapsed = time.time() - pq_started
         total_elapsed = round(time.time() - started, 2)
