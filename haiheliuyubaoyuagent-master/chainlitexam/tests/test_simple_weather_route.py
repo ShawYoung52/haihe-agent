@@ -17,6 +17,8 @@ class TestRouteSimpleWeatherQuery:
         "question, expected_tool",
         [
             ("明天天气", "query_rolling_forecast"),
+            ("明天天气怎么样", "query_rolling_forecast"),
+            ("明天天气如何", "query_rolling_forecast"),
             ("今天会下雨吗", "query_rolling_forecast"),
             ("梅江会展中心明日天气", "query_decision_weather_for_poi"),
             ("后天天津气温", "query_rolling_forecast"),
@@ -35,6 +37,7 @@ class TestRouteSimpleWeatherQuery:
             "海河流域明天天气",      # 流域：走专用河系工具
             "大清河明天有雨吗",       # 裸河名：流域
             "明天适合跑步吗",          # 决策类
+            "明天去郊游天气怎么样",      # 决策类（去）
             "梅江会展中心周边适合跑步吗",  # 决策类
             "你好",                  # 无天气词
             "什么是海河流域",          # 无天气词

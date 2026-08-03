@@ -666,7 +666,17 @@ class QARuntime:
             )
             hit = self._response_cache.get(response_cache_key)
             if hit and (time.time() - hit[0]) < RESPONSE_CACHE_TTL_SECONDS:
-                cached = dict(hit[1])
+                # dict() 浅拷贝只拷贝顶层 dict，images/gis/reasoning 列表仍是
+                # 共享引用。下游（如 JSON 序列化）只读不修改，但防御性地复制列表
+                # 引用，避免将来有人加 mutation 逻辑时污染缓存。
+                raw = hit[1]
+                cached = {
+                    "answer": raw["answer"],
+                    "images": list(raw["images"]),
+                    "gis": list(raw["gis"]),
+                    "reasoning": list(raw["reasoning"]),
+                    "elapsed_seconds": raw["elapsed_seconds"],
+                }
                 cached["conversation_id"] = cid  # 单轮每次应返回新会话 id
                 return cached
 
