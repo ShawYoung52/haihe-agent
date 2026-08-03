@@ -719,6 +719,7 @@ class QARuntime:
         # 历史副本传进去（process_message 会原地 append 本轮问答）
         history = await self.store.get(conversation_id)
 
+        pq_started = time.time()
         try:
             await process_message(
                 message=cl.Message(content=question),
@@ -745,6 +746,11 @@ class QARuntime:
             # 生产上几万请求即 GB 级），最终 OOM。
             _release_chainlit_session(ctx.session.id)
 
+        pq_elapsed = time.time() - pq_started
+        total_elapsed = round(time.time() - started, 2)
+        if pq_elapsed > 5:
+            print(f"[QA-TIMING] {question[:30]!r} process_message={pq_elapsed:.1f}s total={total_elapsed}s", flush=True)
+
         answer = merge_answers(emitter.answer_steps, deleted_ids=emitter._deleted_ids) or EMPTY_ANSWER_FALLBACK
         return {
             "answer": _scrub(answer),
@@ -752,7 +758,7 @@ class QARuntime:
             "images": _build_image_payload(emitter, ctx.session),
             "gis": list(emitter.gis_packets) if include_gis else [],
             "reasoning": [_scrub(t) for t in emitter.reasoning_texts()] if include_reasoning else [],
-            "elapsed_seconds": round(time.time() - started, 2),
+            "elapsed_seconds": total_elapsed,
         }
 
 

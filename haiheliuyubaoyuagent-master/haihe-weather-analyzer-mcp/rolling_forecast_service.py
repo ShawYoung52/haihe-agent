@@ -969,7 +969,9 @@ def _cached_rolling_forecast_request(params: dict) -> dict:
     now_ts = _time.time()
     hit = _rolling_forecast_cache.get(key)
     if hit is not None and (now_ts - hit[0]) < ROLLING_FORECAST_CACHE_TTL:
+        print(f"[FC-CACHE] HIT key_len={len(key)} age={now_ts-hit[0]:.0f}s", flush=True)
         return hit[1]
+    print(f"[FC-CACHE] MISS key_len={len(key)}", flush=True)
 
     response = requests.get(
         ROLLING_FORECAST_API_URL, params=params, timeout=ROLLING_FORECAST_TIMEOUT
