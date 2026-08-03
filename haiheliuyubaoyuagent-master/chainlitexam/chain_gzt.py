@@ -38,6 +38,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+from starlette.middleware import Middleware
 from starlette.routing import Mount
 
 from chainlit.auth import decode_jwt, get_token_from_cookies
@@ -487,10 +488,9 @@ def update_user_status(username: str, req: UpdateUserStatusRequest, request: Req
 # ===============================
 # 问答接口（供天河小程序等外部客户端调用）
 # ===============================
-# 实现在 qa_http_api.py。依赖方向是 chain_gzt → qa_http_api（单向）：
-# 该模块不 import 本文件，因此可独立测试。chain / callbacks 在下方 configure() 注入。
-# 端点注册走 @cl.on_app_startup —— 此时 Chainlit app 已完全初始化，SPA 兜底
-# 路由之后才加，早于它插入才能保证我们的 /qa/* 不被截胡。
+# 实现在 qa_http_api.py。依赖方向是 chain_gzt → qa_http_api（单向）。
+# 端点不走 FastAPI 路由注册（Chainlit 的 --watch reload + SPA 兜底会随机覆盖），
+# 而是挂在 ASGI 中间件上——在请求进入路由表之前直接拦截。
 
 
 class QAAskRequest(BaseModel):
@@ -501,7 +501,6 @@ class QAAskRequest(BaseModel):
 
 
 async def _qa_ask_handler(req: QAAskRequest):
-    """注意：这是个 async 普通函数，不是装饰器注册的。由 _register_qa_routes() 手工注册。"""
     if not qa_http_api.runtime.configured:
         qa_http_api.runtime.configure(_build_qa_runtime)
     _ensure_qa_cleanup_task()
@@ -536,38 +535,37 @@ async def _qa_file_handler(session_id: str, file_id: str):
     return FileResponse(path)
 
 
-@cl.on_app_startup
-async def _register_qa_routes():
-    """在 Chainlit app 完全初始化后注册问答端点。
+# 内嵌一个极简 FastAPI app 只用来处理 /qa/* 两个端点
+# —— Starlette 的 Mount 会被 SPA 兜底截胡，Middleware 是唯一能保证
+# 在所有路由之前拦截的手段。
+_qa_app = FastAPI()
+_qa_app.add_api_route("/api/v1/qa/ask", _qa_ask_handler, methods=["POST"])
+_qa_app.add_api_route("/api/v1/qa/files/{session_id}/{file_id}", _qa_file_handler, methods=["GET"])
 
-    不能在模块 import 时注册——那时 Chainlit 还没加 SPA 兜底路由
-    `/{full_path:path}`，等它加上去之后我们的路由就被盖了。
-    `@cl.on_app_startup` 在服务器启动前一刻执行，此时路由表已定，
-    把 QA 端点插到 SPA 兜底前面即可。
-    """
+
+@cl.on_app_startup
+async def _install_qa_middleware():
+    from starlette.types import ASGIApp, Scope, Receive, Send
+
+    class QAMiddleware:
+        """ASGI 中间件：拦截 /api/v1/qa/* 请求，其余透传给 Chainlit。"""
+
+        def __init__(self, app: ASGIApp):
+            self.app = app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http" and (scope.get("path") or "").startswith("/api/v1/qa"):
+                await _qa_app(scope, receive, send)
+            else:
+                await self.app(scope, receive, send)
+
     from chainlit.server import app as chainlit_app
 
-    already = {getattr(r, "path", "") for r in chainlit_app.router.routes}
-    if "/api/v1/qa/ask" not in already:
-        chainlit_app.add_api_route(
-            "/api/v1/qa/ask",
-            _qa_ask_handler,
-            methods=["POST"],
-            tags=["问答"],
-        )
-        chainlit_app.add_api_route(
-            "/api/v1/qa/files/{session_id}/{file_id}",
-            _qa_file_handler,
-            methods=["GET"],
-            tags=["问答"],
-        )
-        print("[QA-API] 问答端点已注册到 chainlit.app")
-
-    # 重新把 QA 路由顶到最前面，确保在 SPA 兜底之前
-    _qa_paths = {"/api/v1/qa/ask", "/api/v1/qa/files/{session_id}/{file_id}"}
-    qa_routes = [r for r in chainlit_app.router.routes if getattr(r, "path", "") in _qa_paths]
-    other_routes = [r for r in chainlit_app.router.routes if getattr(r, "path", "") not in _qa_paths]
-    chainlit_app.router.routes = qa_routes + other_routes
+    # 幂等防护：热重载时 middleware 会被重新添加，只加一次
+    if not any(isinstance(m.cls, type) and m.cls.__name__ == "QAMiddleware"
+               for m in chainlit_app.user_middleware):
+        chainlit_app.user_middleware.insert(0, Middleware(QAMiddleware))
+        print("[QA-API] 问答 ASGI 中间件已安装（拦截 /api/v1/qa/*）")
 
 
 async def _build_qa_runtime() -> dict:
