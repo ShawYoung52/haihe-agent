@@ -488,11 +488,10 @@ def update_user_status(username: str, req: UpdateUserStatusRequest, request: Req
 # ===============================
 # 问答接口（供天河小程序等外部客户端调用）
 # ===============================
-# Mount 子应用会被 Chainlit 的 SPA 兜底路由截胡——这在 FastAPI+Chainlit 组合下是
-# 已知问题。解决方案：直接把中间件注册到 chainlit.server.app 上（模块级，不动任何钩子），
-# 它在路由匹配之前拦截 /api/v1/qa/*。
-#
-# 预热走 @cl.on_app_startup —— 这个钩子即使失败也不影响中间件正常工作。
+# 挂在 api_sub_app 上，跟 admin 端点完全一样的注册方式（走双 Mount 对外暴露）。
+# 用 ASGI 中间件注册到 chainlit.server.app 的方案在 uvicorn 启动时不可靠
+# （chainlit.server.app 未被加载，中间件不生效），所以回退到 api_sub_app。
+# 实现在 qa_http_api.py。依赖方向 chain_gzt -> qa_http_api（单向）。
 
 
 class QAAskRequest(BaseModel):
@@ -502,86 +501,36 @@ class QAAskRequest(BaseModel):
     include_gis: bool = Field(True)
 
 
-# ---- ASGI 中间件，模块级注册（在 chain_gzt.py 被 import 时执行），不依赖任何钩子 ----
-
-class _QAMiddleware:
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http":
-            await self.app(scope, receive, send)
-            return
-        p = scope.get("path") or ""
-        m = scope.get("method") or ""
-
-        if m == "POST" and p == "/api/v1/qa/ask":
-            from starlette.requests import Request
-            from starlette.responses import JSONResponse
-            req = Request(scope, receive)
-            try:
-                body = await req.json()
-            except Exception:
-                await JSONResponse({"detail": "expect JSON body"}, 400)(scope, receive, send)
-                return
-            try:
-                q = QAAskRequest(**body)
-            except Exception:
-                await JSONResponse({"detail": "bad request"}, 400)(scope, receive, send)
-                return
-            if not qa_http_api.runtime.configured:
-                qa_http_api.runtime.configure(_build_qa_runtime)
-            _ensure_qa_cleanup_task()
-            try:
-                data = await qa_http_api.runtime.ask(
-                    q.question, conversation_id=q.conversation_id,
-                    include_reasoning=q.include_reasoning, include_gis=q.include_gis)
-            except ValueError as e:
-                await JSONResponse({"detail": str(e)}, 400)(scope, receive, send)
-                return
-            except asyncio.TimeoutError:
-                await JSONResponse({"detail": f"timeout ({qa_http_api.TIMEOUT_SECONDS}s)"}, 504)(scope, receive, send)
-                return
-            except qa_http_api.QANotConfigured:
-                await JSONResponse({"detail": "not ready"}, 503)(scope, receive, send)
-                return
-            except Exception as e:
-                logging.getLogger("chain_gzt").error("qa_ask: %s", type(e).__name__)
-                await JSONResponse({"detail": f"internal: {type(e).__name__}"}, 500)(scope, receive, send)
-                return
-            await JSONResponse({"code": 200, "data": data, "message": "success"}, 200)(scope, receive, send)
-            return
-
-        if m == "GET" and p.startswith("/api/v1/qa/files/"):
-            parts = p[len("/api/v1/qa/files/"):].lstrip("/").split("/")
-            if len(parts) == 2:
-                try:
-                    fp = qa_http_api.resolve_file(parts[0], parts[1])
-                    from starlette.responses import FileResponse as _FR
-                    await _FR(fp)(scope, receive, send)
-                    return
-                except qa_http_api.InvalidFileReference:
-                    from starlette.responses import JSONResponse
-                    await JSONResponse({"detail": "bad file ref"}, 400)(scope, receive, send)
-                    return
-                except qa_http_api.FileExpiredOrMissing:
-                    from starlette.responses import JSONResponse
-                    await JSONResponse({"detail": "expired"}, 404)(scope, receive, send)
-                    return
-            from starlette.responses import JSONResponse
-            await JSONResponse({"detail": "bad file path"}, 400)(scope, receive, send)
-            return
-
-        await self.app(scope, receive, send)
+@api_sub_app.post("/qa/ask", tags=["问答"])
+async def _qa_ask(req: QAAskRequest):
+    if not qa_http_api.runtime.configured:
+        qa_http_api.runtime.configure(_build_qa_runtime)
+    _ensure_qa_cleanup_task()
+    try:
+        data = await qa_http_api.runtime.ask(
+            req.question, conversation_id=req.conversation_id,
+            include_reasoning=req.include_reasoning, include_gis=req.include_gis)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"timeout ({qa_http_api.TIMEOUT_SECONDS}s)")
+    except qa_http_api.QANotConfigured:
+        raise HTTPException(503, "not ready")
+    except Exception as e:
+        logging.getLogger("chain_gzt").error("qa_ask: %s", type(e).__name__)
+        raise HTTPException(500, f"internal: {type(e).__name__}")
+    return {"code": 200, "data": data, "message": "success"}
 
 
-# 模块级安装——import chain_gzt 时立即执行，不依赖任何钩子
-try:
-    from chainlit.server import app as _cl_app
-    _cl_app.add_middleware(_QAMiddleware)
-    print("[QA-API] middleware installed (module-level)")
-except Exception as _e:
-    print(f"[QA-API] middleware install failed: {_e}")
+@api_sub_app.get("/qa/files/{session_id}/{file_id}", tags=["问答"])
+async def _qa_file(session_id: str, file_id: str):
+    try:
+        path = qa_http_api.resolve_file(session_id, file_id)
+    except qa_http_api.InvalidFileReference as e:
+        raise HTTPException(400, str(e))
+    except qa_http_api.FileExpiredOrMissing:
+        raise HTTPException(404, "file expired")
+    return FileResponse(path)
 
 
 # ---- 预热（即使失败也不影响中间件工作）----
