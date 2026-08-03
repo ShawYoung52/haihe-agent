@@ -138,7 +138,12 @@
       "Bash(PYTHONIOENCODING=utf-8 /d/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe -m pytest tests/test_qa_http_api.py::test_capturing_emitter_skips_deleted_steps tests/test_qa_http_api.py::test_capturing_emitter_record_is_immune_to_downstream_mutation tests/test_qa_http_api.py::test_capturing_emitter_reasoning_skips_tool_and_user_message -v)",
       "Bash(PYTHONIOENCODING=utf-8 /d/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe \"C:/Users/Xiao/AppData/Local/Temp/debug_filter.py\")",
       "Bash(PYTHONIOENCODING=utf-8 /d/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe \"C:/Users/Xiao/AppData/Local/Temp/debug_filter2.py\")",
-      "Bash(PYTHONIOENCODING=utf-8 /d/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe \"C:/Users/Xiao/AppData/Local/Temp/debug_filter3.py\")"
+      "Bash(PYTHONIOENCODING=utf-8 /d/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe \"C:/Users/Xiao/AppData/Local/Temp/debug_filter3.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 /d/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \":8000 \")",
+      "Bash(powershell -Command \"Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object LocalPort,State,OwningProcess\")",
+      "Bash(xargs wc -l)"
     ]
   }
 }

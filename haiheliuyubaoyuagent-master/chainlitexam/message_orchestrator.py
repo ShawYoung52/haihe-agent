@@ -4325,47 +4325,52 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     reasoning = ReasoningStep("🤔 思考过程")
     await reasoning.__aenter__()
 
-    # 生成并展示深度思考
-    try:
-        print("[THINKING_PLANNER] starting thinking generation")
-        await callbacks["astream_thinking_to_reasoning"](
-            thinking_chain,
-            {
-                "messages": [HumanMessage(content=message.content)],
-                "system_message": THINKING_PROMPT.format(
-                    current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    user_query=message.content,
-                ),
-            },
-            reasoning,
-        )
-        print("[THINKING_PLANNER] thinking generation done")
-    except Exception:
-        pass
+    # 简单天气规则路由：必须在 THINKING_PLANNER 之前执行。
+    # THINKING_PLANNER 也是一次 LLM 调用（耗时 5-17s），如果问题已被规则
+    # 路由命中（如"明天天气"），跳过 thinking 直接进入工具查询。
+    _compressed_already = False
+    if not _is_future_hour_weather_query(message.content):
+        simple_route = _route_simple_weather_query(message.content)
+    else:
+        simple_route = None
+
+    # 生成并展示深度思考（规则路由命中时跳过，省一次 5-17s 的 LLM 调用）
+    if not simple_route:
+        try:
+            print("[THINKING_PLANNER] starting thinking generation")
+            await callbacks["astream_thinking_to_reasoning"](
+                thinking_chain,
+                {
+                    "messages": [HumanMessage(content=message.content)],
+                    "system_message": THINKING_PROMPT.format(
+                        current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        user_query=message.content,
+                    ),
+                },
+                reasoning,
+            )
+            print("[THINKING_PLANNER] thinking generation done")
+        except Exception:
+            pass
 
     await reasoning.stage("🔍 理解问题", "正在规划数据查询方案...")
 
     try:
         _compress_messages(messages)
         if _is_future_hour_weather_query(message.content):
-            # 规则明确的未来小时天气不依赖 Planner 选工具，避免模型服务波动或路由冲突。
             planner_msg = _enforce_initial_future_hour_weather_route(
                 AIMessage(content=""),
                 message.content,
             )
+        elif simple_route:
+            planner_msg = _enforce_simple_weather_route(
+                AIMessage(content=""), message.content, simple_route
+            )
         else:
-            # 简单天气问题（今天/明天/后天/周末 + 天气）直接路由到对应工具，
-            # 跳过 planner LLM 调用，省一次 5-10s 的模型往返。
-            simple_route = _route_simple_weather_query(message.content)
-            if simple_route:
-                planner_msg = _enforce_simple_weather_route(
-                    AIMessage(content=""), message.content, simple_route
-                )
-            else:
-                planner_msg = await callbacks["astream_planner_think"](
-                    planner_chain, {"messages": messages}, reasoning
-                )
-                planner_msg = _ensure_tool_calls_from_content(planner_msg)
+            planner_msg = await callbacks["astream_planner_think"](
+                planner_chain, {"messages": messages}, reasoning
+            )
+            planner_msg = _ensure_tool_calls_from_content(planner_msg)
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
         await reasoning.__aexit__(None, None, None)
