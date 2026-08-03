@@ -692,6 +692,84 @@ def _enforce_initial_future_hour_weather_route(planner_msg, user_text: str):
     return planner_msg
 
 
+# ---- 简单天气规则路由 ----
+# 目的：让"今天/明天/后天/未来N天/周末 + 天气"这类明确的高频问题直接路由到
+# 对应工具，跳过 planner LLM 调用（每次 planner 调用 5-10s，是响应慢的主因之一）。
+# 命中条件必须非常严格——只匹配"明确时间词 + 明确天气词"且不含流域/河系/决策类
+# 信号，避免误路由（误路由会像 fast path 一样导致错误答案）。
+
+_SIMPLE_WEATHER_TIME_WORDS = (
+    "今天", "今日", "明天", "明日", "后天", "未来", "本周", "下周", "周末",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+)
+_SIMPLE_WEATHER_KEYWORD_WORDS = (
+    "天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风力", "风向",
+    "能见度", "雾", "霾", "暴雨", "雷阵雨", "大风", "降温",
+)
+# 决策类问题（适合/能否/是否/可以/推荐/周边/附近等）交给 planner 或决策工具，
+# 规则路由不碰，避免误判。
+_SIMPLE_WEATHER_EXCLUDE_WORDS = (
+    "适合", "能否", "是否", "可以", "推荐", "周边", "附近", "怎么样", "如何",
+    "干嘛", "活动", "去", "办", "上线",
+)
+# 流域/河系强信号：绝不路由到天津滚动预报（query_rolling_forecast 只覆盖天津）。
+_BASIN_STRONG_KEYWORDS = ("海河流域", "流域", "河系")
+_BASIN_RIVER_NAMES = (
+    "大清河", "子牙河", "永定河", "北三河", "漳卫南运河", "漳卫河",
+    "徒骇马颊河", "黑龙港", "滦河", "潮白河", "蓟运河", "海河干流",
+)
+_POI_CONTEXT_MARKERS = (
+    "公园", "湿地", "附近", "沿线", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
+)
+
+
+def _is_basin_or_river_query(user_text: str) -> bool:
+    """轻量流域/河系检测（与 MCP 层 is_basin_weather_query 同口径，避免跨包 import）。"""
+    text = str(user_text or "")
+    if any(k in text for k in _BASIN_STRONG_KEYWORDS):
+        return True
+    if any(m in text for m in _POI_CONTEXT_MARKERS):
+        return False
+    return any(name in text for name in _BASIN_RIVER_NAMES)
+
+
+def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
+    """高置信度规则路由：简单天气问题返回 (tool_name, tool_args)，否则 None。
+
+    命中条件：明确时间词 + 明确天气词，且不含流域/河系/决策类信号。
+    带地点（_decision_weather_prefilter 命中）→ 决策天气；否则 → 天津滚动预报。
+    """
+    text = str(user_text or "").strip()
+    if not text:
+        return None
+    if _is_basin_or_river_query(text):
+        return None  # 流域/河系问题走专用河系工具，不误路由
+    if any(w in text for w in _SIMPLE_WEATHER_EXCLUDE_WORDS):
+        return None  # 决策类问题交回 planner
+    has_time = any(w in text for w in _SIMPLE_WEATHER_TIME_WORDS)
+    has_weather = any(w in text for w in _SIMPLE_WEATHER_KEYWORD_WORDS)
+    if not (has_time and has_weather):
+        return None
+    if _decision_weather_prefilter(text):
+        return ("query_decision_weather_for_poi", {"user_text": text})
+    return ("query_rolling_forecast", {"user_query": text, "regions": ""})
+
+
+def _enforce_simple_weather_route(planner_msg, user_text: str, route: tuple[str, dict]):
+    """把简单天气问题强制路由到指定工具，跳过 planner LLM。"""
+    tool_name, tool_args = route
+    calls = [{
+        "id": f"simple_weather_{uuid.uuid4().hex}",
+        "name": tool_name,
+        "args": tool_args,
+        "type": "tool_call",
+    }]
+    _set_tool_calls(planner_msg, calls)
+    planner_msg.content = ""
+    print(f"[简单天气路由] 强制使用工具: {tool_name}")
+    return planner_msg
+
+
 def _tool_call_names(planner_msg) -> set[str]:
     """Extract tool-call names from a planner message, tolerating dicts and objects."""
     calls = getattr(planner_msg, "tool_calls", None) or []
@@ -4271,10 +4349,18 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 message.content,
             )
         else:
-            planner_msg = await callbacks["astream_planner_think"](
-                planner_chain, {"messages": messages}, reasoning
-            )
-            planner_msg = _ensure_tool_calls_from_content(planner_msg)
+            # 简单天气问题（今天/明天/后天/周末 + 天气）直接路由到对应工具，
+            # 跳过 planner LLM 调用，省一次 5-10s 的模型往返。
+            simple_route = _route_simple_weather_query(message.content)
+            if simple_route:
+                planner_msg = _enforce_simple_weather_route(
+                    AIMessage(content=""), message.content, simple_route
+                )
+            else:
+                planner_msg = await callbacks["astream_planner_think"](
+                    planner_chain, {"messages": messages}, reasoning
+                )
+                planner_msg = _ensure_tool_calls_from_content(planner_msg)
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
         await reasoning.__aexit__(None, None, None)

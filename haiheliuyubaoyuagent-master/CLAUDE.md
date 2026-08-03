@@ -141,6 +141,7 @@ This project uses the superpowers plugin for disciplined development:
 - **多轮上下文**：`InMemoryConversationStore`（内存字典 + TTL）。`lock_for(cid)` 防止同会话并发读改写竞态。`prune_history` 保留最近 `QA_API_MAX_HISTORY_TURNS`（默认 10）轮干净的 Human/AI 问答对，丢弃 `ToolMessage`/`SystemMessage`/`tool_calls` 空壳，且始终从 `HumanMessage` 开头。
 - **环境变量**：`QA_API_MAX_CONCURRENCY`（4）、`QA_API_TIMEOUT_SECONDS`（180）、`QA_API_FILE_TTL_SECONDS`（1800）、`QA_API_CONVERSATION_TTL_SECONDS`（3600）、`QA_API_MAX_HISTORY_TURNS`（10）、`QA_API_CLEANUP_INTERVAL_SECONDS`（300）、`QA_API_RESPONSE_CACHE_TTL`（300）。非法值回落默认，防止 `Semaphore(-1)` 把服务导入期崩掉。
 - **响应缓存**：单轮请求（无 `conversation_id`）相同 `question` + 开关在 `QA_API_RESPONSE_CACHE_TTL`（默认 300s）内直接返回缓存结果，不重新跑完整问答。多轮请求不缓存（保证上下文正确）。`QARuntime._response_cache` 实现。
+- **简单天气规则路由**：`message_orchestrator._route_simple_weather_query` 对"今天/明天/后天/周末 + 天气"这类明确高频问题直接路由到 `query_rolling_forecast`（无地点）或 `query_decision_weather_for_poi`（带地点），跳过 planner LLM 调用（省 5-10s）。命中条件严格：排除流域/河系（`_is_basin_or_river_query`）、决策类词（适合/能否/附近等）。模糊问题交回 planner。测试：`tests/test_simple_weather_route.py`（21 条）。
 - **脱敏**：响应出口过 `_scrub`（IP/路径/数据库连接串）。日志只记异常类型，不记 `exc_info`（完整 traceback 含内网地址）。
 - **鉴权**：本期不做，靠部署时网络层限制。
 - **对接文档**：`docs/问答接口对接文档.md`
