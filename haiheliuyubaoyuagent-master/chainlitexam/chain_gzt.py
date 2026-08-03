@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import re
 import time
 import asyncio
@@ -30,6 +31,7 @@ from chainlit.types import ThreadDict
 from chainlit.user import User
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
@@ -53,6 +55,8 @@ from external_skill_tools import build_external_skill_tools
 from tools.rain_analysis import build_rain_analysis_tools
 from tools.decision_weather import build_decision_weather_tools
 from tools.rainfall_river_impact import build_rainfall_river_impact_tools
+
+import qa_http_api
 
 app = FastAPI(title="海河流域应急响应判定 REST API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -478,6 +482,88 @@ def update_user_status(username: str, req: UpdateUserStatusRequest, request: Req
                 raise HTTPException(404, "用户不存在")
         conn.commit()
     return {"code": 200, "data": {"username": normalized_username, "status": status}, "message": "success"}
+
+
+# ===============================
+# 问答接口（供天河小程序等外部客户端调用）
+# ===============================
+# 实现在 qa_http_api.py。依赖方向是 chain_gzt → qa_http_api（单向）：
+# 该模块不 import 本文件，因此可独立测试。chain / callbacks 在下方 configure() 注入。
+
+
+class QAAskRequest(BaseModel):
+    question: str = Field(..., description="用户问题", min_length=1, max_length=qa_http_api.MAX_QUESTION_LENGTH)
+    conversation_id: str | None = Field(None, description="多轮会话 id；不传则为单轮问答")
+    include_reasoning: bool = Field(True, description="是否返回思考过程")
+    include_gis: bool = Field(True, description="是否返回 GIS 图层（GeoJSON 可能较大）")
+
+
+@api_sub_app.post("/qa/ask", tags=["问答"])
+async def qa_ask(req: QAAskRequest):
+    """问答接口：返回答案正文、图表图片 URL、GIS 图层与思考过程。"""
+    if not qa_http_api.runtime.configured:
+        qa_http_api.runtime.configure(_build_qa_runtime)
+    _ensure_qa_cleanup_task()
+
+    try:
+        data = await qa_http_api.runtime.ask(
+            req.question,
+            conversation_id=req.conversation_id,
+            include_reasoning=req.include_reasoning,
+            include_gis=req.include_gis,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"问答处理超时（{qa_http_api.TIMEOUT_SECONDS}s），请稍后重试或简化问题")
+    except qa_http_api.QANotConfigured:
+        raise HTTPException(503, "问答服务尚未就绪，请稍后重试")
+    except Exception as e:
+        # 只记异常类型：exc_info=True 的完整 traceback 含内网 IP 与绝对路径，
+        # 违反「内网地址/路径不得进入日志或响应」的约定（见 CLAUDE.md）。
+        logging.getLogger("chain_gzt").error("问答接口处理失败：%s", type(e).__name__)
+        raise HTTPException(500, f"问答处理失败（{type(e).__name__}）")
+
+    return {"code": 200, "data": data, "message": "success"}
+
+
+@api_sub_app.get("/qa/files/{session_id}/{file_id}", tags=["问答"])
+async def qa_file(session_id: str, file_id: str):
+    """返回问答生成的图表图片。超过 TTL 后被清理，届时返回 404。"""
+    try:
+        path = qa_http_api.resolve_file(session_id, file_id)
+    except qa_http_api.InvalidFileReference as e:
+        raise HTTPException(400, str(e))
+    except qa_http_api.FileExpiredOrMissing:
+        raise HTTPException(404, "图片不存在或已过期")
+    return FileResponse(path)
+
+
+async def _build_qa_runtime() -> dict:
+    """给 qa_http_api 注入运行时（进程级构造一次）。"""
+    await _ensure_chainlit_tables()
+    runtime = await _build_orchestrator_runtime()
+    runtime["callbacks"] = _build_orchestrator_callbacks()
+    return runtime
+
+
+_QA_CLEANUP_TASK: asyncio.Task | None = None
+
+
+def _ensure_qa_cleanup_task() -> None:
+    """启动问答接口的后台清理循环（幂等）。
+
+    不启动的话 `QA_API_FILE_TTL_SECONDS` / `QA_API_CONVERSATION_TTL_SECONDS`
+    只是纸面配置：图片目录和对话历史永不回收。
+    """
+    global _QA_CLEANUP_TASK
+    if _QA_CLEANUP_TASK is not None and not _QA_CLEANUP_TASK.done():
+        return
+    try:
+        _QA_CLEANUP_TASK = asyncio.create_task(qa_http_api.run_cleanup_loop())
+    except RuntimeError:
+        # 无运行中的 event loop（如 import 期），留给首个请求再启动
+        pass
 
 
 # 把用户管理子应用挂到 `/api/v1`：
@@ -2372,12 +2458,11 @@ def _build_messages_from_thread(thread: ThreadDict | dict | None):
     return resumed_messages
 
 
-async def _init_runtime_session(messages_seed=None):
-    """
-    初始化会话运行时对象；用于首聊和历史线程恢复。
-    """
-    await _ensure_chainlit_tables()
+async def _build_orchestrator_runtime() -> dict:
+    """构造 planner / answer / thinking chain 与工具表。
 
+    不碰 `cl.user_session`，因此可被网页会话与 HTTP 问答接口共用。
+    """
     planner_llm = ChatOpenAI(
         model="Qwen3.6-27B",
         streaming=True,
@@ -2418,10 +2503,26 @@ async def _init_runtime_session(messages_seed=None):
         | answer_llm
     )
 
-    cl.user_session.set("planner_chain", planner_chain)
-    cl.user_session.set("answer_chain", answer_chain)
-    cl.user_session.set("thinking_chain", thinking_chain)
-    cl.user_session.set("tools", tools)
+    return {
+        "planner_chain": planner_chain,
+        "answer_chain": answer_chain,
+        "thinking_chain": thinking_chain,
+        "tools": tools,
+    }
+
+
+async def _init_runtime_session(messages_seed=None):
+    """
+    初始化会话运行时对象；用于首聊和历史线程恢复。
+    """
+    await _ensure_chainlit_tables()
+
+    runtime = await _build_orchestrator_runtime()
+
+    cl.user_session.set("planner_chain", runtime["planner_chain"])
+    cl.user_session.set("answer_chain", runtime["answer_chain"])
+    cl.user_session.set("thinking_chain", runtime["thinking_chain"])
+    cl.user_session.set("tools", runtime["tools"])
     cl.user_session.set("messages", messages_seed if isinstance(messages_seed, list) else [])
 
 
@@ -3610,31 +3711,13 @@ async def on_chat_resume(thread: ThreadDict):
     await _init_runtime_session(messages_seed=resumed_messages)
 
 
-# ===============================
-# 2. 接收用户消息并流式回复
-# ===============================
-@cl.on_message
-async def on_message(message: cl.Message):
-    planner_chain = cl.user_session.get("planner_chain")
-    answer_chain = cl.user_session.get("answer_chain")
-    thinking_chain = cl.user_session.get("thinking_chain")
-    messages = cl.user_session.get("messages")
-    tools = cl.user_session.get("tools")
+def _build_orchestrator_callbacks() -> dict:
+    """构造 process_message 所需的回调表。
 
-    # 兜底：恢复线程或服务热重载后，若运行时对象缺失则即时重建，避免“可看历史但无法继续聊”。
-    if planner_chain is None or answer_chain is None or thinking_chain is None or tools is None:
-        await _init_runtime_session(messages_seed=messages if isinstance(messages, list) else [])
-        planner_chain = cl.user_session.get("planner_chain")
-        answer_chain = cl.user_session.get("answer_chain")
-        thinking_chain = cl.user_session.get("thinking_chain")
-        tools = cl.user_session.get("tools")
-        messages = cl.user_session.get("messages")
-
-    if not isinstance(messages, list):
-        messages = []
-        cl.user_session.set("messages", messages)
-
-    callbacks = {
+    网页端 `on_message` 与 HTTP 问答接口（qa_http_api）共用同一份定义，
+    避免两处维护漂移。
+    """
+    return {
         "need_river_plot": _need_river_plot,
         "extract_river_name": _extract_river_name,
         "build_admin_overlay_for_plot": _build_admin_overlay_for_plot,
@@ -3659,6 +3742,31 @@ async def on_message(message: cl.Message):
         "send_gis_linkage": _send_gis_linkage,
     }
 
+
+# ===============================
+# 2. 接收用户消息并流式回复
+# ===============================
+@cl.on_message
+async def on_message(message: cl.Message):
+    planner_chain = cl.user_session.get("planner_chain")
+    answer_chain = cl.user_session.get("answer_chain")
+    thinking_chain = cl.user_session.get("thinking_chain")
+    messages = cl.user_session.get("messages")
+    tools = cl.user_session.get("tools")
+
+    # 兜底：恢复线程或服务热重载后，若运行时对象缺失则即时重建，避免“可看历史但无法继续聊”。
+    if planner_chain is None or answer_chain is None or thinking_chain is None or tools is None:
+        await _init_runtime_session(messages_seed=messages if isinstance(messages, list) else [])
+        planner_chain = cl.user_session.get("planner_chain")
+        answer_chain = cl.user_session.get("answer_chain")
+        thinking_chain = cl.user_session.get("thinking_chain")
+        tools = cl.user_session.get("tools")
+        messages = cl.user_session.get("messages")
+
+    if not isinstance(messages, list):
+        messages = []
+        cl.user_session.set("messages", messages)
+
     await process_message(
         message=message,
         planner_chain=planner_chain,
@@ -3666,5 +3774,5 @@ async def on_message(message: cl.Message):
         thinking_chain=thinking_chain,
         tools=tools,
         messages=messages,
-        callbacks=callbacks,
+        callbacks=_build_orchestrator_callbacks(),
     )
