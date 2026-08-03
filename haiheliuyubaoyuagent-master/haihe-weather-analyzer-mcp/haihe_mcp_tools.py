@@ -150,6 +150,10 @@ POI_ES_TIMEOUT = int(os.getenv("POI_ES_TIMEOUT", "60"))
 POI_ES_MAX_RETRIES = int(os.getenv("POI_ES_MAX_RETRIES", "3"))
 POI_SEARCH_MAX_SIZE = int(os.getenv("POI_SEARCH_MAX_SIZE", "50"))
 POI_SEARCH_MAX_DISTANCE_KM = int(os.getenv("POI_SEARCH_MAX_DISTANCE_KM", "200"))
+# POI 检索缓存：相同关键词 + size 在 TTL 内直接返回缓存。POI 数据（地点）静态，
+# 高频查询（如"梅江会展中心"）每次重复打 ES 是浪费。默认 1 小时。
+POI_SEARCH_CACHE_TTL = int(os.getenv("POI_SEARCH_CACHE_TTL", "3600"))
+_poi_search_cache: dict[str, tuple[float, Any]] = {}
 _POI_ES_CLIENT = None
 _POI_ES_LOCK = threading.Lock()
 
@@ -2488,6 +2492,10 @@ def _build_poi_result(match_type: str, search_resp: dict, rows: list[dict] | Non
 def _search_poi_core(keyword: str, size: int = 10) -> dict:
     keyword = _validate_poi_keyword(keyword)
     size = _validate_poi_size(size)
+    cache_key = f"{keyword}|{size}"
+    hit = _poi_search_cache.get(cache_key)
+    if hit and (time.time() - hit[0]) < POI_SEARCH_CACHE_TTL:
+        return hit[1]
     es = _get_poi_es_client()
 
     exact_body = {
@@ -2501,61 +2509,63 @@ def _search_poi_core(keyword: str, size: int = 10) -> dict:
     exact_resp = es.search(index=POI_ES_INDEX, body=exact_body)
     exact_hits = exact_resp["hits"]["hits"]
     if exact_hits:
-        return _build_poi_result("exact", exact_resp, rows=[exact_hits[0]])
-
-    fuzzy_body = {
-        "size": size,
-        "_source": [
-            "name",
-            "category_1",
-            "category_2",
-            "address",
-            "location",
-            "longitude",
-            "latitude",
-        ],
-        "query": {
-            "bool": {
-                "should": [
-                    {
-                        "match_phrase": {
-                            "name": {
-                                "query": keyword,
-                                "boost": 30,
+        result = _build_poi_result("exact", exact_resp, rows=[exact_hits[0]])
+    else:
+        fuzzy_body = {
+            "size": size,
+            "_source": [
+                "name",
+                "category_1",
+                "category_2",
+                "address",
+                "location",
+                "longitude",
+                "latitude",
+            ],
+            "query": {
+                "bool": {
+                    "should": [
+                        {
+                            "match_phrase": {
+                                "name": {
+                                    "query": keyword,
+                                    "boost": 30,
+                                }
                             }
-                        }
-                    },
-                    {
-                        "match": {
-                            "name": {
-                                "query": keyword,
-                                "operator": "and",
-                                "boost": 10,
+                        },
+                        {
+                            "match": {
+                                "name": {
+                                    "query": keyword,
+                                    "operator": "and",
+                                    "boost": 10,
+                                }
                             }
-                        }
-                    },
-                    {
-                        "match": {
-                            "name": {
-                                "query": keyword,
-                                "boost": 1,
+                        },
+                        {
+                            "match": {
+                                "name": {
+                                    "query": keyword,
+                                    "boost": 1,
+                                }
                             }
-                        }
-                    },
-                ],
-                "minimum_should_match": 1,
-            }
-        },
-        "sort": [
-            {
-                "_score": {
-                    "order": "desc"
+                        },
+                    ],
+                    "minimum_should_match": 1,
                 }
-            }
-        ],
-    }
-    fuzzy_resp = es.search(index=POI_ES_INDEX, body=fuzzy_body)
-    return _build_poi_result("fuzzy", fuzzy_resp)
+            },
+            "sort": [
+                {
+                    "_score": {
+                        "order": "desc"
+                    }
+                }
+            ],
+        }
+        fuzzy_resp = es.search(index=POI_ES_INDEX, body=fuzzy_body)
+        result = _build_poi_result("fuzzy", fuzzy_resp)
+    _poi_search_cache[cache_key] = (time.time(), result)
+    return result
 
 
 def _search_poi_by_distance_core(
