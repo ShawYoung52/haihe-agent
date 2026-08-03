@@ -63,6 +63,7 @@ MAX_CONCURRENCY = _env_int("QA_API_MAX_CONCURRENCY", 4)
 TIMEOUT_SECONDS = _env_int("QA_API_TIMEOUT_SECONDS", 180)
 FILE_TTL_SECONDS = _env_int("QA_API_FILE_TTL_SECONDS", 1800, minimum=0)
 CONVERSATION_TTL_SECONDS = _env_int("QA_API_CONVERSATION_TTL_SECONDS", 3600, minimum=0)
+RESPONSE_CACHE_TTL_SECONDS = _env_int("QA_API_RESPONSE_CACHE_TTL", 300, minimum=0)
 MAX_HISTORY_TURNS = _env_int("QA_API_MAX_HISTORY_TURNS", 10)
 MAX_QUESTION_LENGTH = 2000
 
@@ -591,6 +592,10 @@ class QARuntime:
         self._init_lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
         self.store: ConversationStore = InMemoryConversationStore()
+        # 单轮问答响应缓存：相同问题 + 相同开关在 TTL 内直接返回上次结果，
+        # 避免每次都走完整 planner + 工具 + LLM。多轮请求（带 conversation_id）
+        # 不缓存，保证上下文正确。默认 TTL 5 分钟。
+        self._response_cache: dict[str, tuple[float, dict]] = {}
 
     def configure(self, runtime_factory) -> None:
         """由 chain_gzt 注入：一个 async 工厂，返回
@@ -651,15 +656,33 @@ class QARuntime:
         # 不存在或已过期的 cid 当新会话处理，不报错
         cid = cid or str(uuid.uuid4())
 
+        # 单轮请求（无 conversation_id）命中缓存则直接返回，省掉完整问答流程。
+        # 多轮请求不缓存（上下文不同）。缓存 key 含开关，排除开关差异。
+        response_cache_key = None
+        if not conversation_id:
+            response_cache_key = json.dumps(
+                {"q": text, "r": include_reasoning, "g": include_gis},
+                sort_keys=True, ensure_ascii=False,
+            )
+            hit = self._response_cache.get(response_cache_key)
+            if hit and (time.time() - hit[0]) < RESPONSE_CACHE_TTL_SECONDS:
+                cached = dict(hit[1])
+                cached["conversation_id"] = cid  # 单轮每次应返回新会话 id
+                return cached
+
         runtime = await self._get_runtime()
         # 同一 conversation_id 串行，避免「读历史→问答→写历史」的读改写竞态
         # （并发两个请求会让后写的覆盖先写的，丢掉一整轮对话；已实测复现）
         async with self.store.lock_for(cid):
             async with self._semaphore:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     self._run_once(text, cid, runtime, include_reasoning, include_gis),
                     timeout=TIMEOUT_SECONDS,
                 )
+
+        if response_cache_key is not None and RESPONSE_CACHE_TTL_SECONDS > 0:
+            self._response_cache[response_cache_key] = (time.time(), result)
+        return result
     async def _run_once(
         self,
         question: str,

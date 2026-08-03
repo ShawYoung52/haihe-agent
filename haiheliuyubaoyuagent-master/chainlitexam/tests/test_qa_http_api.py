@@ -703,6 +703,71 @@ async def test_concurrent_requests_are_isolated():
 # ---------------------------------------------------------------- 资源回收
 
 
+async def test_single_turn_response_cache_hits_same_question(monkeypatch):
+    """单轮相同问题第二次命中缓存，不重复跑完整问答。"""
+    rt = qa.QARuntime()
+
+    async def factory():
+        return {"planner_chain": None, "answer_chain": None, "thinking_chain": None, "tools": [], "callbacks": {}}
+
+    rt.configure(factory)
+    calls = {"n": 0}
+
+    async def fake_run_once(*a, **k):
+        calls["n"] += 1
+        return {"answer": "固定答案", "conversation_id": str(uuid.uuid4()), "images": [], "gis": [], "reasoning": [], "elapsed_seconds": 0.1}
+
+    monkeypatch.setattr(rt, "_run_once", fake_run_once)
+
+    r1 = await rt.ask("今天天气")
+    r2 = await rt.ask("今天天气")
+    assert calls["n"] == 1, f"第二次应命中缓存，实际 {calls['n']} 次"
+    assert r1["answer"] == r2["answer"] == "固定答案"
+
+
+async def test_single_turn_response_cache_distinct_questions_do_not_share(monkeypatch):
+    """不同问题不互相命中缓存。"""
+    rt = qa.QARuntime()
+
+    async def factory():
+        return {"planner_chain": None, "answer_chain": None, "thinking_chain": None, "tools": [], "callbacks": {}}
+
+    rt.configure(factory)
+    calls = {"n": 0}
+
+    async def fake_run_once(*a, **k):
+        calls["n"] += 1
+        return {"answer": f"答案-{calls['n']}", "conversation_id": str(uuid.uuid4()), "images": [], "gis": [], "reasoning": [], "elapsed_seconds": 0.1}
+
+    monkeypatch.setattr(rt, "_run_once", fake_run_once)
+
+    await rt.ask("今天天气")
+    await rt.ask("明天天气")
+    assert calls["n"] == 2, f"不同问题应各跑一次，实际 {calls['n']} 次"
+
+
+async def test_multi_turn_requests_are_not_cached(monkeypatch):
+    """多轮请求（带 conversation_id）不缓存，保证上下文正确。"""
+    rt = qa.QARuntime()
+
+    async def factory():
+        return {"planner_chain": None, "answer_chain": None, "thinking_chain": None, "tools": [], "callbacks": {}}
+
+    rt.configure(factory)
+    calls = {"n": 0}
+
+    async def fake_run_once(*a, **k):
+        calls["n"] += 1
+        return {"answer": "答案", "conversation_id": str(uuid.uuid4()), "images": [], "gis": [], "reasoning": [], "elapsed_seconds": 0.1}
+
+    monkeypatch.setattr(rt, "_run_once", fake_run_once)
+
+    cid = str(uuid.uuid4())
+    await rt.ask("今天天气", conversation_id=cid)
+    await rt.ask("今天天气", conversation_id=cid)
+    assert calls["n"] == 2, f"多轮请求不应命中缓存，实际 {calls['n']} 次"
+
+
 async def test_release_chainlit_session_reclaims_global_state():
     """HTTP 会话必须手动回收：Chainlit 只在 websocket 断开时清理。
 

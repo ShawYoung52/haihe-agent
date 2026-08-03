@@ -24,6 +24,12 @@ ROLLING_FORECAST_API_URL = os.getenv(
     "http://10.226.120.112:8088/tjgrid/gdyb/getGdybDataByParam",
 )
 ROLLING_FORECAST_TIMEOUT = int(os.getenv("ROLLING_FORECAST_TIMEOUT", "120"))
+# 滚动预报数据查询缓存 TTL（秒，默认 10 分钟）。同一起报时次 + 坐标 + 时段
+# 的查询在 TTL 内直接返回缓存，避免每次请求都重新打内网接口（该接口实测
+# 可达几十秒，是"回答响应慢"的主要来源之一）。天气预报短时间稳定，TTL 内
+# 缓存结果可信。
+ROLLING_FORECAST_CACHE_TTL = int(os.getenv("ROLLING_FORECAST_CACHE_TTL", "600"))
+_rolling_forecast_cache: dict[str, tuple[float, Any]] = {}
 ROLLING_FORECAST_ELEMENTS = (
     "WEA",
     "TMAX",
@@ -950,6 +956,30 @@ def analyze_rolling_forecast_periods(periods: list[dict]) -> dict:
     }
 
 
+def _cached_rolling_forecast_request(params: dict) -> dict:
+    """带 TTL 缓存的滚动预报接口查询。
+
+    同一起报时次 + 区域/点位 + 时段的查询在 TTL 内直接返回缓存，避免重复
+    打内网接口。缓存的是原始 JSON payload（不缓存格式化后的结果），这样
+    每次调用仍会重新格式化，query_time 保持最新。
+    """
+    import time as _time
+
+    key = json.dumps(params, sort_keys=True, ensure_ascii=False)
+    now_ts = _time.time()
+    hit = _rolling_forecast_cache.get(key)
+    if hit is not None and (now_ts - hit[0]) < ROLLING_FORECAST_CACHE_TTL:
+        return hit[1]
+
+    response = requests.get(
+        ROLLING_FORECAST_API_URL, params=params, timeout=ROLLING_FORECAST_TIMEOUT
+    )
+    response.raise_for_status()
+    payload = response.json()
+    _rolling_forecast_cache[key] = (now_ts, payload)
+    return payload
+
+
 def query_rolling_forecast_core(
     user_query: str,
     regions: str = "",
@@ -1041,9 +1071,8 @@ def query_rolling_forecast_core(
         "count": "0",
         "stationType": "3",
     }
-    response = requests.get(ROLLING_FORECAST_API_URL, params=params, timeout=ROLLING_FORECAST_TIMEOUT)
-    response.raise_for_status()
-    payload = response.json()
+    response = _cached_rolling_forecast_request(params)
+    payload = response
     result_data = payload.get("resultData") or {}
     periods = build_rolling_forecast_periods(
         result_data=result_data,

@@ -139,8 +139,9 @@ This project uses the superpowers plugin for disciplined development:
 - **图片**：`cl.Image(content=bytes)` 自动落盘到 `chainlit.config.FILES_DIRECTORY/<session_id>/`。TTL 清理由 `run_cleanup_loop` 后台任务负责（`QA_API_CLEANUP_INTERVAL_SECONDS`，默认 300s）。
 - **会话回收**：Chainlit 只在 WS 断开时回收 `user_sessions`/`chat_contexts`，HTTP 会话永不走到那条路。`_release_chainlit_session()` 在请求的 `finally` 块里手动 pop，否则无界增长直到 OOM。
 - **多轮上下文**：`InMemoryConversationStore`（内存字典 + TTL）。`lock_for(cid)` 防止同会话并发读改写竞态。`prune_history` 保留最近 `QA_API_MAX_HISTORY_TURNS`（默认 10）轮干净的 Human/AI 问答对，丢弃 `ToolMessage`/`SystemMessage`/`tool_calls` 空壳，且始终从 `HumanMessage` 开头。
-- **环境变量**：`QA_API_MAX_CONCURRENCY`（4）、`QA_API_TIMEOUT_SECONDS`（180）、`QA_API_FILE_TTL_SECONDS`（1800）、`QA_API_CONVERSATION_TTL_SECONDS`（3600）、`QA_API_MAX_HISTORY_TURNS`（10）、`QA_API_CLEANUP_INTERVAL_SECONDS`（300）。非法值回落默认，防止 `Semaphore(-1)` 把服务导入期崩掉。
+- **环境变量**：`QA_API_MAX_CONCURRENCY`（4）、`QA_API_TIMEOUT_SECONDS`（180）、`QA_API_FILE_TTL_SECONDS`（1800）、`QA_API_CONVERSATION_TTL_SECONDS`（3600）、`QA_API_MAX_HISTORY_TURNS`（10）、`QA_API_CLEANUP_INTERVAL_SECONDS`（300）、`QA_API_RESPONSE_CACHE_TTL`（300）。非法值回落默认，防止 `Semaphore(-1)` 把服务导入期崩掉。
+- **响应缓存**：单轮请求（无 `conversation_id`）相同 `question` + 开关在 `QA_API_RESPONSE_CACHE_TTL`（默认 300s）内直接返回缓存结果，不重新跑完整问答。多轮请求不缓存（保证上下文正确）。`QARuntime._response_cache` 实现。
 - **脱敏**：响应出口过 `_scrub`（IP/路径/数据库连接串）。日志只记异常类型，不记 `exc_info`（完整 traceback 含内网地址）。
 - **鉴权**：本期不做，靠部署时网络层限制。
 - **对接文档**：`docs/问答接口对接文档.md`
-- **测试**：`chainlitexam/tests/test_qa_http_api.py`（68 条），全部用假 chain，不依赖内网。全量跑时部分测试因 `tests/stubs.py` 的假 `chainlit.Step` 被跳过（已知现象）。
+- **测试**：`chainlitexam/tests/test_qa_http_api.py`（71 条），全部用假 chain，不依赖内网。全量跑时部分测试因 `tests/stubs.py` 的假 `chainlit.Step` 被跳过（已知现象）。
