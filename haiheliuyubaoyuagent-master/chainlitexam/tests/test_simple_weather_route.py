@@ -42,6 +42,7 @@ class TestRouteSimpleWeatherQuery:
             "你好",                  # 无天气词
             "什么是海河流域",          # 无天气词
             "今天",                  # 无天气词
+            "暴雨预警",               # 预警类：不走滚动预报
         ],
     )
     def test_does_not_route_ambiguous(self, question):

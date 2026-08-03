@@ -711,12 +711,17 @@ _SIMPLE_WEATHER_KEYWORD_WORDS = (
 # 否则"明天天气怎么样"这种最常见问法会被漏掉规则路由。
 _SIMPLE_WEATHER_EXCLUDE_WORDS = (
     "适合", "能否", "是否", "推荐", "周边", "附近", "干嘛", "活动", "去", "办", "上线",
+    "预警", "警报",
 )
 # 流域/河系强信号：绝不路由到天津滚动预报（query_rolling_forecast 只覆盖天津）。
 _BASIN_STRONG_KEYWORDS = ("海河流域", "流域", "河系")
+# 裸河名：不含"流域/河系"强信号但含河名的问题也应排除。注意"MCP is_basin_weather_query
+# 有同样逻辑，规则路由不能漏判——漏判后走 query_rolling_forecast 会被其内部
+# is_basin_weather_query 硬防护拦截抛 BusinessException，生成无意义的失败回答。
 _BASIN_RIVER_NAMES = (
     "大清河", "子牙河", "永定河", "北三河", "漳卫南运河", "漳卫河",
     "徒骇马颊河", "黑龙港", "滦河", "潮白河", "蓟运河", "海河干流",
+    "海河",
 )
 _POI_CONTEXT_MARKERS = (
     "公园", "湿地", "附近", "沿线", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",

@@ -44,7 +44,9 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 **Key files:**
 - `chainlitexam/chain_gzt.py` — Chainlit lifecycle, tool loading, auth, GIS linkage, FastAPI endpoints (~3700 lines). 包含 `_build_orchestrator_callbacks()` / `_build_orchestrator_runtime()` 供 HTTP 问答接口复用
 - `chainlitexam/qa_http_api.py` — **HTTP 问答接口适配层**（新增）。用 `init_http_context` 伪造 Chainlit 会话 + 自定义 `CapturingEmitter` 拦截输出，在不改 `message_orchestrator.py` 的前提下把问答能力暴露成 REST 接口。**依赖方向必须单向**：`chain_gzt` → `qa_http_api`，禁止反向 import（会继承 chain_gzt 的模块级副作用）。chain / callbacks 由 `chain_gzt` 在启动时通过 `runtime.configure()` 注入。并发隔离依赖「进程只有一个 event loop」前提（chainlit CLI 满足）
-- `chainlitexam/message_orchestrator.py` — Message routing, fast paths (warning/rainfall/river/weather), planner loop, tool execution, answer generation (~4700 lines)
+- `chainlitexam/message_orchestrator.py` — Message routing, planner loop, tool execution, answer generation (~5100 lines)。新增 `_route_simple_weather_query` 简单天气规则路由（跳过 planner LLM，省 5-10s），`_set_tool_calls` / `_enforce_*_route` 强制路由辅助函数
+- `haihe-weather-analyzer-mcp/rolling_forecast_service.py` — 滚动预报核心。`query_rolling_forecast_core` 调用 `_cached_rolling_forecast_request`（TTL 缓存，默认 10 分钟，`ROLLING_FORECAST_CACHE_TTL` 可调），解决甲方反馈的"数据查询 26s"
+- `haihe-weather-analyzer-mcp/haihe_mcp_tools.py` — MCP 工具实现。`_search_poi_core` 加 TTL 缓存（默认 1 小时，`POI_SEARCH_CACHE_TTL` 可调），POI 数据静态，相同关键词频繁查询
 - `chainlitexam/prompts.py` — `WEATHER_ASSISTANT_PROMPT` system prompt, warning route/summary prompts
 - `chainlitexam/tools/rainfall_river_impact.py` — Local wrapper for the rainfall-river impact tool
 - `haihe-weather-analyzer-mcp/constants.py` — Shared constants including `DIRECTED_GRAPH_FILENAME` (`river_directed_v6.pkl`) and `RIVER_TABLE_FULL` (`haihe_river_directed_full_v6`); use these instead of hard-coding versioned names

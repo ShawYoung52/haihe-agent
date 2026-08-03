@@ -675,7 +675,7 @@ class QARuntime:
                     "images": list(raw["images"]),
                     "gis": list(raw["gis"]),
                     "reasoning": list(raw["reasoning"]),
-                    "elapsed_seconds": raw["elapsed_seconds"],
+                    "elapsed_seconds": 0,
                 }
                 cached["conversation_id"] = cid  # 单轮每次应返回新会话 id
                 return cached
