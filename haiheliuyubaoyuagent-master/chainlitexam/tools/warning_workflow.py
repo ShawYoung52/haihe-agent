@@ -188,6 +188,40 @@ def _filter_warning_records_for_user(records: list[dict[str, str]], user_text: s
         filtered = [r for r in filtered if "解除" in str(r.get("msgType") or "")]
     return filtered
 
+
+def _trim_warning_regions_for_scope(records: list[dict], user_text: str) -> list[dict]:
+    """按用户问法作用域裁剪记录的影响区域。
+
+    市级问法（市台/全市/本市/我市）不展开各区县明细，标记为市级层面；
+    具体区县问法仅保留该区县相关记录。
+    """
+    text = user_text or ""
+    broad_terms = {"天津", "天津市", "我市", "全市", "本市"}
+    asks_broad = any(t in text for t in broad_terms)
+    trimmed = []
+    for rec in records:
+        area = str(rec.get("locationName") or _extract_warning_area(rec) or "")
+        if asks_broad:
+            # 市级问法：把区县明细折叠为市级层面
+            rec["locationName"] = "全市"
+        else:
+            # 具体区县问法：仅保留包含该区县关键词的记录
+            matching = [a for a in (_extract_warning_area(rec) or "").split("、") if a and a in text]
+            if matching:
+                rec["locationName"] = "、".join(matching)
+            elif area and any(a in area for a in ["全市", "各区县"]):
+                rec["locationName"] = "全市"
+            else:
+                continue  # 与问法无关的区县，丢弃
+        trimmed.append(rec)
+    return trimmed
+
+
+def _is_broad_scoped_warning_query(user_text: str) -> bool:
+    """市级问法（市台/全市/本市/我市）不展开各区县影响区域列。"""
+    return any(t in (user_text or "") for t in {"天津", "天津市", "我市", "全市", "本市"})
+
+
 def _warning_publisher_rank(record: dict[str, str]) -> int:
     """中央气象台在前，天津市气象台其次，其他发布单位最后。"""
     department = re.sub(r"\s+", "", str(record.get("department") or ""))
@@ -238,20 +272,21 @@ def _sort_warning_records(records: list[dict[str, str]]) -> list[dict[str, str]]
     return [record for _, record in indexed_records]
 
 
-def _build_warning_table_markdown(records: list[dict[str, str]], title: str) -> str:
+def _build_warning_table_markdown(records: list[dict[str, str]], title: str, show_region_column: bool = True) -> str:
     if not records:
         return f"{title}\n\n未检索到符合条件的预警记录。"
-    lines = [
-        f"{title}\n\n", "| 序号 | 发布单位 | 预警类型 | 等级 | 影响区域 | 发布时间 | 发布状态 |\n",
-        "| :---: | :--- | :--- | :--- | :--- | :--- | :--- |\n",
-    ]
+    header = "| 序号 | 发布单位 | 预警类型 | 等级 | 发布时间 | 发布状态 |"
+    sep = "| :---: | :--- | :--- | :--- | :--- | :--- |"
+    if show_region_column:
+        header = "| 序号 | 发布单位 | 预警类型 | 等级 | 影响区域 | 发布时间 | 发布状态 |"
+        sep = "| :---: | :--- | :--- | :--- | :--- | :--- | :--- |"
+    lines = [f"{title}\n\n", header + "\n", sep + "\n"]
     for index, record in enumerate(records, 1):
-        lines.append(
-            f"| {index} | {_clean_table_cell(record.get('department') or '—')} | "
-            f"{_clean_table_cell(record.get('eventType') or '—')} | {_clean_table_cell(record.get('severity') or '—')} | "
-            f"{_clean_table_cell(record.get('locationName') or _extract_warning_area(record) or '暂未明确')} | "
-            f"{_clean_table_cell(record.get('time') or '—')} | {_clean_table_cell(record.get('msgType') or '—')} |\n"
-        )
+        row = f"| {index} | {_clean_table_cell(record.get('department') or '—')} | {_clean_table_cell(record.get('eventType') or '—')} | {_clean_table_cell(record.get('severity') or '—')} |"
+        if show_region_column:
+            row += f" {_clean_table_cell(record.get('locationName') or _extract_warning_area(record) or '暂未明确')} |"
+        row += f" {_clean_table_cell(record.get('time') or '—')} | {_clean_table_cell(record.get('msgType') or '—')} |"
+        lines.append(row + "\n")
     return "".join(lines).strip()
 
 
@@ -542,6 +577,7 @@ async def finalize_warning_answer(answer_chain: Any, warning_bundles: list[dict[
     """两条触发路径共用的唯一回答装配器。"""
     merged = _merge_warning_bundles(warning_bundles)
     records = _sort_warning_records(_filter_warning_records_for_user(merged["records"], user_text))
+    records = _trim_warning_regions_for_scope(records, user_text)
     try:
         llm_text = await _generate_warning_core_and_advice(
             answer_chain,
@@ -555,7 +591,8 @@ async def finalize_warning_answer(answer_chain: Any, warning_bundles: list[dict[
         core = _enforce_single_warning_core(raw_core)
         sections = [core]
         if records:
-            sections.append(_build_warning_table_markdown(records, merged["title"]))
+            show_region = not _is_broad_scoped_warning_query(user_text)  # 新增辅助：市级问法隐藏区县列
+            sections.append(_build_warning_table_markdown(records, merged["title"], show_region_column=show_region))
             sections.append(_build_warning_contents(records, runtime.sanitize_display_text))
         advice = _build_llm_extracted_warning_advice(
             llm_text,
