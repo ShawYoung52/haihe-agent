@@ -19,6 +19,7 @@ from ScheduledTask.emergency_response_monitor import (
     run_emergency_response_monitor,
 )
 from ScheduledTask.report_generator import trigger_weather_bulletin_report
+from ScheduledTask import call_respond
 from utils.MusicTool import MusicApiError
 from utils import create_rainstorm_impact_map
 from utils.MusicTool import MusicClient, MusicConfig
@@ -662,6 +663,13 @@ def calcmaxdataseg5min():
                     logger.warning("报告 URL 回写数据库失败：%s", e)
                 finally:
                     _session.close()
+
+    # 叫应：等级变化时创建叫应任务，并扫描挂起任务补发
+    try:
+        call_respond.on_tick(record, impact_city)
+        call_respond.retry_pending_sends()
+    except Exception as e:
+        logger.warning("叫应流程执行失败（不阻塞主流程）：%s", e, exc_info=True)
 
 
 def circleadd5min():
