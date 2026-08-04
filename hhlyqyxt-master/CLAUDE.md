@@ -132,6 +132,22 @@ body: `{"template": "haihe_weather_bulletin"}`（只传 template，其他默认�
 
 在 `stationProcessMin.py:calcmaxdataseg5min()` 中 `run_emergency_response_monitor` 之后调用 `trigger_weather_bulletin_report(record.response_level)`。仅 I-IV 级触发。失败**不阻塞主流程**（只记 WARNING）。
 
+## 叫应功能（call_respond）
+
+应急响应触发后，**值班人员人工确认**才通知受影响单位。核心流程：等级变化 → 创建叫应任务(pending) → 人工确认(confirmed) → 后台异步发送叫应话术 + 天河报告文件到受影响单位微信群 → 记录逐群台账。
+
+- 模块：`ScheduledTask/call_respond.py`；表：`qy_call_respond_task`（任务）+ `qy_call_respond_send_log`（逐群发送日志）。
+- 触发：`stationProcessMin.py:calcmaxdataseg5min()` 末尾报告 URL 回填后调 `call_respond.on_tick(record, impact_city)` + `call_respond.retry_pending_sends()`。**等级变化**（0→I-IV 或升级）才创建，同等级持续不重复。
+- 状态机：`pending` → `confirmed` → `sending` → `sent`/`failed`；报告缺失 → `suspended`；群未配置 → `pending_send`。`retry_pending_sends` 每 tick 扫描 `RECOVERABLE_STATUSES`（含 suspended/pending_send/sending/failed/confirmed）补发。
+- **关键陷阱**：`run_emergency_response_monitor` 返回的 `record.report_docx_url` 为 None（报告尚未生成），且 `stationProcessMin` 用独立 session 批量 `.update()` 回填 URL **不刷新内存 record**。所以 `send_task` 必须按 `task.emergency_monitor_id` **反查** `qy_emergency_response_monitor` 取报告 URL（`_resolve_report_urls`），不能依赖任务创建时捕获的 URL。
+- 逐群幂等：`_send_to_group` 跳过已有 success 日志的群（`_group_already_sent`），重试只发失败群，不重复已成功群。
+- 群映射：`call_respond_config.json`（可配置层，`{template, groups: {city: [群名]}}`）。**群映射由甲方后续提供**，未配置时任务挂起 `pending_send`。
+- 文件发送：`utils/wechat_send_file.py:send_file(group, file_path, caption)` 通过 HTTP 调**微信 DMZ 网关**（`WechatRPA/gateway/gateway_server.py`，跑在 Windows 服务器、微信已登录）：先 `send-text` 发话术，再 `send-file` 上传报告文件。配置用环境变量 `WECHAT_GATEWAY_URL`（默认 `http://127.0.0.1:8000`）、`WECHAT_GATEWAY_TOKEN`。**部署时须**：调度器进程设这两个环境变量；调度器 Linux IP 加入网关 `ALLOWED_CLIENT_IPS`；群名加入网关 `ALLOWED_TARGETS` 白名单。网关 HTTP 200 但 `ok:false` 视为发送失败（`_check_gateway_ok`）。
+- 后台异步：`threading.Thread(daemon=True)`，不阻塞 5 分钟调度器 240s 预算。失败不阻塞主流程。
+- API：`GET /tool/call-respond/tasks`、`POST /tool/call-respond/{id}/confirm`（不存在 404/状态不可确认 409）、`GET /tool/call-respond/{id}/logs`、`POST /tool/call-respond/{id}/retry`。
+
+**已知限制**：报告生成失败 → 任务永久 `suspended`（需报告补生成机制）；`impact_city` 空（HHLY 应急响应 vs HHLY_JUECE 城市路由流域解耦）→ `pending_send`。均待群映射配置后/需更深架构改动时处理。
+
 ## 场景重放脚本
 
 `scripts/verify_emergency_scenario.py --date YYYY-MM-DD --hour HH` 用历史日期一键重现完整链路（拉数据 → 河流影响图 → 应急响应入库 → 报告触发）。用**验证专用 CSV**（`verify_juece_/verify_hhly_` 前缀），不冲突生产 CSV。
@@ -162,12 +178,13 @@ cd hhlyqyxt-master
 D:\PythonProject\haiheliuyubaoyuagent-master\.venv\Scripts\python.exe -m pytest ScheduledTask/tests/ utils/tests/
 ```
 
-期望：104 passed（65 rainfall_impact + 30 emergency_response + 6 report_generator + 3 HHLY rolling CSV）
+期望：全部通过（含 `ScheduledTask/tests/test_call_respond.py` 的叫应单测，mock 假 Session，不依赖真实 DB）
 
 ## 相关记忆
 
 - `[[traction-emergency-hhly-source]]` — 应急响应 HHLY 数据源改造
 - `[[traction-report-api]]` — 天河报告接口
+- `[[traction-call-respond]]` — 叫应功能（等级变化→人工确认→后台发送报告文件到群，任务/台账表，可配置群映射）
 - `[[traction-station-process-min]]` — 本文档所有约束的记忆汇总
 - `[[traction-review-scope-rule]]` — 审查范围规则（只改我们的代码）
 - `[[haihe-project-env-quirks]]` — Windows Store python 坑 + venv 路径 + git 精确 add
