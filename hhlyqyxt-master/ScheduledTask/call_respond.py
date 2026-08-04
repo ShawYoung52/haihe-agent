@@ -18,6 +18,7 @@ from Models.QyCallRespondTask import QyCallRespondTask
 from Models.QyCallRespondSendLog import QyCallRespondSendLog
 from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
 from utils.db import Session
+from utils.wechat_send_file import send_file
 
 logger = logging.getLogger(__name__)
 
@@ -119,3 +120,114 @@ def on_tick(record, impact_city: str, config: Optional[dict] = None) -> Optional
         return None
     finally:
         session.close()
+
+
+def _write_send_log(task_id: int, group: str, status: str, detail: str = "") -> None:
+    """写入一条逐群发送日志，失败不抛出。"""
+    log = QyCallRespondSendLog(task_id=task_id, target_group=group, status=status, detail=detail)
+    session = Session()
+    try:
+        session.add(log)
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("写入叫应发送日志失败：task=%s group=%s", task_id, group, exc_info=True)
+    finally:
+        session.close()
+
+
+def _download_report(url: str) -> str:
+    """下载报告 URL 到本地临时文件，返回路径。失败抛异常由调用方处理。"""
+    import requests
+    import tempfile
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    suffix = Path(url).suffix or ".docx"
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    with open(fd, "wb") as f:
+        f.write(resp.content)
+    return path
+
+
+def _send_to_group(task, group: str, config: dict) -> bool:
+    """向单个群发送报告文件 + 话术，写 send_log，返回是否成功。"""
+    caption = render_template(config.get("template", ""), task.impact_city, task.response_level)
+    try:
+        file_path = _download_report(task.report_docx_path)
+        ok = send_file(group, file_path, caption)
+        _write_send_log(task.id, group, "success" if ok else "failed",
+                        detail="" if ok else "send_file 返回 False")
+        return ok
+    except Exception as e:
+        _write_send_log(task.id, group, "failed", detail=str(e)[:500])
+        return False
+
+
+def send_task(task_id: int) -> None:
+    """后台发送。读任务+配置，按状态分支：
+    报告缺失→suspended；群未配置→pending_send；否则逐群发送→sent/failed。
+    """
+    session = Session()
+    try:
+        task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
+        if task is None:
+            return
+        config = load_group_config()
+        if not task.report_docx_path and not task.report_pdf_path:
+            task.status = STATUS_SUSPENDED
+            session.commit()
+            return
+        targets = group_targets(task.impact_city, config)
+        if not targets:
+            task.status = STATUS_PENDING_SEND
+            session.commit()
+            return
+        task.status = STATUS_SENDING
+        session.commit()
+        all_ok = True
+        for group in targets:
+            if not _send_to_group(task, group, config):
+                all_ok = False
+        task.status = STATUS_SENT if all_ok else STATUS_FAILED
+        task.send_time = datetime.now()
+        session.commit()
+    except Exception:
+        logger.warning("发送叫应任务失败：task=%s", task_id, exc_info=True)
+    finally:
+        session.close()
+
+
+def confirm_task(task_id: int, confirm_person: str) -> dict:
+    """人工确认。校验任务存在且 pending，置 confirmed，起后台线程发送。"""
+    session = Session()
+    try:
+        task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
+        if task is None:
+            return {"success": False, "detail": "任务不存在"}
+        if task.status != STATUS_PENDING:
+            return {"success": False, "detail": f"任务状态为 {task.status}，不可确认"}
+        task.status = STATUS_CONFIRMED
+        task.confirm_person = confirm_person
+        task.confirm_time = datetime.now()
+        session.commit()
+        tid = task.id
+    finally:
+        session.close()
+    threading.Thread(target=send_task, args=(tid,), daemon=True).start()
+    return {"success": True, "task_id": tid, "status": STATUS_CONFIRMED}
+
+
+def retry_pending_sends() -> None:
+    """扫描 suspended/pending_send 任务，起后台线程补发（条件满足则发送，否则重新挂起）。"""
+    session = Session()
+    try:
+        tasks = (
+            session.query(QyCallRespondTask)
+            .filter(QyCallRespondTask.status.in_([STATUS_SUSPENDED, STATUS_PENDING_SEND]))
+            .all()
+        )
+        ids = [t.id for t in tasks]
+    finally:
+        session.close()
+    for tid in ids:
+        threading.Thread(target=send_task, args=(tid,), daemon=True).start()

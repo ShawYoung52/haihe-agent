@@ -1,6 +1,7 @@
 """应急响应叫应功能单元测试（无需真实数据库）。"""
 import json
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -98,8 +99,9 @@ class _FakeQuery:
         return self
 
     def first(self):
-        # 返回前一条（None 表示无前一条）
-        return self._session.prev_level_obj
+        if self._session.prev_level_obj is not None:
+            return self._session.prev_level_obj
+        return self._session.all_rows[0] if self._session.all_rows else None
 
     def all(self):
         return self._session.all_rows
@@ -171,3 +173,38 @@ def test_on_tick_skips_when_level_zero(fake_session):
     task = call_respond.on_tick(_rec(level=0), "天津市")
     assert task is None
     assert fake_session.added == []
+
+
+def test_confirm_task_requires_pending(fake_session, monkeypatch):
+    fake_session.all_rows = [_rec(level=2, rid=7)]
+    monkeypatch.setattr(call_respond, "send_task", lambda tid: None)
+    result = call_respond.confirm_task(7, "张三")
+    assert result["success"] is True
+    assert result["status"] == "confirmed"
+
+
+def test_send_task_suspended_when_no_report(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    task = _rec(level=2, rid=8, docx=None)  # 无报告
+    fake_session.all_rows = [task]
+    call_respond.send_task(8)
+    assert task.status == "suspended"
+
+
+def test_send_task_pending_send_when_no_group(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {}})
+    task = _rec(level=2, rid=9, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    call_respond.send_task(9)
+    assert task.status == "pending_send"
+
+
+def test_send_task_sent_when_ok(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: True)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=10, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    fake_session.logs = []
+    call_respond.send_task(10)
+    assert task.status == "sent"
