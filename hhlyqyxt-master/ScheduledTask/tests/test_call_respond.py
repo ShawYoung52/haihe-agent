@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from Models.QyCallRespondTask import QyCallRespondTask
 from Models.QyCallRespondSendLog import QyCallRespondSendLog
 from ScheduledTask import call_respond
+from utils.wechat_send_file import send_file
 
 
 def test_task_model_columns():
@@ -60,3 +61,7 @@ def test_group_targets_splits_by_dunhao():
 
 def test_group_targets_empty_config_returns_empty():
     assert call_respond.group_targets("天津市", {"groups": {}}) == []
+
+
+def test_send_file_stub_returns_false():
+    assert send_file("某群", "/tmp/r.docx", "话术") is False
