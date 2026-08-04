@@ -489,6 +489,80 @@ def test_send_task_rerun_sent_task_does_not_resend(fake_session, monkeypatch):
     assert task.status == "sent"
 
 
+def test_send_task_downloads_report_once(fake_session, monkeypatch):
+    """simplify：报告只下载一次，多个群共享同一文件路径（不再 N 群 N 次下载）。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群", "B群"]}})
+    calls = []
+    monkeypatch.setattr(call_respond, "_download_report",
+                        lambda url: calls.append(url) or "/tmp/a.docx")
+    sent = []
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: sent.append((g, f)) or True)
+    task = _rec(level=2, rid=50, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    fake_session.logs = []
+    call_respond.send_task(50)
+    assert len(calls) == 1  # 只下载一次
+    assert sent == [("A群", "/tmp/a.docx"), ("B群", "/tmp/a.docx")]  # 两群共享同一路径
+    assert task.status == "sent"
+
+
+def test_send_task_download_failure_marks_failed(fake_session, monkeypatch):
+    """simplify：报告下载失败 → 任务 failed，不写逐群日志（无文件可发）。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群", "B群"]}})
+
+    def boom(url):
+        raise RuntimeError("网络不可达")
+
+    monkeypatch.setattr(call_respond, "_download_report", boom)
+    sent = []
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: sent.append(g) or True)
+    task = _rec(level=2, rid=51, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    fake_session.logs = []
+    call_respond.send_task(51)
+    assert task.status == "failed"
+    assert sent == []  # 未发送任何群
+    assert fake_session.added == []  # 未写逐群日志
+
+
+def test_send_task_closes_session_before_network(fake_session, monkeypatch):
+    """simplify：网络发送前长 session 已 close，不跨网络 I/O 持 session。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群"]}})
+    state = {"closed": False}
+    orig_close = fake_session.close
+
+    def tracking_close():
+        state["closed"] = True
+        orig_close()
+
+    fake_session.close = tracking_close
+
+    def fake_send_file(g, f, c):
+        assert state["closed"] is True  # 网络发送时 session 已关闭
+        return True
+
+    monkeypatch.setattr(call_respond, "send_file", fake_send_file)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=52, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    call_respond.send_task(52)
+    assert task.status == "sent"
+
+
+def test_recoverable_statuses_set():
+    """simplify：RECOVERABLE_STATUSES 覆盖 retry 扫描的全部状态，排除 pending/sent。"""
+    assert call_respond.RECOVERABLE_STATUSES == {
+        call_respond.STATUS_SUSPENDED, call_respond.STATUS_PENDING_SEND,
+        call_respond.STATUS_SENDING, call_respond.STATUS_FAILED,
+        call_respond.STATUS_CONFIRMED,
+    }
+    assert call_respond.STATUS_PENDING not in call_respond.RECOVERABLE_STATUSES
+    assert call_respond.STATUS_SENT not in call_respond.RECOVERABLE_STATUSES
+
+
 def test_retry_pending_sends_includes_confirmed(fake_session, monkeypatch):
     """code-review：confirmed 状态加入恢复扫描（非 pending，不重复创建）。"""
     started = []

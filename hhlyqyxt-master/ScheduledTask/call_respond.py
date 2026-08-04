@@ -32,6 +32,13 @@ STATUS_PENDING_SEND = "pending_send"
 STATUS_SUSPENDED = "suspended"
 STATUS_FAILED = "failed"
 
+# retry_pending_sends 扫描的"可恢复"任务状态集合（缺报告/缺群映射/卡发送/
+# 发送失败/已确认未发送）。pending/sent 不在其中：pending 待人工确认，
+# sent 已全部成功无需补发。
+RECOVERABLE_STATUSES = {
+    STATUS_SUSPENDED, STATUS_PENDING_SEND, STATUS_SENDING, STATUS_FAILED, STATUS_CONFIRMED,
+}
+
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "call_respond_config.json"
 
 # 模块级 in-flight 守卫：同一 task_id 不允许并发重复发送（retry_pending_sends
@@ -179,33 +186,38 @@ def _resolve_report_urls(task, session) -> bool:
     return True
 
 
-def _group_already_sent(session, task_id: int, group: str) -> bool:
-    """该群是否已有成功发送日志（逐群幂等：重试不重复发已成功群）。"""
-    row = (
-        session.query(QyCallRespondSendLog)
-        .filter(
-            QyCallRespondSendLog.task_id == task_id,
-            QyCallRespondSendLog.target_group == group,
-            QyCallRespondSendLog.status == "success",
+def _group_already_sent(task_id: int, group: str) -> bool:
+    """该群是否已有成功发送日志（逐群幂等：重试不重复发已成功群）。
+
+    网络发送阶段不持长 session，自建自关短 session。
+    """
+    session = Session()
+    try:
+        row = (
+            session.query(QyCallRespondSendLog)
+            .filter(
+                QyCallRespondSendLog.task_id == task_id,
+                QyCallRespondSendLog.target_group == group,
+                QyCallRespondSendLog.status == "success",
+            )
+            .first()
         )
-        .first()
-    )
-    return row is not None
+        return row is not None
+    finally:
+        session.close()
 
 
-def _send_to_group(task, group: str, config: dict, session) -> bool:
-    """向单个群发送报告文件 + 话术，写 send_log，返回是否成功。
+def _send_to_group(task, group: str, config: dict, file_path: str) -> bool:
+    """向单个群发送已下载的报告文件 + 话术，写 send_log，返回是否成功。
 
     该群已有成功发送日志则跳过（逐群幂等，重试只重发失败群，不重复
-    已成功群）。下载的临时文件在 send_file 之后通过 finally 删除，
-    避免 temp 文件泄漏。
+    已成功群）。报告已在 send_task 中下载一次，此处复用 file_path，
+    不再逐群重复下载；临时文件由 send_task 统一清理。
     """
-    if _group_already_sent(session, task.id, group):
+    if _group_already_sent(task.id, group):
         return True
     caption = render_template(config.get("template", ""), task.impact_city, task.response_level)
-    file_path = None
     try:
-        file_path = _download_report(task.report_docx_path or task.report_pdf_path)
         ok = send_file(group, file_path, caption)
         _write_send_log(task.id, group, "success" if ok else "failed",
                         detail="" if ok else "send_file 返回 False")
@@ -213,53 +225,82 @@ def _send_to_group(task, group: str, config: dict, session) -> bool:
     except Exception as e:
         _write_send_log(task.id, group, "failed", detail=str(e)[:500])
         return False
+
+
+def _finalize_send(task_id: int, status: str) -> None:
+    """网络发送结束后重开短 session 置最终状态（sent/failed），失败不抛出。"""
+    session = Session()
+    try:
+        task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
+        if task is None:
+            return
+        task.status = status
+        task.send_time = datetime.now()
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("更新叫应任务最终状态失败：task=%s", task_id, exc_info=True)
     finally:
-        if file_path:
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
+        session.close()
 
 
 def send_task(task_id: int) -> None:
     """后台发送。读任务+配置，按状态分支：
     报告缺失（含反查应急响应表仍无）→suspended；群未配置→pending_send；
-    否则逐群发送→sent（任一成功）/failed（全部失败）。
+    否则报告下载一次 → 逐群发送→sent（任一成功）/failed（全部失败）。
     同一 task_id 已在发送中则跳过（in-flight 守卫，避免并发重复发送）。
+    网络阶段（下载 + 逐群发送）不持有 DB session。
     """
     with _in_flight_lock:
         if task_id in _in_flight:
             return
         _in_flight.add(task_id)
-    session = Session()
     try:
-        task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
-        if task is None:
-            return  # 任务不存在/非法，直接返回
-        config = load_group_config()
-        if not _resolve_report_urls(task, session):
-            task.status = STATUS_SUSPENDED
+        # 阶段一：加载任务 + 解析报告 + 置 sending（短 session，立即关闭）
+        session = Session()
+        try:
+            task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
+            if task is None:
+                return  # 任务不存在/非法，直接返回
+            config = load_group_config()
+            if not _resolve_report_urls(task, session):
+                task.status = STATUS_SUSPENDED
+                session.commit()
+                return
+            targets = group_targets(task.impact_city, config)
+            if not targets:
+                task.status = STATUS_PENDING_SEND
+                session.commit()
+                return
+            task.status = STATUS_SENDING
             session.commit()
+        finally:
+            session.close()
+
+        # 阶段二：网络发送（不持 DB session）。报告只下载一次，群间共享。
+        file_path = None
+        try:
+            file_path = _download_report(task.report_docx_path or task.report_pdf_path)
+        except Exception:
+            logger.warning("下载报告失败：task=%s，无文件可发，任务置 failed", task_id, exc_info=True)
+            _finalize_send(task_id, STATUS_FAILED)
             return
-        targets = group_targets(task.impact_city, config)
-        if not targets:
-            task.status = STATUS_PENDING_SEND
-            session.commit()
-            return
-        task.status = STATUS_SENDING
-        session.commit()
-        any_ok = False
-        for group in targets:
-            if _send_to_group(task, group, config, session):
-                any_ok = True
+        try:
+            any_ok = False
+            for group in targets:
+                if _send_to_group(task, group, config, file_path):
+                    any_ok = True
+        finally:
+            if file_path:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
         # 单个群失败不影响其他群；任一成功则 sent，全部失败才 failed
-        task.status = STATUS_SENT if any_ok else STATUS_FAILED
-        task.send_time = datetime.now()
-        session.commit()
+        _finalize_send(task_id, STATUS_SENT if any_ok else STATUS_FAILED)
     except Exception:
         logger.warning("发送叫应任务失败：task=%s", task_id, exc_info=True)
     finally:
-        session.close()
         with _in_flight_lock:
             _in_flight.discard(task_id)
 
@@ -299,10 +340,7 @@ def retry_pending_sends() -> None:
     try:
         tasks = (
             session.query(QyCallRespondTask)
-            .filter(QyCallRespondTask.status.in_([
-                STATUS_SUSPENDED, STATUS_PENDING_SEND, STATUS_SENDING, STATUS_FAILED,
-                STATUS_CONFIRMED,
-            ]))
+            .filter(QyCallRespondTask.status.in_(RECOVERABLE_STATUSES))
             .all()
         )
         ids = [t.id for t in tasks]
