@@ -153,7 +153,7 @@ def _send_to_group(task, group: str, config: dict) -> bool:
     """向单个群发送报告文件 + 话术，写 send_log，返回是否成功。"""
     caption = render_template(config.get("template", ""), task.impact_city, task.response_level)
     try:
-        file_path = _download_report(task.report_docx_path)
+        file_path = _download_report(task.report_docx_path or task.report_pdf_path)
         ok = send_file(group, file_path, caption)
         _write_send_log(task.id, group, "success" if ok else "failed",
                         detail="" if ok else "send_file 返回 False")

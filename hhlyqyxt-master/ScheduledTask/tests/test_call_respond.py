@@ -208,3 +208,15 @@ def test_send_task_sent_when_ok(fake_session, monkeypatch):
     fake_session.logs = []
     call_respond.send_task(10)
     assert task.status == "sent"
+
+
+def test_send_task_sent_when_pdf_only(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: True)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.pdf")
+    task = _rec(level=2, rid=11, docx=None)  # 无 docx，仅 pdf
+    task.report_pdf_path = "http://x/a.pdf"
+    fake_session.all_rows = [task]
+    fake_session.logs = []
+    call_respond.send_task(11)
+    assert task.status == "sent"
