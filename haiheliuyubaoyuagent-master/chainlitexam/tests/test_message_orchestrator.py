@@ -1,9 +1,12 @@
 """Tests for message_orchestrator feature-flag behavior."""
 
+import asyncio
 import importlib
 import sys
+import time
 from pathlib import Path
 
+import langchain_core.messages  # noqa: F401  在 ensure_stubs() 之前导入，避免安装 langchain stub（stub 会丢弃 tool_call_id）
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -272,3 +275,46 @@ async def test_process_message_creates_reasoning_before_stream_msg(monkeypatch):
 
     assert order.index("reasoning") < order.index("stream_msg"), \
         f"思考过程应在上、回答在下，实际顺序: {order}"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_round_parallelizes_pure_data_tools(monkeypatch):
+    """相互独立的纯数据工具应并行调用（总耗时≈最慢工具，而非各工具之和）。"""
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+    async def slow_invoke(tool_name, tool, tool_args, step, user_text=""):
+        await asyncio.sleep(0.05)
+        return f"{tool_name}-result", 0.05
+
+    monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", slow_invoke)
+    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+
+    class FakePlannerMsg:
+        tool_calls = [
+            {"name": "get_city_rainfall_time_range", "args": {"city": "天津"}, "id": "c1"},
+            {"name": "get_river_system_rainfall_forecast", "args": {"river_system": "大清河"}, "id": "c2"},
+            {"name": "get_city_rainfall_time_range", "args": {"city": "北京"}, "id": "c3"},
+        ]
+
+    tools = [FakeTool(c["name"]) for c in FakePlannerMsg.tool_calls]
+    callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
+    messages = []
+
+    start = time.time()
+    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+        FakePlannerMsg(), tools, messages, "测试", 1, callbacks
+    )
+    elapsed = time.time() - start
+
+    # 3 个 0.05s 工具串行应 ~0.15s，并行应 < 0.12s
+    assert elapsed < 0.12, f"工具应并行执行，实际耗时 {elapsed:.3f}s"
+    assert len(messages) == 3
+    contents = [m.content for m in messages]
+    assert contents[0] == "get_city_rainfall_time_range-result"
+    assert contents[1] == "get_river_system_rainfall_forecast-result"
+    assert contents[2] == "get_city_rainfall_time_range-result"
+    # ToolMessage 顺序与 tool_call 顺序一致
+    assert [m.tool_call_id for m in messages] == ["c1", "c2", "c3"]

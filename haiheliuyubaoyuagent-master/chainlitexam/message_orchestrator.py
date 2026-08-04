@@ -1760,6 +1760,68 @@ def _extract_historical_weather_images(data):
     return [], str(data)[:2000]
 
 
+# 可并行执行的纯数据查询工具（无全局副作用：不渲染图、不发送 GIS、不组装预警/滚动预报收口、不设 forced_final_text）。
+# 这些工具全部落入 _run_tool_round 的 else: tool_observation_to_text 分支，不依赖 tool_step。
+_PARALLEL_SAFE_TOOLS = {
+    "get_city_rainfall_time_range",
+    "get_river_system_rainfall_forecast",
+    "query_current_weather_observation",
+    "query_basin_areal_rainfall",
+    "analyze_rainfall_by_time",
+    "local_analyze_rainfall_by_time",
+    "rag_search",
+    "search_poi",
+    "search_poi_by_distance",
+    "get_tianjin_wind_warning_assessment",
+    "estimate_river_impact_time",
+    "locate_region_rivers",
+}
+
+
+async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
+    """阶段一：并行调用纯数据工具。
+
+    返回 {tool_call_id: (observation, elapsed)}。仅对白名单内工具并行调用；
+    有副作用的工具不在此处调用，由阶段二按需串行执行。
+    工具失败在本函数内转为失败观测文本（与串行路径 per-tool 处理一致），
+    不中断整轮，由阶段二统一组装 ToolMessage。
+    """
+    results: dict[str, tuple[Any, float]] = {}
+
+    async def _invoke_one(tool_call):
+        tool = _find_tool(tools, tool_call["name"])
+        if tool is None:
+            return tool_call["id"], None, (f"工具未找到：{tool_call['name']}", 0.0)
+        async with cl.Step(name=TOOL_DISPLAY_NAMES.get(tool_call["name"], tool_call["name"]),
+                           parent_id=parent_step.id, type="tool") as tool_step:
+            tool_step.show_input = False
+            try:
+                obs, elapsed = await _invoke_tool_with_tolerance(
+                    tool_call["name"], tool, tool_call["args"], tool_step, user_text=user_text
+                )
+                tool_step.output = f"查询完成（耗时 {elapsed:.1f} 秒）"
+                return tool_call["id"], obs, (obs, elapsed)
+            except Exception as e:
+                # 与串行路径一致：把失败转为 ToolMessage 文本，不中断整轮
+                err_summary = _scrub_internal_data(str(e)) or "未知错误"
+                print(f"[工具错误] {tool_call['name']}: {err_summary}")
+                tool_step.output = f"查询失败：{err_summary[:120]}"
+                failure_text = (
+                    f"工具 {tool_call['name']} 执行失败（{type(e).__name__}），"
+                    f"该数据暂不可用。错误摘要：{err_summary}"
+                )
+                return tool_call["id"], None, (failure_text, 0.0)
+
+    pending = [c for c in calls if c["name"] in _PARALLEL_SAFE_TOOLS]
+    gathered = await asyncio.gather(*[_invoke_one(c) for c in pending], return_exceptions=True)
+    for g in gathered:
+        if isinstance(g, BaseException):
+            raise g  # _invoke_one 已兜底，理论上不会走到这里
+        cid, obs, pair = g
+        results[cid] = pair
+    return results
+
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks):
     ree = None
     forced_final_text = None
@@ -1777,152 +1839,179 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
         print(f"参数：{[tc['args'] for tc in planner_msg.tool_calls]}")
         print(f"====================\n")
 
+        # 阶段一：并行调用相互独立的纯数据工具，缩短多工具总延迟
+        pre_fetched = await _invoke_tools_in_parallel(
+            planner_msg.tool_calls, tools, user_text, step
+        )
+
         for tool_call in planner_msg.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             tool = _find_tool(tools, tool_name)
             display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
 
-            async with cl.Step(name=display_name, parent_id=step.id, type="tool") as tool_step:
-                tool_step.show_input = False
-                print(f"[工具] {tool_name} 参数: {tool_args}")
+            if tool_call["id"] in pre_fetched:
+                # 阶段一已并行获取该纯数据工具结果，直接进入分支处理
+                observation, tool_elapsed = pre_fetched[tool_call["id"]]
+                tool_step = None  # 该工具的 step 已在阶段一创建并更新
+            else:
+                async with cl.Step(name=display_name, parent_id=step.id, type="tool") as tool_step:
+                    tool_step.show_input = False
+                    print(f"[工具] {tool_name} 参数: {tool_args}")
 
-                if tool is None:
-                    observation_text = f"工具未找到：{tool_name}"
-                    messages.append(ToolMessage(content=observation_text, tool_call_id=tool_call["id"], role="tool"))
-                    tool_step.output = f"❌ {observation_text}"
-                    continue
-                try:
-                    observation, tool_elapsed = await _invoke_tool_with_tolerance(tool_name, tool, tool_args, tool_step, user_text=user_text)
-                    if tool_name == "analyze_rainstorm_impact":
-                        observation = await callbacks["enrich_with_impact_time_tool"](
-                            observation=observation,
-                            tool_args=tool_args,
-                            tools=tools,
-                            step=tool_step,
-                        )
-                    maybe_send_gis = callbacks.get("send_gis_linkage")
-                    if maybe_send_gis:
-                        try:
-                            ree = await maybe_send_gis(
-                                tool_name=tool_name,
-                                tool_args=tool_args,
-                                observation=observation,
-                                user_text=user_text,
-                                tools=tools,
-                            )
-
-
-                        except Exception as gis_err:
-                            # GIS 联动失败不应中断主问答流程
-                            print(f"[GIS联动] 发送失败：{gis_err}")
-                    if tool_name == "analyze_rainstorm_impact" and callbacks["should_force_admin_units_reply"](user_text):
-                        forced_final_text = callbacks["build_admin_units_only_reply"](observation)
-                    elif tool_name == "analyze_rainstorm_impact" and callbacks["should_force_partition_table_reply"](user_text):
-                        forced_final_text = callbacks["build_partition_only_reply"](observation)
-                    elif tool_name == "analyze_rainstorm_impact" and callbacks["should_force_structured_impact_reply"](user_text):
-                        forced_final_text = callbacks["build_structured_impact_reply"](observation)
-
-                    if tool_name == "query_decision_weather_for_poi":
-                        decision_result = _unwrap_tool_result(observation)
+                    if tool is None:
+                        observation_text = f"工具未找到：{tool_name}"
+                        messages.append(ToolMessage(content=observation_text, tool_call_id=tool_call["id"], role="tool"))
+                        tool_step.output = f"❌ {observation_text}"
+                        continue
+                    try:
+                        observation, tool_elapsed = await _invoke_tool_with_tolerance(tool_name, tool, tool_args, tool_step, user_text=user_text)
+                    except Exception as e:
+                        # 控制台保留详细错误（已脱敏）；不再单独向用户发送通用错误消息，
+                        # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
+                        err_summary = _scrub_internal_data(str(e)) or "未知错误"
+                        print(f"[工具错误] {tool_name}: {err_summary}")
                         observation_text = (
-                            decision_result
-                            if isinstance(decision_result, str)
-                            else callbacks["tool_observation_to_text"](decision_result)
+                            f"工具 {tool_name} 执行失败（{type(e).__name__}），"
+                            f"该数据暂不可用。错误摘要：{err_summary}"
                         )
-                        forced_final_text = _sanitize_display_text(str(observation_text or ""))
-                    elif warning_workflow.is_warning_tool(tool_name):
-                        warning_bundles.append(warning_workflow.build_warning_bundle(tool_name, observation))
-                        observation_text = (
-                            "预警数据已进入专用组装流程：预警清单表格由代码根据 "
-                            "eventType、department、time、severity、locationName 生成；"
-                            "预警内容由 content 组装，核心结论由大模型基于 content 生成，"
-                            "防范建议由大模型从生效预警 content 原文中提取，再由代码校验、去重和组装。"
-                        )
-                    elif tool_name == "get_river_network_for_plot":
-                        river_name = tool_args.get("start_river", "全流域")
-                        try:
-                            await _render_river_plot_with_overlay(tools, observation, river_name, callbacks, user_text)
-                        except Exception as e:
-                            print(f"加载行政区划底图失败：{e}")
-                            await callbacks["render_and_send_plot"](observation, title_suffix=river_name, admin_raw_result=None)
+                        tool_step.output = f"查询失败：{err_summary[:120]}"
+                        messages.append(ToolMessage(content=observation_text, tool_call_id=tool_call["id"], role="tool"))
+                        continue
 
-                        cl.user_session.set("has_chart_generated", True)
-                        observation_text = (
-                            f"（系统消息：已成功在前端为用户绘制了 {river_name} 的"
-                            f"河网可视化图，并叠加行政区划底图。不要输出坐标数据，请继续用自然语言回答分析结果）"
-                        )
-                    elif tool_name == "get_station_rainfall_real_img":
-                        data = _unwrap_tool_result(observation)
-                        if isinstance(data, dict) and "base64" in data:
-                            b64_str = data["base64"]
-                            # 去掉 data:image/...;base64, 前缀（如有）
-                            if "," in b64_str:
-                                b64_str = b64_str.split(",")[1]
-
-                            try:
-                                img_bytes = base64.b64decode(b64_str)
-                                begin_time = data.get("beginTime", "")
-                                end_time = data.get("endTime", "")
-                                range_type = data.get("range", "9")
-                                title = f"九分区面雨量分布图（{begin_time} ~ {end_time}）"
-                                cl.user_session.set("has_chart_generated", True)
-                                await cl.Message(
-                                    content=f"📊 已生成{title}：",
-                                    elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
-                                ).send()
-                                observation_text = (
-                                    f"（系统消息：已成功在前端为用户绘制了{title}。"
-                                    f"区间{range_type}分区。不要输出坐标数据，请继续用自然语言简要说明时间范围和分区类型）"
-                                )
-                            except Exception as decode_err:
-                                print(f"base64解码失败：{decode_err}")
-                                observation_text = "已获取降水实况图，但图片数据解码失败。"
-                        elif isinstance(data, dict) and "error" in data:
-                            raw_err = str(data["error"])
-                            print(f"[降水实况图] 后端返回错误（已隐藏）：{raw_err}")
-                            observation_text = "获取降水实况图失败，请稍后重试。"
-                        else:
-                            observation_text = "已获取降水实况图数据。"
-                    elif tool_name == "query_rolling_forecast":
-                        data = _unwrap_tool_result(observation)
-                        bundle = build_rolling_forecast_bundle(user_text, data)
-                        if bundle:
-                            rolling_forecast_bundles.append(bundle)
-                            if bundle.get("forced_core_conclusion"):
-                                forced_final_text = str(bundle["forced_core_conclusion"])
-                        compact_facts = compact_rolling_forecast_facts(data)
-                        observation_text = (
-                            json.dumps(compact_facts, ensure_ascii=False, default=str)
-                            + rolling_forecast_llm_instruction(bundle)
-                        )
-                    elif tool_name.startswith("historical_weather_"):
-                        img_msgs, observation_text = _extract_historical_weather_images(observation)
-                        if img_msgs:
-                            cl.user_session.set("has_chart_generated", True)
-                            await cl.Message(content="📊 图表已生成：", elements=img_msgs).send()
-                    else:
-                        observation_text = callbacks["tool_observation_to_text"](observation)
-
-                    tool_step.output = f"查询完成（耗时 {tool_elapsed:.1f} 秒）"
-                except Exception as e:
-                    # 控制台保留详细错误（已脱敏）；不再单独向用户发送通用错误消息，
-                    # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
-                    err_summary = _scrub_internal_data(str(e)) or "未知错误"
-                    print(f"[工具错误] {tool_name}: {err_summary}")
-                    observation_text = (
-                        f"工具 {tool_name} 执行失败（{type(e).__name__}），"
-                        f"该数据暂不可用。错误摘要：{err_summary}"
+            # 分支处理（对预取结果也执行，保证副作用与返回一致）
+            try:
+                if tool_name == "analyze_rainstorm_impact":
+                    observation = await callbacks["enrich_with_impact_time_tool"](
+                        observation=observation,
+                        tool_args=tool_args,
+                        tools=tools,
+                        step=tool_step,
                     )
+                maybe_send_gis = callbacks.get("send_gis_linkage")
+                if maybe_send_gis:
+                    try:
+                        ree = await maybe_send_gis(
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            observation=observation,
+                            user_text=user_text,
+                            tools=tools,
+                        )
+
+
+                    except Exception as gis_err:
+                        # GIS 联动失败不应中断主问答流程
+                        print(f"[GIS联动] 发送失败：{gis_err}")
+                if tool_name == "analyze_rainstorm_impact" and callbacks["should_force_admin_units_reply"](user_text):
+                    forced_final_text = callbacks["build_admin_units_only_reply"](observation)
+                elif tool_name == "analyze_rainstorm_impact" and callbacks["should_force_partition_table_reply"](user_text):
+                    forced_final_text = callbacks["build_partition_only_reply"](observation)
+                elif tool_name == "analyze_rainstorm_impact" and callbacks["should_force_structured_impact_reply"](user_text):
+                    forced_final_text = callbacks["build_structured_impact_reply"](observation)
+
+                if tool_name == "query_decision_weather_for_poi":
+                    decision_result = _unwrap_tool_result(observation)
+                    observation_text = (
+                        decision_result
+                        if isinstance(decision_result, str)
+                        else callbacks["tool_observation_to_text"](decision_result)
+                    )
+                    forced_final_text = _sanitize_display_text(str(observation_text or ""))
+                elif warning_workflow.is_warning_tool(tool_name):
+                    warning_bundles.append(warning_workflow.build_warning_bundle(tool_name, observation))
+                    observation_text = (
+                        "预警数据已进入专用组装流程：预警清单表格由代码根据 "
+                        "eventType、department、time、severity、locationName 生成；"
+                        "预警内容由 content 组装，核心结论由大模型基于 content 生成，"
+                        "防范建议由大模型从生效预警 content 原文中提取，再由代码校验、去重和组装。"
+                    )
+                elif tool_name == "get_river_network_for_plot":
+                    river_name = tool_args.get("start_river", "全流域")
+                    try:
+                        await _render_river_plot_with_overlay(tools, observation, river_name, callbacks, user_text)
+                    except Exception as e:
+                        print(f"加载行政区划底图失败：{e}")
+                        await callbacks["render_and_send_plot"](observation, title_suffix=river_name, admin_raw_result=None)
+
+                    cl.user_session.set("has_chart_generated", True)
+                    observation_text = (
+                        f"（系统消息：已成功在前端为用户绘制了 {river_name} 的"
+                        f"河网可视化图，并叠加行政区划底图。不要输出坐标数据，请继续用自然语言回答分析结果）"
+                    )
+                elif tool_name == "get_station_rainfall_real_img":
+                    data = _unwrap_tool_result(observation)
+                    if isinstance(data, dict) and "base64" in data:
+                        b64_str = data["base64"]
+                        # 去掉 data:image/...;base64, 前缀（如有）
+                        if "," in b64_str:
+                            b64_str = b64_str.split(",")[1]
+
+                        try:
+                            img_bytes = base64.b64decode(b64_str)
+                            begin_time = data.get("beginTime", "")
+                            end_time = data.get("endTime", "")
+                            range_type = data.get("range", "9")
+                            title = f"九分区面雨量分布图（{begin_time} ~ {end_time}）"
+                            cl.user_session.set("has_chart_generated", True)
+                            await cl.Message(
+                                content=f"📊 已生成{title}：",
+                                elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
+                            ).send()
+                            observation_text = (
+                                f"（系统消息：已成功在前端为用户绘制了{title}。"
+                                f"区间{range_type}分区。不要输出坐标数据，请继续用自然语言简要说明时间范围和分区类型）"
+                            )
+                        except Exception as decode_err:
+                            print(f"base64解码失败：{decode_err}")
+                            observation_text = "已获取降水实况图，但图片数据解码失败。"
+                    elif isinstance(data, dict) and "error" in data:
+                        raw_err = str(data["error"])
+                        print(f"[降水实况图] 后端返回错误（已隐藏）：{raw_err}")
+                        observation_text = "获取降水实况图失败，请稍后重试。"
+                    else:
+                        observation_text = "已获取降水实况图数据。"
+                elif tool_name == "query_rolling_forecast":
+                    data = _unwrap_tool_result(observation)
+                    bundle = build_rolling_forecast_bundle(user_text, data)
+                    if bundle:
+                        rolling_forecast_bundles.append(bundle)
+                        if bundle.get("forced_core_conclusion"):
+                            forced_final_text = str(bundle["forced_core_conclusion"])
+                    compact_facts = compact_rolling_forecast_facts(data)
+                    observation_text = (
+                        json.dumps(compact_facts, ensure_ascii=False, default=str)
+                        + rolling_forecast_llm_instruction(bundle)
+                    )
+                elif tool_name.startswith("historical_weather_"):
+                    img_msgs, observation_text = _extract_historical_weather_images(observation)
+                    if img_msgs:
+                        cl.user_session.set("has_chart_generated", True)
+                        await cl.Message(content="📊 图表已生成：", elements=img_msgs).send()
+                else:
+                    observation_text = callbacks["tool_observation_to_text"](observation)
+
+                if tool_step is not None:
+                    tool_step.output = f"查询完成（耗时 {tool_elapsed:.1f} 秒）"
+            except Exception as e:
+                # 控制台保留详细错误（已脱敏）；不再单独向用户发送通用错误消息，
+                # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
+                err_summary = _scrub_internal_data(str(e)) or "未知错误"
+                print(f"[工具错误] {tool_name}: {err_summary}")
+                observation_text = (
+                    f"工具 {tool_name} 执行失败（{type(e).__name__}），"
+                    f"该数据暂不可用。错误摘要：{err_summary}"
+                )
+                if tool_step is not None:
                     tool_step.output = f"查询失败：{err_summary[:120]}"
 
-                messages.append(
-                    ToolMessage(
-                        content=observation_text,
-                        tool_call_id=tool_call["id"],
-                        role="tool",
-                    )
+            messages.append(
+                ToolMessage(
+                    content=observation_text,
+                    tool_call_id=tool_call["id"],
+                    role="tool",
                 )
+            )
 
     round_elapsed = time.time() - round_start
     print(f"[本轮耗时] 第 {iteration} 轮工具调用总耗时: {round_elapsed:.2f}s")
