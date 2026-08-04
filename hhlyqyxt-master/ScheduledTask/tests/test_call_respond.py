@@ -81,6 +81,10 @@ class _FakeTask:
         self.status = kw.get("status")
         self.report_docx_path = kw.get("report_docx_path")
         self.report_pdf_path = kw.get("report_pdf_path")
+        self.confirm_person = kw.get("confirm_person")
+        self.confirm_time = kw.get("confirm_time")
+        self.send_time = kw.get("send_time")
+        self.create_time = kw.get("create_time")
 
 
 class _FakeQuery:
@@ -96,6 +100,9 @@ class _FakeQuery:
 
     def order_by(self, *args):
         self._order = args
+        return self
+
+    def limit(self, *args):
         return self
 
     def first(self):
@@ -220,3 +227,42 @@ def test_send_task_sent_when_pdf_only(fake_session, monkeypatch):
     fake_session.logs = []
     call_respond.send_task(11)
     assert task.status == "sent"
+
+
+from fastapi import HTTPException
+from Controller.tool_router import (
+    list_call_respond_tasks, confirm_call_respond, get_call_respond_logs,
+    retry_call_respond, CallRespondConfirmRequest,
+)
+
+
+def test_confirm_endpoint_calls_confirm_task(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "confirm_task", lambda tid, person: {"success": True, "task_id": tid, "status": "confirmed"})
+    result = confirm_call_respond(7, CallRespondConfirmRequest(confirm_person="张三"))
+    assert result["success"] is True
+
+
+def test_confirm_endpoint_raises_when_not_found(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "confirm_task", lambda tid, person: {"success": False, "detail": "任务不存在"})
+    import pytest as _pytest
+    with _pytest.raises(HTTPException) as ei:
+        confirm_call_respond(999, CallRespondConfirmRequest(confirm_person="张三"))
+    assert ei.value.status_code == 404
+
+
+def test_list_tasks_returns_list(fake_session):
+    fake_session.all_rows = [_rec(level=2, rid=3)]
+    rows = list_call_respond_tasks()
+    assert isinstance(rows, list)
+
+
+def test_logs_endpoint_returns_list(fake_session):
+    fake_session.all_rows = []
+    rows = get_call_respond_logs(1)
+    assert isinstance(rows, list)
+
+
+def test_retry_endpoint_returns_success(fake_session, monkeypatch):
+    monkeypatch.setattr(call_respond, "send_task", lambda tid: None)
+    result = retry_call_respond(5)
+    assert result["success"] is True

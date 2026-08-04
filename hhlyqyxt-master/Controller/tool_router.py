@@ -1,9 +1,14 @@
 from elasticsearch import Elasticsearch
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import desc
+from threading import Thread
 from typing import Optional
 
+from Models.QyCallRespondSendLog import QyCallRespondSendLog
+from Models.QyCallRespondTask import QyCallRespondTask
 from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
+from ScheduledTask import call_respond
 from utils.db import Session
 
 
@@ -247,3 +252,81 @@ def get_latest_emergency_response(limit: int = 1):
         return [_serialize_emergency_response(r) for r in rows]
     finally:
         session.close()
+
+
+class CallRespondConfirmRequest(BaseModel):
+    confirm_person: str = Field(..., description="确认人姓名")
+
+
+def _serialize_task(t) -> dict:
+    return {
+        "id": t.id,
+        "emergency_monitor_id": t.emergency_monitor_id,
+        "response_level": t.response_level,
+        "datatime": _format_datetime(t.datatime),
+        "impact_city": t.impact_city,
+        "status": t.status,
+        "report_docx_path": t.report_docx_path,
+        "report_pdf_path": t.report_pdf_path,
+        "confirm_person": t.confirm_person,
+        "confirm_time": _format_datetime(t.confirm_time),
+        "send_time": _format_datetime(t.send_time),
+        "create_time": _format_datetime(t.create_time),
+    }
+
+
+@toolrouter.get("/call-respond/tasks")
+def list_call_respond_tasks(status: Optional[str] = None, limit: int = 50):
+    """按状态查询叫应任务列表。"""
+    limit = max(1, min(limit, 200))
+    session = call_respond.Session()
+    try:
+        q = session.query(QyCallRespondTask)
+        if status:
+            q = q.filter(QyCallRespondTask.status == status)
+        rows = q.order_by(desc(QyCallRespondTask.id)).limit(limit).all()
+        return [_serialize_task(r) for r in rows]
+    finally:
+        session.close()
+
+
+@toolrouter.post("/call-respond/{task_id}/confirm")
+def confirm_call_respond(task_id: int, req: CallRespondConfirmRequest):
+    """人工确认叫应任务并触发后台发送。"""
+    result = call_respond.confirm_task(task_id, req.confirm_person)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result["detail"])
+    return result
+
+
+@toolrouter.get("/call-respond/{task_id}/logs")
+def get_call_respond_logs(task_id: int):
+    """查询某任务逐群发送日志。"""
+    session = call_respond.Session()
+    try:
+        rows = (
+            session.query(QyCallRespondSendLog)
+            .filter(QyCallRespondSendLog.task_id == task_id)
+            .order_by(desc(QyCallRespondSendLog.id))
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "task_id": r.task_id,
+                "target_group": r.target_group,
+                "status": r.status,
+                "detail": r.detail,
+                "send_time": _format_datetime(r.send_time),
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+@toolrouter.post("/call-respond/{task_id}/retry")
+def retry_call_respond(task_id: int):
+    """手动重试发送（补发挂起任务）。"""
+    Thread(target=call_respond.send_task, args=(task_id,), daemon=True).start()
+    return {"success": True, "task_id": task_id}
