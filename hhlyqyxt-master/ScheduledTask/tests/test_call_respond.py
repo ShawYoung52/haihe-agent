@@ -1,4 +1,5 @@
 """应急响应叫应功能单元测试（无需真实数据库）。"""
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from Models.QyCallRespondTask import QyCallRespondTask
 from Models.QyCallRespondSendLog import QyCallRespondSendLog
+from ScheduledTask import call_respond
 
 
 def test_task_model_columns():
@@ -27,3 +29,34 @@ def test_send_log_model_columns():
     assert log.task_id == 1
     assert log.target_group == "天津市防汛值班群"
     assert log.status == "success"
+
+
+def test_load_group_config_missing_file_returns_empty(tmp_path):
+    cfg = call_respond.load_group_config(str(tmp_path / "nope.json"))
+    assert cfg == {"template": "", "groups": {}}
+
+
+def test_load_group_config_reads_file(tmp_path):
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({
+        "template": "T{level}",
+        "groups": {"天津市": ["A群", "B群"]},
+    }, ensure_ascii=False), encoding="utf-8")
+    cfg = call_respond.load_group_config(str(p))
+    assert cfg["template"] == "T{level}"
+    assert cfg["groups"] == {"天津市": ["A群", "B群"]}
+
+
+def test_render_template_replaces_placeholders():
+    out = call_respond.render_template("【叫应】{city} 已启动 {level} 级", "天津市", 2)
+    assert out == "【叫应】天津市 已启动 2 级"
+
+
+def test_group_targets_splits_by_dunhao():
+    cfg = {"groups": {"天津市": ["A群"], "廊坊市": ["B群", "C群"]}}
+    out = call_respond.group_targets("天津市、廊坊市", cfg)
+    assert out == ["A群", "B群", "C群"]
+
+
+def test_group_targets_empty_config_returns_empty():
+    assert call_respond.group_targets("天津市", {"groups": {}}) == []
