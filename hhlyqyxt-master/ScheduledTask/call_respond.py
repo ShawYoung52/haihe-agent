@@ -179,11 +179,29 @@ def _resolve_report_urls(task, session) -> bool:
     return True
 
 
-def _send_to_group(task, group: str, config: dict) -> bool:
+def _group_already_sent(session, task_id: int, group: str) -> bool:
+    """该群是否已有成功发送日志（逐群幂等：重试不重复发已成功群）。"""
+    row = (
+        session.query(QyCallRespondSendLog)
+        .filter(
+            QyCallRespondSendLog.task_id == task_id,
+            QyCallRespondSendLog.target_group == group,
+            QyCallRespondSendLog.status == "success",
+        )
+        .first()
+    )
+    return row is not None
+
+
+def _send_to_group(task, group: str, config: dict, session) -> bool:
     """向单个群发送报告文件 + 话术，写 send_log，返回是否成功。
 
-    下载的临时文件在 send_file 之后通过 finally 删除，避免 temp 文件泄漏。
+    该群已有成功发送日志则跳过（逐群幂等，重试只重发失败群，不重复
+    已成功群）。下载的临时文件在 send_file 之后通过 finally 删除，
+    避免 temp 文件泄漏。
     """
+    if _group_already_sent(session, task.id, group):
+        return True
     caption = render_template(config.get("template", ""), task.impact_city, task.response_level)
     file_path = None
     try:
@@ -217,7 +235,7 @@ def send_task(task_id: int) -> None:
     try:
         task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
         if task is None:
-            return
+            return  # 任务不存在/非法，直接返回
         config = load_group_config()
         if not _resolve_report_urls(task, session):
             task.status = STATUS_SUSPENDED
@@ -232,7 +250,7 @@ def send_task(task_id: int) -> None:
         session.commit()
         any_ok = False
         for group in targets:
-            if _send_to_group(task, group, config):
+            if _send_to_group(task, group, config, session):
                 any_ok = True
         # 单个群失败不影响其他群；任一成功则 sent，全部失败才 failed
         task.status = STATUS_SENT if any_ok else STATUS_FAILED
@@ -273,8 +291,9 @@ def confirm_task(task_id: int, confirm_person: str) -> dict:
 def retry_pending_sends() -> None:
     """扫描待补发任务，起后台线程补发（条件满足则发送，否则重新挂起）。
 
-    涵盖 suspended/pending_send（缺报告/缺群映射）与 sending/failed
-    （进程中断卡 sending 或发送失败可重试）。in-flight 守卫保证并发去重。
+    涵盖 suspended/pending_send（缺报告/缺群映射）、sending/failed
+    （进程中断卡 sending 或发送失败可重试）与 confirmed（确认后进程中断
+    未发送）。in-flight 守卫保证并发去重，安全。
     """
     session = Session()
     try:
@@ -282,6 +301,7 @@ def retry_pending_sends() -> None:
             session.query(QyCallRespondTask)
             .filter(QyCallRespondTask.status.in_([
                 STATUS_SUSPENDED, STATUS_PENDING_SEND, STATUS_SENDING, STATUS_FAILED,
+                STATUS_CONFIRMED,
             ]))
             .all()
         )

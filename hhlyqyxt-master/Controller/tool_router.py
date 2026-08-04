@@ -328,6 +328,13 @@ def get_call_respond_logs(task_id: int):
 
 @toolrouter.post("/call-respond/{task_id}/retry")
 def retry_call_respond(task_id: int):
-    """手动重试发送（补发挂起任务）。"""
+    """手动重试发送（补发挂起任务）。任务不存在返回 404。"""
+    session = call_respond.Session()
+    try:
+        task = session.query(QyCallRespondTask).filter(QyCallRespondTask.id == task_id).first()
+        if task is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+    finally:
+        session.close()
     Thread(target=call_respond.send_task, args=(task_id,), daemon=True).start()
     return {"success": True, "task_id": task_id}

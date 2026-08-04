@@ -101,6 +101,18 @@ class _FakeMonitor:
         self.report_pdf_url = kw.get("report_pdf_url")
 
 
+class _FakeSendLog:
+    """qy_call_respond_send_log 假记录（逐群幂等判定用）。"""
+
+    def __init__(self, **kw):
+        self.id = kw.get("id")
+        self.task_id = kw.get("task_id")
+        self.target_group = kw.get("target_group")
+        self.status = kw.get("status")
+        self.detail = kw.get("detail")
+        self.send_time = kw.get("send_time")
+
+
 class _FakeQuery:
     def __init__(self, session, model):
         self._session = session
@@ -119,7 +131,48 @@ class _FakeQuery:
     def limit(self, *args):
         return self
 
+    def _matches(self, obj):
+        """检查对象是否匹配当前所有 filter 条件（逐字段等值比较）。"""
+        for group in self._filters:
+            for expr in group:
+                left = getattr(expr, "left", None)
+                right = getattr(expr, "right", None)
+                if left is None or right is None:
+                    continue
+                col = getattr(left, "key", None) or getattr(left, "attr", None)
+                if col is None:
+                    continue
+                val = getattr(right, "value", None)
+                if val is not None and getattr(obj, col, None) != val:
+                    return False
+        return True
+
+    def _status_filter(self):
+        """从 filter 中提取 status.in_([...]) 允许状态集合，无则返回 None。"""
+        allowed = None
+        for group in self._filters:
+            for expr in group:
+                left = getattr(expr, "left", None)
+                right = getattr(expr, "right", None)
+                if left is None or right is None:
+                    continue
+                col = getattr(left, "key", None) or getattr(left, "attr", None)
+                if col != "status":
+                    continue
+                vals = getattr(right, "value", None)
+                if vals is None:
+                    vals = right  # in_() 右值为 tuple/list
+                if isinstance(vals, (list, tuple)):
+                    allowed = set(vals)
+        return allowed
+
     def first(self):
+        # QyCallRespondSendLog 查询按 filter 匹配 session.logs（逐群幂等判定）
+        if self._model is QyCallRespondSendLog:
+            for log in self._session.logs:
+                if self._matches(log):
+                    return log
+            return None
         # 按模型区分：QyEmergencyResponseMonitor 查询走 monitor_obj/prev_level_obj，
         # 其余（QyCallRespondTask 等）从 all_rows 取任务。
         if self._model is QyEmergencyResponseMonitor:
@@ -131,6 +184,12 @@ class _FakeQuery:
         return self._session.all_rows[0] if self._session.all_rows else None
 
     def all(self):
+        # QyCallRespondTask 带 status 过滤时（retry_pending_sends 扫描）按状态过滤
+        if self._model is QyCallRespondTask:
+            allowed = self._status_filter()
+            if allowed is not None:
+                return [r for r in self._session.all_rows
+                        if getattr(r, "status", None) in allowed]
         return self._session.all_rows
 
 
@@ -140,6 +199,7 @@ class _FakeSession:
         self.prev_level_obj = None
         self.monitor_obj = None
         self.all_rows = []
+        self.logs = []
 
     def query(self, model):
         return _FakeQuery(self, model)
@@ -381,5 +441,78 @@ def test_logs_endpoint_returns_list(fake_session):
 
 def test_retry_endpoint_returns_success(fake_session, monkeypatch):
     monkeypatch.setattr(call_respond, "send_task", lambda tid: None)
+    fake_session.all_rows = [_rec(level=2, rid=5)]
     result = retry_call_respond(5)
     assert result["success"] is True
+
+
+def test_retry_endpoint_404_when_task_not_exist(fake_session):
+    """code-review：retry 任务不存在 → 404，而非静默成功。"""
+    fake_session.all_rows = []  # 无任务
+    with pytest.raises(HTTPException) as ei:
+        retry_call_respond(999)
+    assert ei.value.status_code == 404
+
+
+def test_send_task_skips_already_sent_group(fake_session, monkeypatch):
+    """code-review：逐群重试 —— 已成功群被跳过，只重发失败/未成功群。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群", "B群"]}})
+    sent = []
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: sent.append(g) or True)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=20, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    # A群已成功发送过，B群失败未重发
+    fake_session.logs = [_FakeSendLog(task_id=20, target_group="A群", status="success")]
+    call_respond.send_task(20)
+    assert task.status == "sent"
+    assert sent == ["B群"]  # 只重发 B群，A群被跳过
+
+
+def test_send_task_rerun_sent_task_does_not_resend(fake_session, monkeypatch):
+    """code-review：重跑已 sent 且所有群都已成功的任务 → 全部跳过，不重复发送。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群", "B群"]}})
+    sent = []
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: sent.append(g) or True)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=21, docx="http://x/a.docx")
+    task.status = "sent"
+    fake_session.all_rows = [task]
+    fake_session.logs = [
+        _FakeSendLog(task_id=21, target_group="A群", status="success"),
+        _FakeSendLog(task_id=21, target_group="B群", status="success"),
+    ]
+    call_respond.send_task(21)
+    assert sent == []  # 无重复发送
+    assert task.status == "sent"
+
+
+def test_retry_pending_sends_includes_confirmed(fake_session, monkeypatch):
+    """code-review：confirmed 状态加入恢复扫描（非 pending，不重复创建）。"""
+    started = []
+
+    class _FakeThread:
+        def __init__(self, target, args=(), daemon=None):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            started.append(self.args[0])
+
+    monkeypatch.setattr(threading, "Thread", _FakeThread)
+    t_suspended = _rec(level=2, rid=30)
+    t_suspended.status = "suspended"
+    t_confirmed = _rec(level=2, rid=31)
+    t_confirmed.status = "confirmed"
+    t_failed = _rec(level=2, rid=32)
+    t_failed.status = "failed"
+    t_pending = _rec(level=2, rid=33)
+    t_pending.status = "pending"
+    fake_session.all_rows = [t_suspended, t_confirmed, t_failed, t_pending]
+    call_respond.retry_pending_sends()
+    assert 31 in started  # confirmed 被扫描
+    assert 30 in started
+    assert 32 in started
+    assert 33 not in started  # pending 不应被扫描
