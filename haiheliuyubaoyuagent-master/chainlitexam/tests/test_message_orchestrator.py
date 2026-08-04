@@ -191,3 +191,84 @@ def test_brief_without_propagation_block_stays_compatible():
     brief = mo._build_affected_river_network_brief(result, "暴雨影响哪些河系")
     assert "经验流速" not in brief
     assert "滦河" in brief  # 既有河系列表不受影响
+
+
+@pytest.mark.asyncio
+async def test_process_message_creates_reasoning_before_stream_msg(monkeypatch):
+    """思考过程必须比回答消息先创建/发送（网页端思考在上、回答在下）。"""
+    monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
+
+    order: list[str] = []
+
+    class FakeMessage:
+        content = "测试查询"
+
+    class FakePlannerMsg:
+        content = ""
+        tool_calls = []
+
+    async def fake_astream_planner_think(*args, **kwargs):
+        return FakePlannerMsg()
+
+    async def noop_async(*args, **kwargs):
+        return None
+
+    # 捕获 ReasoningStep 创建顺序：monkeypatch 构造器
+    def fake_reasoning_step(name="🤔 思考过程"):
+        order.append("reasoning")
+        return _FakeReasoning()
+
+    class _FakeReasoning:
+        _closed = False
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return None
+        async def stage(self, *a, **k):
+            return None
+        async def line(self, *a, **k):
+            return None
+        async def append(self, *a, **k):
+            return None
+        async def close(self):
+            return None
+
+    class FakeStreamMsg:
+        def __init__(self, **kw):
+            order.append("stream_msg")
+            self.content = ""
+        async def send(self):
+            return None
+        async def update(self):
+            return None
+        async def remove(self):
+            return None
+
+    callbacks = {
+        "astream_planner_think": fake_astream_planner_think,
+        "need_river_plot": lambda message: False,
+        "astream_thinking_to_reasoning": noop_async,
+        "append_followup_if_needed": lambda text, query: text,
+        "stream_text_to_message": noop_async,
+        "astream_answer_chain_to_message": noop_async,
+    }
+
+    monkeypatch.setattr(mo, "ReasoningStep", fake_reasoning_step)
+    monkeypatch.setattr(mo.cl, "Message", FakeStreamMsg)
+
+    # 全量测试中 process_message 内 cl.user_session.set 需要 Chainlit 上下文；
+    # 单独跑本文件时上下文偶然存在，这里统一补一个 http 上下文保证全量可跑。
+    # 裸环境（tests/stubs.py 假 chainlit）下无 context 模块，靠假 user_session 兜底。
+    try:
+        from chainlit.context import context_var, init_http_context
+        context_var.set(init_http_context(thread_id="test-reasoning-order"))
+    except Exception:
+        pass
+
+    await mo.process_message(
+        FakeMessage(), planner_chain=None, answer_chain=None,
+        thinking_chain=None, tools=[], messages=[], callbacks=callbacks,
+    )
+
+    assert order.index("reasoning") < order.index("stream_msg"), \
+        f"思考过程应在上、回答在下，实际顺序: {order}"

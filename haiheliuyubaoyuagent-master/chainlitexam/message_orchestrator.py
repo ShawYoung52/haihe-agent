@@ -4319,11 +4319,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     messages.append(HumanMessage(content=message.content))
     cl.user_session.set("last_query", message.content)
 
-    stream_msg = cl.Message(content="")
-    await stream_msg.send()
-
     reasoning = ReasoningStep("🤔 思考过程")
     await reasoning.__aenter__()
+
+    stream_msg = cl.Message(content="")
+    await stream_msg.send()
 
     # 简单天气规则路由：必须在 THINKING_PLANNER 之前执行。
     # THINKING_PLANNER 也是一次 LLM 调用（耗时 5-17s），如果问题已被规则
