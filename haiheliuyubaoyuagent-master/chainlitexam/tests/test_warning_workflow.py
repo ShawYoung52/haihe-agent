@@ -45,3 +45,15 @@ def test_table_region_column_can_be_hidden():
     assert "影响区域" not in hidden
     shown = _build_warning_table_markdown(records, "【生效预警清单】", show_region_column=True)
     assert "影响区域" in shown
+
+
+def test_generic_no_location_query_keeps_all_district_records():
+    """问法未指定区县（如"现在有哪些暴雨预警"）时，各区县记录不得被丢弃。"""
+    records = [
+        _record(area="蓟州区、宝坻区", dept="天津市气象台"),
+        _record(area="滨海新区", dept="天津市气象台"),
+    ]
+    trimmed = _trim_warning_regions_for_scope(records, "现在有哪些暴雨预警")
+    assert len(trimmed) == 2
+    assert all("蓟州" in str(r.get("locationName") or "") for r in trimmed[:1])
+    assert all("滨海" in str(r.get("locationName") or "") for r in trimmed[1:])

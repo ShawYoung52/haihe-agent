@@ -193,18 +193,26 @@ def _trim_warning_regions_for_scope(records: list[dict], user_text: str) -> list
     """按用户问法作用域裁剪记录的影响区域。
 
     市级问法（市台/全市/本市/我市）不展开各区县明细，标记为市级层面；
-    具体区县问法仅保留该区县相关记录。
+    具体区县问法仅保留该区县相关记录；未指定区县且非市级时保留全部记录。
     """
     text = user_text or ""
     broad_terms = {"天津", "天津市", "我市", "全市", "本市"}
     asks_broad = any(t in text for t in broad_terms)
+    # 问法是否明确指定了某个区县：遍历所有记录的影响区域，判断是否命中文本。
+    all_districts = {
+        a
+        for rec in records
+        for a in (_extract_warning_area(rec) or "").split("、")
+        if a
+    }
+    names_district = any(a in text for a in all_districts)
     trimmed = []
     for rec in records:
         area = str(rec.get("locationName") or _extract_warning_area(rec) or "")
         if asks_broad:
             # 市级问法：把区县明细折叠为市级层面
             rec["locationName"] = "全市"
-        else:
+        elif names_district:
             # 具体区县问法：仅保留包含该区县关键词的记录
             matching = [a for a in (_extract_warning_area(rec) or "").split("、") if a and a in text]
             if matching:
@@ -213,6 +221,7 @@ def _trim_warning_regions_for_scope(records: list[dict], user_text: str) -> list
                 rec["locationName"] = "全市"
             else:
                 continue  # 与问法无关的区县，丢弃
+        # 未指定区县且非市级：保留原记录，不做裁剪
         trimmed.append(rec)
     return trimmed
 
