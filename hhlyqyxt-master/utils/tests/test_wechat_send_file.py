@@ -12,9 +12,15 @@ import utils.wechat_send_file as wsf
 
 
 class _Resp:
-    def __init__(self, status_code=200, text=""):
+    def __init__(self, status_code=200, text="", json=None):
         self.status_code = status_code
         self.text = text
+        self._json = json
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no json")
+        return self._json
 
 
 @pytest.fixture
@@ -109,3 +115,46 @@ def test_send_file_returns_false_on_request_exception(monkeypatch, tmp_path):
     f = tmp_path / "r.docx"
     f.write_bytes(b"data")
     assert wsf.send_file("某群", str(f), "话术") is False
+
+
+def test_send_file_returns_false_when_gateway_ok_false_on_text(monkeypatch, tmp_path):
+    """HTTP 200 但网关 ok=false（微信发送失败）→ send-text 报错 → 返回 False。"""
+    monkeypatch.setattr(wsf, "_gateway_url", lambda: "http://gw:8000")
+    monkeypatch.setattr(wsf, "_gateway_token", lambda: "tok")
+    monkeypatch.setattr(
+        wsf.requests, "post",
+        lambda *a, **k: _Resp(status_code=200, json={"ok": False, "result": {"msg": "not logged in"}}),
+    )
+
+    f = tmp_path / "r.docx"
+    f.write_bytes(b"data")
+    assert wsf.send_file("某群", str(f), "话术") is False
+
+
+def test_send_file_returns_false_when_gateway_ok_false_on_file(monkeypatch, tmp_path):
+    """send-text 成功但 send-file 网关 ok=false → 返回 False。"""
+    seq = [
+        _Resp(status_code=200, json={"ok": True, "result": {}}),
+        _Resp(status_code=200, json={"ok": False, "result": {"msg": "target not found"}}),
+    ]
+    monkeypatch.setattr(wsf, "_gateway_url", lambda: "http://gw:8000")
+    monkeypatch.setattr(wsf, "_gateway_token", lambda: "tok")
+    monkeypatch.setattr(wsf.requests, "post", lambda *a, **k: seq.pop(0))
+
+    f = tmp_path / "r.docx"
+    f.write_bytes(b"data")
+    assert wsf.send_file("某群", str(f), "话术") is False
+
+
+def test_send_file_ok_true_still_succeeds(monkeypatch, tmp_path):
+    """网关 ok=true（HTTP 200）→ 仍成功返回 True。"""
+    monkeypatch.setattr(wsf, "_gateway_url", lambda: "http://gw:8000")
+    monkeypatch.setattr(wsf, "_gateway_token", lambda: "tok")
+    monkeypatch.setattr(
+        wsf.requests, "post",
+        lambda *a, **k: _Resp(status_code=200, json={"ok": True, "result": {}}),
+    )
+
+    f = tmp_path / "r.docx"
+    f.write_bytes(b"data")
+    assert wsf.send_file("某群", str(f), "话术") is True

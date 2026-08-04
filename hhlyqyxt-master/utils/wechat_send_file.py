@@ -62,6 +62,30 @@ def send_file(group: str, file_path: str, caption: str) -> bool:
     return True
 
 
+def _check_gateway_ok(resp, what: str) -> None:
+    """HTTP 状态码 OK 后，再校验网关 JSON 的 ok 字段。
+
+    微信 DMZ 网关发送失败时返回 HTTP 200 + {"ok": false, "result": {...}}
+    （如微信未登录、目标未找到）。只查状态码会误判为成功 → 告警没送达却标
+    sent。ok 为 False 时 raise，使 send_file 返回 False。
+    """
+    if resp.status_code >= 400:
+        raise RuntimeError(f"{what} HTTP {resp.status_code}: {resp.text[:200]}")
+    json_fn = getattr(resp, "json", None)
+    if json_fn is None:
+        return
+    try:
+        payload = json_fn()
+    except ValueError:
+        # 无 JSON 或非 JSON 响应，视为成功（网关可能只回状态码）。
+        return
+    if not isinstance(payload, dict):
+        return
+    if payload.get("ok") is False:
+        detail = payload.get("result")
+        raise RuntimeError(f"{what} 网关返回 ok=false: {detail!r}")
+
+
 def _post_text(url: str, headers: dict, group: str, caption: str) -> None:
     resp = requests.post(
         url,
@@ -69,8 +93,7 @@ def _post_text(url: str, headers: dict, group: str, caption: str) -> None:
         headers=headers,
         timeout=DEFAULT_TIMEOUT,
     )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"send-text HTTP {resp.status_code}: {resp.text[:200]}")
+    _check_gateway_ok(resp, "send-text")
 
 
 def _post_file(url: str, headers: dict, group: str, file_path: str, filename: str) -> None:
@@ -82,5 +105,4 @@ def _post_file(url: str, headers: dict, group: str, file_path: str, filename: st
             headers=headers,
             timeout=DEFAULT_TIMEOUT,
         )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"send-file HTTP {resp.status_code}: {resp.text[:200]}")
+    _check_gateway_ok(resp, "send-file")
