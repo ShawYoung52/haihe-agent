@@ -295,7 +295,8 @@ def confirm_call_respond(task_id: int, req: CallRespondConfirmRequest):
     """人工确认叫应任务并触发后台发送。"""
     result = call_respond.confirm_task(task_id, req.confirm_person)
     if not result["success"]:
-        raise HTTPException(status_code=404, detail=result["detail"])
+        # 任务不存在→404；状态不可确认→409
+        raise HTTPException(status_code=result.get("status_code", 404), detail=result["detail"])
     return result
 
 

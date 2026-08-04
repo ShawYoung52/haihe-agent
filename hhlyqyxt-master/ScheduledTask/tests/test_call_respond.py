@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from Models.QyCallRespondTask import QyCallRespondTask
 from Models.QyCallRespondSendLog import QyCallRespondSendLog
+from Models.QyEmergencyResponseMonitor import QyEmergencyResponseMonitor
 from ScheduledTask import call_respond
 from utils.wechat_send_file import send_file
 
@@ -81,10 +82,23 @@ class _FakeTask:
         self.status = kw.get("status")
         self.report_docx_path = kw.get("report_docx_path")
         self.report_pdf_path = kw.get("report_pdf_path")
+        self.report_docx_url = kw.get("report_docx_url")
+        self.report_pdf_url = kw.get("report_pdf_url")
         self.confirm_person = kw.get("confirm_person")
         self.confirm_time = kw.get("confirm_time")
         self.send_time = kw.get("send_time")
         self.create_time = kw.get("create_time")
+
+
+class _FakeMonitor:
+    """qy_emergency_response_monitor 假记录（含 report_docx_url/report_pdf_url）。"""
+
+    def __init__(self, **kw):
+        self.id = kw.get("id")
+        self.response_level = kw.get("response_level")
+        self.datatime = kw.get("datatime")
+        self.report_docx_url = kw.get("report_docx_url")
+        self.report_pdf_url = kw.get("report_pdf_url")
 
 
 class _FakeQuery:
@@ -106,8 +120,14 @@ class _FakeQuery:
         return self
 
     def first(self):
-        if self._session.prev_level_obj is not None:
-            return self._session.prev_level_obj
+        # 按模型区分：QyEmergencyResponseMonitor 查询走 monitor_obj/prev_level_obj，
+        # 其余（QyCallRespondTask 等）从 all_rows 取任务。
+        if self._model is QyEmergencyResponseMonitor:
+            if self._session.monitor_obj is not None:
+                return self._session.monitor_obj
+            if self._session.prev_level_obj is not None:
+                return self._session.prev_level_obj
+            return self._session.all_rows[0] if self._session.all_rows else None
         return self._session.all_rows[0] if self._session.all_rows else None
 
     def all(self):
@@ -118,6 +138,7 @@ class _FakeSession:
     def __init__(self):
         self.added = []
         self.prev_level_obj = None
+        self.monitor_obj = None
         self.all_rows = []
 
     def query(self, model):
@@ -148,10 +169,13 @@ def fake_session(monkeypatch):
 
 
 def _rec(level=2, datatime="2026-08-04 10:00:00", rid=1, docx="http://x/a.docx"):
+    """假应急响应记录。同时带 report_docx_url（on_tick 读）与
+    report_docx_path（send_task 读），保证两处映射都被真实断言。"""
     return _FakeTask(
         id=rid, emergency_monitor_id=rid, response_level=level,
         datatime=datetime.strptime(datatime, "%Y-%m-%d %H:%M:%S"),
-        impact_city="天津市", status="pending", report_docx_path=docx,
+        impact_city="天津市", status="pending",
+        report_docx_url=docx, report_docx_path=docx,
     )
 
 
@@ -229,6 +253,89 @@ def test_send_task_sent_when_pdf_only(fake_session, monkeypatch):
     assert task.status == "sent"
 
 
+def test_on_tick_maps_report_url_to_task_path(fake_session):
+    """C1/deferred：on_tick 必须把 record.report_docx_url 映射到 task.report_docx_path。"""
+    fake_session.prev_level_obj = _rec(level=0)  # 前一条 0 级，触发等级变化
+    task = call_respond.on_tick(_rec(level=2, rid=2, docx="http://x/b.docx"), "天津市")
+    assert task is not None
+    assert task.report_docx_path == "http://x/b.docx"
+    assert task.report_pdf_path is None
+
+
+def test_send_task_resolves_report_url_from_monitor(fake_session, monkeypatch):
+    """C1：task 自身路径为空时，send_task 按 emergency_monitor_id 反查应急响应表取 URL。"""
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: True)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/r.docx")
+    task = _rec(level=2, rid=12, docx=None)  # 任务自身无报告路径
+    fake_session.all_rows = [task]
+    fake_session.monitor_obj = _FakeMonitor(id=12, report_docx_url="http://x/resolved.docx")
+    call_respond.send_task(12)
+    assert task.status == "sent"
+    assert task.report_docx_path == "http://x/resolved.docx"
+
+
+def test_send_task_suspended_when_monitor_has_no_url(fake_session, monkeypatch):
+    """C1：任务路径空且应急响应表也无 URL 时，仍挂起等报告。"""
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    task = _rec(level=2, rid=13, docx=None)
+    fake_session.all_rows = [task]
+    fake_session.monitor_obj = _FakeMonitor(id=13)  # 无 URL
+    call_respond.send_task(13)
+    assert task.status == "suspended"
+
+
+def test_send_task_partial_failure_sent(fake_session, monkeypatch):
+    """I1：单个群失败不影响其他群，任一成功即 sent。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群", "B群"]}})
+    results = {"A群": True, "B群": False}
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: results[g])
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=14, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    call_respond.send_task(14)
+    assert task.status == "sent"
+
+
+def test_send_task_all_fail_failed(fake_session, monkeypatch):
+    """I1：全部群失败 → failed。"""
+    monkeypatch.setattr(call_respond, "load_group_config",
+                        lambda: {"groups": {"天津市": ["A群", "B群"]}})
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: False)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=15, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    call_respond.send_task(15)
+    assert task.status == "failed"
+
+
+def test_send_task_inflight_guard_skips_duplicate(fake_session, monkeypatch):
+    """I2：同一 task_id 已在发送中时，send_task 直接跳过，不改状态。"""
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    task = _rec(level=2, rid=16, docx="http://x/a.docx")
+    task.status = "confirmed"
+    fake_session.all_rows = [task]
+    call_respond._in_flight.add(16)
+    try:
+        call_respond.send_task(16)
+        assert task.status == "confirmed"  # 未执行发送，状态未被改写
+    finally:
+        call_respond._in_flight.discard(16)
+
+
+def test_send_task_clears_inflight_after_send(fake_session, monkeypatch):
+    """I2：正常发送完成后 in-flight 守卫被清理，后续可重试。"""
+    monkeypatch.setattr(call_respond, "load_group_config", lambda: {"groups": {"天津市": ["A群"]}})
+    monkeypatch.setattr(call_respond, "send_file", lambda g, f, c: True)
+    monkeypatch.setattr(call_respond, "_download_report", lambda url: "/tmp/a.docx")
+    task = _rec(level=2, rid=17, docx="http://x/a.docx")
+    fake_session.all_rows = [task]
+    call_respond.send_task(17)
+    assert task.status == "sent"
+    assert 17 not in call_respond._in_flight
+
+
 from fastapi import HTTPException
 from Controller.tool_router import (
     list_call_respond_tasks, confirm_call_respond, get_call_respond_logs,
@@ -248,6 +355,16 @@ def test_confirm_endpoint_raises_when_not_found(fake_session, monkeypatch):
     with _pytest.raises(HTTPException) as ei:
         confirm_call_respond(999, CallRespondConfirmRequest(confirm_person="张三"))
     assert ei.value.status_code == 404
+
+
+def test_confirm_endpoint_raises_409_when_not_confirmable(fake_session, monkeypatch):
+    """I3：任务存在但状态不可确认 → 409，而非 404。"""
+    monkeypatch.setattr(call_respond, "confirm_task",
+                        lambda tid, person: {"success": False, "detail": "任务状态为 sent，不可确认",
+                                             "status_code": 409})
+    with pytest.raises(HTTPException) as ei:
+        confirm_call_respond(7, CallRespondConfirmRequest(confirm_person="张三"))
+    assert ei.value.status_code == 409
 
 
 def test_list_tasks_returns_list(fake_session):
