@@ -65,3 +65,57 @@ def group_targets(impact_city: str, config: dict) -> list:
         if city:
             result.extend(groups.get(city, []))
     return list(dict.fromkeys(result))
+
+
+def _previous_response_level(datatime) -> int:
+    """返回 qy_emergency_response_monitor 中 datatime 之前最近一条的等级，无则 0。"""
+    session = Session()
+    try:
+        prev = (
+            session.query(QyEmergencyResponseMonitor)
+            .filter(QyEmergencyResponseMonitor.datatime < datatime)
+            .order_by(desc(QyEmergencyResponseMonitor.datatime))
+            .first()
+        )
+        return prev.response_level if prev is not None else 0
+    finally:
+        session.close()
+
+
+def on_tick(record, impact_city: str, config: Optional[dict] = None) -> Optional[QyCallRespondTask]:
+    """等级变化时创建叫应任务。
+
+    record 为 None 或 0 级时不创建。等级变化判定：当前等级与前一条
+    应急响应记录等级不同且当前 ≥1 时创建 pending 任务。
+    """
+    if record is None:
+        return None
+    level = int(record.response_level)
+    if level < 1:
+        return None
+    prev_level = _previous_response_level(record.datatime)
+    if prev_level == level:
+        return None  # 同等级持续不重复创建
+
+    task = QyCallRespondTask(
+        emergency_monitor_id=record.id,
+        response_level=level,
+        datatime=record.datatime,
+        impact_city=impact_city,
+        status=STATUS_PENDING,
+        report_docx_path=getattr(record, "report_docx_url", None),
+        report_pdf_path=getattr(record, "report_pdf_url", None),
+    )
+    session = Session()
+    try:
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+        logger.info("等级变化创建叫应任务 id=%s level=%d impact=%s", task.id, level, impact_city)
+        return task
+    except Exception:
+        session.rollback()
+        logger.warning("创建叫应任务失败（不阻塞主流程）", exc_info=True)
+        return None
+    finally:
+        session.close()
