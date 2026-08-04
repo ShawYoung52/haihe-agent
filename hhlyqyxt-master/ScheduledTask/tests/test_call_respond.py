@@ -68,8 +68,17 @@ def test_group_targets_empty_config_returns_empty():
     assert call_respond.group_targets("天津市", {"groups": {}}) == []
 
 
-def test_send_file_stub_returns_false():
-    assert send_file("某群", "/tmp/r.docx", "话术") is False
+def test_send_file_success_mocked(monkeypatch, tmp_path):
+    """send_file 已接入网关（非占位），成功路径返回 True。"""
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+    import utils.wechat_send_file as wsf
+    monkeypatch.setattr(wsf.requests, "post", lambda *a, **k: _Resp())
+    f = tmp_path / "r.docx"
+    f.write_bytes(b"data")
+    assert send_file("某群", str(f), "话术") is True
 
 
 class _FakeTask:
