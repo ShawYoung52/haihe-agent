@@ -25,6 +25,14 @@ def test_prompts_subbasin_section_uses_river_system_tool():
     assert "优先调用" in subbasin_section
 
 
+def test_anti_redundancy_rule_present():
+    """回答规范必须包含"只输出与当前问题直接相关的内容"强制规则。"""
+    text = PROMPTS_PATH.read_text(encoding="utf-8")
+    assert "只输出与当前问题直接相关的内容" in text
+    # 反例示例：问市台预警不该给全市各区县
+    assert "市台" in text or "全市" in text
+
+
 def test_prompts_does_not_hardcode_ec_for_river_system():
     """3.4 工具列表中，新工具条目必须要求引用 data_source 而非硬编码数据来源。"""
     text = PROMPTS_PATH.read_text(encoding="utf-8")
