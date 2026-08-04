@@ -209,10 +209,7 @@ def _trim_warning_regions_for_scope(records: list[dict], user_text: str) -> list
     trimmed = []
     for rec in records:
         area = str(rec.get("locationName") or _extract_warning_area(rec) or "")
-        if asks_broad:
-            # 市级问法：把区县明细折叠为市级层面
-            rec["locationName"] = "全市"
-        elif names_district:
+        if names_district:
             # 具体区县问法：仅保留包含该区县关键词的记录
             matching = [a for a in (_extract_warning_area(rec) or "").split("、") if a and a in text]
             if matching:
@@ -221,14 +218,24 @@ def _trim_warning_regions_for_scope(records: list[dict], user_text: str) -> list
                 rec["locationName"] = "全市"
             else:
                 continue  # 与问法无关的区县，丢弃
+        elif asks_broad:
+            # 市级问法：把区县明细折叠为市级层面
+            rec["locationName"] = "全市"
         # 未指定区县且非市级：保留原记录，不做裁剪
         trimmed.append(rec)
     return trimmed
 
 
 def _is_broad_scoped_warning_query(user_text: str) -> bool:
-    """市级问法（市台/全市/本市/我市）不展开各区县影响区域列。"""
-    return any(t in (user_text or "") for t in {"天津", "天津市", "我市", "全市", "本市"})
+    """市级问法（市台/全市/本市/我市）不展开各区县影响区域列。
+
+    若问法指定了具体区县（如"天津市蓟州区"、"滨海新区"），不算市级问法，
+    保留影响区域列。
+    """
+    text = user_text or ""
+    if re.search(r"[一-龥]{1,4}区(?:县)?", text):
+        return False
+    return any(t in text for t in {"天津", "天津市", "我市", "全市", "本市"})
 
 
 def _warning_publisher_rank(record: dict[str, str]) -> int:

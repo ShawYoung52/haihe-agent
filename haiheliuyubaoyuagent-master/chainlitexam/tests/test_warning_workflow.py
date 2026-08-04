@@ -7,6 +7,7 @@ ensure_stubs()
 
 from chainlitexam.tools.warning_workflow import (
     _build_warning_table_markdown,
+    _is_broad_scoped_warning_query,
     _trim_warning_regions_for_scope,
 )
 
@@ -57,3 +58,22 @@ def test_generic_no_location_query_keeps_all_district_records():
     assert len(trimmed) == 2
     assert all("蓟州" in str(r.get("locationName") or "") for r in trimmed[:1])
     assert all("滨海" in str(r.get("locationName") or "") for r in trimmed[1:])
+
+
+def test_district_qualified_with_city_prefix_keeps_matching_district():
+    """"天津市X区"前缀问法（含"天津"子串）应走区县分支，不折叠为全市。"""
+    records = [
+        _record(area="蓟州区、宝坻区", dept="天津市气象台"),
+        _record(area="滨海新区", dept="天津市气象台"),
+    ]
+    trimmed = _trim_warning_regions_for_scope(records, "天津市蓟州区有暴雨预警吗")
+    assert len(trimmed) == 1
+    assert all("蓟州" in str(r.get("locationName") or "") for r in trimmed)
+    assert all("全市" not in str(r.get("locationName") or "") for r in trimmed)
+
+
+def test_district_qualified_keeps_region_column():
+    """"天津市X区"前缀问法不应视作市级问法，保留影响区域列。"""
+    records = [_record(area="蓟州区、宝坻区")]
+    table = _build_warning_table_markdown(records, "【生效预警清单】", show_region_column=not _is_broad_scoped_warning_query("天津市蓟州区有暴雨预警吗"))
+    assert "影响区域" in table
