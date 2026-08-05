@@ -5,7 +5,7 @@
 `send_file(group, file_path, caption) -> bool` 契约调用，无需改动。
 
 配置（环境变量）：
-    WECHAT_GATEWAY_URL    网关 base URL，默认 http://127.0.0.1:8000
+    WECHAT_GATEWAY_URL    网关 base URL，默认 http://127.0.0.1:18080
     WECHAT_GATEWAY_TOKEN  网关 token（Authorization: Bearer <token>）
 """
 import logging
@@ -16,7 +16,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GATEWAY_URL = "http://127.0.0.1:8000"
+DEFAULT_GATEWAY_URL = "http://127.0.0.1:18080"
 DEFAULT_TIMEOUT = 30
 
 
