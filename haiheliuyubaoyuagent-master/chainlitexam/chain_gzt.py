@@ -2461,24 +2461,49 @@ def _build_messages_from_thread(thread: ThreadDict | dict | None):
     return resumed_messages
 
 
+def _env_str(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int_optional(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _build_orchestrator_runtime() -> dict:
     """构造 planner / answer / thinking chain 与工具表。
 
     不碰 `cl.user_session`，因此可被网页会话与 HTTP 问答接口共用。
     """
+    DEFAULT_API_BASE = "http://10.226.188.156:8000/v1/"
+
     planner_llm = ChatOpenAI(
-        model="Qwen3.6-27B",
+        model=_env_str("PLANNER_MODEL", "Qwen3.6-27B"),
         streaming=True,
-        temperature=0.7,
-        openai_api_base="http://10.226.188.156:8000/v1/",
-        openai_api_key="EMPTY",
+        temperature=_env_float("PLANNER_TEMPERATURE", 0.7),
+        openai_api_base=_env_str("PLANNER_API_BASE", DEFAULT_API_BASE),
+        openai_api_key=_env_str("PLANNER_API_KEY", "EMPTY"),
+        **({"max_tokens": _env_int_optional("PLANNER_MAX_TOKENS")} if _env_int_optional("PLANNER_MAX_TOKENS") else {}),
     )
     answer_llm = ChatOpenAI(
-        model="Qwen3.6-27B",
+        model=_env_str("ANSWER_MODEL", "Qwen3.6-27B"),
         streaming=True,
-        temperature=0.7,
-        openai_api_base="http://10.226.188.156:8000/v1/",
-        openai_api_key="EMPTY",
+        temperature=_env_float("ANSWER_TEMPERATURE", 0.7),
+        openai_api_base=_env_str("ANSWER_API_BASE", DEFAULT_API_BASE),
+        openai_api_key=_env_str("ANSWER_API_KEY", "EMPTY"),
+        **({"max_tokens": _env_int_optional("ANSWER_MAX_TOKENS")} if _env_int_optional("ANSWER_MAX_TOKENS") else {}),
     )
 
     tools = await load_sse_tools()
