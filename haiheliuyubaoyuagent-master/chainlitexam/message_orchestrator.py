@@ -4817,6 +4817,35 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                         callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                         timeout=60,
                     )
+                except (asyncio.TimeoutError, TimeoutError) as timeout_exc:
+                    # Fix C：第 2 次 Planner 超时且已有完整滚动预报数据时，回退 Answer 生成
+                    if _has_complete_rolling_forecast(rolling_forecast_bundles):
+                        print("[Fix C] Planner 超时，已有完整预报数据，回退 Answer 生成。")
+                        try:
+                            await _maybe_close_reasoning(reasoning)
+                            text = await asyncio.wait_for(
+                                callbacks["astream_answer_chain_to_message"](
+                                    answer_chain, {"messages": messages}, stream_msg
+                                ),
+                                timeout=60,
+                            )
+                        except Exception:
+                            text = ""
+                        text = assemble_rolling_forecast_answer(
+                            _sanitize_display_text(text or ""),
+                            rolling_forecast_bundles,
+                        )
+                        text = callbacks["append_followup_if_needed"](text, message.content)
+                        has_chart = cl.user_session.get("has_chart_generated", False) or False
+                        text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
+                        if text:
+                            stream_msg.content = text
+                            await stream_msg.update()
+                            messages.append(AIMessage(content=text))
+                        cl.user_session.set("messages", messages)
+                        answer_generated = True
+                        break
+                    raise
                 except Exception as e:
                     await reasoning.line(f"❌ 循环生成回答失败：{str(e)[:200]}")
                     # 不 close，让循环外兜底继续复用 reasoning
@@ -4842,6 +4871,45 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             if planner_msg.tool_calls and stream_msg.content.strip():
                 stream_msg.content = ""
                 await stream_msg.update()
+
+        except (asyncio.TimeoutError, TimeoutError) as timeout_exc:
+            # Fix C：第 2 次 Planner 超时且已有完整滚动预报数据时，回退 Answer 生成
+            if _has_complete_rolling_forecast(rolling_forecast_bundles):
+                print("[Fix C] 外层 Planner 超时，已有完整预报数据，回退 Answer 生成。")
+                try:
+                    await _maybe_close_reasoning(reasoning)
+                    text = await asyncio.wait_for(
+                        callbacks["astream_answer_chain_to_message"](
+                            answer_chain, {"messages": messages}, stream_msg
+                        ),
+                        timeout=60,
+                    )
+                except Exception:
+                    text = ""
+                text = assemble_rolling_forecast_answer(
+                    _sanitize_display_text(text or ""),
+                    rolling_forecast_bundles,
+                )
+                text = callbacks["append_followup_if_needed"](text, message.content)
+                has_chart = cl.user_session.get("has_chart_generated", False) or False
+                text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
+                if text:
+                    stream_msg.content = text
+                    await stream_msg.update()
+                    messages.append(AIMessage(content=text))
+                cl.user_session.set("messages", messages)
+                answer_generated = True
+                break
+            error_msg = _friendly_llm_error_text(timeout_exc)
+            await reasoning.line(f"❌ 调用失败：{str(timeout_exc)[:200]}")
+            await _maybe_close_reasoning(reasoning)
+            await cl.Message(content=error_msg).send()
+            print(f"LLM 调用失败：{timeout_exc}")
+
+            traceback.print_exc()
+            print(f"Messages 内容：{messages}")
+            _log_query_exit(query_start_time, session_id, query_summary, "fail")
+            break  # 中断循环，避免同一异常重复报错，后续走循环外兜底
 
         except Exception as e:
             error_msg = _friendly_llm_error_text(e)
