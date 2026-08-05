@@ -1847,6 +1847,14 @@ async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
     return results
 
 
+def _has_complete_rolling_forecast(bundles: list) -> bool:
+    """滚动预报数据完整（最后一个 bundle 有代码生成的表格）时返回 True。"""
+    valid = [b for b in bundles if isinstance(b, dict)]
+    if not valid:
+        return False
+    return bool(str(valid[-1].get("code_section") or "").strip())
+
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks,
                           parent_step_id: str | None = None):
     ree = None
@@ -4692,6 +4700,44 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             messages.append(AIMessage(content=final_text))
             cl.user_session.set("messages", messages)
             print("\n=== 使用预警专用组装答案，退出循环 ===\n")
+            _log_query_exit(query_start_time, session_id, query_summary, "ok")
+            answer_generated = True
+            break
+
+        # Fix A：滚动预报数据已完整（有代码生成的表格）且非应急响应综合场景时，
+        # 跳过第 2 次 Planner 决策，直接由 Answer LLM 生成结论，走代码收口组装。
+        if (
+            _has_complete_rolling_forecast(rolling_forecast_bundles)
+            and not has_emergency_response_tool
+        ):
+            print("[process_message] 滚动预报数据完整，跳过第 2 次 Planner，直接生成回答。")
+            await reasoning.stage("✍️ 生成结论", "已获取完整预报数据，正在为您生成分析结论...")
+            has_chart = cl.user_session.get("has_chart_generated", False) or False
+            try:
+                _compress_messages(messages)
+                await _maybe_close_reasoning(reasoning)
+                text = await asyncio.wait_for(
+                    callbacks["astream_answer_chain_to_message"](
+                        answer_chain, {"messages": messages}, stream_msg
+                    ),
+                    timeout=60,
+                )
+            except Exception as e:
+                print(f"[Fix A] 回答生成失败：{e}")
+                # 兜底：用首个 bundle 的 code_section 直接收口（无结论则用占位）
+                text = ""
+            text = assemble_rolling_forecast_answer(
+                _sanitize_display_text(text or ""),
+                rolling_forecast_bundles,
+            )
+            text = callbacks["append_followup_if_needed"](text, message.content)
+            text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
+            if text:
+                stream_msg.content = text
+                await stream_msg.update()
+                messages.append(AIMessage(content=text))
+            cl.user_session.set("messages", messages)
+            print("\n=== Fix A：跳过第 2 次 Planner，使用代码收口答案 ===\n")
             _log_query_exit(query_start_time, session_id, query_summary, "ok")
             answer_generated = True
             break

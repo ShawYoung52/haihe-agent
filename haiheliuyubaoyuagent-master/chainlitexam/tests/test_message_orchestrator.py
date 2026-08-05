@@ -445,3 +445,11 @@ async def test_run_tool_round_uses_parent_step_id(monkeypatch):
     assert round_step.parent_id == "reasoning-step-1", (
         f"第 1 轮 step 应挂到 reasoning-step-1，实际 {round_step.parent_id}"
     )
+
+
+def test_has_complete_rolling_forecast():
+    """最后一个滚动预报 bundle 有 code_section 时视为数据完整。"""
+    assert mo._has_complete_rolling_forecast([{"code_section": "| 表格 |"}]) is True
+    assert mo._has_complete_rolling_forecast([{"code_section": ""}]) is False
+    assert mo._has_complete_rolling_forecast([]) is False
+    assert mo._has_complete_rolling_forecast([{"category": "activity"}]) is False
