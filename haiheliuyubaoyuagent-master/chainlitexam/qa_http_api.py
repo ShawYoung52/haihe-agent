@@ -363,11 +363,9 @@ class CapturingEmitter(BaseChainlitEmitter):
 
     async def send_step(self, step_dict):
         self._record(step_dict)
-        return await super().send_step(step_dict)
 
     async def update_step(self, step_dict):
         self._record(step_dict)
-        return await super().update_step(step_dict)
 
     async def delete_step(self, step_dict):
         """标记被删除的 step，归并时跳过。
@@ -380,12 +378,10 @@ class CapturingEmitter(BaseChainlitEmitter):
             sid = step_dict.get("id")
             if sid:
                 self._deleted_ids.add(str(sid))
-        return await super().delete_step(step_dict)
 
     async def send_element(self, element_dict):
         if isinstance(element_dict, dict):
             self.elements.append(element_dict)
-        return await super().send_element(element_dict)
 
     async def send_window_message(self, data):
         # GIS 联动包是 JSON 字符串；非 JSON 内容忽略而不是让请求崩掉
@@ -393,7 +389,6 @@ class CapturingEmitter(BaseChainlitEmitter):
             self.gis_packets.append(json.loads(data) if isinstance(data, str) else data)
         except (TypeError, ValueError):
             logger.debug("window message 非 JSON，已忽略")
-        return await super().send_window_message(data)
 
     def reasoning_texts(self) -> list[str]:
         """按 step id 归并思考过程，取每个的最终态。
@@ -416,54 +411,6 @@ class CapturingEmitter(BaseChainlitEmitter):
             if i in final_by_id and final_by_id[i].strip() and i not in self._deleted_ids
         ]
 
-
-# ---------------------------------------------------------------- 数据层过滤
-
-
-def _ensure_data_layer_filter() -> None:
-    """给 Chainlit 数据层套一层代理：HTTP 会话不落库。
-
-    Chainlit 的 `Message.send()` / `Step()` 通过 `asyncio.create_task` 异步
-    写 threads/steps 表。create_task 创建的新 Task 不继承当前 context_var，
-    所以按会话标记（`_qa_skip_persist`）判断会失效。
-
-    解决方案：进程级全局布尔标志。HTTP 会话执行前设为 True，执行后设回 False。
-    这是粗粒度的（同一时刻只有一个 HTTP 请求走这条路径，并发通过
-    `_semaphore` 串行保证了），但窗口期内落库请求（create_task 产生的）全部
-    被拦截。网页会话不受影响（标志始终为 False）。
-    """
-    import chainlit.data as cl_data
-
-    inner = cl_data.get_data_layer()
-    if inner is None:
-        return
-    if getattr(inner, "_qa_filtered", False):
-        return
-
-    class _FilteringDataLayer:
-        def __init__(self, real):
-            object.__setattr__(self, "_real", real)
-            object.__setattr__(self, "_qa_filtered", True)
-
-        def __getattr__(self, name):
-            inner_attr = getattr(object.__getattribute__(self, "_real"), name)
-            if not callable(inner_attr):
-                return inner_attr
-
-            async def _wrapped(*a, **k):
-                # 全局标志：HTTP 会话进行中，所有落库请求跳过
-                if _qa_persist_blocked:
-                    return None
-                return await inner_attr(*a, **k)
-
-            return _wrapped
-
-    cl_data._data_layer = _FilteringDataLayer(inner)
-    cl_data._data_layer_initialized = True
-
-
-# 进程级全局：HTTP 会话期间设为 True，拦截所有 DB 写
-_qa_persist_blocked = False
 
 
 # ---------------------------------------------------------------- 图片
@@ -597,7 +544,6 @@ class QARuntime:
         """
         self._factory = runtime_factory
         self._runtime = None
-        _ensure_data_layer_filter()
 
     @property
     def configured(self) -> bool:
@@ -712,12 +658,6 @@ class QARuntime:
         # 历史副本传进去（process_message 会原地 append 本轮问答）
         history = await self.store.get(conversation_id)
 
-        # 全局标志：HTTP 会话过程中拦截所有 Chainlit DB 写（threads/steps 表）。
-        # 必须用全局标志而非 session 标记——Chainlit 数据层用 asyncio.create_task
-        # 异步写库，新 Task 不继承 ContextVar，session 标记方式失效。
-        global _qa_persist_blocked
-        _qa_persist_blocked = True
-
         pq_started = time.time()
         try:
             await process_message(
@@ -744,7 +684,6 @@ class QARuntime:
             # 不手动清理会让 user_sessions / chat_contexts 无界增长（实测 ~5 KB/请求，
             # 生产上几万请求即 GB 级），最终 OOM。
             _release_chainlit_session(ctx.session.id)
-            _qa_persist_blocked = False
 
         pq_elapsed = time.time() - pq_started
         total_elapsed = round(time.time() - started, 2)

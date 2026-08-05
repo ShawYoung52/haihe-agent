@@ -828,3 +828,47 @@ def test_scrub_keeps_normal_text_intact():
 def test_scrub_handles_empty():
     assert qa._scrub("") == ""
     assert qa._scrub(None) is None
+
+
+def test_capturing_emitter_does_not_call_super(monkeypatch):
+    """HTTP emitter 的方法不应调用 super() 进入 Chainlit 数据层。"""
+    import qa_http_api
+    # 构造 emitter，monkeypatch super 方法为抛错，验证不被调用
+    called = {"super": False}
+
+    class FakeSession:
+        id = "sess-1"
+
+    cap = qa_http_api.CapturingEmitter(FakeSession())
+    async def _boom(*a, **k):
+        called["super"] = True
+        raise AssertionError("super() 不应被调用")
+    monkeypatch.setattr(qa_http_api.BaseChainlitEmitter, "send_step", _boom)
+    monkeypatch.setattr(qa_http_api.BaseChainlitEmitter, "update_step", _boom)
+    monkeypatch.setattr(qa_http_api.BaseChainlitEmitter, "delete_step", _boom)
+    monkeypatch.setattr(qa_http_api.BaseChainlitEmitter, "send_element", _boom)
+    monkeypatch.setattr(qa_http_api.BaseChainlitEmitter, "send_window_message", _boom)
+
+    import asyncio
+    async def _run():
+        await cap.send_step({"id": "a", "type": "assistant_message", "output": "hi"})
+        await cap.update_step({"id": "a", "type": "assistant_message", "output": "hello"})
+        await cap.delete_step({"id": "a"})
+        await cap.send_element({"id": "e"})
+        await cap.send_window_message('{"gis":1}')
+    asyncio.new_event_loop().run_until_complete(_run())
+
+    assert called["super"] is False, "HTTP emitter 不应调用 super() 写数据层"
+    assert len(cap.answer_steps) >= 1
+    assert cap.gis_packets == [{"gis": 1}]
+
+
+def test_no_qa_persist_blocked_global():
+    """不再依赖进程级 _qa_persist_blocked 布尔变量。"""
+    import qa_http_api
+    assert not hasattr(qa_http_api, "_qa_persist_blocked")
+
+
+def test_no_data_layer_filter_function():
+    import qa_http_api
+    assert not hasattr(qa_http_api, "_ensure_data_layer_filter")
