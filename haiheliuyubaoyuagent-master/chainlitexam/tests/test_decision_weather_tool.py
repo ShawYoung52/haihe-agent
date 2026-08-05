@@ -199,6 +199,8 @@ def test_rule_based_slot_extraction_locations():
     assert dw_core._extract_decision_slots_rule_based("天津大学未来24小时会下雨吗")["location_name"] == "天津大学"
     assert dw_core._extract_decision_slots_rule_based("未来24小时天津大学会下雨吗")["location_name"] == "天津大学"
     assert dw_core._extract_decision_slots_rule_based("梅江会展中心适合户外活动吗")["question_type"] == "activity"
+    # 天/日/周 时段词不得泄漏进位置名：无具体名词后缀前内容时回退 LLM（None）
+    assert dw_core._extract_decision_slots_rule_based("未来三天学校天气") is None
 
 
 def test_rule_based_slot_extraction_falls_back_on_ambiguous():
