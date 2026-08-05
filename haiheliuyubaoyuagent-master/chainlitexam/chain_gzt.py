@@ -551,7 +551,7 @@ async def _build_qa_runtime() -> dict:
     """给 qa_http_api 注入运行时（进程级构造一次）。"""
     await _ensure_chainlit_tables()
     runtime = await _build_orchestrator_runtime()
-    runtime["callbacks"] = _build_orchestrator_callbacks()
+    runtime["callbacks"] = _build_orchestrator_callbacks(execution_mode="http")
     return runtime
 
 
@@ -865,11 +865,14 @@ def _repair_markdown_layout(text: str) -> str:
     return text.strip()
 
 
-async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: cl.Message, config: RunnableConfig | None = None) -> str:
+async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: cl.Message, config: RunnableConfig | None = None, execution_mode: str = "chainlit") -> str:
     """
     对 answer_chain 启用真实流式输出（不适用于带 tool_calls 的 planner_chain）。
     边生成边刷新前端，并返回完整文本用于写入历史消息。
     若流式失败则自动回退到 ainvoke。
+
+    execution_mode="chainlit"：逐 chunk 刷新 stream_msg.update()
+    execution_mode="http"：仅在结尾更新一次，减少 per-chunk 开销
     """
     full_text = ""
     try:
@@ -883,17 +886,22 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
                 # 实时清理可能泄露的工具调用标记
                 text = _sanitize_display_text(text)
                 full_text += text
-                stream_msg.content += text
-                await stream_msg.update()
+                if execution_mode == "chainlit":
+                    stream_msg.content += text
+                    await stream_msg.update()
         # 最终再清理一次，防止跨 chunk 残留
-        final_text = _repair_markdown_layout(_sanitize_display_text(stream_msg.content))
+        final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
         stream_msg.content = final_text
-        await stream_msg.update()
+        if execution_mode == "chainlit":
+            await stream_msg.update()
+        else:
+            await stream_msg.update()
         return _sanitize_display_text(full_text)
     except Exception as e:
         print(f"[流式回答] 失败，回退到非流式：{e}")
         if full_text.strip():
-            stream_msg.content = _repair_markdown_layout(_sanitize_display_text(stream_msg.content))
+            final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
+            stream_msg.content = final_text
             await stream_msg.update()
             return stream_msg.content
         result = await answer_chain.ainvoke(input_dict, config=config)
@@ -3739,12 +3747,19 @@ async def on_chat_resume(thread: ThreadDict):
     await _init_runtime_session(messages_seed=resumed_messages)
 
 
-def _build_orchestrator_callbacks() -> dict:
+def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
     """构造 process_message 所需的回调表。
 
     网页端 `on_message` 与 HTTP 问答接口（qa_http_api）共用同一份定义，
     避免两处维护漂移。
+
+    execution_mode="chainlit"：逐 chunk 刷新前端
+    execution_mode="http"：累积后在结尾更新一次
     """
+    def _astream_answer(answer_chain, input_dict, stream_msg, config=None):
+        return astream_answer_chain_to_message(
+            answer_chain, input_dict, stream_msg, config, execution_mode=execution_mode
+        )
     return {
         "need_river_plot": _need_river_plot,
         "extract_river_name": _extract_river_name,
@@ -3758,7 +3773,7 @@ def _build_orchestrator_callbacks() -> dict:
         "ainvoke_chain": ainvoke_chain,
         "astream_planner_think": astream_planner_think,
         "astream_thinking_to_reasoning": astream_thinking_to_reasoning,
-        "astream_answer_chain_to_message": astream_answer_chain_to_message,
+        "astream_answer_chain_to_message": _astream_answer,
         "should_force_admin_units_reply": _should_force_admin_units_reply,
         "should_force_partition_table_reply": _should_force_partition_table_reply,
         "should_force_structured_impact_reply": _should_force_structured_impact_reply,
