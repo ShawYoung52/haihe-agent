@@ -4508,6 +4508,17 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     timing.mark("planner_round_1")
     timing.record_planner_round()
 
+    # 影子模式：记录候选工具是否召回 Planner 实际调用工具。只打日志，不改 Planner 绑定。
+    if planner_msg.tool_calls and callbacks.get("tool_candidate_index"):
+        try:
+            idx = callbacks["tool_candidate_index"]
+            actual = [tc["name"] for tc in planner_msg.tool_calls]
+            hit = [t for t in actual if idx.contains(message.content, t)]
+            print(f"[TOOL_CAND] request={session_id} actual={actual} "
+                  f"recalled={len(hit)}/{len(actual)} candidates={idx.candidates_for(message.content, limit=12)}")
+        except Exception:
+            pass
+
     if planner_msg.tool_calls:
         tool_count = len(planner_msg.tool_calls)
         tool_names_display = "、".join(

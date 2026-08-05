@@ -552,6 +552,7 @@ async def _build_qa_runtime() -> dict:
     await _ensure_chainlit_tables()
     runtime = await _build_orchestrator_runtime()
     runtime["callbacks"] = _build_orchestrator_callbacks(execution_mode="http")
+    runtime["callbacks"]["tool_candidate_index"] = runtime.get("tool_candidate_index")
     return runtime
 
 
@@ -2532,6 +2533,8 @@ async def _build_orchestrator_runtime() -> dict:
     rainfall_river_impact_tools = build_rainfall_river_impact_tools()
     tools = tools + decision_weather_tools + rainfall_river_impact_tools
     print(f"✅ 本地工具已合并，当前工具列表：{[t.name for t in tools]}")
+    from tools.tool_candidate_index import ToolCandidateIndex
+    tool_candidate_index = ToolCandidateIndex(tools)
     planner_chain = prompt_template | planner_llm.bind_tools(tools)
     thinking_chain = (
         ChatPromptTemplate.from_messages([
@@ -2546,6 +2549,7 @@ async def _build_orchestrator_runtime() -> dict:
         "answer_chain": answer_chain,
         "thinking_chain": thinking_chain,
         "tools": tools,
+        "tool_candidate_index": tool_candidate_index,
     }
 
 
@@ -2561,6 +2565,7 @@ async def _init_runtime_session(messages_seed=None):
     cl.user_session.set("answer_chain", runtime["answer_chain"])
     cl.user_session.set("thinking_chain", runtime["thinking_chain"])
     cl.user_session.set("tools", runtime["tools"])
+    cl.user_session.set("tool_candidate_index", runtime.get("tool_candidate_index"))
     cl.user_session.set("messages", messages_seed if isinstance(messages_seed, list) else [])
 
 
@@ -3785,6 +3790,7 @@ def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
         "enrich_with_impact_time_tool": _enrich_with_impact_time_tool,
         "tool_observation_to_text": _tool_observation_to_text,
         "send_gis_linkage": _send_gis_linkage,
+        "tool_candidate_index": None,
     }
 
 
@@ -3812,6 +3818,8 @@ async def on_message(message: cl.Message):
         messages = []
         cl.user_session.set("messages", messages)
 
+    callbacks = _build_orchestrator_callbacks()
+    callbacks["tool_candidate_index"] = cl.user_session.get("tool_candidate_index")
     await process_message(
         message=message,
         planner_chain=planner_chain,
@@ -3819,5 +3827,5 @@ async def on_message(message: cl.Message):
         thinking_chain=thinking_chain,
         tools=tools,
         messages=messages,
-        callbacks=_build_orchestrator_callbacks(),
+        callbacks=callbacks,
     )
