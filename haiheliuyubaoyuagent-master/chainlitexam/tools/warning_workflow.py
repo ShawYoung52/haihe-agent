@@ -449,7 +449,34 @@ def _fill_prompt(template: str, **values: str) -> str:
     return prompt
 
 
+def _route_warning_tools_rule_based(user_text: str) -> dict | None:
+    t = (user_text or "").strip()
+    if not t or "预警" not in t:
+        return None
+    tool_names = ["get_effective_warning_info"]
+    national = any(k in t for k in ("国家局", "中央气象台", "中央台", "全国", "周边", "华北", "京津冀", "北京", "河北"))
+    history = any(k in t for k in ("解除了吗", "解除预警", "已解除", "解除的", "历史预警", "过去", "此前"))
+    today = any(k in t for k in ("今天新发", "今日新发", "今日发布", "今天发布", "今日预警", "今天预警", "新发", "动态"))
+    if national:
+        has_local = any(k in t for k in ("天津", "我市", "全市"))
+        tool_names = ["get_effective_warning_info", "get_national_warning_info"] if has_local else ["get_national_warning_info"]
+    if history and "get_history_warning_info" not in tool_names:
+        tool_names.append("get_history_warning_info")
+    if today and "get_today_warning_summary" not in tool_names:
+        tool_names.append("get_today_warning_summary")
+    return _normalize_warning_route({
+        "tool_names": tool_names,
+        "national_keywords": _infer_national_warning_keywords(t, None),
+        "reason": "规则路由",
+    })
+
+
 async def _route_warning_tools(answer_chain: Any, user_text: str, callbacks: dict[str, Any]) -> dict[str, Any]:
+    rule_route = _route_warning_tools_rule_based(user_text)
+    if rule_route:
+        print(f"[WarningWorkflow] rule route={json.dumps(rule_route, ensure_ascii=False)}")
+        return rule_route
+    # 回退：现有 LLM 路由
     prompt = _fill_prompt(
         WARNING_ROUTE_PROMPT,
         current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
