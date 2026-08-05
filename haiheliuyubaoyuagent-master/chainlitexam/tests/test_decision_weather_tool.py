@@ -37,6 +37,7 @@ _lc_tools.tool = _tool_stub
 sys.modules["langchain_core.tools"] = _lc_tools
 
 import chainlitexam.tools.decision_weather as dw
+from chainlitexam.tools import decision_weather_core as dw_core
 
 
 def test_build_decision_weather_tools_returns_one_tool():
@@ -190,3 +191,16 @@ async def test_query_decision_weather_for_poi_not_decision_weather():
 
     assert isinstance(result, str)
     assert "不是" in result or "不属于" in result
+
+
+def test_rule_based_slot_extraction_locations():
+    """规则抽取能识别常见点位名称。"""
+    assert dw_core._extract_decision_slots_rule_based("梅江会展中心明天天气怎么样")["location_name"] == "梅江会展中心"
+    assert dw_core._extract_decision_slots_rule_based("天津大学未来24小时会下雨吗")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("梅江会展中心适合户外活动吗")["question_type"] == "activity"
+
+
+def test_rule_based_slot_extraction_falls_back_on_ambiguous():
+    """无明确后缀的模糊问题应返回 None（回退 LLM）。"""
+    assert dw_core._extract_decision_slots_rule_based("学校明天天气怎么样") is None  # 后缀"学校"前无具体名词
+    assert dw_core._extract_decision_slots_rule_based("天气怎么样") is None

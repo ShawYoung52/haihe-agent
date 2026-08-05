@@ -146,6 +146,62 @@ def _decision_weather_prefilter(user_text: str) -> bool:
     return has_indicator or has_institution
 
 
+_DECISION_WEATHER_SUFFIXES = [
+    "会展中心", "中心", "大学", "学院", "学校", "医院", "公园", "酒店",
+    "大厦", "广场", "机场", "车站", "码头", "景区", "园区", "小区",
+]
+_DECISION_RAIN_WORDS = ["下雨", "有雨", "降雨", "降水", "暴雨", "雷阵雨", "雨"]
+
+
+def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
+    """纯规则抽取点位决策天气槽位；无法可靠抽取时返回 None（调用方回退 LLM）。"""
+    t = (user_text or "").strip()
+    if not t:
+        return None
+
+    # 1) 位置名：匹配机构后缀前的最长名词短语
+    location = None
+    for suffix in sorted(_DECISION_WEATHER_SUFFIXES, key=len, reverse=True):
+        idx = t.find(suffix)
+        if idx < 0:
+            continue
+        # 取后缀前的一段（跳过标点/介词/时间词）
+        head = t[:idx]
+        head = re.split(r"[，。？?！!、\s，]|今天|明天|后天|周末|未来|现在|上午|下午|晚上|夜里", head)[-1]
+        # 去掉结尾的"在/去/到/位于/附近"等
+        head = re.sub(r"(在|去|到|位于|附近|周边|旁边|距|距离)$", "", head)
+        candidate = (head + suffix).strip()
+        if candidate and len(candidate) >= 2 and head:
+            location = candidate
+            break
+
+    if not location:
+        return None
+
+    # 2) 问题类型
+    qtype = "general_weather"
+    if any(w in t for w in ["适合", "活动", "户外", "露营", "出行"]):
+        qtype = "activity"
+    elif any(w in t for w in ["未来", "小时", "接下来"]):
+        qtype = "rain_next_hours"
+    elif any(w in t for w in _DECISION_RAIN_WORDS):
+        qtype = "rain_now"
+    elif any(w in t for w in ["能见度", "雾", "霾"]):
+        qtype = "visibility"
+    elif any(w in t for w in ["气温", "温度", "热", "冷"]):
+        qtype = "temperature"
+    elif any(w in t for w in ["风"]):
+        qtype = "wind"
+
+    return {
+        "is_decision_weather": True,
+        "location_name": location,
+        "question_type": qtype,
+        "need_clarification": False,
+        "clarification_question": "",
+    }
+
+
 def _decision_pick_first_poi(poi_payload: dict) -> dict | None:
     """从 POI 检索结果中挑选第一个带有效经纬度的条目。"""
     pois = poi_payload.get("pois") if isinstance(poi_payload, dict) else None
@@ -310,7 +366,11 @@ def _ainvoke_chain(callbacks: dict) -> Any:
 
 
 async def _extract_decision_weather_slots(user_text: str, answer_chain: Any, callbacks: dict) -> dict:
-    """使用 LLM 只识别点位和问题类型，不在本层计算任何预报时间参数。"""
+    """抽取点位与问题类型；优先规则，规则不明确时回退 LLM。"""
+    rule_slots = _extract_decision_slots_rule_based(user_text)
+    if rule_slots:
+        return rule_slots
+    # 回退：现有 LLM 抽取
     prompt = (
         "你是天津气象决策服务问答的结构化抽取器。请判断用户问题是否属于"
         "“具体地点/单位/场馆/学校/医院/设施附近的未来或当前天气决策服务”。\n"
