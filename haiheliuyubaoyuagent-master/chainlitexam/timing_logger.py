@@ -20,7 +20,8 @@ class TimingContext:
         self.tool_calls: list[tuple[str, float]] = []
         self.planner_rounds: int = 0
         self.tool_call_count: int = 0
-        self._prev_ts = time.time()
+        self._start_ts = time.time()
+        self._prev_ts = self._start_ts
 
     def mark(self, name: str) -> None:
         """记录自上一 mark 到现在的耗时（毫秒），作为 name 阶段。"""
@@ -40,7 +41,7 @@ class TimingContext:
         parts += [f"{name}={ms:.0f}ms" for name, ms in self.stages.items()]
         parts.append(f"planner_rounds={self.planner_rounds}")
         parts.append(f"tool_call_count={self.tool_call_count}")
-        parts.append(f"total_ms={(time.time() - self._prev_ts) * 1000:.0f}ms")
+        parts.append(f"total_ms={(time.time() - self._start_ts) * 1000:.0f}ms")
         per_tool = ",".join(f"{n}:{ms:.0f}" for n, ms in self.tool_calls)
         parts.append(f"tools=[{per_tool}]")
         print(f"[PERF] {' '.join(parts)}")
