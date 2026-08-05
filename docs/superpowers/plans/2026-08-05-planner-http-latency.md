@@ -264,8 +264,6 @@ class TimingContext:
 在 `message_orchestrator.py` 顶部导入后，`process_message` 开头（`query_start_time` 之后）创建 `timing`：
 
 ```python
-    if not hasattr(cl.user_session, "_current_timing"):
-        pass
     from timing_logger import TimingContext
     timing = TimingContext(request_id=cl.user_session.get("id") or None)
 ```
@@ -273,8 +271,8 @@ class TimingContext:
 在 `process_message` 关键点插入 `timing.mark(...)`：
 - thinking 块之后（约 4454 行后）：`timing.mark("thinking")`
 - 首次 Planner 之后（`planner_msg` 得到后）：`timing.mark("planner_round_1")` + `timing.record_planner_round()`
-- 每轮 `_run_tool_round` 之后：`timing.mark(f"tool_round_{iteration}")` + `timing.record_tool_call`（可从 ToolMessage 或 `_run_tool_round` 返回的耗时统计）
-- Answer 生成之后：`timing.mark("answer")`
+- 每轮 `_run_tool_round` 调用前后：`timing.mark(f"tool_round_{iteration}")`——用 `_run_tool_round` 调用前的一刻到调用后的一刻作为该轮耗时。`tool_call_count` 用 `len(planner_msg.tool_calls)` 累计（`timing.tool_call_count += len(planner_msg.tool_calls)`）。每工具明细已由 `[TOOL_TIMING]` 单独记录，不必进 TimingContext。
+- Answer 生成之后（`astream_answer_chain_to_message` 返回后）：`timing.mark("answer")`
 - 结尾（`_log_query_exit` 前）：`timing.mark("done")` + `timing.log()`
 
 具体埋点位置以 `process_message` 现有 `iteration`、`_run_tool_round` 返回为准，插入后不改变任何控制流。`total_ms` 由 `TimingContext.log()` 基于 `_prev_ts` 计算。
