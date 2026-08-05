@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** ①修复网页端工具 step 出现在回答下方的排版问题（挂到思考过程下）；②优化 `query_decision_weather_for_poi` 31 秒延迟（槽位规则抽取省 1 次 LLM 调用）。
+**Goal:** ①修复网页端工具 step 出现在回答下方的排版问题（挂到思考过程下）；②优化 `query_decision_weather_for_poi` 31 秒延迟（槽位规则抽取省 1 次 LLM 调用）；③候选工具召回影子模式（只记录不启用）。
 
-**Architecture:** ①`_run_tool_round` 加 `parent_step_id` 参数，把工具 step 挂到 `reasoning.step.id` 下；②`_extract_decision_slots_rule_based` 纯规则抽位置名+问题类型，规则失败回退 LLM。
+**Architecture:** ①`_run_tool_round` 加 `parent_step_id` 参数，把工具 step 挂到 `reasoning.step.id` 下；②`_extract_decision_slots_rule_based` 纯规则抽位置名+问题类型，规则失败回退 LLM；③`ToolCandidateIndex` 启动构建一次，影子记录候选工具是否包含 Planner 实际调用工具。
 
 **Tech Stack:** Python 3.10+, Chainlit（兼容 2.9.6 内网 + 2.11.0 本地）, pytest.
 
@@ -251,10 +251,201 @@ git commit -m "perf(qa): rule-based decision weather slot extraction with LLM fa
 
 ---
 
+### Task 3: 候选工具召回影子模式（只记录不启用）— GPT 方案七
+
+**Files:**
+- Create: `chainlitexam/tools/tool_candidate_index.py`（新文件）
+- Modify: `chainlitexam/chain_gzt.py`（`_build_orchestrator_runtime` 构建索引 + callbacks 传 `tool_candidate_index`）
+- Modify: `chainlitexam/message_orchestrator.py`（`process_message` 影子记录候选 vs 实际工具）
+- Test: `chainlitexam/tests/test_tool_candidate_index.py`（新建）
+
+**Interfaces:**
+- Produces: `ToolCandidateIndex` 类——`__init__(tools: list)` 构建关键词→工具映射；`candidates_for(user_text: str, limit: int = 12) -> list[str]` 返回候选工具名；`build` 一次（启动时）。
+- 影子模式：`process_message` 在 Planner 返回 tool_calls 后，调用 `candidates_for(user_text)`，记录 `[TOOL_CAND]` 日志"候选是否包含实际调用工具"，**不改 Planner 绑定**。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_tool_candidate_index.py`：
+
+```python
+"""候选工具召回索引（影子模式）测试。"""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from chainlitexam.tests.stubs import ensure_stubs
+ensure_stubs()
+
+from tools.tool_candidate_index import ToolCandidateIndex
+
+
+def _fake_tool(name, desc=""):
+    class _T:
+        def __init__(self):
+            self.name = name
+            self.description = desc
+        @property
+        def args_schema(self):
+            class _S:
+                properties = {}
+            return _S()
+    return _T()
+
+
+def test_candidates_include_weather_tools_for_weather_query():
+    tools = [
+        _fake_tool("query_rolling_forecast", "查询天津滚动预报未来天气"),
+        _fake_tool("query_decision_weather_for_poi", "查询具体点位附近天气"),
+        _fake_tool("get_effective_warning_info", "查询当前生效预警"),
+        _fake_tool("query_water_level", "查询水位"),
+    ]
+    idx = ToolCandidateIndex(tools)
+    cands = idx.candidates_for("梅江会展中心明天天气怎么样", limit=12)
+    assert "query_decision_weather_for_poi" in cands, f"天气+点位查询应召回决策天气工具，实际 {cands}"
+
+
+def test_candidates_include_warning_tool_for_warning_query():
+    tools = [_fake_tool("get_effective_warning_info", "查询当前生效预警"), _fake_tool("query_rolling_forecast", "预报")]
+    idx = ToolCandidateIndex(tools)
+    cands = idx.candidates_for("天津有暴雨预警吗", limit=12)
+    assert "get_effective_warning_info" in cands, f"预警查询应召回预警工具，实际 {cands}"
+
+
+def test_index_built_once_is_stable():
+    tools = [_fake_tool("query_rolling_forecast", "预报天气")]
+    idx = ToolCandidateIndex(tools)
+    first = idx.candidates_for("明天天气", limit=12)
+    second = idx.candidates_for("明天天气", limit=12)
+    assert first == second  # 索引稳定，不随调用变化
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `D:/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe -m pytest tests/test_tool_candidate_index.py -v`
+Expected: FAIL（`ToolCandidateIndex` 不存在）。
+
+- [ ] **Step 3: 实现**
+
+新建 `tools/tool_candidate_index.py`：
+
+```python
+"""候选工具召回索引（影子模式）。
+
+启动时构建一次关键词→工具映射。Planner 仍绑定完整工具列表，
+本模块只用于"记录候选工具是否包含 Planner 实际调用工具"的影子观测，
+不改变 Planner 行为。
+"""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+class ToolCandidateIndex:
+    """基于工具名/描述/参数名的关键词召回索引。"""
+
+    def __init__(self, tools: list[Any]):
+        self._tools = tools
+        self._by_keyword: dict[str, list[str]] = {}
+        self._default_candidates: list[str] = []
+        self._build(tools)
+
+    def _build(self, tools: list[Any]) -> None:
+        """一次构建：提取每个工具的关键词并建立倒排。"""
+        fallback_names = ["rag_search", "query_rolling_forecast"]  # 兜底工具
+        for tool in tools:
+            name = getattr(tool, "name", "") or ""
+            if not name:
+                continue
+            desc = getattr(tool, "description", "") or ""
+            keywords = self._keywords_for(name, desc)
+            for kw in keywords:
+                self._by_keyword.setdefault(kw, []).append(name)
+            if name in fallback_names:
+                self._default_candidates.append(name)
+        # 兜底工具始终在候选里
+        for fb in fallback_names:
+            if fb not in self._default_candidates:
+                self._default_candidates.append(fb)
+
+    def _keywords_for(self, name: str, desc: str) -> list[str]:
+        """从工具名+描述提取中文关键词。"""
+        text = f"{name} {desc}"
+        # 常见业务词
+        biz = [
+            "天气", "降雨", "降水", "雨", "预警", "水位", "河网", "河流",
+            "行政区", "面雨量", "应急", "点位", "短临", "强对流", "雷暴",
+            "冰雹", "气温", "风", "能见度", "雾", "霾", "站点", "实况",
+        ]
+        return [b for b in biz if b in text]
+
+    def candidates_for(self, user_text: str, limit: int = 12) -> list[str]:
+        """按用户问题关键词召回候选工具；无命中时返回兜底工具。"""
+        matched: list[str] = []
+        for kw, names in self._by_keyword.items():
+            if kw in (user_text or ""):
+                for n in names:
+                    if n not in matched:
+                        matched.append(n)
+        for n in self._default_candidates:
+            if n not in matched:
+                matched.append(n)
+        return matched[:limit]
+
+    def contains(self, user_text: str, actual_tool: str, limit: int = 12) -> bool:
+        """影子观测：候选是否包含实际调用的工具。"""
+        return actual_tool in self.candidates_for(user_text, limit=limit)
+```
+
+`chain_gzt.py` `_build_orchestrator_runtime` 构建索引并传入 runtime：
+
+```python
+    from tools.tool_candidate_index import ToolCandidateIndex
+    tool_candidate_index = ToolCandidateIndex(tools)
+    # ... return 增加 "tool_candidate_index": tool_candidate_index
+```
+
+`message_orchestrator.py` `process_message` 影子记录（Planner 首次返回 tool_calls 后）：
+
+```python
+    if planner_msg.tool_calls and callbacks.get("tool_candidate_index"):
+        try:
+            idx = callbacks["tool_candidate_index"]
+            actual = [tc["name"] for tc in planner_msg.tool_calls]
+            hit = [t for t in actual if idx.contains(message.content, t)]
+            print(f"[TOOL_CAND] request={session_id} actual={actual} "
+                  f"recalled={len(hit)}/{len(actual)} candidates={idx.candidates_for(message.content, limit=12)}")
+        except Exception:
+            pass
+```
+
+> 说明：影子模式**只打印 `[TOOL_CAND]` 日志**，不改 Planner 绑定。`callbacks` 需包含 `tool_candidate_index`（`_build_orchestrator_callbacks` 加一项，默认 None 兼容）。
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `D:/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe -m pytest tests/test_tool_candidate_index.py -v`
+Expected: PASS。
+
+- [ ] **Step 5: 运行全量测试确认无回归**
+
+Run: `D:/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_decision_weather_tool.py -v`
+Expected: 全量 PASS，仅 1 个既有 flaky 失败。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add chainlitexam/tools/tool_candidate_index.py chainlitexam/chain_gzt.py chainlitexam/message_orchestrator.py chainlitexam/tests/test_tool_candidate_index.py
+git commit -m "feat(qa): shadow-mode tool candidate recall index (log-only, no binding change)"
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage**：
 - 改动 1（排版：工具 step 挂思考下）→ Task 1 ✓
+- 改动 2（决策天气槽位规则抽取 + LLM 兜底）→ Task 2 ✓
+- 改动 3（候选工具召回影子）→ Task 3 ✓
+- 兼容 2.9.6：不引入 auto_collapse ✓
 - 改动 2（决策天气槽位规则抽取 + LLM 兜底）→ Task 2 ✓
 - 兼容 2.9.6：不引入 auto_collapse ✓
 
