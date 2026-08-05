@@ -45,6 +45,7 @@ ALLOWED_CLIENT_IPS = {
     "127.0.0.1",
     "::1",
     "10.226.245.128",
+    "10.226.107.130",  # 牵引调度器 Linux 服务器（station-process-min）
 }
 
 # 第一阶段只允许发到文件传输助手和测试群。
@@ -85,6 +86,18 @@ WINDOWS_RESERVED_NAMES = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
+
+# 从项目根 .env 加载配置（与调度器侧 send_file 共用同一份，密钥不进 git）
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            if _k and _k not in os.environ:
+                os.environ[_k] = _v.strip().strip("'\"")
+    del _line, _k, _v
 
 
 API_TOKEN = os.environ.get(
