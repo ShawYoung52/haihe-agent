@@ -10,6 +10,8 @@ import threading
 from datetime import datetime
 from urllib.parse import quote_plus
 
+import httpx
+
 from utils.tool_result import _extract_self_report, _unwrap_tool_result
 
 try:
@@ -914,15 +916,19 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
 
 
 async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None):
-    """静默调用模型，用于工具决策阶段（不向前端输出中间指令）。带60秒超时防止卡死，超时后重试一次。"""
+    """静默调用模型，用于工具决策阶段（不向前端输出中间指令）。带超时；推理超时（TimeoutError）不重试，连接/限流错误重试。"""
+    timeout = int(os.environ.get("PLANNER_TIMEOUT_SECONDS", "60"))
     max_retries = int(os.environ.get("PLANNER_MAX_RETRIES", "2"))
     last_exc = None
     for attempt in range(max_retries):
         try:
-            return await asyncio.wait_for(chain.ainvoke(input_dict, config=config), timeout=60)
+            return await asyncio.wait_for(chain.ainvoke(input_dict, config=config), timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as e:
+            # 推理超时：不重试，直接抛出（避免连续等待两个完整超时时间）
+            raise e
+        except (ConnectionError, httpx.ConnectError, httpx.ReadTimeout) as e:
             last_exc = e
-            print(f"[ainvoke_chain] 第 {attempt + 1} 次调用超时，准备重试...")
+            print(f"[ainvoke_chain] 第 {attempt + 1} 次连接失败，准备重试...")
             await asyncio.sleep(1)
     raise last_exc
 
@@ -956,18 +962,21 @@ async def _process_planner_stream(chain, input_dict, reasoning_step, config):
 
 
 async def astream_planner_think(chain, input_dict, reasoning_step, config: RunnableConfig | None = None):
-    """流式调用模型，实时展示思考过程。带60秒超时+重试。"""
+    """流式调用模型，实时展示思考过程。带超时；推理超时不重试，连接/限流错误重试。"""
+    timeout = int(os.environ.get("PLANNER_TIMEOUT_SECONDS", "60"))
     max_retries = int(os.environ.get("PLANNER_MAX_RETRIES", "2"))
     last_exc = None
     for attempt in range(max_retries):
         try:
             return await asyncio.wait_for(
                 _process_planner_stream(chain, input_dict, reasoning_step, config),
-                timeout=60,
+                timeout=timeout,
             )
         except (asyncio.TimeoutError, TimeoutError) as e:
+            raise e
+        except (ConnectionError, httpx.ConnectError, httpx.ReadTimeout) as e:
             last_exc = e
-            print(f"[astream_planner_think] 第 {attempt + 1} 次调用超时，准备重试...")
+            print(f"[astream_planner_think] 第 {attempt + 1} 次连接失败，准备重试...")
             await asyncio.sleep(1)
     raise last_exc
 
