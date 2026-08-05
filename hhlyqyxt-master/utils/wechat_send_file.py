@@ -1,7 +1,8 @@
-"""微信发送文件到群（可插拔契约）。
+"""微信发送文件到群（牵引智能体项目的一部分）。
 
-通过 HTTP 调用微信 DMZ 网关（跑在 Windows 服务器，微信已登录）发送话术与
-报告文件。调用方 `ScheduledTask/call_respond.py:_send_to_group` 按
+通过 HTTP 调用**本项目的微信 DMZ 网关**（`utils/wechat_gateway/gateway_server.py`，
+跑在 Windows 服务器，微信已登录）发送话术与报告文件。调用方
+`ScheduledTask/call_respond.py:_send_to_group` 按
 `send_file(group, file_path, caption) -> bool` 契约调用，无需改动。
 
 配置（环境变量）：

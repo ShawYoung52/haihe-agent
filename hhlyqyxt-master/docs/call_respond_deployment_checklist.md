@@ -1,6 +1,6 @@
 # 叫应功能内网部署检查清单
 
-> 牵引智能体"叫应功能"上线前逐项核对。目标环境：Linux 调度器（`station-process-min`）+ Windows DMZ 微信网关（`WechatRPA/gateway`）。
+> 牵引智能体"叫应功能"上线前逐项核对。目标环境：Linux 调度器（`station-process-min`）+ Windows DMZ 微信网关（`utils/wechat_gateway/gateway_server.py`，已集成进牵引项目）。
 
 ## 一、数据库（内网 PostgreSQL）
 
@@ -18,7 +18,7 @@
 - [ ] 重启服务：`systemctl restart station-process-min`
 - [ ] 日志无报错：`journalctl -u station-process-min -f`
 
-## 三、微信网关侧（Windows DMZ，WechatRPA/gateway）
+## 三、微信网关侧（Windows DMZ，`utils/wechat_gateway/gateway_server.py`）
 
 - [ ] 微信已登录、桌面未锁屏、同一 Windows 用户运行
 - [ ] 网关已启动：`POST /health` 返回 OK

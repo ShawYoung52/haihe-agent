@@ -23,13 +23,18 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
+# 本网关已集成进牵引智能体项目（hhlyqyxt-master/utils/wechat_gateway/）。
+# wechat_tools 包与网关同目录，确保从任意工作目录启动都能 import。
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from wechat_tools import WeChatRPAClient
 
 
 HOST = "0.0.0.0"
-PORT = 18080
+PORT = int(os.environ.get("WECHAT_GATEWAY_PORT", "18080"))
 
-BASE_DIR = Path(r"C:\WechatRPA\gateway")
+BASE_DIR = Path(os.environ.get("WECHAT_GATEWAY_BASE_DIR", r"C:\WechatRPA\gateway"))
 UPLOAD_DIR = BASE_DIR / "data" / "uploads"
 LOG_DIR = BASE_DIR / "logs"
 

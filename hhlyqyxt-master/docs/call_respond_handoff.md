@@ -42,7 +42,7 @@
 
 ### 3. 微信网关白名单（网关侧）
 
-请配合在微信网关服务器确认/补充：
+请配合在微信网关服务器确认/补充（网关为牵引项目内的 `utils/wechat_gateway/gateway_server.py`，部署在 Windows 微信登录机器）：
 - **IP 白名单**：调度器（Linux 服务器）的 IP 加入网关 `ALLOWED_CLIENT_IPS`，否则请求被拒绝（403）
 - **群白名单**：上述群映射中的群名加入网关 `ALLOWED_TARGETS`，否则微信发送被拒绝
 

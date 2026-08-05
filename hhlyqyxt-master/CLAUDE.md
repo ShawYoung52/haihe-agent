@@ -142,7 +142,7 @@ body: `{"template": "haihe_weather_bulletin"}`（只传 template，其他默认�
 - **关键陷阱**：`run_emergency_response_monitor` 返回的 `record.report_docx_url` 为 None（报告尚未生成），且 `stationProcessMin` 用独立 session 批量 `.update()` 回填 URL **不刷新内存 record**。所以 `send_task` 必须按 `task.emergency_monitor_id` **反查** `qy_emergency_response_monitor` 取报告 URL（`_resolve_report_urls`），不能依赖任务创建时捕获的 URL。
 - 逐群幂等：`_send_to_group` 跳过已有 success 日志的群（`_group_already_sent`），重试只发失败群，不重复已成功群。
 - 群映射：`call_respond_config.json`（可配置层，`{template, groups: {city: [群名]}}`）。**群映射由甲方后续提供**，未配置时任务挂起 `pending_send`。
-- 文件发送：`utils/wechat_send_file.py:send_file(group, file_path, caption)` 通过 HTTP 调**微信 DMZ 网关**（`WechatRPA/gateway/gateway_server.py`，跑在 Windows 服务器、微信已登录）：先 `send-text` 发话术，再 `send-file` 上传报告文件。配置用环境变量 `WECHAT_GATEWAY_URL`（默认 `http://127.0.0.1:8000`）、`WECHAT_GATEWAY_TOKEN`。**部署时须**：调度器进程设这两个环境变量；调度器 Linux IP 加入网关 `ALLOWED_CLIENT_IPS`；群名加入网关 `ALLOWED_TARGETS` 白名单。网关 HTTP 200 但 `ok:false` 视为发送失败（`_check_gateway_ok`）。
+- 文件发送：`utils/wechat_send_file.py:send_file(group, file_path, caption)` 通过 HTTP 调**本项目微信 DMZ 网关**（`utils/wechat_gateway/gateway_server.py`，跑在 Windows 服务器、微信已登录，已集成进牵引项目）：先 `send-text` 发话术，再 `send-file` 上传报告文件。配置用环境变量 `WECHAT_GATEWAY_URL`（默认 `http://127.0.0.1:18080`）、`WECHAT_GATEWAY_TOKEN`；网关侧可用 `WECHAT_GATEWAY_BASE_DIR`/`WECHAT_GATEWAY_PORT` 覆盖运行路径/端口。**部署时须**：调度器进程设这两个环境变量；调度器 Linux IP 加入网关 `ALLOWED_CLIENT_IPS`；群名加入网关 `ALLOWED_TARGETS` 白名单。网关 HTTP 200 但 `ok:false` 视为发送失败（`_check_gateway_ok`）。
 - 后台异步：`threading.Thread(daemon=True)`，不阻塞 5 分钟调度器 240s 预算。失败不阻塞主流程。
 - API：`GET /tool/call-respond/tasks`、`POST /tool/call-respond/{id}/confirm`（不存在 404/状态不可确认 409）、`GET /tool/call-respond/{id}/logs`、`POST /tool/call-respond/{id}/retry`。
 
