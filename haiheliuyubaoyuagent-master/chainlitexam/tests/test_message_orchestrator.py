@@ -445,3 +445,161 @@ async def test_run_tool_round_uses_parent_step_id(monkeypatch):
     assert round_step.parent_id == "reasoning-step-1", (
         f"第 1 轮 step 应挂到 reasoning-step-1，实际 {round_step.parent_id}"
     )
+
+
+def test_has_complete_rolling_forecast():
+    """最后一个滚动预报 bundle 有 code_section 时视为数据完整。"""
+    assert mo._has_complete_rolling_forecast([{"code_section": "| 表格 |"}]) is True
+    assert mo._has_complete_rolling_forecast([{"code_section": ""}]) is False
+    assert mo._has_complete_rolling_forecast([]) is False
+    assert mo._has_complete_rolling_forecast([{"category": "activity"}]) is False
+
+
+def test_fallback_on_planner_timeout_with_complete_data():
+    """Planner 超时且已有完整滚动预报数据时，应回退生成回答而非抛错。"""
+    # 直接验证 Fix C 的核心条件：数据完整时允许回退
+    assert mo._has_complete_rolling_forecast([{"code_section": "表格"}]) is True
+
+
+@pytest.mark.asyncio
+async def test_second_planner_timeout_with_complete_data_falls_back_to_answer(monkeypatch):
+    """Fix C：第 2 次 Planner 超时且滚动预报数据完整（含应急响应工具综合场景）时，
+    应回退调用 Answer LLM 组装回答，而非把超时异常抛给外层兜底返回错误。"""
+    monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
+    monkeypatch.setattr(mo, "ENABLE_LLM_THINKING", False)
+
+    user_query = "查询海河流域的应急响应，并给出滚动预报"
+    answer_text = "应急响应已启动，滚动预报如下。"
+    stream_contents: list[str] = []
+    final_messages: list = []
+
+    # 第 1 次 planner 返回应急响应 + 滚动预报工具调用；第 2 次 planner 抛超时。
+    round_no = {"n": 0}
+
+    def make_planner_msg(tool_calls):
+        msg = type("FakePlannerMsg", (), {})()
+        msg.content = ""
+        msg.tool_calls = tool_calls
+        return msg
+
+    async def fake_astream_planner_think(*args, **kwargs):
+        round_no["n"] += 1
+        if round_no["n"] == 1:
+            return make_planner_msg([
+                {"id": "c-emergency", "name": "safe_evaluate_haihe_emergency_response", "args": {}},
+                {"id": "c-rolling", "name": "query_rolling_forecast", "args": {"user_query": user_query}},
+            ])
+        raise asyncio.TimeoutError("planner inference timeout")
+
+    async def fake_answer_chain(*args, **kwargs):
+        return answer_text
+
+    async def noop_async(*args, **kwargs):
+        return None
+
+    class FakeStreamMsg:
+        def __init__(self, **kw):
+            self.content = ""
+
+        async def send(self):
+            return None
+
+        async def update(self):
+            stream_contents.append(self.content)
+            return None
+
+        async def remove(self):
+            return None
+
+    class FakeReasoning:
+        _closed = False
+        step = type("FakeStep", (), {"id": "reasoning-step"})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def stage(self, *a, **k):
+            return None
+
+        async def line(self, *a, **k):
+            return None
+
+        async def append(self, *a, **k):
+            return None
+
+        async def close(self):
+            self._closed = True
+            return None
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def ainvoke(self, args):
+            if self.name == "safe_evaluate_haihe_emergency_response":
+                return {"status": "ok", "level": 2, "summary": "Ⅲ级应急响应"}
+            return {
+                "status": "ok",
+                "code_section": "| 时段 | 雨量 |\n| --- | --- |\n| 今夜 | 中雨 |",
+                "data_source": "滚动预报测试源",
+                "forced_core_conclusion": "今夜至明天有中雨。",
+            }
+
+    # 工具分支需要用的 callbacks：_run_tool_round 仅用到 tool_observation_to_text。
+    tools = [FakeTool("safe_evaluate_haihe_emergency_response"), FakeTool("query_rolling_forecast")]
+
+    callbacks = {
+        "astream_planner_think": fake_astream_planner_think,
+        "need_river_plot": lambda message: False,
+        "astream_thinking_to_reasoning": noop_async,
+        "append_followup_if_needed": lambda text, query: text,
+        "stream_text_to_message": noop_async,
+        "astream_answer_chain_to_message": fake_answer_chain,
+        "tool_observation_to_text": lambda obs: str(obs),
+        "enrich_with_impact_time_tool": lambda **k: k.get("observation"),
+        "should_force_admin_units_reply": lambda text: False,
+        "build_admin_units_only_reply": lambda obs: obs,
+        "should_force_partition_table_reply": lambda text: False,
+        "build_partition_only_reply": lambda obs: obs,
+        "should_force_structured_impact_reply": lambda text: False,
+        "build_structured_impact_reply": lambda obs: obs,
+    }
+
+    monkeypatch.setattr(mo, "ReasoningStep", lambda name="": FakeReasoning())
+    monkeypatch.setattr(mo.cl, "Message", FakeStreamMsg)
+    # 固定滚动预报 bundle 构造：确保 code_section 非空（数据完整）且带数据来源。
+    monkeypatch.setattr(
+        mo,
+        "build_rolling_forecast_bundle",
+        lambda user_text, payload: {
+            "category": "rain",
+            "code_section": "| 时段 | 雨量 |\n| --- | --- |\n| 今夜 | 中雨 |",
+            "data_source": "滚动预报测试源",
+            "forced_core_conclusion": "",
+        },
+    )
+
+    try:
+        from chainlit.context import context_var, init_http_context
+        context_var.set(init_http_context(thread_id="test-timeout-fallback"))
+    except Exception:
+        pass
+
+    await mo.process_message(
+        type("FakeMessage", (), {"content": user_query})(),
+        planner_chain=None, answer_chain=None,
+        thinking_chain=None, tools=tools, messages=final_messages, callbacks=callbacks,
+    )
+
+    # 期望：Fix C 回退后 Answer 文本经代码收口组装（含数据来源行）。
+    joined = "\n".join(stream_contents)
+    assert "应急响应已启动" in joined, f"应回退生成 Answer 回答，实际 stream_msg: {joined!r}"
+    assert "滚动预报测试源" in joined, f"应包含滚动预报数据来源，实际: {joined!r}"
+    # 最终 messages 末尾应含生成的 AIMessage 回答（前置思考摘要不影响正文包含）。
+    assert any(
+        "应急响应已启动" in getattr(m, "content", "")
+        for m in final_messages
+    ), f"messages 末尾应追加回退生成的回答，实际: {[type(m).__name__ for m in final_messages]}"
