@@ -4610,7 +4610,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     messages.append(planner_msg)
 
-    max_iterations = 5
+    max_iterations = int(os.environ.get("MAX_PLANNER_ROUNDS", "5"))
     iteration = 0
     forced_final_text = None
     answer_generated = False  # 标记是否已在循环内成功生成最终回答

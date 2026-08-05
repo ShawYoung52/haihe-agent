@@ -914,8 +914,9 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
 
 async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None):
     """静默调用模型，用于工具决策阶段（不向前端输出中间指令）。带60秒超时防止卡死，超时后重试一次。"""
+    max_retries = int(os.environ.get("PLANNER_MAX_RETRIES", "2"))
     last_exc = None
-    for attempt in range(2):
+    for attempt in range(max_retries):
         try:
             return await asyncio.wait_for(chain.ainvoke(input_dict, config=config), timeout=60)
         except (asyncio.TimeoutError, TimeoutError) as e:
@@ -955,8 +956,9 @@ async def _process_planner_stream(chain, input_dict, reasoning_step, config):
 
 async def astream_planner_think(chain, input_dict, reasoning_step, config: RunnableConfig | None = None):
     """流式调用模型，实时展示思考过程。带60秒超时+重试。"""
+    max_retries = int(os.environ.get("PLANNER_MAX_RETRIES", "2"))
     last_exc = None
-    for attempt in range(2):
+    for attempt in range(max_retries):
         try:
             return await asyncio.wait_for(
                 _process_planner_stream(chain, input_dict, reasoning_step, config),
