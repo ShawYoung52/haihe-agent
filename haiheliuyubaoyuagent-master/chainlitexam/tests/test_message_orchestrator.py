@@ -398,3 +398,50 @@ async def test_process_message_skips_thinking_when_disabled(monkeypatch):
     )
 
     assert thinking_calls == [], f"ENABLE_LLM_THINKING=false 时不应调用 thinking_chain，实际 {thinking_calls}"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_round_uses_parent_step_id(monkeypatch):
+    """_run_tool_round 传入 parent_step_id 时，工具 step 应挂到该父 step 下。"""
+    created = []
+
+    class FakeStep:
+        _id_counter = 0
+
+        def __init__(self, **kwargs):
+            type(self)._id_counter += 1
+            self.id = f"step-{type(self)._id_counter}"
+            self.name = kwargs.get("name", "")
+            self.parent_id = kwargs.get("parent_id")
+            self.type = kwargs.get("type", "tool")
+            self.show_input = True
+            self.output = ""
+            self.input = ""
+            self.default_open = None
+            created.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def update(self):
+            return None
+
+    class FakePlannerMsg:
+        tool_calls = []
+
+    monkeypatch.setattr(mo.cl, "Step", FakeStep)
+
+    callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
+    messages = []
+    await mo._run_tool_round(
+        FakePlannerMsg(), [], messages, "测试", 1, callbacks, parent_step_id="reasoning-step-1"
+    )
+
+    round_step = next((s for s in created if s.name.startswith("第 1 轮")), None)
+    assert round_step is not None, f"应创建第 1 轮 step，实际 created={[s.name for s in created]}"
+    assert round_step.parent_id == "reasoning-step-1", (
+        f"第 1 轮 step 应挂到 reasoning-step-1，实际 {round_step.parent_id}"
+    )

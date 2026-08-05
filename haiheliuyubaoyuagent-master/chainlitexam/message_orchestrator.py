@@ -1847,7 +1847,8 @@ async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
     return results
 
 
-async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks):
+async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks,
+                          parent_step_id: str | None = None):
     ree = None
     forced_final_text = None
     warning_bundles = []
@@ -1856,7 +1857,8 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     print(f"\n=== 第 {iteration} 轮工具调用 ===")
 
     round_start = time.time()
-    async with cl.Step(name=f"第 {iteration} 轮数据查询（共 {len(planner_msg.tool_calls)} 项）", type="tool") as step:
+    async with cl.Step(name=f"第 {iteration} 轮数据查询（共 {len(planner_msg.tool_calls)} 项）", type="tool",
+                       parent_id=parent_step_id) as step:
         step.show_input = False
         # 开发者调试信息保留在控制台，不暴露给业务用户
         print(f"\n=== 准备执行工具 ===")
@@ -4627,7 +4629,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         timing.mark(f"tool_round_{iteration}")
         forced_final_text, ree, warning_bundles, round_rolling_forecast_bundles = await _run_tool_round(
-            planner_msg, tools, messages, message.content, iteration, callbacks
+            planner_msg, tools, messages, message.content, iteration, callbacks,
+            parent_step_id=reasoning.step.id if reasoning and reasoning.step else None,
         )
         timing.mark(f"tool_round_{iteration}")
         timing.tool_call_count += len(planner_msg.tool_calls)
