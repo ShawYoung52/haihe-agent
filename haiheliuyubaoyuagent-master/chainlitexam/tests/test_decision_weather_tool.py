@@ -197,6 +197,7 @@ def test_rule_based_slot_extraction_locations():
     """规则抽取能识别常见点位名称。"""
     assert dw_core._extract_decision_slots_rule_based("梅江会展中心明天天气怎么样")["location_name"] == "梅江会展中心"
     assert dw_core._extract_decision_slots_rule_based("天津大学未来24小时会下雨吗")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("未来24小时天津大学会下雨吗")["location_name"] == "天津大学"
     assert dw_core._extract_decision_slots_rule_based("梅江会展中心适合户外活动吗")["question_type"] == "activity"
 
 

@@ -167,7 +167,7 @@ def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
             continue
         # 取后缀前的一段（跳过标点/介词/时间词）
         head = t[:idx]
-        head = re.split(r"[，。？?！!、\s，]|今天|明天|后天|周末|未来|现在|上午|下午|晚上|夜里", head)[-1]
+        head = re.split(r"[，。？?！!、\s，]|今天|明天|后天|周末|未来|现在|上午|下午|晚上|夜里|\d+小时|[一二三四五六七八九十]+小时", head)[-1]
         # 去掉结尾的"在/去/到/位于/附近"等
         head = re.sub(r"(在|去|到|位于|附近|周边|旁边|距|距离)$", "", head)
         candidate = (head + suffix).strip()
