@@ -4,6 +4,47 @@ Outputs `[TOOL_TIMING]` and `[QUERY_TIMING]` lines to the console so that
 performance metrics can be collected from logs.
 """
 
+import time
+import uuid
+
+
+class TimingContext:
+    """结构化记录一次问答请求的各阶段耗时，输出 [PERF] 一行。
+
+    不记录用户问题、工具原始结果、内网地址或绝对路径。
+    """
+
+    def __init__(self, request_id: str | None = None):
+        self.request_id = request_id or str(uuid.uuid4())
+        self.stages: dict[str, float] = {}
+        self.tool_calls: list[tuple[str, float]] = []
+        self.planner_rounds: int = 0
+        self.tool_call_count: int = 0
+        self._prev_ts = time.time()
+
+    def mark(self, name: str) -> None:
+        """记录自上一 mark 到现在的耗时（毫秒），作为 name 阶段。"""
+        now = time.time()
+        self.stages[name] = (now - self._prev_ts) * 1000.0
+        self._prev_ts = now
+
+    def record_planner_round(self) -> None:
+        self.planner_rounds += 1
+
+    def record_tool_call(self, tool_name: str, elapsed_ms: float) -> None:
+        self.tool_calls.append((tool_name, elapsed_ms))
+        self.tool_call_count += 1
+
+    def log(self) -> None:
+        parts = [f"request_id={self.request_id}"]
+        parts += [f"{name}={ms:.0f}ms" for name, ms in self.stages.items()]
+        parts.append(f"planner_rounds={self.planner_rounds}")
+        parts.append(f"tool_call_count={self.tool_call_count}")
+        parts.append(f"total_ms={(time.time() - self._prev_ts) * 1000:.0f}ms")
+        per_tool = ",".join(f"{n}:{ms:.0f}" for n, ms in self.tool_calls)
+        parts.append(f"tools=[{per_tool}]")
+        print(f"[PERF] {' '.join(parts)}")
+
 
 class TimingLogger:
     """Lightweight helper for logging timing metrics."""

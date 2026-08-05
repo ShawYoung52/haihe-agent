@@ -21,7 +21,7 @@ except Exception:
     FAST_PATH_THINKING_PROMPT = ""
 
 try:
-    from timing_logger import TimingLogger
+    from timing_logger import TimingLogger, TimingContext
 except Exception:
     class TimingLogger:
         @staticmethod
@@ -35,6 +35,22 @@ except Exception:
         @staticmethod
         def _safe_summary(text, max_len=40):
             return str(text)[:max_len] if text else ""
+
+    class TimingContext:
+        def __init__(self, request_id=None):
+            pass
+
+        def mark(self, name):
+            pass
+
+        def record_planner_round(self):
+            pass
+
+        def record_tool_call(self, tool_name, elapsed_ms):
+            pass
+
+        def log(self):
+            pass
 
 from utils.tool_result import _unwrap_tool_result
 from tools.current_weather_observation_response import (
@@ -4172,6 +4188,7 @@ async def _try_emergency_response_fast_path(user_text: str, thinking_chain, tool
 async def process_message(message: cl.Message, planner_chain, answer_chain, thinking_chain, tools, messages, callbacks):
     query_start_time = time.time()
     cl.user_session.set("query_start_time", query_start_time)
+    timing = TimingContext(request_id=cl.user_session.get("id") or None)
     session_id = cl.user_session.get("id") or ""
     query_summary = message.content
     cl.user_session.set("query_timing_logged", False)
@@ -4455,6 +4472,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         except Exception:
             pass
 
+        timing.mark("thinking")
+
     await reasoning.stage("🔍 理解问题", "正在规划数据查询方案...")
 
     try:
@@ -4483,6 +4502,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         cl.user_session.set("messages", messages)
         _log_query_exit(query_start_time, session_id, query_summary, "fail")
         return
+
+    timing.mark("planner_round_1")
+    timing.record_planner_round()
 
     if planner_msg.tool_calls:
         tool_count = len(planner_msg.tool_calls)
@@ -4603,9 +4625,12 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         await reasoning.stage("📡 查询数据", f"补充查询更多数据：{tool_names_display}")
         await reasoning.stage("📡 查询数据", f"第 {iteration} 轮补充查询中...")
 
+        timing.mark(f"tool_round_{iteration}")
         forced_final_text, ree, warning_bundles, round_rolling_forecast_bundles = await _run_tool_round(
             planner_msg, tools, messages, message.content, iteration, callbacks
         )
+        timing.mark(f"tool_round_{iteration}")
+        timing.tool_call_count += len(planner_msg.tool_calls)
         rolling_forecast_bundles.extend(round_rolling_forecast_bundles)
         if ree:
             await cl.send_window_message(ree)
@@ -4804,6 +4829,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             await stream_msg.update()
             messages.append(AIMessage(content=text))
             cl.user_session.set("messages", messages)
+
+    timing.mark("answer")
+    timing.mark("done")
+    timing.log()
 
     _log_query_exit(query_start_time, session_id, query_summary, "ok")
     await reasoning.close()

@@ -3,13 +3,17 @@
 import io
 import re
 import sys
+import time
 from contextlib import redirect_stdout
 from pathlib import Path
 
 # Make ``import chainlitexam`` work when running this script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from chainlitexam.timing_logger import TimingLogger
+from chainlitexam.tests.stubs import ensure_stubs
+ensure_stubs()
+
+from chainlitexam.timing_logger import TimingLogger, TimingContext
 
 
 def _capture_stdout(func, *args, **kwargs):
@@ -101,6 +105,40 @@ def test_elapsed_format():
     assert "elapsed=1.23s" in output
     # 必须恰好两位小数
     assert re.search(r"elapsed=\d+\.\d{2}s", output) is not None
+
+
+def test_timing_context_accumulates_stages():
+    ctx = TimingContext(request_id="test-1")
+    ctx.mark("thinking")
+    time.sleep(0.01)
+    ctx.mark("planner_round_1")
+    ctx.record_tool_call("get_city_rainfall_time_range", 12.5)
+    ctx.record_planner_round()
+    ctx.mark("answer")
+    ctx.mark("done")
+
+    assert ctx.stages["thinking"] >= 0
+    assert ctx.stages["planner_round_1"] >= 10  # 0.01s = 10ms
+    assert ctx.stages["answer"] >= 0
+    assert ctx.tool_call_count == 1
+    assert ctx.tool_calls[0][0] == "get_city_rainfall_time_range"
+    assert ctx.planner_rounds == 1
+
+
+def test_timing_context_log_line_has_no_sensitive_fields(capsys):
+    ctx = TimingContext(request_id="req-abc")
+    ctx.mark("thinking")
+    ctx.mark("answer")
+    ctx.mark("done")
+    ctx.log()
+    out = capsys.readouterr().out
+    assert "[PERF]" in out
+    assert "req-abc" in out
+    assert "thinking=" in out
+    assert "total_ms=" in out
+    # 不泄露用户问题/内网地址/路径
+    assert "10.226" not in out
+    assert ".venv" not in out
 
 
 if __name__ == "__main__":
