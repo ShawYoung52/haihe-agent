@@ -52,6 +52,8 @@ from tools import decision_weather_fast_path, warning_workflow
 
 # Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
 ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
+# Feature flag: when false (default), skip the thinking_chain LLM call in the planner path (saves one 5-17s LLM call).
+ENABLE_LLM_THINKING = os.environ.get("ENABLE_LLM_THINKING", "false").strip().lower() in ("1", "true", "yes")
 
 from tools.decision_weather_core import (
     _decision_weather_prefilter,
@@ -4435,7 +4437,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         simple_route = None
 
     # 生成并展示深度思考（规则路由命中时跳过，省一次 5-17s 的 LLM 调用）
-    if not simple_route:
+    if ENABLE_LLM_THINKING and not simple_route:
         try:
             print("[THINKING_PLANNER] starting thinking generation")
             await callbacks["astream_thinking_to_reasoning"](

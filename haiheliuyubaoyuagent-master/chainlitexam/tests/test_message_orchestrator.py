@@ -318,3 +318,83 @@ async def test_run_tool_round_parallelizes_pure_data_tools(monkeypatch):
     assert contents[2] == "get_city_rainfall_time_range-result"
     # ToolMessage 顺序与 tool_call 顺序一致
     assert [m.tool_call_id for m in messages] == ["c1", "c2", "c3"]
+
+
+@pytest.mark.asyncio
+async def test_process_message_skips_thinking_when_disabled(monkeypatch):
+    """ENABLE_FAST_PATHS=false 且 ENABLE_LLM_THINKING=false 时，thinking_chain 调用次数严格为 0。"""
+    monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
+    monkeypatch.setattr(mo, "ENABLE_LLM_THINKING", False)
+
+    thinking_calls = []
+
+    async def fake_thinking(*args, **kwargs):
+        thinking_calls.append("thinking")
+        return None
+
+    async def fake_astream_planner_think(*args, **kwargs):
+        class FakePlannerMsg:
+            content = "这是一个测试回答。"
+            tool_calls = []
+        return FakePlannerMsg()
+
+    async def noop_async(*args, **kwargs):
+        return None
+
+    class FakeMessage:
+        content = "测试查询"
+
+    class FakeStreamMsg:
+        def __init__(self, **kw):
+            self.content = ""
+        async def send(self):
+            return None
+        async def update(self):
+            return None
+        async def remove(self):
+            return None
+
+    callbacks = {
+        "astream_planner_think": fake_astream_planner_think,
+        "need_river_plot": lambda message: False,
+        "astream_thinking_to_reasoning": fake_thinking,
+        "append_followup_if_needed": lambda text, query: text,
+        "stream_text_to_message": noop_async,
+        "astream_answer_chain_to_message": lambda *a, **k: "",
+    }
+
+    monkeypatch.setattr(mo.cl, "Message", FakeStreamMsg)
+    # ReasoningStep 保留真实实现需要的 stub 环境；若环境无 Chainlit context，
+    # 单独 patch 掉 ReasoningStep 构造与 __aenter__
+    class FakeReasoning:
+        _closed = False
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return None
+        async def stage(self, *a, **k):
+            return None
+        async def line(self, *a, **k):
+            return None
+        async def append(self, *a, **k):
+            return None
+        async def close(self):
+            self._closed = True
+            return None
+    monkeypatch.setattr(mo, "ReasoningStep", lambda name="": FakeReasoning())
+
+    # 全量测试中 process_message 内 cl.user_session.set 需要 Chainlit 上下文；
+    # 单独跑本文件时上下文偶然存在，这里统一补一个 http 上下文保证全量可跑。
+    # 裸环境（tests/stubs.py 假 chainlit）下无 context 模块，靠假 user_session 兜底。
+    try:
+        from chainlit.context import context_var, init_http_context
+        context_var.set(init_http_context(thread_id="test-skips-thinking"))
+    except Exception:
+        pass
+
+    await mo.process_message(
+        FakeMessage(), planner_chain=None, answer_chain=None,
+        thinking_chain=None, tools=[], messages=[], callbacks=callbacks,
+    )
+
+    assert thinking_calls == [], f"ENABLE_LLM_THINKING=false 时不应调用 thinking_chain，实际 {thinking_calls}"
