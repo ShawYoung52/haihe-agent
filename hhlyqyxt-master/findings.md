@@ -113,3 +113,19 @@
 - 跨仓库 import QA 侧模块：**0 处**（用户硬约束兑现）。
 - 应急响应 HHLY 改造（B1-B4）：合规代理 5 项硬约束全 PASS，旧调用方向下兼容。
 - `rainstorm_impact_map_service.py`、`river_city_impact_tool.py`、`es_preprocess.py`、`db.py`、`Models/*` 业务逻辑/连接生命周期基本正确。
+
+---
+
+## 叫应功能（2026-08-04）
+
+### 核心发现
+- **C1（关键陷阱）**：`run_emergency_response_monitor` 返回的 `record.report_docx_url` 恒为 None（报告尚未生成），且 `stationProcessMin` 用独立 session 批量 `.update()` 回填 URL **不刷新内存 record**。叫应任务必须按 `task.emergency_monitor_id` **反查** `qy_emergency_response_monitor` 取报告 URL（`_resolve_report_urls`），否则任务永远 suspended、报告文件永不发送。
+- **状态机**：`pending`→`confirmed`→`sending`→`sent`/`failed`；报告缺失→`suspended`；群未配置→`pending_send`。`retry_pending_sends` 扫 `RECOVERABLE_STATUSES`（含 confirmed/sending/failed）补发。
+- **逐群幂等**：重试只发失败群（`_send_to_group` 跳过已有 success 日志的群），避免重复告警。
+- **微信网关**：`send_file` 调 DMZ 网关（Windows 微信登录）HTTP `send-text`+`send-file`。HTTP 200 但 `ok:false` 视为失败（`_check_gateway_ok`）。网关默认端口 18080。
+
+### 已知限制（待乙方/甲方）
+- 报告生成失败→任务永久 `suspended`（需报告补生成机制）。
+- `impact_city` 空→`pending_send`（HHLY 应急响应 vs HHLY_JUECE 城市路由流域解耦）。
+- 跨进程并发（Controller + scheduler）需 DB 原子认领（现 in-flight 守卫是进程内存）。
+- send_log 加 `(task_id, target_group)` 唯一索引做幂等（未做）。

@@ -1,5 +1,14 @@
 # 进度日志
 
+## 2026-08-04
+
+- 叫应功能全流程完成（brainstorming→设计→计划→SDD 8 任务→最终审查→code-review→code-simplifier→微信网关接入→文档→记忆→github）。
+- 累计提交 `4065b72`（设计）→ `9a57c8b`（默认端口），测试全量 161 passed。
+- **C1 关键陷阱**：report URL 在 record 上恒 None（报告后生成 + 独立 session 回填不刷新内存），send_task 必须按 emergency_monitor_id 反查。
+- 微信网关接入：`send_file` 调 DMZ 网关（send-text+send-file），ok 字段检查，默认端口 18080。
+- 交付：`call_respond.py` + 两张表 + 4 HTTP API + 建表 SQL + 部署清单 + CLAUDE.md 章节 + claude-mem 记忆。
+- 待乙方/甲方：群映射、部署 env 变量、网关 IP/群白名单。
+
 ## 2026-07-17
 
 - 修复 `ScheduledTask/emergency_response_monitor.py` 的 IDE 报错"无效的类型实参"（`8524502`）：
