@@ -5,8 +5,8 @@
 `ScheduledTask/call_respond.py:_send_to_group` 按
 `send_file(group, file_path, caption) -> bool` 契约调用，无需改动。
 
-配置（环境变量）：
-    WECHAT_GATEWAY_URL    网关 base URL，默认 http://127.0.0.1:18080
+配置（环境变量，或项目根 `.env`）：
+    WECHAT_GATEWAY_URL    网关 base URL，默认 http://192.168.31.146:18080
     WECHAT_GATEWAY_TOKEN  网关 token（Authorization: Bearer <token>）
 """
 import logging
@@ -17,8 +17,26 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GATEWAY_URL = "http://127.0.0.1:18080"
+DEFAULT_GATEWAY_URL = "http://192.168.31.146:18080"
 DEFAULT_TIMEOUT = 30
+
+
+def _load_dotenv() -> None:
+    """加载项目根 .env（若存在）到 os.environ，不覆盖已设置的变量。"""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
 
 
 def _gateway_url() -> str:
