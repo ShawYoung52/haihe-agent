@@ -1777,11 +1777,17 @@ _PARALLEL_SAFE_TOOLS = {
     "locate_region_rivers",
 }
 
+# 并行调用纯数据工具时的并发上限，防止瞬时打满上游 MCP/API 触发限流或资源尖峰。
+_PARALLEL_TOOL_CONCURRENCY = 4
+# 模块级信号量：同一进程内所有 _run_tool_round 的并行调用共享该上限。
+_PARALLEL_TOOL_SEMAPHORE = asyncio.Semaphore(_PARALLEL_TOOL_CONCURRENCY)
+
 
 async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
     """阶段一：并行调用纯数据工具。
 
-    返回 {tool_call_id: (observation, elapsed)}。仅对白名单内工具并行调用；
+    返回 {tool_call_id: (observation, elapsed)}。仅对白名单内工具并行调用，
+    并以信号量限制并发（默认 _PARALLEL_TOOL_CONCURRENCY=4）；
     有副作用的工具不在此处调用，由阶段二按需串行执行。
     工具失败在本函数内转为失败观测文本（与串行路径 per-tool 处理一致），
     不中断整轮，由阶段二统一组装 ToolMessage。
@@ -1792,25 +1798,26 @@ async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
         tool = _find_tool(tools, tool_call["name"])
         if tool is None:
             return tool_call["id"], None, (f"工具未找到：{tool_call['name']}", 0.0)
-        async with cl.Step(name=TOOL_DISPLAY_NAMES.get(tool_call["name"], tool_call["name"]),
-                           parent_id=parent_step.id, type="tool") as tool_step:
-            tool_step.show_input = False
-            try:
-                obs, elapsed = await _invoke_tool_with_tolerance(
-                    tool_call["name"], tool, tool_call["args"], tool_step, user_text=user_text
-                )
-                tool_step.output = f"查询完成（耗时 {elapsed:.1f} 秒）"
-                return tool_call["id"], obs, (obs, elapsed)
-            except Exception as e:
-                # 与串行路径一致：把失败转为 ToolMessage 文本，不中断整轮
-                err_summary = _scrub_internal_data(str(e)) or "未知错误"
-                print(f"[工具错误] {tool_call['name']}: {err_summary}")
-                tool_step.output = f"查询失败：{err_summary[:120]}"
-                failure_text = (
-                    f"工具 {tool_call['name']} 执行失败（{type(e).__name__}），"
-                    f"该数据暂不可用。错误摘要：{err_summary}"
-                )
-                return tool_call["id"], None, (failure_text, 0.0)
+        async with _PARALLEL_TOOL_SEMAPHORE:
+            async with cl.Step(name=TOOL_DISPLAY_NAMES.get(tool_call["name"], tool_call["name"]),
+                               parent_id=parent_step.id, type="tool") as tool_step:
+                tool_step.show_input = False
+                try:
+                    obs, elapsed = await _invoke_tool_with_tolerance(
+                        tool_call["name"], tool, tool_call["args"], tool_step, user_text=user_text
+                    )
+                    tool_step.output = f"查询完成（耗时 {elapsed:.1f} 秒）"
+                    return tool_call["id"], obs, (obs, elapsed)
+                except Exception as e:
+                    # 与串行路径一致：把失败转为 ToolMessage 文本，不中断整轮
+                    err_summary = _scrub_internal_data(str(e)) or "未知错误"
+                    print(f"[工具错误] {tool_call['name']}: {err_summary}")
+                    tool_step.output = f"查询失败：{err_summary[:120]}"
+                    failure_text = (
+                        f"工具 {tool_call['name']} 执行失败（{type(e).__name__}），"
+                        f"该数据暂不可用。错误摘要：{err_summary}"
+                    )
+                    return tool_call["id"], None, (failure_text, 0.0)
 
     pending = [c for c in calls if c["name"] in _PARALLEL_SAFE_TOOLS]
     gathered = await asyncio.gather(*[_invoke_one(c) for c in pending], return_exceptions=True)
@@ -1993,6 +2000,9 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
 
                 if tool_step is not None:
                     tool_step.output = f"查询完成（耗时 {tool_elapsed:.1f} 秒）"
+                    # 该 step 的 __aexit__ 已发送，需 update() 把更新后的状态文本重新下发，
+                    # 否则串行工具的状态文案不会渲染（预取工具 tool_step 为 None，其输出已在阶段一设置）
+                    await tool_step.update()
             except Exception as e:
                 # 控制台保留详细错误（已脱敏）；不再单独向用户发送通用错误消息，
                 # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
@@ -2004,6 +2014,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                 )
                 if tool_step is not None:
                     tool_step.output = f"查询失败：{err_summary[:120]}"
+                    await tool_step.update()
 
             messages.append(
                 ToolMessage(
