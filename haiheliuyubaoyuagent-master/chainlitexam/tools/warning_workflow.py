@@ -29,6 +29,9 @@ WARNING_TOOL_NAMES = frozenset({
     "get_national_warning_info",
 })
 
+# 市级/全市范围问法关键词：命中时折叠各区县明细为市级层面，不展开影响区域列。
+_BROAD_SCOPE_TERMS = frozenset({"天津", "天津市", "我市", "全市", "本市"})
+
 
 @dataclass(frozen=True)
 class WarningRuntime:
@@ -174,10 +177,9 @@ def _filter_warning_records_for_user(records: list[dict[str, str]], user_text: s
     severities = [level for level in ["红色", "橙色", "黄色", "蓝色"] if level in (user_text or "")]
     if severities:
         filtered = [r for r in filtered if any(level in str(r.get("severity") or "") for level in severities)]
-    broad_terms = {"天津", "天津市", "我市", "全市", "本市"}
     areas = list(dict.fromkeys(
         area for area in (_extract_warning_area(r) for r in filtered)
-        if area not in broad_terms and area in (user_text or "")
+        if area not in _BROAD_SCOPE_TERMS and area in (user_text or "")
     ))
     if areas:
         filtered = [r for r in filtered if any(a in _extract_warning_area(r) or a in str(r.get("department") or "") for a in areas)]
@@ -196,8 +198,7 @@ def _trim_warning_regions_for_scope(records: list[dict], user_text: str) -> list
     具体区县问法仅保留该区县相关记录；未指定区县且非市级时保留全部记录。
     """
     text = user_text or ""
-    broad_terms = {"天津", "天津市", "我市", "全市", "本市"}
-    asks_broad = any(t in text for t in broad_terms)
+    asks_broad = any(t in text for t in _BROAD_SCOPE_TERMS)
     # 问法是否明确指定了某个区县：遍历所有记录的影响区域，判断是否命中文本。
     all_districts = {
         a
@@ -235,7 +236,7 @@ def _is_broad_scoped_warning_query(user_text: str) -> bool:
     text = user_text or ""
     if re.search(r"[一-龥]{1,4}区(?:县)?", text):
         return False
-    return any(t in text for t in {"天津", "天津市", "我市", "全市", "本市"})
+    return any(t in text for t in _BROAD_SCOPE_TERMS)
 
 
 def _warning_publisher_rank(record: dict[str, str]) -> int:

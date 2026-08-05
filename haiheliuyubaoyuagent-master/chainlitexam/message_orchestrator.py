@@ -1854,7 +1854,6 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
         for tool_call in planner_msg.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
-            tool = _find_tool(tools, tool_name)
             display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
 
             if tool_call["id"] in pre_fetched:
@@ -1862,6 +1861,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                 observation, tool_elapsed = pre_fetched[tool_call["id"]]
                 tool_step = None  # 该工具的 step 已在阶段一创建并更新
             else:
+                tool = _find_tool(tools, tool_name)
                 async with cl.Step(name=display_name, parent_id=step.id, type="tool") as tool_step:
                     tool_step.show_input = False
                     print(f"[工具] {tool_name} 参数: {tool_args}")
