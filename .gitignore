@@ -1,0 +1,8 @@
+# 其它项目的微信相关代码（非牵引智能体的一部分，网关已集成进 hhlyqyxt-master/utils/wechat_gateway/）
+WechatGatewayClient/
+WechatLinkTest/
+WechatPipeline/
+WechatRPA/
+
+# IDE
+.idea/
