@@ -454,7 +454,9 @@ def _route_warning_tools_rule_based(user_text: str) -> dict | None:
     if not t or "预警" not in t:
         return None
     tool_names = ["get_effective_warning_info"]
-    national = any(k in t for k in ("国家局", "中央气象台", "中央台", "全国", "周边", "华北", "京津冀", "北京", "河北"))
+    # 地名关键词需排除"河北区/北京区"这类天津区县后缀，避免把天津本地区县问法误判为国家。
+    national = any(k in t for k in ("国家局", "中央气象台", "中央台", "全国", "周边", "华北", "京津冀"))
+    national = national or bool(re.search(r"北京(?!区)", t)) or bool(re.search(r"河北(?!区)", t))
     history = any(k in t for k in ("解除了吗", "解除预警", "已解除", "解除的", "历史预警", "过去", "此前"))
     today = any(k in t for k in ("今天新发", "今日新发", "今日发布", "今天发布", "今日预警", "今天预警", "新发", "动态"))
     if national:
@@ -464,11 +466,16 @@ def _route_warning_tools_rule_based(user_text: str) -> dict | None:
         tool_names.append("get_history_warning_info")
     if today and "get_today_warning_summary" not in tool_names:
         tool_names.append("get_today_warning_summary")
-    return _normalize_warning_route({
+    route = _normalize_warning_route({
         "tool_names": tool_names,
         "national_keywords": _infer_national_warning_keywords(t, None),
         "reason": "规则路由",
     })
+    if "get_national_warning_info" in route["tool_names"]:
+        # 镜像 LLM 路径的调用顺序：normalize 会把空串兜底成"天津"，
+        # 需再跑一次推理以恢复"全国"→空串（match-all）等语义。
+        route["national_keywords"] = _infer_national_warning_keywords(t, route.get("national_keywords"))
+    return route
 
 
 async def _route_warning_tools(answer_chain: Any, user_text: str, callbacks: dict[str, Any]) -> dict[str, Any]:

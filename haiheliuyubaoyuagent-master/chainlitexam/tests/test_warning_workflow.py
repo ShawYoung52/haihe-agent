@@ -113,3 +113,19 @@ def test_rule_based_warning_route_falls_back_without_keyword():
     """无预警关键词时返回 None（回退 LLM）。"""
     assert wf._route_warning_tools_rule_based("明天天气怎么样") is None
     assert wf._route_warning_tools_rule_based("") is None
+
+
+def test_rule_based_warning_route_national_match_all():
+    """"全国的预警"national_keywords 应保持空串（match-all），不被兜底成"天津"。"""
+    route = wf._route_warning_tools_rule_based("全国的预警")
+    assert route is not None
+    assert "get_national_warning_info" in route["tool_names"]
+    assert route["national_keywords"] == ""
+
+
+def test_rule_based_warning_route_district_suffix_not_national():
+    """"河北区有暴雨预警吗"是天津区县问法，应路由本地生效接口而非国家接口。"""
+    route = wf._route_warning_tools_rule_based("河北区有暴雨预警吗")
+    assert route is not None
+    assert "get_effective_warning_info" in route["tool_names"]
+    assert "get_national_warning_info" not in route["tool_names"]
