@@ -45,7 +45,7 @@ from starlette.routing import Mount
 
 from chainlit.auth import decode_jwt, get_token_from_cookies
 
-from prompts import WEATHER_ASSISTANT_PROMPT
+from prompts import WEATHER_ASSISTANT_PROMPT, PLANNER_SYSTEM_PROMPT, METEO_ANSWER_SYSTEM_PROMPT
 
 try:
     from prompts import THINKING_PROMPT, FAST_PATH_THINKING_PROMPT
@@ -2532,11 +2532,21 @@ async def _build_orchestrator_runtime() -> dict:
     today_str = datetime.now().strftime("%Y年%m月%d日")
     weekday_str = weekday_map[datetime.now().weekday()]
     prompt_prefix = f"【当前日期：{today_str}（{weekday_str}）】请基于这个当前日期来理解用户的相对时间表述（如今天、明天、周末等）。\n\n"
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", f"{prompt_prefix}{WEATHER_ASSISTANT_PROMPT}"),
+    ENABLE_NEW_PLANNER_PROMPT = os.environ.get("ENABLE_NEW_PLANNER_PROMPT", "false").strip().lower() in ("1", "true", "yes")
+    ENABLE_NEW_ANSWER_PROMPT = os.environ.get("ENABLE_NEW_ANSWER_PROMPT", "false").strip().lower() in ("1", "true", "yes")
+
+    planner_prompt = PLANNER_SYSTEM_PROMPT if ENABLE_NEW_PLANNER_PROMPT else WEATHER_ASSISTANT_PROMPT
+    answer_prompt = METEO_ANSWER_SYSTEM_PROMPT if ENABLE_NEW_ANSWER_PROMPT else WEATHER_ASSISTANT_PROMPT
+
+    planner_template = ChatPromptTemplate.from_messages([
+        ("system", f"{prompt_prefix}{planner_prompt}"),
         MessagesPlaceholder(variable_name="messages"),
     ])
-    answer_chain = prompt_template | answer_llm
+    answer_template = ChatPromptTemplate.from_messages([
+        ("system", f"{prompt_prefix}{answer_prompt}"),
+        MessagesPlaceholder(variable_name="messages"),
+    ])
+    answer_chain = answer_template | answer_llm
     callbacks = {"ainvoke_chain": ainvoke_chain}
     decision_weather_tools = build_decision_weather_tools(answer_chain, tools, callbacks)
     rainfall_river_impact_tools = build_rainfall_river_impact_tools()
@@ -2544,7 +2554,7 @@ async def _build_orchestrator_runtime() -> dict:
     print(f"✅ 本地工具已合并，当前工具列表：{[t.name for t in tools]}")
     from tools.tool_candidate_index import ToolCandidateIndex
     tool_candidate_index = ToolCandidateIndex(tools)
-    planner_chain = prompt_template | planner_llm.bind_tools(tools)
+    planner_chain = planner_template | planner_llm.bind_tools(tools)
     thinking_chain = (
         ChatPromptTemplate.from_messages([
             ("system", "{system_message}"),
