@@ -10,7 +10,14 @@ GPT 方案要求：①定位并降低 P95/P99 尾延迟（当前平均已改善�
 
 **硬约束**：`ENABLE_FAST_PATHS=false` 不动 fast path；`/api/v1/qa/ask` 契约冻结（可加 `request_id`/`X-Request-ID`）；分支 `perf/qa-tail-latency-meteo-domain`；高风险功能默认关。
 
-## 第一批范围（3 项）
+## 第一批范围（4 项）
+
+### ⓪ 黄金基线（前置，GPT 原则 1、2）
+
+修改任何代码前，先锁定基线：
+
+1. **基线报告** `docs/performance/baseline-before-optimization.md`：记录当前通过的测试（全量 252 passed、1 既有 flaky、5 skipped）、代表性问答结果、工具路由、HTTP 响应样例、当前 p50/p95（从既有 `[QUERY_TIMING]` 日志）、Planner 轮数分布。
+2. **基线测试集** `tests/fixtures/meteo_qa_cases.json`：26 类问题各 1-2 例，每例定义 `question/expected_tools{allowed,required,forbidden}/key_facts/time_scope/spatial_scope/units/forbidden_phrases/should_image/should_gis`。作为后续 Prompt 拆分、候选工具启用、DeepSeek 评估的对比基准。
 
 ### ① 调用链文档 `docs/performance/current-qa-call-chain.md`
 
@@ -41,12 +48,21 @@ GPT 方案要求：①定位并降低 P95/P99 尾延迟（当前平均已改善�
 
 | 文件 | 改动 |
 |------|------|
+| `docs/performance/baseline-before-optimization.md` | 基线报告 |
+| `tests/fixtures/meteo_qa_cases.json` | 黄金基线测试集框架 |
 | `docs/performance/current-qa-call-chain.md` | 新增调用链文档 |
 | `chainlitexam/timing_logger.py` | `TimingContext.log()` 改 JSON Lines；加字符数/排队字段 |
 | `chainlitexam/message_orchestrator.py` | 统一出口（timing 移入 `_log_query_exit` finally）；字符数埋点；工具排队记录 |
 | `chainlitexam/qa_http_api.py` | HTTP Semaphore 排队记录 |
 | `chainlitexam/scripts/perf_stats.py` | 统计脚本 |
-| `chainlitexam/tests/fixtures/meteo_qa_cases.json` | 回归问题集框架 |
+
+## 遵守 GPT 13 条黄金原则
+
+- **小批量独立提交**（原则 12）：每项一个提交，说明范围、影响文件、测试、回滚。
+- **禁止大规模重写核心流程**（原则 3）：只提取小函数、加埋点、加可关闭适配层。
+- **Shadow 不改变回答**（原则 6）：观测项只记录，不改工具调用/最终答案/GIS。
+- **不以提速减数据**（原则 7）：埋点只记耗时，不跳过任何必要查询。
+- **回归失败立即停**（原则 13）：每个提交后跑全量测试，异常即停。
 
 ## 测试
 
