@@ -10,7 +10,7 @@ import os
 import re
 from collections import Counter
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -628,13 +628,26 @@ def _source_value_text(value: Any) -> str | None:
     return str(value).strip()
 
 
+def _temperature_display_text(value: Any) -> str | None:
+    """温度展示统一按整数四舍五入，原始数值仍保留给业务计算使用。"""
+    value = _clean_value(value)
+    if value is None:
+        return None
+    try:
+        rounded = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value).strip()
+    return format(rounded, "f")
+
+
 def _difference_text(high: Any, low: Any) -> str | None:
-    """计算派生差值，避免二进制浮点数尾差进入代码生成的表格或关键节点。"""
+    """计算派生温差并按整数四舍五入，避免小数进入展示层。"""
     try:
         value = Decimal(str(high)) - Decimal(str(low))
     except (InvalidOperation, TypeError, ValueError):
         return None
-    return format(value.normalize(), "f")
+    rounded = value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return format(rounded, "f")
 
 
 def build_daily_summary(periods: list[dict]) -> list[dict]:
@@ -698,8 +711,8 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
         tmin_item = min(tmin_values, key=lambda item: item[0]) if tmin_values else None
         tmax = tmax_item[0] if tmax_item else None
         tmin = tmin_item[0] if tmin_item else None
-        tmax_display = _source_value_text(tmax_item[1]) if tmax_item else None
-        tmin_display = _source_value_text(tmin_item[1]) if tmin_item else None
+        tmax_display = _temperature_display_text(tmax_item[1]) if tmax_item else None
+        tmin_display = _temperature_display_text(tmin_item[1]) if tmin_item else None
         rows.append({
             "date": start_dt.strftime("%Y-%m-%d") if start_dt else start[:10],
             "date_label": f"{start_dt.month}月{start_dt.day}日" if start_dt else start[:10],
@@ -1122,8 +1135,8 @@ def query_rolling_forecast_core(
                 "end_time": item.get("end_time"),
                 "period_label": item.get("period_label"),
                 "weather": item.get("WEA"),
-                "tmax": item.get("TMAX"),
-                "tmin": item.get("TMIN"),
+                "tmax": _temperature_display_text(item.get("TMAX")),
+                "tmin": _temperature_display_text(item.get("TMIN")),
                 "EDA": item.get("EDA"),
                 "wind": item.get("EDA"),
                 "rainfall_mm": item.get("TP1H"),

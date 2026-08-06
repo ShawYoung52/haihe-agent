@@ -239,6 +239,84 @@ def _is_broad_scoped_warning_query(user_text: str) -> bool:
     return any(t in text for t in _BROAD_SCOPE_TERMS)
 
 
+_WARNING_DISPLAY_LABELS = (
+    "短时强降水",
+    "雷雨大风",
+    "雷暴大风",
+    "海上大风",
+    "大暴雨",
+    "强降雨",
+    "道路结冰",
+    "地质灾害",
+    "低能见度",
+    "暴雨",
+    "高温",
+    "冰雹",
+    "雷电",
+    "寒潮",
+    "大雾",
+    "山洪",
+    "霾",
+    "大风",
+)
+
+
+def _warning_query_display_label(user_text: str) -> str:
+    """提取用户明确询问的预警类型，用于无生效预警的固定回执。"""
+    text = str(user_text or "")
+    known = next((label for label in _WARNING_DISPLAY_LABELS if label in text), "")
+    if known:
+        return known
+    candidates = re.findall(r"([\u4e00-\u9fffA-Za-z0-9]{2,12})预警", text)
+    excluded = ("当前", "今天", "哪些", "什么", "发布", "相关", "天气", "国家局", "中央", "天津")
+    return next(
+        (candidate for candidate in reversed(candidates) if not any(word in candidate for word in excluded)),
+        "",
+    )
+
+
+def _strict_no_effective_warning_signal(
+    warning_bundles: list[dict[str, Any]],
+    user_text: str,
+) -> str:
+    """命中明确预警类型但生效接口无该类型时，返回唯一允许的答复。"""
+    label = _warning_query_display_label(user_text)
+    if not label:
+        return ""
+    effective_records = [
+        record
+        for bundle in warning_bundles
+        if bundle.get("tool_name") == "get_effective_warning_info"
+        for record in (bundle.get("records") or [])
+    ]
+    if not effective_records:
+        return f"当前无生效{label}预警信号"
+
+    event_keywords = _warning_query_event_keywords(user_text)
+    matching_records = effective_records
+    if event_keywords:
+        matching_records = [
+            record
+            for record in matching_records
+            if any(keyword in str(record.get("eventType") or "") for keyword in event_keywords)
+        ]
+    else:
+        matching_records = [
+            record
+            for record in matching_records
+            if label in str(record.get("eventType") or "")
+            or label in str(record.get("content") or "")
+        ]
+    severities = [level for level in ["红色", "橙色", "黄色", "蓝色"] if level in user_text]
+    if severities:
+        matching_records = [
+            record
+            for record in matching_records
+            if any(level in str(record.get("severity") or "") for level in severities)
+        ]
+    return f"当前无生效{label}预警信号" if not matching_records else ""
+
+
 def _warning_publisher_rank(record: dict[str, str]) -> int:
     """中央气象台在前，天津市气象台其次，其他发布单位最后。"""
     department = re.sub(r"\s+", "", str(record.get("department") or ""))
@@ -626,6 +704,9 @@ async def _generate_warning_core_and_advice(
 
 async def finalize_warning_answer(answer_chain: Any, warning_bundles: list[dict[str, Any]], user_text: str, callbacks: dict[str, Any], runtime: WarningRuntime) -> str:
     """两条触发路径共用的唯一回答装配器。"""
+    strict_no_effective = _strict_no_effective_warning_signal(warning_bundles, user_text)
+    if strict_no_effective:
+        return strict_no_effective
     merged = _merge_warning_bundles(warning_bundles)
     records = _sort_warning_records(_filter_warning_records_for_user(merged["records"], user_text))
     records = _trim_warning_regions_for_scope(records, user_text)

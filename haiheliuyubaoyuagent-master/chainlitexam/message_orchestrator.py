@@ -1005,6 +1005,8 @@ def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
 
 
 def _prepend_thinking_summary(text: str, query: str, has_chart: bool = False) -> str:
+    if re.fullmatch(r"当前无生效.+预警信号", str(text or "").strip()):
+        return str(text).strip()
     summary = _build_thinking_summary(query, has_chart=has_chart)
     return summary + "\n\n" + text if summary else text
 

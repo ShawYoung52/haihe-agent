@@ -6,6 +6,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/haiheliuyubaoyuagent-master/chainlitexam/.venv_new" />
       <excludeFolder url="file://$MODULE_DIR$/hhlyqyxt-master/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/WechatRPA/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="D:\PythonProject\haiheliuyubaoyuagent-master\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

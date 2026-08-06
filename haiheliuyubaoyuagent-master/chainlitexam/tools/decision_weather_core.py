@@ -12,9 +12,12 @@ import json
 import math
 import re
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+
+from tools.rolling_forecast_response import sanitize_forecast_core_summary
 
 DECISION_WEATHER_STATIONS = [
     {"region": "天津市区", "lon": 117.14, "lat": 39.24},
@@ -242,6 +245,17 @@ def _decision_rain_text(value: float | None) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def _decision_temperature_text_value(value: Any) -> str | None:
+    """点位天气表与点位结论使用整数温度。"""
+    if value is None or str(value).strip() in {"", "—"}:
+        return None
+    try:
+        rounded = Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value).strip()
+    return format(rounded, "f")
+
+
 def _decision_future_rain_level(total_rain: float | None) -> str:
     if total_rain is None:
         return "暂无足够逐小时降水数据"
@@ -261,8 +275,12 @@ def _compact_decision_period(period: dict) -> dict:
         "end_time": period.get("end_time"),
         "period_label": period.get("period_label"),
         "weather": period.get("weather") if period.get("weather") is not None else period.get("WEA"),
-        "tmax": period.get("tmax") if period.get("tmax") is not None else period.get("TMAX"),
-        "tmin": period.get("tmin") if period.get("tmin") is not None else period.get("TMIN"),
+        "tmax": _decision_temperature_text_value(
+            period.get("tmax") if period.get("tmax") is not None else period.get("TMAX")
+        ),
+        "tmin": _decision_temperature_text_value(
+            period.get("tmin") if period.get("tmin") is not None else period.get("TMIN")
+        ),
         "EDA": period.get("EDA") if period.get("EDA") is not None else period.get("wind"),
         "wind": period.get("wind") if period.get("wind") is not None else period.get("EDA"),
         "visibility_min_km": (
@@ -433,8 +451,8 @@ def _decision_temperature_text(period: dict) -> str:
     tmin = period.get("tmin")
     tmax = period.get("tmax")
     if tmin is not None and tmax is not None:
-        return f"{_decision_table_cell(tmin)}~{_decision_table_cell(tmax)}"
-    return _decision_table_cell(tmax if tmax is not None else tmin)
+        return f"{_decision_temperature_text_value(tmin)}~{_decision_temperature_text_value(tmax)}"
+    return _decision_temperature_text_value(tmax if tmax is not None else tmin) or "—"
 
 
 def _build_decision_weather_table(user_text: str, facts: dict) -> str:
@@ -477,7 +495,7 @@ def _build_decision_weather_table(user_text: str, facts: dict) -> str:
     return "\n".join(lines)
 
 
-def _decision_core_only(answer: Any) -> str:
+def _decision_core_only(answer: Any, user_text: str = "") -> str:
     """只保留模型生成的首句核心结论，丢弃其可能附带的表格或其它区块。"""
     text = str(answer or "").strip()
     match = re.search(r"【核心结论】\s*(.*?)(?=\n\s*【[^】]+】|\Z)", text, re.DOTALL)
@@ -491,7 +509,8 @@ def _decision_core_only(answer: Any) -> str:
     ]
     normalized = re.sub(r"\s+", " ", " ".join(kept_lines)).strip()
     sentence = re.match(r"^.*?[。！？!?](?:[”’」』])?", normalized)
-    return sentence.group(0).strip() if sentence else normalized
+    core = sentence.group(0).strip() if sentence else normalized
+    return sanitize_forecast_core_summary(core, user_text)
 
 
 async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_chain: Any, callbacks: dict) -> str:
@@ -513,6 +532,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
         "只输出【核心结论】及其正文，正文严格且只能有一句；只围绕用户明确询问的"
         "降雨、天气、气温、风力、能见度或活动适宜性直接作答，不主动扩展无关风险、背景或建议。\n"
+        "不要机械补充“无降水/无降雨”或“风力为X级”等泛化描述；只有用户明确询问降水或风力时才回答对应要素。\n"
+        "所有温度数值必须按四舍五入展示为整数，不得输出小数。\n"
         "未来N小时降雨问题必须使用代码给出的 rain_level 和 total_rain_text；当前是否下雨只能依据"
         "当前整点至下一整点预报判断，不得表述为降雨实况，也不得编造过去1/3/6小时累计雨量。\n"
         "表格、逐时或逐日数据行和数据来源均由代码生成；不得输出表格、其它标题、数据来源或技术说明。\n\n"
@@ -521,7 +542,7 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     )
     result = await _ainvoke_chain(callbacks)(answer_chain, {"messages": [HumanMessage(content=prompt)]})
     answer = getattr(result, "content", None) or str(result)
-    core = _decision_core_only(answer)
+    core = _decision_core_only(answer, user_text)
     table = _build_decision_weather_table(user_text, facts)
     source = _decision_table_cell(facts.get("data_source"), "天津市气象台滚动预报")
     sections = [f"【核心结论】\n{core}".rstrip()]
