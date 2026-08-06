@@ -134,9 +134,35 @@ def test_timing_context_log_line_has_no_sensitive_fields(capsys):
     out = capsys.readouterr().out
     assert "[PERF]" in out
     assert "req-abc" in out
-    assert "thinking=" in out
-    assert "total_ms=" in out
+    assert '"thinking"' in out
+    assert '"total_ms"' in out
     # 不泄露用户问题/内网地址/路径
+    assert "10.226" not in out
+    assert ".venv" not in out
+
+
+def test_timing_context_as_dict_and_json_log():
+    ctx = TimingContext(request_id="req-1")
+    ctx.mark("thinking")
+    ctx.mark("planner_round_1")
+    ctx.record_planner_round()
+    ctx.record_tool_call("get_effective_warning_info", 12.5)
+    ctx.mark("done")
+    d = ctx.as_dict()
+    assert d["request_id"] == "req-1"
+    assert d["planner_rounds"] == 1
+    assert d["tool_call_count"] == 1
+    assert "thinking" in d["stages"]
+    assert d["status"] == "ok"
+    import json as _json
+    _json.loads(ctx.to_json())  # 必须是合法 JSON
+
+
+def test_timing_log_has_no_sensitive_fields():
+    import re
+    ctx = TimingContext(request_id="req-2")
+    ctx.mark("done")
+    out = ctx.to_json()
     assert "10.226" not in out
     assert ".venv" not in out
 

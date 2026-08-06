@@ -38,7 +38,7 @@ except Exception:
 
     class TimingContext:
         def __init__(self, request_id=None):
-            pass
+            self.status = "ok"
 
         def mark(self, name):
             pass
@@ -48,6 +48,12 @@ except Exception:
 
         def record_tool_call(self, tool_name, elapsed_ms):
             pass
+
+        def as_dict(self):
+            return {}
+
+        def to_json(self):
+            return "{}"
 
         def log(self):
             pass
@@ -1058,6 +1064,15 @@ def _log_query_exit(query_start_time: float, session_id: str, query_summary: str
         pass
     finally:
         cl.user_session.set("query_timing_logged", True)
+        try:
+            timing = cl.user_session.get("timing_context")
+            if timing is not None and not getattr(timing, "_logged", False):
+                timing.status = status
+                timing.mark("done")  # 若尚未 mark
+                timing.log()
+                timing._logged = True
+        except Exception:
+            pass
 
 
 async def _handle_fast_path_error(
@@ -4201,6 +4216,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     query_start_time = time.time()
     cl.user_session.set("query_start_time", query_start_time)
     timing = TimingContext(request_id=cl.user_session.get("id") or None)
+    cl.user_session.set("timing_context", timing)
     session_id = cl.user_session.get("id") or ""
     query_summary = message.content
     cl.user_session.set("query_timing_logged", False)
@@ -4962,7 +4978,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     timing.mark("answer")
     timing.mark("done")
-    timing.log()
 
     _log_query_exit(query_start_time, session_id, query_summary, "ok")
     await reasoning.close()
