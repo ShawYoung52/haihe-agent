@@ -4852,7 +4852,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         # query_type 由本轮实际工具名推断（_query_category 词表与 is_evidence_complete 不匹配）。
         try:
             from tools.meteo_evidence import is_evidence_complete
-            qtype = _evidence_query_type_from_tool_names(planner_msg.tool_calls)
+            qtype = _evidence_query_type_from_tool_names(planner_msg)
             if qtype == "warning":
                 shadow_tool_name = "get_effective_warning_info"
                 shadow_bundles = warning_bundles
@@ -4868,9 +4868,10 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 for b in shadow_bundles
             ]
             would_early = is_evidence_complete(qtype, tool_results)
-            timing = cl.user_session.get("timing_context")
-            if timing is not None:
-                timing.evidence = {"would_early_finalize": would_early, "query_type": qtype}
+            # 用独立变量名，避免覆盖 process_message 主流程的 timing 局部变量
+            shadow_timing = cl.user_session.get("timing_context")
+            if shadow_timing is not None:
+                shadow_timing.evidence = {"would_early_finalize": would_early, "query_type": qtype}
             print(f"[EVIDENCE] query_type={qtype} would_early_finalize={would_early}")
         except Exception:
             pass
