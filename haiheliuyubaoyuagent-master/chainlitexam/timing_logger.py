@@ -4,6 +4,7 @@ Outputs `[TOOL_TIMING]` and `[QUERY_TIMING]` lines to the console so that
 performance metrics can be collected from logs.
 """
 
+import json
 import time
 import uuid
 
@@ -20,8 +21,16 @@ class TimingContext:
         self.tool_calls: list[tuple[str, float]] = []
         self.planner_rounds: int = 0
         self.tool_call_count: int = 0
+        self.status: str = "ok"
         self._start_ts = time.time()
         self._prev_ts = self._start_ts
+        # 排队 + 字符数埋点（Task 3）：P95/P99 分析可区分「信号量等待」与「工具慢」
+        self.http_queue_wait_ms: float = 0.0
+        self.tool_queue_wait_ms: float = 0.0
+        self.planner_input_chars: int = 0
+        self.planner_output_chars: int = 0
+        self.answer_input_chars: int = 0
+        self.answer_output_chars: int = 0
 
     def mark(self, name: str) -> None:
         """记录自上一 mark 到现在的耗时（毫秒），作为 name 阶段。"""
@@ -36,15 +45,28 @@ class TimingContext:
         self.tool_calls.append((tool_name, elapsed_ms))
         self.tool_call_count += 1
 
+    def as_dict(self) -> dict:
+        return {
+            "request_id": self.request_id,
+            "stages": {name: round(ms, 1) for name, ms in self.stages.items()},
+            "planner_rounds": self.planner_rounds,
+            "tool_call_count": self.tool_call_count,
+            "tools": [{"name": n, "ms": round(ms, 1)} for n, ms in self.tool_calls],
+            "total_ms": round((time.time() - self._start_ts) * 1000.0, 1),
+            "status": self.status,
+            "http_queue_wait_ms": round(self.http_queue_wait_ms, 1),
+            "tool_queue_wait_ms": round(self.tool_queue_wait_ms, 1),
+            "planner_input_chars": self.planner_input_chars,
+            "planner_output_chars": self.planner_output_chars,
+            "answer_input_chars": self.answer_input_chars,
+            "answer_output_chars": self.answer_output_chars,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.as_dict(), ensure_ascii=False)
+
     def log(self) -> None:
-        parts = [f"request_id={self.request_id}"]
-        parts += [f"{name}={ms:.0f}ms" for name, ms in self.stages.items()]
-        parts.append(f"planner_rounds={self.planner_rounds}")
-        parts.append(f"tool_call_count={self.tool_call_count}")
-        parts.append(f"total_ms={(time.time() - self._start_ts) * 1000:.0f}ms")
-        per_tool = ",".join(f"{n}:{ms:.0f}" for n, ms in self.tool_calls)
-        parts.append(f"tools=[{per_tool}]")
-        print(f"[PERF] {' '.join(parts)}")
+        print(f"[PERF] {self.to_json()}")
 
 
 class TimingLogger:

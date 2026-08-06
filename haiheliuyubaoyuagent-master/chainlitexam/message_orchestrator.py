@@ -38,7 +38,7 @@ except Exception:
 
     class TimingContext:
         def __init__(self, request_id=None):
-            pass
+            self.status = "ok"
 
         def mark(self, name):
             pass
@@ -48,6 +48,12 @@ except Exception:
 
         def record_tool_call(self, tool_name, elapsed_ms):
             pass
+
+        def as_dict(self):
+            return {}
+
+        def to_json(self):
+            return "{}"
 
         def log(self):
             pass
@@ -1058,6 +1064,15 @@ def _log_query_exit(query_start_time: float, session_id: str, query_summary: str
         pass
     finally:
         cl.user_session.set("query_timing_logged", True)
+        try:
+            timing = cl.user_session.get("timing_context")
+            if timing is not None and not getattr(timing, "_logged", False):
+                timing.status = status
+                timing.mark("done")  # 若尚未 mark
+                timing.log()
+                timing._logged = True
+        except Exception:
+            pass
 
 
 async def _handle_fast_path_error(
@@ -1803,6 +1818,30 @@ _PARALLEL_TOOL_CONCURRENCY = 4
 _PARALLEL_TOOL_SEMAPHORE = asyncio.Semaphore(_PARALLEL_TOOL_CONCURRENCY)
 
 
+def _record_answer_input_chars(messages) -> None:
+    """观测埋点：记录 answer LLM 的输入消息字符数。
+
+    messages 在 answer 调用期间不会被并发修改（调用是 await 的），因此调用后
+    记录与调用前等价。纯观测，异常绝不外抛，不影响消息流。
+    """
+    try:
+        timing = cl.user_session.get("timing_context")
+        if timing is not None:
+            timing.answer_input_chars = sum(len(str(m.content or "")) for m in messages)
+    except Exception:
+        pass
+
+
+def _record_answer_output_chars(text) -> None:
+    """观测埋点：记录 answer LLM 的输出文本长度。异常绝不外抛。"""
+    try:
+        timing = cl.user_session.get("timing_context")
+        if timing is not None:
+            timing.answer_output_chars = len(str(text or ""))
+    except Exception:
+        pass
+
+
 async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
     """阶段一：并行调用纯数据工具。
 
@@ -1818,7 +1857,17 @@ async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
         tool = _find_tool(tools, tool_call["name"])
         if tool is None:
             return tool_call["id"], None, (f"工具未找到：{tool_call['name']}", 0.0)
+        # 观测埋点：记录工具信号量排队耗时，累计进 TimingContext.tool_queue_wait_ms，
+        # 供 P95/P99 分析分离「并发排队」与「工具自身耗时」。纯观测，异常绝不外抛。
+        sem_start = time.time()
         async with _PARALLEL_TOOL_SEMAPHORE:
+            tool_queue_ms = (time.time() - sem_start) * 1000
+            try:
+                timing = cl.user_session.get("timing_context")
+                if timing is not None:
+                    timing.tool_queue_wait_ms = float(timing.tool_queue_wait_ms or 0.0) + tool_queue_ms
+            except Exception:
+                pass
             async with cl.Step(name=TOOL_DISPLAY_NAMES.get(tool_call["name"], tool_call["name"]),
                                parent_id=parent_step.id, type="tool") as tool_step:
                 tool_step.show_input = False
@@ -4201,6 +4250,14 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     query_start_time = time.time()
     cl.user_session.set("query_start_time", query_start_time)
     timing = TimingContext(request_id=cl.user_session.get("id") or None)
+    cl.user_session.set("timing_context", timing)
+    # HTTP 接口在 _run_once 之前排队，已把等待时间写入会话，此处回填到 timing。
+    try:
+        _http_queue_wait_ms = cl.user_session.get("http_queue_wait_ms") or 0.0
+        if _http_queue_wait_ms:
+            timing.http_queue_wait_ms = float(_http_queue_wait_ms)
+    except Exception:
+        pass
     session_id = cl.user_session.get("id") or ""
     query_summary = message.content
     cl.user_session.set("query_timing_logged", False)
@@ -4500,9 +4557,23 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 AIMessage(content=""), message.content, simple_route
             )
         else:
+            try:
+                _timing = cl.user_session.get("timing_context")
+                if _timing is not None:
+                    _timing.planner_input_chars = sum(
+                        len(str(m.content or "")) for m in messages
+                    )
+            except Exception:
+                pass
             planner_msg = await callbacks["astream_planner_think"](
                 planner_chain, {"messages": messages}, reasoning
             )
+            try:
+                _timing = cl.user_session.get("timing_context")
+                if _timing is not None:
+                    _timing.planner_output_chars = len(str(planner_msg.content or ""))
+            except Exception:
+                pass
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
@@ -4604,10 +4675,12 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             if stream_msg.content:
                 await stream_msg.update()
             await _maybe_close_reasoning(reasoning)
+            _record_answer_input_chars(messages)
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                 timeout=60,
             )
+            _record_answer_output_chars(text)
         except Exception as e:
             await reasoning.line(f"❌ 生成回答失败：{str(e)[:200]}")
             await _maybe_close_reasoning(reasoning)
@@ -4718,12 +4791,14 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             try:
                 _compress_messages(messages)
                 await _maybe_close_reasoning(reasoning)
+                _record_answer_input_chars(messages)
                 text = await asyncio.wait_for(
                     callbacks["astream_answer_chain_to_message"](
                         answer_chain, {"messages": messages}, stream_msg
                     ),
                     timeout=60,
                 )
+                _record_answer_output_chars(text)
             except Exception as e:
                 print(f"[Fix A] 回答生成失败：{e}")
                 # 兜底：用首个 bundle 的 code_section 直接收口（无结论则用占位）
@@ -4755,9 +4830,23 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
         try:
             _compress_messages(messages)
+            try:
+                _timing = cl.user_session.get("timing_context")
+                if _timing is not None:
+                    _timing.planner_input_chars = sum(
+                        len(str(m.content or "")) for m in messages
+                    )
+            except Exception:
+                pass
             planner_msg = await callbacks["astream_planner_think"](
                 planner_chain, {"messages": messages}, reasoning
             )
+            try:
+                _timing = cl.user_session.get("timing_context")
+                if _timing is not None:
+                    _timing.planner_output_chars = len(str(planner_msg.content or ""))
+            except Exception:
+                pass
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
             if _is_future_hour_weather_query(message.content) and planner_msg.tool_calls:
                 print("[未来小时天气路由] 已取得滚动预报，忽略后续重复工具调用并进入回答生成。")
@@ -4815,22 +4904,26 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     if stream_msg.content:
                         await stream_msg.update()
                     await _maybe_close_reasoning(reasoning)
+                    _record_answer_input_chars(messages)
                     text = await asyncio.wait_for(
                         callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                         timeout=60,
                     )
+                    _record_answer_output_chars(text)
                 except (asyncio.TimeoutError, TimeoutError) as timeout_exc:
                     # Fix C：第 2 次 Planner 超时且已有完整滚动预报数据时，回退 Answer 生成
                     if _has_complete_rolling_forecast(rolling_forecast_bundles):
                         print("[Fix C] Planner 超时，已有完整预报数据，回退 Answer 生成。")
                         try:
                             await _maybe_close_reasoning(reasoning)
+                            _record_answer_input_chars(messages)
                             text = await asyncio.wait_for(
                                 callbacks["astream_answer_chain_to_message"](
                                     answer_chain, {"messages": messages}, stream_msg
                                 ),
                                 timeout=60,
                             )
+                            _record_answer_output_chars(text)
                         except Exception:
                             text = ""
                         text = assemble_rolling_forecast_answer(
@@ -4880,12 +4973,14 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 print("[Fix C] 外层 Planner 超时，已有完整预报数据，回退 Answer 生成。")
                 try:
                     await _maybe_close_reasoning(reasoning)
+                    _record_answer_input_chars(messages)
                     text = await asyncio.wait_for(
                         callbacks["astream_answer_chain_to_message"](
                             answer_chain, {"messages": messages}, stream_msg
                         ),
                         timeout=60,
                     )
+                    _record_answer_output_chars(text)
                 except Exception:
                     text = ""
                 text = assemble_rolling_forecast_answer(
@@ -4940,10 +5035,12 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             if stream_msg.content:
                 await stream_msg.update()
             await _maybe_close_reasoning(reasoning)
+            _record_answer_input_chars(messages)
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
                 timeout=60,
             )
+            _record_answer_output_chars(text)
         except Exception as e:
             await reasoning.line(f"❌ 兜底回答失败：{str(e)[:200]}")
             await _maybe_close_reasoning(reasoning)
@@ -4962,7 +5059,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     timing.mark("answer")
     timing.mark("done")
-    timing.log()
 
     _log_query_exit(query_start_time, session_id, query_summary, "ok")
     await reasoning.close()

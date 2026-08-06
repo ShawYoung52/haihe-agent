@@ -1,0 +1,550 @@
+{
+  "version": "0.1.0",
+  "note": "气象问答黄金问题集。字段结构完整、不依赖真实工具结果：只校验结构，不执行工具。expected_tools.allowed=候选工具全集；required=必须调用的工具；forbidden=不允许调用的工具（若调用说明路由/召回错误）。",
+  "cases": [
+    {
+      "id": "current_obs",
+      "category": "天气实况",
+      "question": "现在天津天气怎么样",
+      "expected_tools": {
+        "allowed": ["query_current_weather_observation"],
+        "required": ["query_current_weather_observation"],
+        "forbidden": []
+      },
+      "key_facts": ["温度", "降水"],
+      "time_scope": "current",
+      "spatial_scope": "天津",
+      "units": ["℃", "mm"],
+      "forbidden_phrases": ["根据工具"],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "station_real_time_obs",
+      "category": "天气实况",
+      "question": "天津现在温度是多少",
+      "expected_tools": {
+        "allowed": ["query_current_weather_observation"],
+        "required": ["query_current_weather_observation"],
+        "forbidden": ["query_rolling_forecast", "query_decision_weather_for_poi"]
+      },
+      "key_facts": ["温度"],
+      "time_scope": "current",
+      "spatial_scope": "天津",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "hourly_forecast",
+      "category": "逐小时预报",
+      "question": "未来24小时天津每小时天气",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": ["query_current_weather_observation", "query_decision_weather_for_poi"]
+      },
+      "key_facts": ["逐小时", "降水"],
+      "time_scope": "next24h",
+      "spatial_scope": "天津",
+      "units": ["mm/h"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "multi_day",
+      "category": "未来多日预报",
+      "question": "未来一周天津天气",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["7天"],
+      "time_scope": "7days",
+      "spatial_scope": "天津",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "precip_start_end",
+      "category": "降水起止",
+      "question": "天津明天几点开始下雨",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["开始时间"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "天津",
+      "units": ["时"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "precip_end_time",
+      "category": "降水起止",
+      "question": "天津这场雨什么时候停",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["结束时间"],
+      "time_scope": "current+next24h",
+      "spatial_scope": "天津",
+      "units": ["时"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "accum_rain",
+      "category": "累计雨量",
+      "question": "天津过去24小时累计降雨多少",
+      "expected_tools": {
+        "allowed": ["query_current_weather_observation", "analyze_rainfall_by_time"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["累计"],
+      "time_scope": "past24h",
+      "spatial_scope": "天津",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "temp",
+      "category": "气温",
+      "question": "天津明天最高气温多少",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["最高气温"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "天津",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "wind",
+      "category": "风力和阵风",
+      "question": "天津明天风力多大",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["风力"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "天津",
+      "units": ["级", "m/s"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "visibility",
+      "category": "能见度和雾",
+      "question": "天津明天能见度如何",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["能见度"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "天津",
+      "units": ["m"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "effective_warning",
+      "category": "当前生效预警",
+      "question": "现在有什么暴雨预警",
+      "expected_tools": {
+        "allowed": ["get_effective_warning_info"],
+        "required": ["get_effective_warning_info"],
+        "forbidden": ["get_national_warning_info"]
+      },
+      "key_facts": ["生效", "暴雨"],
+      "time_scope": "current",
+      "spatial_scope": "天津",
+      "units": [],
+      "forbidden_phrases": ["未检索到"],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "history_warning",
+      "category": "历史预警",
+      "question": "暴雨预警解除了吗",
+      "expected_tools": {
+        "allowed": ["get_effective_warning_info", "get_history_warning_info"],
+        "required": ["get_history_warning_info"],
+        "forbidden": []
+      },
+      "key_facts": ["解除"],
+      "time_scope": "current+history",
+      "spatial_scope": "天津",
+      "units": [],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "national_warning",
+      "category": "国家级预警",
+      "question": "中央气象台发布了什么预警",
+      "expected_tools": {
+        "allowed": ["get_national_warning_info"],
+        "required": ["get_national_warning_info"],
+        "forbidden": []
+      },
+      "key_facts": ["中央气象台"],
+      "time_scope": "current",
+      "spatial_scope": "全国/天津",
+      "units": [],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "decision_poi",
+      "category": "点位决策天气",
+      "question": "梅江会展中心明天天气如何",
+      "expected_tools": {
+        "allowed": ["query_decision_weather_for_poi"],
+        "required": ["query_decision_weather_for_poi"],
+        "forbidden": ["query_rolling_forecast"]
+      },
+      "key_facts": ["梅江会展中心"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "点位",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "decision_poi_rain_hours",
+      "category": "点位决策天气",
+      "question": "天津大学未来24小时会下雨吗",
+      "expected_tools": {
+        "allowed": ["query_decision_weather_for_poi"],
+        "required": ["query_decision_weather_for_poi"],
+        "forbidden": []
+      },
+      "key_facts": ["天津大学", "下雨"],
+      "time_scope": "next24h",
+      "spatial_scope": "点位",
+      "units": ["mm/h"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "basin_areal",
+      "category": "流域面雨量",
+      "question": "海河流域面雨量多少",
+      "expected_tools": {
+        "allowed": ["query_basin_areal_rainfall"],
+        "required": ["query_basin_areal_rainfall"],
+        "forbidden": ["query_rolling_forecast"]
+      },
+      "key_facts": ["面雨量"],
+      "time_scope": "current",
+      "spatial_scope": "海河流域",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "basin_future_weather",
+      "category": "流域未来天气",
+      "question": "海河流域明天天气如何",
+      "expected_tools": {
+        "allowed": ["get_river_system_rainfall_forecast", "get_city_rainfall_time_range"],
+        "required": ["get_river_system_rainfall_forecast"],
+        "forbidden": ["query_rolling_forecast"]
+      },
+      "key_facts": ["流域", "河系"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "海河流域",
+      "units": ["mm"],
+      "forbidden_phrases": ["表名", "文件路径", "参数"],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "rainstorm_impact",
+      "category": "暴雨影响河流",
+      "question": "这场暴雨会影响哪些河流",
+      "expected_tools": {
+        "allowed": ["get_affected_river_network_by_rainfall"],
+        "required": ["get_affected_river_network_by_rainfall"],
+        "forbidden": []
+      },
+      "key_facts": ["影响河流", "river_propagation"],
+      "time_scope": "current",
+      "spatial_scope": "海河流域",
+      "units": ["km", "小时"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "rainstorm_impact_arrival",
+      "category": "暴雨影响河流",
+      "question": "暴雨洪水大概多久到达下游",
+      "expected_tools": {
+        "allowed": ["get_affected_river_network_by_rainfall"],
+        "required": ["get_affected_river_network_by_rainfall"],
+        "forbidden": []
+      },
+      "key_facts": ["到达时间", "estimated_arrival_time"],
+      "time_scope": "current+future",
+      "spatial_scope": "海河流域",
+      "units": ["小时"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "admin_division",
+      "category": "行政区划",
+      "question": "天津市各区天气怎么样",
+      "expected_tools": {
+        "allowed": ["get_admin_division_for_plot", "query_rolling_forecast"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["区县"],
+      "time_scope": "current",
+      "spatial_scope": "天津市各区",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "emergency_response",
+      "category": "防汛应急",
+      "question": "海河流域当前防汛应急响应级别是多少",
+      "expected_tools": {
+        "allowed": ["safe_evaluate_haihe_emergency_response", "evaluate_emergency_response_by_time_range"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["应急响应", "级别"],
+      "time_scope": "current",
+      "spatial_scope": "海河流域",
+      "units": ["级"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "water_level",
+      "category": "水位",
+      "question": "子牙河现在水位多高",
+      "expected_tools": {
+        "allowed": ["query_water_level"],
+        "required": ["query_water_level"],
+        "forbidden": ["query_rolling_forecast"]
+      },
+      "key_facts": ["水位", "子牙河"],
+      "time_scope": "current",
+      "spatial_scope": "子牙河",
+      "units": ["m"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "river_network",
+      "category": "河网",
+      "question": "海河流域河网分布如何",
+      "expected_tools": {
+        "allowed": ["get_river_network_for_plot"],
+        "required": ["get_river_network_for_plot"],
+        "forbidden": []
+      },
+      "key_facts": ["河网"],
+      "time_scope": "current",
+      "spatial_scope": "海河流域",
+      "units": [],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "downstream_river",
+      "category": "上下游",
+      "question": "滦河下游有哪些河流",
+      "expected_tools": {
+        "allowed": ["get_xialiu_rivername", "locate_downstream_rivers"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["下游", "滦河"],
+      "time_scope": "current",
+      "spatial_scope": "滦河",
+      "units": [],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "region_rainfall",
+      "category": "区域雨量",
+      "question": "京津冀区域最近24小时降雨量分布",
+      "expected_tools": {
+        "allowed": ["get_city_rainfall_time_range", "query_basin_areal_rainfall"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["区域", "降雨"],
+      "time_scope": "past24h",
+      "spatial_scope": "京津冀",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": true,
+      "should_gis": true
+    },
+    {
+      "id": "station_img",
+      "category": "图片",
+      "question": "给我看天津降雨的实况图",
+      "expected_tools": {
+        "allowed": ["get_station_rainfall_real_img"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["实况图", "降雨"],
+      "time_scope": "current",
+      "spatial_scope": "天津",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": true,
+      "should_gis": false
+    },
+    {
+      "id": "gis_layer",
+      "category": "GIS图层",
+      "question": "在地图上显示海河流域面雨量",
+      "expected_tools": {
+        "allowed": ["query_basin_areal_rainfall"],
+        "required": ["query_basin_areal_rainfall"],
+        "forbidden": []
+      },
+      "key_facts": ["地图", "面雨量"],
+      "time_scope": "current",
+      "spatial_scope": "海河流域",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": true
+    },
+    {
+      "id": "missing_station_data",
+      "category": "缺测",
+      "question": "天津部分站点数据缺失了怎么办",
+      "expected_tools": {
+        "allowed": ["query_current_weather_observation"],
+        "required": [],
+        "forbidden": []
+      },
+      "key_facts": ["缺测", "站点"],
+      "time_scope": "current",
+      "spatial_scope": "天津",
+      "units": [],
+      "forbidden_phrases": ["根据工具"],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "tool_timeout",
+      "category": "工具超时",
+      "question": "查询了很久没出结果，天津明天天气如何",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["明天天气"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "天津",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "follow_up_question",
+      "category": "多轮追问",
+      "question": "那明天呢",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["明天"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "同会话上文",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "same_session",
+      "category": "同会话",
+      "question": "继续刚才的预报，天津后天天气怎样",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["后天"],
+      "time_scope": "day_after_tomorrow",
+      "spatial_scope": "天津",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "cross_session",
+      "category": "异会话",
+      "question": "（新会话）帮我查一下天津这周末天气",
+      "expected_tools": {
+        "allowed": ["query_rolling_forecast"],
+        "required": ["query_rolling_forecast"],
+        "forbidden": []
+      },
+      "key_facts": ["周末"],
+      "time_scope": "weekend",
+      "spatial_scope": "天津",
+      "units": ["℃"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    }
+  ]
+}
