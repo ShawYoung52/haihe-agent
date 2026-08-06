@@ -398,7 +398,7 @@
       "category": "上下游",
       "question": "滦河下游有哪些河流",
       "expected_tools": {
-        "allowed": ["get_xialiu_rivername", "locate_downstream_rivers", "direct_downstream_of_rivers"],
+        "allowed": ["get_xialiu_rivername", "locate_downstream_rivers"],
         "required": [],
         "forbidden": []
       },
@@ -415,7 +415,7 @@
       "category": "区域雨量",
       "question": "京津冀区域最近24小时降雨量分布",
       "expected_tools": {
-        "allowed": ["get_surf_ele_in_basin_by_time_range", "analyze_region_rainfall"],
+        "allowed": ["get_city_rainfall_time_range", "query_basin_areal_rainfall"],
         "required": [],
         "forbidden": []
       },
@@ -432,7 +432,7 @@
       "category": "图片",
       "question": "给我看天津降雨的实况图",
       "expected_tools": {
-        "allowed": ["get_station_rainfall_real_img", "station_rainfall_real_img"],
+        "allowed": ["get_station_rainfall_real_img"],
         "required": [],
         "forbidden": []
       },
@@ -466,7 +466,7 @@
       "category": "缺测",
       "question": "天津部分站点数据缺失了怎么办",
       "expected_tools": {
-        "allowed": ["get_available_stations", "query_current_weather_observation"],
+        "allowed": ["query_current_weather_observation"],
         "required": [],
         "forbidden": []
       },
