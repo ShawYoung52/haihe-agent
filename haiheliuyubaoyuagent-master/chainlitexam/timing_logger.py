@@ -24,6 +24,13 @@ class TimingContext:
         self.status: str = "ok"
         self._start_ts = time.time()
         self._prev_ts = self._start_ts
+        # 排队 + 字符数埋点（Task 3）：P95/P99 分析可区分「信号量等待」与「工具慢」
+        self.http_queue_wait_ms: float = 0.0
+        self.tool_queue_wait_ms: float = 0.0
+        self.planner_input_chars: int = 0
+        self.planner_output_chars: int = 0
+        self.answer_input_chars: int = 0
+        self.answer_output_chars: int = 0
 
     def mark(self, name: str) -> None:
         """记录自上一 mark 到现在的耗时（毫秒），作为 name 阶段。"""
@@ -47,6 +54,12 @@ class TimingContext:
             "tools": [{"name": n, "ms": round(ms, 1)} for n, ms in self.tool_calls],
             "total_ms": round((time.time() - self._start_ts) * 1000.0, 1),
             "status": self.status,
+            "http_queue_wait_ms": round(self.http_queue_wait_ms, 1),
+            "tool_queue_wait_ms": round(self.tool_queue_wait_ms, 1),
+            "planner_input_chars": self.planner_input_chars,
+            "planner_output_chars": self.planner_output_chars,
+            "answer_input_chars": self.answer_input_chars,
+            "answer_output_chars": self.answer_output_chars,
         }
 
     def to_json(self) -> str:

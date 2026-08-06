@@ -167,6 +167,17 @@ def test_timing_log_has_no_sensitive_fields():
     assert ".venv" not in out
 
 
+def test_timing_context_queue_and_chars_fields():
+    ctx = TimingContext(request_id="req-3")
+    ctx.http_queue_wait_ms = 150.0
+    ctx.tool_queue_wait_ms = 20.0
+    ctx.planner_input_chars = 100
+    ctx.answer_input_chars = 200
+    d = ctx.as_dict()
+    assert d["http_queue_wait_ms"] == 150.0
+    assert d["planner_input_chars"] == 100
+
+
 if __name__ == "__main__":
     test_log_tool_format()
     test_log_query_format()

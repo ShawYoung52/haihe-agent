@@ -624,9 +624,16 @@ class QARuntime:
         # 同一 conversation_id 串行，避免「读历史→问答→写历史」的读改写竞态
         # （并发两个请求会让后写的覆盖先写的，丢掉一整轮对话；已实测复现）
         async with self.store.lock_for(cid):
+            # 观测埋点：记录 HTTP 信号量排队耗时，供 TimingContext.http_queue_wait_ms 使用，
+            # 让 P95/P99 分析能分离「排队等待」与「实际处理」。
+            sem_wait_start = time.time()
             async with self._semaphore:
+                sem_wait_ms = (time.time() - sem_wait_start) * 1000
                 result = await asyncio.wait_for(
-                    self._run_once(text, cid, runtime, include_reasoning, include_gis),
+                    self._run_once(
+                        text, cid, runtime, include_reasoning, include_gis,
+                        http_queue_wait_ms=sem_wait_ms,
+                    ),
                     timeout=TIMEOUT_SECONDS,
                 )
 
@@ -640,6 +647,7 @@ class QARuntime:
         runtime: dict[str, Any],
         include_reasoning: bool,
         include_gis: bool,
+        http_queue_wait_ms: float = 0.0,
     ) -> dict[str, Any]:
         import chainlit as cl
         from chainlit.context import context_var, init_http_context
@@ -654,6 +662,14 @@ class QARuntime:
         emitter = CapturingEmitter(ctx.session)
         ctx.emitter = emitter
         context_var.set(ctx)
+
+        # 排队发生在 _run_once 之前（ask 的 _semaphore），此处把等待时间写入
+        # 会话供 process_message 读取到 TimingContext.http_queue_wait_ms。
+        if http_queue_wait_ms:
+            try:
+                cl.user_session.set("http_queue_wait_ms", float(http_queue_wait_ms))
+            except Exception:
+                pass
 
         # 历史副本传进去（process_message 会原地 append 本轮问答）
         history = await self.store.get(conversation_id)
