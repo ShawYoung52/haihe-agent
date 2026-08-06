@@ -48,18 +48,21 @@ class ToolCandidateIndex:
         ]
         return [b for b in biz if b in text]
 
-    def candidates_for(self, user_text: str, limit: int = 12) -> list[str]:
-        """按用户问题关键词召回候选工具；无命中时返回兜底工具。"""
+    def candidates_for_top_n(self, user_text: str, n: int) -> list[str]:
+        """取候选工具前 n 个（按关键词命中顺序，含兜底工具）。"""
         matched: list[str] = []
         for kw, names in self._by_keyword.items():
             if kw in (user_text or ""):
-                for n in names:
-                    if n not in matched:
-                        matched.append(n)
-        for n in self._default_candidates:
-            if n not in matched:
-                matched.append(n)
-        return matched[:limit]
+                for name in names:
+                    if name not in matched:
+                        matched.append(name)
+        for name in self._default_candidates:
+            if name not in matched:
+                matched.append(name)
+        return matched[:n]
+
+    def candidates_for(self, user_text: str, limit: int = 12) -> list[str]:
+        return self.candidates_for_top_n(user_text, limit)
 
     def contains(self, user_text: str, actual_tool: str, limit: int = 12) -> bool:
         """影子观测：候选是否包含实际调用的工具。"""

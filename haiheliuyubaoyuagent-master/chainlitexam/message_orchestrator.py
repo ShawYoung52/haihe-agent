@@ -4621,9 +4621,14 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         try:
             idx = callbacks["tool_candidate_index"]
             actual = [tc["name"] for tc in planner_msg.tool_calls]
-            hit = [t for t in actual if idx.contains(message.content, t)]
-            print(f"[TOOL_CAND] request={session_id} actual={actual} "
-                  f"recalled={len(hit)}/{len(actual)} candidates={idx.candidates_for(message.content, limit=12)}")
+            qtype = _evidence_query_type_from_tool_names(planner_msg)
+            top5 = idx.candidates_for_top_n(message.content, 5)
+            top8 = idx.candidates_for_top_n(message.content, 8)
+            top12 = idx.candidates_for(message.content, limit=12)
+            def _recall(top: list) -> str:
+                hit = [t for t in actual if t in top]
+                return f"{len(hit)}/{len(actual)}"
+            print(f"[TOOL_CAND] {json.dumps({'request': session_id, 'query_type': qtype, 'actual': actual, 'recall_5': _recall(top5), 'recall_8': _recall(top8), 'recall_12': _recall(top12), 'candidates_12': top12}, ensure_ascii=False)}")
         except Exception:
             pass
 
