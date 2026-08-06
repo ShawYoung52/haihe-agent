@@ -31,6 +31,8 @@ class TimingContext:
         self.planner_output_chars: int = 0
         self.answer_input_chars: int = 0
         self.answer_output_chars: int = 0
+        # 阶段五 shadow：证据完整性判断观测（would_early_finalize / query_type），默认空，不参与跳过决策
+        self.evidence: dict = {}
 
     def mark(self, name: str) -> None:
         """记录自上一 mark 到现在的耗时（毫秒），作为 name 阶段。"""
@@ -60,6 +62,7 @@ class TimingContext:
             "planner_output_chars": self.planner_output_chars,
             "answer_input_chars": self.answer_input_chars,
             "answer_output_chars": self.answer_output_chars,
+            "evidence": self.evidence,
         }
 
     def to_json(self) -> str:

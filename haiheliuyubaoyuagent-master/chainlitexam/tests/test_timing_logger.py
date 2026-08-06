@@ -178,6 +178,14 @@ def test_timing_context_queue_and_chars_fields():
     assert d["planner_input_chars"] == 100
 
 
+def test_timing_context_evidence_field():
+    ctx = TimingContext(request_id="req-ev")
+    ctx.evidence = {"would_early_finalize": True, "query_type": "forecast"}
+    d = ctx.as_dict()
+    assert d["evidence"] == {"would_early_finalize": True, "query_type": "forecast"}
+    assert "would_early_finalize" in d["evidence"]
+
+
 if __name__ == "__main__":
     test_log_tool_format()
     test_log_query_format()
