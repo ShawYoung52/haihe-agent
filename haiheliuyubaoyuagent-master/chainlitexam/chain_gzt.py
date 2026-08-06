@@ -537,14 +537,37 @@ async def _qa_file(session_id: str, file_id: str):
 
 # ---- 预热（即使失败也不影响中间件工作）----
 
+
+async def _llm_warmup(runtime: dict) -> None:
+    """对 Planner 和 Answer 发最小非敏感请求，触发一次真实推理预热。
+
+    默认关闭（由 `_warmup_qa` 的 ENABLE_LLM_WARMUP 开关控制）。失败只打日志，
+    不抛异常、不阻塞启动。只调用传入的 chain，不写 Chainlit 数据层 / 响应缓存。
+    """
+    warmup_msg = [HumanMessage(content="请回复一个字：好")]
+    for name, chain_key in (("planner", "planner_chain"), ("answer", "answer_chain")):
+        chain = runtime.get(chain_key)
+        if chain is None:
+            continue
+        try:
+            await asyncio.wait_for(chain.ainvoke({"messages": warmup_msg}), timeout=30)
+            print(f"[LLM-WARMUP] {name} done")
+        except Exception as e:
+            print(f"[LLM-WARMUP] {name} failed: {type(e).__name__}")
+
+
 @cl.on_app_startup
 async def _warmup_qa():
     if not qa_http_api.runtime.configured:
         qa_http_api.runtime.configure(_build_qa_runtime)
     try:
         print("[QA-API] warming up...")
-        await qa_http_api.runtime._get_runtime()
-        print("[QA-API] ready")
+        runtime = await qa_http_api.runtime._get_runtime()
+        if os.environ.get("ENABLE_LLM_WARMUP", "false").strip().lower() in ("1", "true", "yes"):
+            await _llm_warmup(runtime)
+            print("[QA-API] ready (with LLM warmup)")
+        else:
+            print("[QA-API] ready (LLM warmup disabled)")
     except Exception as e:
         print(f"[QA-API] warmup failed (will lazy-load): {type(e).__name__}")
 
