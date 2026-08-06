@@ -813,6 +813,33 @@ def _tool_call_names(planner_msg) -> set[str]:
     return names
 
 
+# 工具名 → 证据完整性判定的 query_type 映射（阶段五 shadow）。
+# 不用 _query_category：其只返回 rainstorm/visibility/temperature/activity/weather，
+# 与 is_evidence_complete 的词表（forecast/warning/current/water_level/rain）不匹配，
+# 会导致 would_early_finalize 对预警/实况/水位等恒为 False，shadow 数据失去意义。
+# 注意映射顺序即优先级：warning 工具排最前，多个工具同轮时优先观测预警。
+_QUERY_TYPE_BY_TOOL: dict[str, str] = {
+    "get_effective_warning_info": "warning",
+    "get_history_warning_info": "warning",
+    "get_national_warning_info": "warning",
+    "get_today_warning_summary": "warning",
+    "query_rolling_forecast": "forecast",
+    "query_current_weather_observation": "current",
+    "query_water_level": "water_level",
+    "query_decision_weather_for_poi": "forecast",
+    "query_basin_areal_rainfall": "rain",
+}
+
+
+def _evidence_query_type_from_tool_names(planner_msg) -> str:
+    """根据本轮实际调用的工具名推断 query_type；多个工具时按安全优先级取一个，未知返回 unknown。"""
+    names = _tool_call_names(planner_msg)
+    for tool_name, qtype in _QUERY_TYPE_BY_TOOL.items():
+        if tool_name in names:
+            return qtype
+    return "unknown"
+
+
 def _friendly_llm_error_text(err: Exception) -> str:
     t = str(err).strip()
     lower_t = t.lower()
@@ -4818,6 +4845,36 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             _log_query_exit(query_start_time, session_id, query_summary, "ok")
             answer_generated = True
             break
+
+        # 阶段五 shadow：记录证据完整性判断，不改变真实流程。
+        # ENABLE_EVIDENCE_EARLY_FINALIZE=true 时才用 would_early 参与跳过决策。
+        # 这里只在 Fix A 未触发（非滚动预报）时提供 would_early_finalize 观测数据；
+        # query_type 由本轮实际工具名推断（_query_category 词表与 is_evidence_complete 不匹配）。
+        try:
+            from tools.meteo_evidence import is_evidence_complete
+            qtype = _evidence_query_type_from_tool_names(planner_msg)
+            if qtype == "warning":
+                shadow_tool_name = "get_effective_warning_info"
+                shadow_bundles = warning_bundles
+            elif qtype in ("current", "water_level"):
+                # bundle 未带 observation_time/water_level_m，保守返回 False（不跳过）
+                shadow_tool_name = qtype
+                shadow_bundles = []
+            else:
+                shadow_tool_name = "query_rolling_forecast"
+                shadow_bundles = rolling_forecast_bundles
+            tool_results = [
+                {"tool_name": shadow_tool_name, "bundle": b}
+                for b in shadow_bundles
+            ]
+            would_early = is_evidence_complete(qtype, tool_results)
+            # 用独立变量名，避免覆盖 process_message 主流程的 timing 局部变量
+            shadow_timing = cl.user_session.get("timing_context")
+            if shadow_timing is not None:
+                shadow_timing.evidence = {"would_early_finalize": would_early, "query_type": qtype}
+            print(f"[EVIDENCE] query_type={qtype} would_early_finalize={would_early}")
+        except Exception:
+            pass
 
         await reasoning.stage("✅ 评估结果", "已获取数据，正在判断能否完整回答您的问题...")
         await reasoning.stage("✅ 评估结果", "正在评估是否需要补充查询...")

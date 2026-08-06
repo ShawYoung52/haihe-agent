@@ -14,6 +14,7 @@ from chainlitexam.tests.stubs import ensure_stubs
 ensure_stubs()
 
 from chainlitexam.timing_logger import TimingLogger, TimingContext
+from chainlitexam import message_orchestrator as mo
 
 
 def _capture_stdout(func, *args, **kwargs):
@@ -176,6 +177,46 @@ def test_timing_context_queue_and_chars_fields():
     d = ctx.as_dict()
     assert d["http_queue_wait_ms"] == 150.0
     assert d["planner_input_chars"] == 100
+
+
+def test_timing_context_evidence_field():
+    ctx = TimingContext(request_id="req-ev")
+    ctx.evidence = {"would_early_finalize": True, "query_type": "forecast"}
+    d = ctx.as_dict()
+    assert d["evidence"] == {"would_early_finalize": True, "query_type": "forecast"}
+    assert "would_early_finalize" in d["evidence"]
+
+
+def _planner_msg_with_tool_calls(tool_calls):
+    """构造一个带 tool_calls 的伪 planner 消息对象。"""
+    msg = type("FakePlannerMsg", (), {})()
+    msg.content = ""
+    msg.tool_calls = tool_calls
+    return msg
+
+
+def test_evidence_query_type_from_tool_names_forecast():
+    """含 query_rolling_forecast 工具的 planner 消息 → forecast。"""
+    msg = _planner_msg_with_tool_calls([
+        {"id": "c1", "name": "query_rolling_forecast", "args": {"user_query": "未来三天降雨"}},
+    ])
+    assert mo._evidence_query_type_from_tool_names(msg) == "forecast"
+
+
+def test_evidence_query_type_from_tool_names_warning():
+    """含预警工具的 planner 消息 → warning。"""
+    msg = _planner_msg_with_tool_calls([
+        {"id": "c1", "name": "get_effective_warning_info", "args": {}},
+    ])
+    assert mo._evidence_query_type_from_tool_names(msg) == "warning"
+
+
+def test_evidence_query_type_from_tool_names_bare_list_is_unknown():
+    """误传 tool_calls 裸列表（而非 planner 消息对象）时 → unknown（保守，不误判）。"""
+    bare_list = [
+        {"id": "c1", "name": "query_rolling_forecast", "args": {}},
+    ]
+    assert mo._evidence_query_type_from_tool_names(bare_list) == "unknown"
 
 
 if __name__ == "__main__":
