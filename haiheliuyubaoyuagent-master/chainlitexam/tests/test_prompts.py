@@ -74,3 +74,49 @@ def test_thinking_prompts_require_scope_consistency():
         body = m.group(1)
         assert "地域" in body and "一致" in body, f"{name} 缺少地域一致性约束"
         assert "不得出现" in body and "海河流域" in body, f"{name} 缺少海河流域字样的禁用条款"
+
+
+def test_prompt_split_constants_exist():
+    """新 Prompt 常量存在且与旧 Prompt 不同。"""
+    import prompts
+    assert hasattr(prompts, "PLANNER_SYSTEM_PROMPT")
+    assert hasattr(prompts, "METEO_ANSWER_SYSTEM_PROMPT")
+    assert isinstance(prompts.PLANNER_SYSTEM_PROMPT, str) and len(prompts.PLANNER_SYSTEM_PROMPT) > 100
+    assert isinstance(prompts.METEO_ANSWER_SYSTEM_PROMPT, str) and len(prompts.METEO_ANSWER_SYSTEM_PROMPT) > 100
+    # 旧 Prompt 不变
+    assert len(prompts.WEATHER_ASSISTANT_PROMPT) > 500
+
+
+def test_planner_prompt_has_no_formatting():
+    """PLANNER_SYSTEM_PROMPT 不含 Markdown 格式/回答结构/语言风格。"""
+    import prompts
+    p = prompts.PLANNER_SYSTEM_PROMPT
+    assert "表格格式规范" not in p  # 无表格格式章节
+    assert "回答结构" not in p  # 无回答结构章节
+    assert "### 语言风格" not in p  # 无语言风格章节
+
+
+def test_planner_prompt_has_tool_rules():
+    """PLANNER_SYSTEM_PROMPT 含工具选择/参数/停止条件。"""
+    import prompts
+    p = prompts.PLANNER_SYSTEM_PROMPT
+    assert "有工具必须用工具" in p or "调用工具获取真实数据" in p
+    assert "决策天气" in p or "query_decision_weather" in p
+    assert "单维度" in p  # 停止条件
+
+
+def test_answer_prompt_has_expression_rules():
+    """METEO_ANSWER_SYSTEM_PROMPT 含气象表达/格式/结论结构。"""
+    import prompts
+    p = prompts.METEO_ANSWER_SYSTEM_PROMPT
+    assert "核心结论" in p
+    assert "表格" in p or "| :---" in p
+    assert "数据来源" in p
+
+
+def test_answer_prompt_has_no_tool_selection():
+    """METEO_ANSWER_SYSTEM_PROMPT 不含工具选择/路由规则。"""
+    import prompts
+    p = prompts.METEO_ANSWER_SYSTEM_PROMPT
+    assert "有工具必须用工具" not in p
+    assert "query_decision_weather_for_poi" not in p
