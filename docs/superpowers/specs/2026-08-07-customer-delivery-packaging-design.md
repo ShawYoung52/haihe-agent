@@ -67,6 +67,10 @@ qa-agent-delivery/
 | `chainlitexam/.files/` | Chainlit 运行时会话文件（134K 临时文件） |
 | `chainlitexam/` 下的 diff 文件（`current_fix.diff`、`luan_review.diff`、`msg_orchestrator.diff`、`review_diff.txt`） | 开发残留 |
 | `chainlitexam/code-review-findings.json` | 内部评审记录 |
+| `chainlitexam/.planning/` | planning 工具开发残留 |
+| 嵌套 `.claude/`（如 `haihe-weather-analyzer-mcp/.claude/`） | 工具/IDE 配置 |
+
+> **保留例外**：`chainlitexam/.chainlit/` **保留**——含 Chainlit 运行时配置 `config.toml`（应用名/MCP 开关/UI 定制）与 `translations/`（Chainlit 自带 i18n），客户部署必需。
 | 根目录 `task_plan.md`、`progress.md`、`findings.md`、`current-progress.md`、`AGENTS.md`、`PRODUCT.md`、`DESIGN.md`、`plugin-list.json` | 开发过程文件 |
 | `.chainlit/`、`.planning/`、`.superpowers/`、`.agents/`、`.claude/`（外层） | 开发工具配置 |
 

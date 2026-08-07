@@ -6,3 +6,6 @@ WechatRPA/
 
 # IDE
 .idea/
+# 客户交付包（整理产物，不入库）
+qa-agent-delivery/
+qa-agent-delivery.zip
