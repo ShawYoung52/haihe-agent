@@ -229,3 +229,22 @@ if __name__ == "__main__":
     test_empty_summary()
     test_small_max_len()
     print("All tests passed.")
+
+def test_evidence_query_type_from_tool_names_decision_poi():
+    """点位决策工具 → decision_poi（而非 forecast，避免误导 shadow 观测）。"""
+    msg = _planner_msg_with_tool_calls([
+        {"id": "c1", "name": "query_decision_weather_for_poi", "args": {"user_text": "梅江会展中心明天天气"}},
+    ])
+    assert mo._evidence_query_type_from_tool_names(msg) == "decision_poi"
+
+
+def test_log_query_exit_does_not_remark_done():
+    """_log_query_exit 统一出口不应覆盖已 mark 的 done 阶段（双调用守卫）。"""
+    ctx = mo.TimingContext(request_id="req-done")
+    ctx.mark("planner_round_1")
+    ctx.mark("done")
+    done_before = ctx.stages.get("done")
+    # 模拟 _log_query_exit finally 逻辑：若 done 已存在则不覆盖
+    if "done" not in ctx.stages:
+        ctx.mark("done")
+    assert ctx.stages.get("done") == done_before

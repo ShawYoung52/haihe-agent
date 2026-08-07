@@ -41,3 +41,11 @@ def test_current_complete_with_observation_time():
 def test_unknown_query_type_is_conservative():
     results = [{"tool_name": "query_rolling_forecast", "bundle": {"code_section": "表格"}}]
     assert is_evidence_complete("unknown_kind", results) is False
+
+
+def test_decision_poi_query_type_is_conservative():
+    """点位决策（decision_poi）应保守返回 False（不误判为 forecast）。"""
+    from tools.meteo_evidence import _KNOWN_UNSAFE
+    assert "decision_poi" in _KNOWN_UNSAFE
+    results = [{"tool_name": "query_decision_weather_for_poi", "bundle": {"code_section": "表格"}}]
+    assert is_evidence_complete("decision_poi", results) is False
