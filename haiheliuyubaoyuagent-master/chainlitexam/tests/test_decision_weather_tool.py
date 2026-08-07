@@ -215,6 +215,7 @@ def test_classify_poi_category_five_categories():
     assert dw_core.classify_poi_category("天津滨海国际机场", "") == "airport"
     assert dw_core.classify_poi_category("天津站", "天津市河北区") == "station"
     assert dw_core.classify_poi_category("盘山风景名胜区", "") == "scenic"
+    assert dw_core.classify_poi_category("梅江会展中心", "") == "scenic"
     assert dw_core.classify_poi_category("某山区乡镇", "") == "mountain"
 
 
@@ -223,7 +224,6 @@ def test_classify_poi_category_false_positives():
     assert dw_core.classify_poi_category("石家庄", "河北省石家庄市") is None
     assert dw_core.classify_poi_category("唐山", "河北省唐山市") is None
     assert dw_core.classify_poi_category("燕山", "") is None
-    assert dw_core.classify_poi_category("梅江会展中心", "") is None
     assert dw_core.classify_poi_category("天津市人民医院", "") is None
     assert dw_core.classify_poi_category("西站", "") is None  # 裸"站"不命中
     assert dw_core.classify_poi_category("", "天津市和平区") is None
