@@ -622,6 +622,68 @@ def _decision_min_visibility_km(periods: list[dict]) -> float | None:
     return minimum
 
 
+# 降雨强度级别：0=无明显降雨 1=小雨/有降雨 2=中雨(≥10mm) 3=大雨(≥25mm) 4=暴雨(≥50mm)
+_RAIN_INTENSITY_LEVELS: dict[int, str] = {
+    0: "无明显降雨",
+    1: "小雨/有降雨",
+    2: "中雨",
+    3: "大雨",
+    4: "暴雨",
+}
+
+
+def _decision_rain_intensity(facts: dict) -> tuple[int, float | None]:
+    """从 facts 判定预报降雨强度级别。
+
+    返回 (级别, 累计雨量mm或None)。按 total_rain_mm 分档，缺失时用
+    has_rain_signal 兜底（>0mm 即小雨）。天气断言只来自 facts 实际数值，不编造。
+    """
+    mm = facts.get("total_rain_mm")
+    try:
+        mm_float = float(mm) if mm is not None and str(mm).strip() != "" else None
+    except (TypeError, ValueError):
+        mm_float = None
+    if mm_float is not None:
+        if mm_float >= 50:
+            return 4, mm_float
+        if mm_float >= 25:
+            return 3, mm_float
+        if mm_float >= 10:
+            return 2, mm_float
+        if mm_float > 0:
+            return 1, mm_float
+    if facts.get("has_rain_signal") is True:
+        return 1, mm_float
+    return 0, mm_float
+
+
+# 隐患类型 × 降雨强度 → (风险研判, 专业建议)。强度级别同 _RAIN_INTENSITY_LEVELS。
+# 代码确定性生成：风险等级与建议只由降雨强度分档 + 隐患类型决定，零编造。
+_HAZARD_RAIN_RISK: dict[str, dict[int, tuple[str, str]]] = {
+    "dzzh": {
+        0: ("风险低", "无显著降雨，地质灾害风险低，可正常出行。"),
+        1: ("风险较低", "有降雨，注意陡坡、边坡区域湿滑，避免在陡坡下方长时间停留。"),
+        2: ("风险中等", "中雨使坡体含水量上升，注意滑坡、崩塌风险，避开陡坡、沟口下方。"),
+        3: ("风险较高", "大雨易诱发滑坡、崩塌、泥石流，尽量避免进入山区及陡坡区域，留意地质险情。"),
+        4: ("风险高", "暴雨极易诱发滑坡、崩塌、泥石流，切勿进入山谷、沟道、陡坡下方，按预警转移避险。"),
+    },
+    "sh": {
+        0: ("风险低", "无显著降雨，山洪风险低。"),
+        1: ("风险较低", "有降雨，避免在山洪沟道、河谷低洼处停留。"),
+        2: ("风险中等", "中雨可能引发沟道洪水，远离山洪沟道、漫水路段，留意上游来水。"),
+        3: ("风险较高", "大雨时段山洪风险上升，切勿进入河道、沟道及行洪区，关注预警信息。"),
+        4: ("风险高", "暴雨易引发山洪，立即远离河道、沟道、行洪区，服从转移避险安排。"),
+    },
+    "zxhl": {
+        0: ("风险低", "无显著降雨，中小河流水位平稳，风险低。"),
+        1: ("风险较低", "有降雨，注意远离河岸、漫水桥，观察水位变化。"),
+        2: ("风险中等", "中雨致中小河流水位上涨，远离河岸、桥梁及低洼河段。"),
+        3: ("风险较高", "大雨致水位明显上涨，避免在河边、漫水桥、涉水路段停留。"),
+        4: ("风险高", "暴雨致中小河流可能超警，远离河道及淹没区，关注水情预警。"),
+    },
+}
+
+
 def _build_poi_reminder_section(facts: dict) -> str:
     """根据点位类别 + 周边隐患点确定性生成“⚠️ 注意事项”段落。
 
@@ -659,10 +721,41 @@ def _build_poi_reminder_section(facts: dict) -> str:
             lines.append(template + (clauses[0] if clauses else ""))
 
     if hazard_points and hazard_points.get("status") == "ok":
+        categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []
+        # 统计各隐患类型数量，供风险研判表使用
+        hazard_counts: dict[str, tuple[str, int]] = {}
+        for category_item in categories:
+            if not isinstance(category_item, dict):
+                continue
+            key = str(category_item.get("key") or "")
+            label = str(category_item.get("label") or "")
+            count = int(category_item.get("count") or 0)
+            if key and label and count > 0:
+                hazard_counts[key] = (label, count)
+
+        # 风险研判表：预报降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
+        intensity, mm = _decision_rain_intensity(facts)
+        if hazard_counts:
+            intensity_label = _RAIN_INTENSITY_LEVELS.get(intensity, "无明显降雨")
+            if mm is not None:
+                lines.append(f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：")
+            else:
+                lines.append(f"预计未来为{intensity_label}，周边灾害风险研判如下：")
+            lines.append("")
+            lines.append("| 隐患类型 | 数量 | 风险研判 | 防范建议 |")
+            lines.append("|---|---|---|---|")
+            for key in ("dzzh", "sh", "zxhl"):
+                if key not in hazard_counts:
+                    continue
+                label, count = hazard_counts[key]
+                risk, advice = _HAZARD_RAIN_RISK[key][intensity]
+                lines.append(f"| {label} | {count} 处 | {risk} | {advice} |")
+            lines.append("")
+
+        # 隐患点清单
         radius_km = hazard_points.get("radius_km")
         radius_text = f"{float(radius_km):.0f}" if isinstance(radius_km, (int, float)) else "5"
-        lines.append(f"周边 {radius_text} 公里内存在以下灾害隐患点，请提高警惕：")
-        categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []
+        lines.append(f"周边 {radius_text} 公里内隐患点：")
         for category_item in categories:
             if not isinstance(category_item, dict):
                 continue

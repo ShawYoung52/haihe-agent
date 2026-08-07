@@ -258,7 +258,13 @@ def test_build_poi_reminder_section_hazard_points():
     }
     text = dw_core._build_poi_reminder_section(facts)
     assert "⚠️ 注意事项" in text
-    assert "周边 5 公里内存在以下灾害隐患点" in text
+    assert "周边 5 公里内隐患点" in text
+    # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议
+    assert "风险研判" in text
+    assert "| 地质灾害 | 1 处 |" in text
+    assert "| 山洪 | 1 处 |" in text
+    assert "有降雨，注意陡坡、边坡区域湿滑" in text
+    assert "有降雨，避免在山洪沟道、河谷低洼处停留" in text
     assert "**地质灾害（1处）**" in text
     assert "滑坡隐患点A（蓟州区，约 1.2 公里）" in text
     assert "山洪危险区B（宝坻区，约 4.1 公里）" in text
@@ -270,6 +276,52 @@ def test_build_poi_reminder_section_empty():
     """无类别且无隐患点时返回空串（不追加注意事项）。"""
     assert dw_core._build_poi_reminder_section({"poi_category": None, "hazard_points": None}) == ""
     assert dw_core._build_poi_reminder_section({"poi_category": None, "hazard_points": {"status": "no_data", "total_found": 0}}) == ""
+
+
+def test_build_poi_reminder_section_rain_risk_matrix():
+    """风险研判表随降雨强度分档变化：暴雨→风险高，无雨→风险低。"""
+    base_hazard = {
+        "status": "ok",
+        "total_found": 1,
+        "radius_km": 5.0,
+        "categories": [
+            {"key": "dzzh", "label": "地质灾害", "count": 1, "records": [
+                {"name": "滑坡点", "county": "蓟州区", "city": "天津市", "distance_km": 1.0},
+            ]},
+        ],
+    }
+    # 暴雨（60mm）→ 风险高
+    heavy = dw_core._build_poi_reminder_section({
+        "poi_category": "mountain",
+        "has_rain_signal": True,
+        "total_rain_mm": 60.0,
+        "periods": [],
+        "hazard_points": base_hazard,
+    })
+    assert "（暴雨）" in heavy
+    assert "风险高" in heavy
+    assert "暴雨极易诱发滑坡、崩塌、泥石流" in heavy
+    # 无雨（0mm）→ 风险低
+    dry = dw_core._build_poi_reminder_section({
+        "poi_category": "mountain",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [],
+        "hazard_points": base_hazard,
+    })
+    assert "（无明显降雨）" in dry
+    assert "风险低" in dry
+    assert "可正常出行" in dry
+    # 缺 total_rain_mm，仅 has_rain_signal=True → 兜底为小雨
+    fallback = dw_core._build_poi_reminder_section({
+        "poi_category": "mountain",
+        "has_rain_signal": True,
+        "total_rain_mm": None,
+        "periods": [],
+        "hazard_points": base_hazard,
+    })
+    assert "预计未来为小雨/有降雨" in fallback
+    assert "风险较低" in fallback
 
 
 def test_build_poi_reminder_section_wind_and_visibility():
