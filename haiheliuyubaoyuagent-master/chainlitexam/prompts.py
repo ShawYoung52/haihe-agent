@@ -194,6 +194,7 @@ PLANNER_SYSTEM_PROMPT = """你是一名具有丰富业务经验的气象预报�
   - "XX医院附近未来三天天气"
 - 该工具会自动完成当前时间确定、POI 定位、代表站匹配、滚动预报查询和格式化回答。对这类问题，Planner **只调用一次** `query_decision_weather_for_poi`，不得并列或追加调用 `search_poi`、`search_poi_by_distance`、`query_rolling_forecast`、`get_server_time`、`analyze_rainfall_by_time` 或 `local_analyze_rainfall_by_time`。
 - 如果用户问的是"天津天气""海河流域天气""西青区天气""滨海新区天气"等**宽泛区域**，**不调用**此工具，优先使用天津滚动预报或降雨工具。
+- 该工具回答会在正文后由代码自动追加“⚠️ 注意事项”（含周边地质灾害/山洪/中小河流隐患点提示）。这些内容由代码根据实际数据生成，Planner 无需也不得额外调用其它工具补充风险内容。
 
 ### 时间问题处理规范（强制）
 1. **识别时间关键词**：当用户问题包含以下词汇时，必须基于系统提示顶部的【当前日期】理解其具体含义：
@@ -715,6 +716,7 @@ WEATHER_ASSISTANT_PROMPT = """你是一名具有丰富业务经验的气象预�
   - "XX医院附近未来三天天气"
 - 该工具会自动完成当前时间确定、POI 定位、代表站匹配、滚动预报查询和格式化回答。对这类问题，Planner **只调用一次** `query_decision_weather_for_poi`，不得并列或追加调用 `search_poi`、`search_poi_by_distance`、`query_rolling_forecast`、`get_server_time`、`analyze_rainfall_by_time` 或 `local_analyze_rainfall_by_time`。
 - 如果用户问的是"天津天气""海河流域天气""西青区天气""滨海新区天气"等**宽泛区域**，**不调用**此工具，优先使用天津滚动预报或降雨工具。
+- 该工具回答会在正文后由代码自动追加“⚠️ 注意事项”（含周边地质灾害/山洪/中小河流隐患点提示）。这些内容由代码根据实际数据生成，Planner 无需也不得额外调用其它工具补充风险内容。
 
 ### 5. 知识库类问题回答规范
 - 当用户询问气象灾害防御、风险应对、气象标准、专业术语、天气现象特点、等级划分、差异对比、汛期时段等非实时数据问题时，应优先调用 `rag_search` 检索知识库，并严格依据检索结果回答。

@@ -38,6 +38,7 @@ DECISION_WEATHER_INTERNAL_TOOLS = {
     "search_poi",
     "search_poi_by_distance",
     "query_rolling_forecast",
+    "query_poi_hazard_reminders",
     "get_server_time",
     "analyze_rainfall_by_time",
     "local_analyze_rainfall_by_time",
@@ -224,6 +225,54 @@ def _decision_pick_first_poi(poi_payload: dict) -> dict | None:
             return {**poi, "longitude": float(lon), "latitude": float(lat)}
         except Exception:
             continue
+    return None
+
+
+# POI 地理类型分类：用于点位天气回答时追加“注意事项”。
+# 优先级 school → airport → station → scenic → mountain，先命中者返回。
+# 关键词匹配保守优先：mountain 只认复合词，排除“石家庄/唐山/燕山”等单字“山”地名；
+# station 只认列表内复合词，不认裸“站”。
+POI_CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "school": [
+        "小学", "中学", "学校", "校区", "学院", "大学", "高中", "初中",
+        "职校", "职业院校", "幼儿园", "学前", "培训学校", "子弟校",
+    ],
+    "airport": ["机场"],
+    "station": [
+        "火车站", "高铁站", "动车所", "长途汽车站", "客运站", "汽车站",
+        "天津站", "天津西站", "天津南站", "天津北站", "滨海站", "塘沽站",
+        "车站",
+    ],
+    "scenic": [
+        "风景区", "风景名胜", "景区", "景点", "旅游区", "古镇", "公园",
+        "湿地公园", "乐园", "游乐场", "游乐园", "度假区", "博物", "展览馆",
+        "博物馆", "纪念馆",
+    ],
+    "mountain": ["山区", "山地", "山间", "山脚", "山腰", "山沟", "山坡", "峡谷", "山洪"],
+}
+_POI_CATEGORY_ORDER = ("school", "airport", "station", "scenic", "mountain")
+
+
+def classify_poi_category(
+    name: str,
+    address: str = "",
+    category_1: Any = None,
+    category_2: Any = None,
+) -> str | None:
+    """按名称/地址/ES 类别识别 POI 地理类型。
+
+    返回 school|scenic|mountain|airport|station 之一，无法可靠分类时返回 None
+    （保守优先，避免把“石家庄/唐山”等普通地名误判成山区）。
+    """
+    if not name:
+        return None
+    parts = [str(name or ""), str(address or ""), str(category_1 or ""), str(category_2 or "")]
+    text = " ".join(part.strip() for part in parts if part and part.strip())
+    if not text:
+        return None
+    for category in _POI_CATEGORY_ORDER:
+        if any(kw in text for kw in POI_CATEGORY_KEYWORDS[category]):
+            return category
     return None
 
 
@@ -513,8 +562,125 @@ def _decision_core_only(answer: Any, user_text: str = "") -> str:
     return sanitize_forecast_core_summary(core, user_text)
 
 
+# 点位地理类型 → 注意事项模板（代码确定性生成，仅作为骨架，天气断言由 facts 数值派生）
+_POI_CATEGORY_REMINDER_TEMPLATES: dict[str, str] = {
+    "school": "学校区域师生与家长请注意出行安全，关注上下学时段路况与天气变化。",
+    "scenic": "景区游客较多，雨时道路湿滑，请注意防滑、防雷与游览安全。",
+    "mountain": "山区地形复杂，强降雨时易诱发地质灾害与山洪，请避免进入山谷、沟道等危险区域。",
+    "airport": "机场区域请注意降雨、大风、雷暴及低能见度对航班起降的影响。",
+    "station": "车站人流密集，请注意雨天路滑、乘车安全及列车运行调整信息。",
+}
+
+
+def _decision_max_wind_level(periods: list[dict]) -> int | None:
+    """从预报时段的风况文本解析最大风力等级；无法解析返回 None。
+
+    先抓所有 ``A～B级`` 区间取端点较大值，再对文本里全部 ``N级`` 单值取最大，
+    保证 ``X～Y级转Z级``、``X～Y级阵风Z级`` 这类复合风况不低估。
+    """
+    max_level: int | None = None
+    for period in periods or []:
+        text = str(period.get("EDA") or period.get("wind") or "")
+        for match in re.finditer(r"(\d+)\s*[～~-]\s*(\d+)\s*级", text):
+            try:
+                level = max(int(match.group(1)), int(match.group(2)))
+            except ValueError:
+                continue
+            if max_level is None or level > max_level:
+                max_level = level
+        for match in re.finditer(r"(\d+)\s*级", text):
+            try:
+                level = int(match.group(1))
+            except ValueError:
+                continue
+            if max_level is None or level > max_level:
+                max_level = level
+    return max_level
+
+
+def _decision_min_visibility_km(periods: list[dict]) -> float | None:
+    """从预报时段解析最小能见度（千米）；无法解析返回 None。"""
+    minimum: float | None = None
+    for period in periods or []:
+        value = period.get("visibility_min_km")
+        if value is None:
+            value = period.get("visibility_min_m")
+            if value is not None:
+                try:
+                    value = float(value) / 1000.0
+                except (TypeError, ValueError):
+                    value = None
+        if value is None:
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if minimum is None or num < minimum:
+            minimum = num
+    return minimum
+
+
+def _build_poi_reminder_section(facts: dict) -> str:
+    """根据点位类别 + 周边隐患点确定性生成“⚠️ 注意事项”段落。
+
+    无可展示内容（既无类别模板、也无周边隐患点）时返回空串。
+    天气断言只来自 facts 实际数值（has_rain_signal/total_rain_mm/风力/能见度），
+    隐患点名称、区县、距离均来自 MCP 工具返回，不编造。
+    """
+    category = facts.get("poi_category")
+    hazard_points = facts.get("hazard_points") if isinstance(facts.get("hazard_points"), dict) else None
+    if not category and not (hazard_points and hazard_points.get("status") == "ok" and int(hazard_points.get("total_found") or 0) > 0):
+        return ""
+
+    lines: list[str] = ["⚠️ 注意事项\n"]
+    if category:
+        template = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
+        if template:
+            clauses: list[str] = []
+            periods = [p for p in (facts.get("periods") or []) if isinstance(p, dict)]
+            if facts.get("has_rain_signal") is True:
+                clauses.append("当前预报时段内有降雨信号，请携带雨具并注意防滑。")
+            elif facts.get("total_rain_mm") is not None and float(facts["total_rain_mm"]) >= 10:
+                clauses.append(f"未来累计降雨可达约 {float(facts['total_rain_mm']):.0f} 毫米，请注意防范。")
+            max_wind = _decision_max_wind_level(periods)
+            if not clauses and max_wind is not None and max_wind >= 6:
+                clauses.append("风力较大，请注意大风防范。")
+            min_vis = _decision_min_visibility_km(periods)
+            if not clauses and min_vis is not None and min_vis < 1.0:
+                clauses.append("能见度较低，出行请注意交通安全。")
+            lines.append(template + (clauses[0] if clauses else ""))
+
+    if hazard_points and hazard_points.get("status") == "ok":
+        radius_km = hazard_points.get("radius_km")
+        radius_text = f"{float(radius_km):.0f}" if isinstance(radius_km, (int, float)) else "5"
+        lines.append(f"周边 {radius_text} 公里内存在以下灾害隐患点，请提高警惕：")
+        categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []
+        for category_item in categories:
+            if not isinstance(category_item, dict):
+                continue
+            label = str(category_item.get("label") or "")
+            count = int(category_item.get("count") or 0)
+            if not label or count <= 0:
+                continue
+            lines.append(f"**{label}（{count}处）**")
+            records = category_item.get("records") if isinstance(category_item.get("records"), list) else []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                name = str(record.get("name") or "未命名隐患点").strip()
+                county = str(record.get("county") or "").strip()
+                city = str(record.get("city") or "").strip()
+                location = county or city or "位置未知"
+                distance = record.get("distance_km")
+                distance_text = f"约 {float(distance):.1f} 公里" if isinstance(distance, (int, float)) else ""
+                lines.append(f"- {name}（{location}，{distance_text}）")
+
+    return "\n".join(line.rstrip() for line in lines).strip()
+
+
 async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_chain: Any, callbacks: dict) -> str:
-    """由模型生成一句结论，再由代码生成点位天气表和数据来源。"""
+    """由模型生成一句结论，再由代码生成点位天气表、注意事项和数据来源。"""
     business_facts = {
         "位置名称": (facts.get("poi") or {}).get("name") or "该位置",
         "位置地址": (facts.get("poi") or {}).get("address") or "",
@@ -544,9 +710,12 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     answer = getattr(result, "content", None) or str(result)
     core = _decision_core_only(answer, user_text)
     table = _build_decision_weather_table(user_text, facts)
+    reminder = _build_poi_reminder_section(facts)
     source = _decision_table_cell(facts.get("data_source"), "天津市气象台滚动预报")
     sections = [f"【核心结论】\n{core}".rstrip()]
     if table:
         sections.append(table)
+    if reminder:
+        sections.append(reminder)
     sections.append(f"数据来源：{source}。")
     return "\n\n".join(section for section in sections if section).strip()

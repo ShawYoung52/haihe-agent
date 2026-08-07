@@ -19,6 +19,7 @@ from tools.decision_weather_core import (
     _generate_decision_weather_answer,
     _nearest_decision_station,
     _normalize_decision_weather_slots,
+    classify_poi_category,
 )
 
 from message_orchestrator import _clean_table_cell, _find_tool, _sanitize_display_text
@@ -130,6 +131,26 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             facts["matched_station"] = nearest
             facts["question_type"] = normalized["question_type"]
 
+            # POI 地理类型分类 + 周边灾害隐患点（用于回答后追加“注意事项”）。
+            # 无类别不调隐患工具；工具缺失/失败均静默跳过，不打断天气主回答。
+            category = classify_poi_category(
+                point_name, poi_address, poi.get("category_1"), poi.get("category_2")
+            )
+            hazard_points = None
+            if category is not None:
+                hazard_tool = _find_tool(tools, "query_poi_hazard_reminders")
+                if hazard_tool is not None:
+                    try:
+                        hazard_raw = await hazard_tool.ainvoke(
+                            {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0}
+                        )
+                        hazard_payload = _unwrap_tool_result(hazard_raw)
+                        if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
+                            hazard_points = hazard_payload
+                    except Exception as exc:
+                        print(f"[DecisionWeatherTool] 隐患点查询失败（跳过注意事项）：{exc}")
+            facts["poi_category"] = category
+            facts["hazard_points"] = hazard_points
 
             final_text = await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
             append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)

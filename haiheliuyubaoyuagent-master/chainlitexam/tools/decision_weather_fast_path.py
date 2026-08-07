@@ -19,6 +19,7 @@ from tools.decision_weather_core import (
     _generate_decision_weather_answer,
     _nearest_decision_station,
     _normalize_decision_weather_slots,
+    classify_poi_category,
 )
 from utils.tool_result import _unwrap_tool_result
 
@@ -112,6 +113,28 @@ class DecisionWeatherQAService:
         facts["poi"] = {"name": point_name, "address": poi_address, "lon": poi_lon, "lat": poi_lat}
         facts["matched_station"] = nearest
         facts["question_type"] = normalized["question_type"]
+
+        # POI 地理类型分类 + 周边灾害隐患点（用于回答后追加“注意事项”）。
+        # 无类别不调隐患工具；工具缺失/失败均静默跳过，不打断天气主回答。
+        category = classify_poi_category(
+            point_name, poi_address, poi.get("category_1"), poi.get("category_2")
+        )
+        hazard_points = None
+        if category is not None:
+            hazard_tool = self.runtime.find_tool(self.tools, "query_poi_hazard_reminders")
+            if hazard_tool is not None:
+                try:
+                    hazard_raw = await self.runtime.invoke_fast_tool(
+                        hazard_tool.name, hazard_tool,
+                        {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0}, user_text,
+                    )
+                    hazard_payload = _unwrap_tool_result(hazard_raw)
+                    if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
+                        hazard_points = hazard_payload
+                except Exception as exc:
+                    print(f"[DecisionWeather] 隐患点查询失败（跳过注意事项）：{exc}")
+        facts["poi_category"] = category
+        facts["hazard_points"] = hazard_points
 
         final_text = await _generate_decision_weather_answer(user_text, facts, self.answer_chain, self.callbacks)
         final_text = self.runtime.sanitize_display_text(
