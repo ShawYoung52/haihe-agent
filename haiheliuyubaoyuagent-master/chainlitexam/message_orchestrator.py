@@ -818,6 +818,7 @@ def _tool_call_names(planner_msg) -> set[str]:
 # 与 is_evidence_complete 的词表（forecast/warning/current/water_level/rain）不匹配，
 # 会导致 would_early_finalize 对预警/实况/水位等恒为 False，shadow 数据失去意义。
 # 注意映射顺序即优先级：warning 工具排最前，多个工具同轮时优先观测预警。
+# _evidence_query_type_from_tool_names 按 dict 插入顺序迭代，首个匹配的工具名决定 query_type。
 _QUERY_TYPE_BY_TOOL: dict[str, str] = {
     "get_effective_warning_info": "warning",
     "get_history_warning_info": "warning",

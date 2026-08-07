@@ -5,8 +5,8 @@
   python scripts/recall_stats.py tool_cand.jsonl
 """
 import json
-import sys
-from pathlib import Path
+
+from scripts._stats_common import read_records
 
 
 def _parse_tool_cand_line(line: str) -> dict | None:
@@ -53,18 +53,7 @@ def summarize(records: list[dict]) -> dict:
 
 
 def main() -> None:
-    records = []
-    if len(sys.argv) > 1:
-        for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-            rec = _parse_tool_cand_line(line)
-            if rec:
-                records.append(rec)
-    else:
-        for line in sys.stdin:
-            rec = _parse_tool_cand_line(line)
-            if rec:
-                records.append(rec)
-    print(json.dumps(summarize(records), ensure_ascii=False, indent=2))
+    print(json.dumps(summarize(read_records(_parse_tool_cand_line)), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
