@@ -152,3 +152,12 @@ This project uses the superpowers plugin for disciplined development:
 - **鉴权**：本期不做，靠部署时网络层限制。
 - **对接文档**：`docs/问答接口对接文档.md`
 - **测试**：`chainlitexam/tests/test_qa_http_api.py`（71 条），全部用假 chain，不依赖内网。全量跑时部分测试因 `tests/stubs.py` 的假 `chainlit.Step` 被跳过（已知现象）。
+
+## 近期功能（2026-08-05~06 批次）
+
+- **Prompt 拆分**：`WEATHER_ASSISTANT_PROMPT` 拆为 `PLANNER_SYSTEM_PROMPT`（~355行，只含工具选择/参数规则/停止条件）和 `METEO_ANSWER_SYSTEM_PROMPT`（~145行，只含气象表达/格式/结论结构）。`ENABLE_NEW_PLANNER_PROMPT=false`/`ENABLE_NEW_ANSWER_PROMPT=false` 默认关闭，`_build_orchestrator_runtime` 双轨选择。旧 PROMPT 保留不删。
+- **证据完整性 shadow**：`tools/meteo_evidence.py` 的 `is_evidence_complete(query_type, tool_results)` 纯函数判断工具结果是否足够回答。`process_message` 记录 `would_early_finalize` shadow 日志（`[EVIDENCE]`），默认不改流程。`TimingContext.evidence` 字段含 `query_type`/`would_early_finalize`。`_QUERY_TYPE_BY_TOOL` 从 tool_name 推断 query_type（**注意 dict 插入顺序即优先级**：warning 最前，forecast/current/water_level/rain 依次）。
+- **候选工具召回增强**：`ToolCandidateIndex.candidates_for_top_n(user_text, n)` 分层召回（Top-5/8/12）。`[TOOL_CAND]` 日志改 JSON Lines（含 `query_type`/`recall_5`/`recall_8`/`recall_12`/`candidates_12`）。`scripts/recall_stats.py` 离线统计召回率 + 漏召回列表。`scripts/perf_stats.py` 和 `recall_stats.py` 共享 `_stats_common.read_records()`。
+- **LLM 预热**：`chain_gzt._llm_warmup(runtime)` 对 planner/answer 各发一次最小非敏感请求（"请回复一个字：好"），30s 短超时，失败不阻断启动。`ENABLE_LLM_WARMUP=false` 默认关闭。
+- **[PERF] 统一出口**：`TimingContext.log()` 输出 JSON Lines（`as_dict`/`to_json`）。`timing.log()` 统一到 `_log_query_exit` finally（幂等 `_logged` + `query_timing_logged` 去重），所有退出路径记录一次。含 `http_queue_wait_ms`/`tool_queue_wait_ms`/`planner_input_chars`/`planner_output_chars`/`answer_input_chars`/`answer_output_chars` 字段。
+- **`_QUERY_TYPE_BY_TOOL` 插入顺序依赖**：`message_orchestrator.py:821-831` 的 dict 插入顺序即优先级（warning 工具最前，两轮时 warning 优先于 forecast/current/water_level/rain）。**勿排序或 alphabetize**。
