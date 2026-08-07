@@ -827,7 +827,7 @@ _QUERY_TYPE_BY_TOOL: dict[str, str] = {
     "query_rolling_forecast": "forecast",
     "query_current_weather_observation": "current",
     "query_water_level": "water_level",
-    "query_decision_weather_for_poi": "forecast",
+    "query_decision_weather_for_poi": "decision_poi",
     "query_basin_areal_rainfall": "rain",
 }
 
@@ -1096,7 +1096,8 @@ def _log_query_exit(query_start_time: float, session_id: str, query_summary: str
             timing = cl.user_session.get("timing_context")
             if timing is not None and not getattr(timing, "_logged", False):
                 timing.status = status
-                timing.mark("done")  # 若尚未 mark
+                if "done" not in timing.stages:
+                    timing.mark("done")  # 主流程已 mark 过则不覆盖
                 timing.log()
                 timing._logged = True
         except Exception:

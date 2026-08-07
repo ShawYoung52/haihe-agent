@@ -21,7 +21,7 @@ _REQUIRED_BUNDLE_KEYS: dict[str, set[str]] = {
 }
 
 # 已知但不支持提前收口的 query_type（保守返回 False）
-_KNOWN_UNSAFE: set[str] = {"river", "impact", "unknown"}
+_KNOWN_UNSAFE: set[str] = {"river", "impact", "unknown", "decision_poi"}
 
 
 def _bundle_complete(required_keys: set[str], bundle: dict) -> bool:
