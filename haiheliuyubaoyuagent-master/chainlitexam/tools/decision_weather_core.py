@@ -266,7 +266,7 @@ def classify_poi_category(
     """
     if not name:
         return None
-    parts = [str(name or ""), str(address or ""), str(category_1 or ""), str(category_2 or "")]
+    parts = [str(name), str(address or ""), str(category_1 or ""), str(category_2 or "")]
     text = " ".join(part.strip() for part in parts if part and part.strip())
     if not text:
         return None
@@ -629,8 +629,14 @@ def _build_poi_reminder_section(facts: dict) -> str:
     隐患点名称、区县、距离均来自 MCP 工具返回，不编造。
     """
     category = facts.get("poi_category")
-    hazard_points = facts.get("hazard_points") if isinstance(facts.get("hazard_points"), dict) else None
-    if not category and not (hazard_points and hazard_points.get("status") == "ok" and int(hazard_points.get("total_found") or 0) > 0):
+    hp_raw = facts.get("hazard_points")
+    hazard_points = hp_raw if isinstance(hp_raw, dict) else None
+    has_hazard = (
+        hazard_points is not None
+        and hazard_points.get("status") == "ok"
+        and int(hazard_points.get("total_found") or 0) > 0
+    )
+    if not category and not has_hazard:
         return ""
 
     lines: list[str] = ["⚠️ 注意事项\n"]
