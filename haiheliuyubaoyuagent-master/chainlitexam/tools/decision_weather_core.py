@@ -138,9 +138,10 @@ def _decision_weather_prefilter(user_text: str) -> bool:
         return False
     location_indicators = ["在", "去", "到", "位于", "附近", "周边", "旁边", "距", "距离"]
     institution_suffixes = [
-        "学校", "大学", "学院", "医院", "场馆", "中心", "公园", "酒店", "大厦",
-        "广场", "机场", "车站", "码头", "景区", "园区", "小区", "村", "镇",
-        "街道", "乡",
+        "学校", "中学", "小学", "初中", "高中", "大学", "学院", "幼儿园",
+        "医院", "场馆", "中心", "公园", "酒店", "大厦",
+        "广场", "机场", "车站", "站", "码头", "景区", "名胜区", "园区", "小区", "村", "镇",
+        "街道", "乡", "中",
     ]
     has_indicator = any(k in t for k in location_indicators)
     has_institution = any(s in t for s in institution_suffixes)
@@ -151,8 +152,8 @@ def _decision_weather_prefilter(user_text: str) -> bool:
 
 
 _DECISION_WEATHER_SUFFIXES = [
-    "会展中心", "中心", "大学", "学院", "学校", "医院", "公园", "酒店",
-    "大厦", "广场", "机场", "车站", "码头", "景区", "园区", "小区",
+    "会展中心", "中心", "大学", "学院", "中学", "小学", "初中", "高中", "学校", "幼儿园",
+    "医院", "公园", "酒店", "大厦", "广场", "机场", "车站", "码头", "景区", "园区", "小区",
 ]
 _DECISION_RAIN_WORDS = ["下雨", "有雨", "降雨", "降水", "暴雨", "雷阵雨", "雨"]
 
