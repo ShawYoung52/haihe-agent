@@ -88,11 +88,13 @@ qa-agent-delivery/
 _EVALUATE_SCRIPTS = Path(__file__).resolve().parents[2] / "forecast_evaluate 2" / "forecast_evaluate" / "scripts"
 ```
 
-交付包中目录名变为 `forecast_evaluate/`，此引用必须同步改为：
+交付包中目录名变为 `forecast_evaluate/`，且层级从"离根 2 层"变为"离根 1 层"，此引用必须同步改为：
 
 ```python
-_EVALUATE_SCRIPTS = Path(__file__).resolve().parents[2] / "forecast_evaluate" / "forecast_evaluate" / "scripts"
+_EVALUATE_SCRIPTS = Path(__file__).resolve().parents[1] / "forecast_evaluate" / "forecast_evaluate" / "scripts"
 ```
+
+> **层级说明**：原仓库该文件在 `<root>/<inner>/haihe-weather-analyzer-mcp/`（离根 2 层），故 `parents[2]` 回到根再找 `forecast_evaluate 2`；交付包中它在 `<root>/qa-agent-delivery/haihe-weather-analyzer-mcp/`（离根 1 层），`forecast_evaluate/` 也在 `qa-agent-delivery/` 下，故需用 `parents[1]`。
 
 **注意**：这只改交付包内的副本，原始仓库源码不动。
 
