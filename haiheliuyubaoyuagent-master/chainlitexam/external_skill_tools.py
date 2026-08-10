@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import json
+import os
+
+import httpx
 
 from langchain_core.tools import tool
 
@@ -118,6 +121,64 @@ async def invoke_partner_skill_shortterm(query: str, history: str = "[]") -> str
     return json.dumps(data, ensure_ascii=False)
 
 
+TIANHE_QA_API_URL = os.getenv("TIANHE_QA_API_URL", "http://10.226.188.156:8001/api/qa")
+
+
+async def call_tianhe_qa_api(query: str) -> str:
+    """真实调用天河平台问答接口（POST /api/qa），返回 answer 字符串。
+
+    天河 Fixed QA 是整句精确匹配；本函数只做 HTTP 调用与解析，不判断命中。
+    失败不抛异常，返回中文提示（供 planner 兜底走本地工具）。
+    """
+    q = (query or "").strip()
+    if not q:
+        return "问题不能为空。"
+
+    try:
+        resp = await httpx.post(
+            TIANHE_QA_API_URL,
+            json={"question": q, "history": [], "stream": False},
+            timeout=(5, 120),
+        )
+    except httpx.ConnectTimeout:
+        return "天河问答服务连接超时，请稍后重试或换一种问法。"
+    except httpx.RequestError:
+        return "天河问答服务暂时不可用，请稍后重试。"
+
+    if resp.status_code >= 400:
+        return "天河问答服务暂时不可用，请稍后重试。"
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return "天河问答服务返回格式异常，请稍后重试。"
+
+    answer = data.get("answer") if isinstance(data, dict) else None
+    if not isinstance(answer, str) or not answer.strip():
+        return "天河问答服务返回格式异常，请稍后重试。"
+
+    # 200 但降级正文（如"智能体服务暂时不可用"）原样透传，不自动重试
+    return answer
+
+
+@tool
+async def query_tianhe_fixed_qa(query: str) -> str:
+    """调用天河平台 Fixed QA 固定问答接口，获取模板化回答。
+
+    适用于天河已配置固定问答目录的问题，命中后由天河返回标准回答。
+    当前已知的 Fixed QA 示例（整句精确匹配，会做去空白/去句末标点规范化）：
+    - 今天雨下了多长时间
+    - 全市现在下了多少雨
+    - 市区现在气温和风的实况
+    - 暴雨天气的防范建议
+
+    参数 query：用户问题原文（中文）。不要自行改写或提炼——Fixed QA 是整句匹配。
+    返回：天河生成的完整回答正文（UTF-8 字符串，可能含 Markdown 表格）。
+    接口失败时返回中文提示，planner 应改用其他本地工具回答。
+    """
+    return await call_tianhe_qa_api(query)
+
+
 def build_external_skill_tools():
     """与 MCP 工具列表合并：bind_tools(mcp_tools + build_external_skill_tools())"""
     return [
@@ -125,4 +186,5 @@ def build_external_skill_tools():
         invoke_partner_skill_alpha_hydro,
         invoke_partner_skill_beta_emergency,
         invoke_partner_skill_shortterm,
+        query_tianhe_fixed_qa,
     ]
