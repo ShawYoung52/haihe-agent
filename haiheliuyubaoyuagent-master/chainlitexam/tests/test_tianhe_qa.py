@@ -1,4 +1,4 @@
-"""天河 Fixed QA 问答接口接入测试。mock httpx，不依赖内网。"""
+"""天河 Fixed QA 问答接口接入测试。mock 共享 AsyncClient，不依赖内网。"""
 
 from __future__ import annotations
 
@@ -8,81 +8,85 @@ import pytest
 import external_skill_tools as est
 
 
-def _Resp(status_code, json_body):
-    class R:
-        def __init__(self):
-            self.status_code = status_code
-            self._json = json_body
+class _Resp:
+    def __init__(self, status_code, json_body):
+        self.status_code = status_code
+        self._json = json_body
 
-        def json(self):
-            return self._json
+    def json(self):
+        return self._json
 
-    return R()
+
+class _FakeClient:
+    """模拟 httpx.AsyncClient：可配置返回体或抛指定异常。"""
+
+    def __init__(self, *, json_body=None, exc=None, status_code=200, seen=None):
+        self._json_body = json_body
+        self._exc = exc
+        self._status_code = status_code
+        self.seen = seen if seen is not None else {}
+
+    async def post(self, url, json):
+        self.seen["url"] = url
+        self.seen["json"] = json
+        if self._exc is not None:
+            raise self._exc
+        return _Resp(self._status_code, self._json_body)
+
+
+def _install_fake_client(monkeypatch, **kwargs):
+    """安装假 client 并清空 TTL 缓存，返回 seen 记录。"""
+    seen = {}
+    monkeypatch.setattr(est, "_get_tianhe_client", lambda: _FakeClient(seen=seen, **kwargs))
+    est._tianhe_cache.clear()
+    return seen
 
 
 @pytest.mark.asyncio
 async def test_call_returns_answer(monkeypatch):
-    """正常返回 answer。"""
-    async def fake_post(url, json, timeout):
-        assert json["stream"] is False, "必须显式传 stream=false"
-        assert json["history"] == [], "单轮 history=[]"
-        return _Resp(200, {"answer": "今天下雨持续了 3 小时。"})
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    """正常返回 answer，body 契约正确。"""
+    seen = _install_fake_client(monkeypatch, json_body={"answer": "今天下雨持续了 3 小时。"})
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert out == "今天下雨持续了 3 小时。"
+    assert seen["json"]["stream"] is False, "必须显式传 stream=false"
+    assert seen["json"]["history"] == [], "单轮 history=[]"
 
 
 @pytest.mark.asyncio
 async def test_call_empty_query_returns_hint_without_http(monkeypatch):
-    called = {"n": 0}
+    def fail(*a, **k):
+        raise AssertionError("空 query 不应发起 HTTP 请求")
 
-    async def fake_post(url, json, timeout):
-        called["n"] += 1
-        return _Resp(200, {"answer": "x"})
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    monkeypatch.setattr(est, "_get_tianhe_client", fail)
+    est._tianhe_cache.clear()
     out = await est.call_tianhe_qa_api("   ")
     assert "不能为空" in out
-    assert called["n"] == 0, "空 query 不应发起 HTTP 请求"
 
 
 @pytest.mark.asyncio
 async def test_call_timeout_returns_hint(monkeypatch):
-    async def fake_post(url, json, timeout):
-        raise httpx.ConnectTimeout("timeout")
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    _install_fake_client(monkeypatch, exc=httpx.ConnectTimeout("timeout"))
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
-    assert "暂不可用" in out or "超时" in out
+    assert "超时" in out
 
 
 @pytest.mark.asyncio
 async def test_call_connect_error_returns_hint(monkeypatch):
-    async def fake_post(url, json, timeout):
-        raise httpx.ConnectError("connection refused")
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    _install_fake_client(monkeypatch, exc=httpx.ConnectError("refused"))
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert "暂时不可用" in out
 
 
 @pytest.mark.asyncio
 async def test_call_http_500_returns_hint(monkeypatch):
-    async def fake_post(url, json, timeout):
-        return _Resp(500, {"detail": "boom"})
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    _install_fake_client(monkeypatch, status_code=500, json_body={"detail": "boom"})
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert "暂时不可用" in out
 
 
 @pytest.mark.asyncio
 async def test_call_missing_answer_returns_hint(monkeypatch):
-    async def fake_post(url, json, timeout):
-        return _Resp(200, {"foo": "bar"})
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    _install_fake_client(monkeypatch, json_body={"foo": "bar"})
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert "格式异常" in out
 
@@ -90,27 +94,39 @@ async def test_call_missing_answer_returns_hint(monkeypatch):
 @pytest.mark.asyncio
 async def test_call_degraded_body_passthrough(monkeypatch):
     """200 但降级正文原样透传，不判定为失败。"""
-    async def fake_post(url, json, timeout):
-        return _Resp(200, {"answer": "智能体服务暂时不可用，请稍后重试。"})
-
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    degraded = "智能体服务暂时不可用，请稍后重试。"
+    _install_fake_client(monkeypatch, json_body={"answer": degraded})
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
-    assert out == "智能体服务暂时不可用，请稍后重试。"
+    assert out == degraded
 
 
 @pytest.mark.asyncio
 async def test_call_uses_env_url(monkeypatch):
     """环境变量 TIANHE_QA_API_URL 覆盖默认地址。"""
-    seen = {}
-
-    async def fake_post(url, json, timeout):
-        seen["url"] = url
-        return _Resp(200, {"answer": "ok"})
-
     monkeypatch.setattr(est, "TIANHE_QA_API_URL", "http://fake:9999/api/qa")
-    monkeypatch.setattr(est.httpx, "post", fake_post)
+    seen = _install_fake_client(monkeypatch, json_body={"answer": "ok"})
     await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert seen["url"] == "http://fake:9999/api/qa"
+
+
+@pytest.mark.asyncio
+async def test_call_caches_same_query(monkeypatch):
+    """相同问题 TTL 内命中缓存，不重复请求。"""
+    calls = {"n": 0}
+
+    def counting_client():
+        async def _post(self, url, json):
+            calls["n"] += 1
+            return _Resp(200, {"answer": "ok"})
+        return type("C", (), {"post": _post})()
+
+    monkeypatch.setattr(est, "_get_tianhe_client", counting_client)
+    est._tianhe_cache.clear()
+    monkeypatch.setattr(est, "TIANHE_QA_CACHE_TTL", 300)
+
+    await est.call_tianhe_qa_api("今天雨下了多长时间")
+    await est.call_tianhe_qa_api("今天雨下了多长时间")
+    assert calls["n"] == 1, f"第二次应命中缓存，实际请求 {calls['n']} 次"
 
 
 def test_tool_description_mentions_fixed_qa_examples():

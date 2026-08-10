@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 
 import httpx
 
@@ -16,6 +18,8 @@ from mock_vendor_agents import (
     call_vendor_beta_emergency_api,
     call_vendor_shortterm_api,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _auto_route_vendor(query: str) -> str:
@@ -122,6 +126,27 @@ async def invoke_partner_skill_shortterm(query: str, history: str = "[]") -> str
 
 
 TIANHE_QA_API_URL = os.getenv("TIANHE_QA_API_URL", "http://10.226.188.156:8001/api/qa")
+# 连接 5s / 响应 120s（对接文档建议）。固定 QA 是整句固定问题，跨用户重复提问，
+# 加 300s TTL 缓存减少重复打远程接口（项目已有 rolling_forecast/POI 缓存先例）。
+TIANHE_QA_TIMEOUT = (5, 120)
+TIANHE_QA_CACHE_TTL = int(os.getenv("TIANHE_QA_CACHE_TTL", "300"))
+
+_TIANHE_ERR_EMPTY = "问题不能为空。"
+_TIANHE_ERR_CONNECT = "天河问答服务连接超时，请稍后重试或换一种问法。"
+_TIANHE_ERR_UNAVAILABLE = "天河问答服务暂时不可用，请稍后重试。"
+_TIANHE_ERR_FORMAT = "天河问答服务返回格式异常，请稍后重试。"
+
+_tianhe_cache: dict[str, tuple[float, str]] = {}
+_tianhe_client: httpx.AsyncClient | None = None
+
+
+def _get_tianhe_client() -> httpx.AsyncClient:
+    """懒加载共享 AsyncClient。httpx 顶层 post 是同步函数，await 会抛 TypeError，
+    必须用 AsyncClient 的异步 post；共享 client 也复用连接避免每次握手。"""
+    global _tianhe_client
+    if _tianhe_client is None:
+        _tianhe_client = httpx.AsyncClient(timeout=TIANHE_QA_TIMEOUT)
+    return _tianhe_client
 
 
 async def call_tianhe_qa_api(query: str) -> str:
@@ -132,32 +157,41 @@ async def call_tianhe_qa_api(query: str) -> str:
     """
     q = (query or "").strip()
     if not q:
-        return "问题不能为空。"
+        return _TIANHE_ERR_EMPTY
+
+    hit = _tianhe_cache.get(q)
+    if hit and (time.time() - hit[0]) < TIANHE_QA_CACHE_TTL:
+        return hit[1]
 
     try:
-        resp = await httpx.post(
+        resp = await _get_tianhe_client().post(
             TIANHE_QA_API_URL,
             json={"question": q, "history": [], "stream": False},
-            timeout=(5, 120),
         )
     except httpx.ConnectTimeout:
-        return "天河问答服务连接超时，请稍后重试或换一种问法。"
-    except httpx.RequestError:
-        return "天河问答服务暂时不可用，请稍后重试。"
+        logger.warning("天河问答接口连接超时（query=%s）", q[:50])
+        return _TIANHE_ERR_CONNECT
+    except httpx.RequestError as e:
+        logger.warning("天河问答接口调用失败：%s", type(e).__name__)
+        return _TIANHE_ERR_UNAVAILABLE
 
     if resp.status_code >= 400:
-        return "天河问答服务暂时不可用，请稍后重试。"
+        logger.warning("天河问答接口返回非成功状态码：%s", resp.status_code)
+        return _TIANHE_ERR_UNAVAILABLE
 
     try:
         data = resp.json()
     except ValueError:
-        return "天河问答服务返回格式异常，请稍后重试。"
+        logger.warning("天河问答接口响应非 JSON")
+        return _TIANHE_ERR_FORMAT
 
     answer = data.get("answer") if isinstance(data, dict) else None
     if not isinstance(answer, str) or not answer.strip():
-        return "天河问答服务返回格式异常，请稍后重试。"
+        logger.warning("天河问答接口响应缺 answer 字段")
+        return _TIANHE_ERR_FORMAT
 
     # 200 但降级正文（如"智能体服务暂时不可用"）原样透传，不自动重试
+    _tianhe_cache[q] = (time.time(), answer)
     return answer
 
 
@@ -165,16 +199,12 @@ async def call_tianhe_qa_api(query: str) -> str:
 async def query_tianhe_fixed_qa(query: str) -> str:
     """调用天河平台 Fixed QA 固定问答接口，获取模板化回答。
 
-    适用于天河已配置固定问答目录的问题，命中后由天河返回标准回答。
-    当前已知的 Fixed QA 示例（整句精确匹配，会做去空白/去句末标点规范化）：
-    - 今天雨下了多长时间
-    - 全市现在下了多少雨
-    - 市区现在气温和风的实况
-    - 暴雨天气的防范建议
-
-    参数 query：用户问题原文（中文）。不要自行改写或提炼——Fixed QA 是整句匹配。
-    返回：天河生成的完整回答正文（UTF-8 字符串，可能含 Markdown 表格）。
-    接口失败时返回中文提示，planner 应改用其他本地工具回答。
+    适用于天河已配置固定问答目录的问题（如"今天雨下了多长时间""全市现在下了多少雨"
+    "暴雨天气的防范建议"等），命中后由天河返回标准回答。Fixed QA 是整句精确匹配
+    （去空白/去句末标点规范化），不要自行改写或提炼 query。
+    参数 query：用户问题原文（中文）。
+    返回：天河生成的完整回答正文（可能含 Markdown 表格）；失败返回中文提示，
+    planner 应改用其他本地工具回答。
     """
     return await call_tianhe_qa_api(query)
 
