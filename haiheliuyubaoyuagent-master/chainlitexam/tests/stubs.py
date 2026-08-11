@@ -14,6 +14,16 @@ def _install_chainlit_stub():
     if "chainlit" in sys.modules:
         return sys.modules["chainlit"]
 
+    # 真实 chainlit 已安装时直接用真包，绝不装假 stub——假 stub 不是包，
+    # 会让后续 `import chainlit.data` / `chainlit.emitter`（chain_gzt、qa_http_api）
+    # 报 "'chainlit' is not a package"。stub 只在裸环境（无 chainlit）才作兜底。
+    try:
+        import chainlit as real_chainlit
+
+        return real_chainlit
+    except ImportError:
+        pass
+
     chainlit = types.ModuleType("chainlit")
 
     class Step:
@@ -65,6 +75,13 @@ def _install_chainlit_stub():
 
 
 def _install_langchain_stub():
+    # 真实 langchain_core 已安装时跳过——假 stub 的 ToolMessage 会丢弃 tool_call_id。
+    try:
+        import langchain_core.messages  # noqa: F401
+
+        return
+    except ImportError:
+        pass
     if "langchain_core" not in sys.modules:
         sys.modules["langchain_core"] = types.ModuleType("langchain_core")
     if "langchain_core.messages" not in sys.modules:
