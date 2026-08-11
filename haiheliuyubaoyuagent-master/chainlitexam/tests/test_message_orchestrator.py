@@ -123,7 +123,7 @@ async def test_run_tool_round_failure_records_tool_message_without_generic_error
     callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
     messages = []
 
-    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+    forced, ree, bundles, rolling_bundles, _ = await mo._run_tool_round(
         FakePlannerMsg(), [FakeTool()], messages, "测试", 1, callbacks
     )
 
@@ -304,7 +304,7 @@ async def test_run_tool_round_parallelizes_pure_data_tools(monkeypatch):
     messages = []
 
     start = time.time()
-    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+    forced, ree, bundles, rolling_bundles, _ = await mo._run_tool_round(
         FakePlannerMsg(), tools, messages, "测试", 1, callbacks
     )
     elapsed = time.time() - start
@@ -318,16 +318,6 @@ async def test_run_tool_round_parallelizes_pure_data_tools(monkeypatch):
     assert contents[2] == "get_city_rainfall_time_range-result"
     # ToolMessage 顺序与 tool_call 顺序一致
     assert [m.tool_call_id for m in messages] == ["c1", "c2", "c3"]
-
-
-class _UserSessionStub:
-    """no-op 的 cl.user_session 替身（真实 chainlit 的需 Chainlit context）。"""
-
-    def get(self, *args, **kwargs):
-        return None
-
-    def set(self, *args, **kwargs):
-        return None
 
 
 def _tianhe_round_setup(monkeypatch, answer: str):
@@ -373,13 +363,8 @@ def _tianhe_round_setup(monkeypatch, answer: str):
 
     monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", fake_invoke)
     monkeypatch.setattr(mo.cl, "Step", _CtxFreeStep)
-    # 真实 chainlit 的 user_session 需 Chainlit context；tianhe 收口会 set("tianhe_passthrough")，
-    # 无 context 时抛 ChainlitContextException 被记成工具失败。stub 成 no-op 命名空间。
-    monkeypatch.setattr(
-        mo.cl,
-        "user_session",
-        _UserSessionStub(),
-    )
+    # 天河透传已改为值绑定（_run_tool_round 返回天河原文），不再写 cl.user_session 会话标志，
+    # 因此无需 stub user_session。
     callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
     messages: list = []
     return FakePlannerMsg(), [FakeTool()], messages, callbacks
@@ -391,11 +376,12 @@ async def test_tianhe_answer_passthrough_sets_forced_final_text(monkeypatch):
     answer = "【核心结论】\n全市近24小时平均降雨量：2.5毫米\n最大降雨量：79.8毫米"
     planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, answer)
 
-    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
         planner_msg, tools, messages, "全市现在下了多少雨", 1, callbacks
     )
 
     assert forced == answer, "天河 answer 应原样作为 forced_final_text 透传"
+    assert tianhe_text == answer, "透传标记应记录天河原文，供 process_message 收口做值绑定判定"
     assert rolling_bundles == [], "天河不是滚动预报，不应产生 bundle"
     assert len(messages) == 1
     assert messages[0].content == answer, "ToolMessage 也应保留原文供历史记录"
@@ -407,11 +393,26 @@ async def test_tianhe_degraded_answer_also_passthrough(monkeypatch):
     degraded = "智能体服务暂时不可用，请稍后重试。"
     planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, degraded)
 
-    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
         planner_msg, tools, messages, "今天雨下了多长时间", 1, callbacks
     )
 
     assert forced == degraded, "降级文案同样原样透传（文档 9.4），不当失败、不过 LLM"
+    assert tianhe_text == degraded, "降级文案也记录进透传标记"
+
+
+def test_is_tianhe_passthrough_value_binding():
+    """透传判定是值绑定的：仅当 forced_final_text 仍等于本轮天河原文时为真。
+
+    覆盖修复的泄漏路径——天河被后续工具覆盖、被应急响应清空、或非天河强收口时
+    都不应误判为透传；且不依赖会话级标志，天然不会跨消息残留。
+    """
+    answer = "【核心结论】全市近24小时平均降雨量：2.5毫米"
+    assert mo._is_tianhe_passthrough(answer, answer) is True, "未覆盖时透传"
+    assert mo._is_tianhe_passthrough(answer, "滚动预报核心结论") is False, "被其他工具覆盖后不透传"
+    assert mo._is_tianhe_passthrough(answer, None) is False, "应急响应清空 forced_final_text 后不透传"
+    assert mo._is_tianhe_passthrough(None, answer) is False, "非天河强收口不透传"
+    assert mo._is_tianhe_passthrough(None, None) is False
 
 
 def _qa_round(q: str, a: str):

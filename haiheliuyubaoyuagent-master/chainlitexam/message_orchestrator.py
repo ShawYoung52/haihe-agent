@@ -1953,10 +1953,21 @@ def _has_complete_rolling_forecast(bundles: list) -> bool:
     return bool(str(valid[-1].get("code_section") or "").strip())
 
 
+def _is_tianhe_passthrough(tianhe_text, forced_text):
+    """天河 Fixed QA 透传判定（值绑定）。
+
+    仅当当前 forced_final_text 仍等于本轮天河 answer 原文时为真。这样任何后续覆盖
+    （其他工具改写 forced_final_text、应急响应将其清空）都会让透传失效，且不依赖
+    会话级状态，天然不会跨消息泄漏。
+    """
+    return tianhe_text is not None and forced_text == tianhe_text
+
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks,
                           parent_step_id: str | None = None):
     ree = None
     forced_final_text = None
+    tianhe_passthrough_text = None  # 本轮 forced_final_text 若来自天河 answer，记录原文用于透传判定
     warning_bundles = []
     rolling_forecast_bundles = []
     tool_names = [tc['name'] for tc in planner_msg.tool_calls]
@@ -2124,12 +2135,13 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                 elif tool_name == "query_tianhe_fixed_qa":
                     # 天河 answer 是完整成品回答（含 HTTP 200 降级文案，按对接文档 9.4 原样展示）。
                     # 直接作为 forced_final_text 收口，跳过 answer LLM——避免 LLM 超时/改写把现成答案拖死。
-                    # 标记为天河透传：主循环收口时不加“已查询…整理如下”前缀、不做滚动预报组装，完全原样。
+                    # 透传判定在 process_message 收口处做值绑定：仅当 forced_final_text 仍等于本轮天河原文时
+                    # 才原样透传，保证被后续工具覆盖或应急清空后不误判（不再用会话级标志，避免跨消息泄漏）。
                     answer_text = str(_unwrap_tool_result(observation) or "").strip()
                     observation_text = answer_text or "天河问答服务返回为空。"
                     if answer_text:
                         forced_final_text = answer_text
-                        cl.user_session.set("tianhe_passthrough", True)
+                        tianhe_passthrough_text = answer_text
                 else:
                     observation_text = callbacks["tool_observation_to_text"](observation)
 
@@ -2162,7 +2174,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     round_elapsed = time.time() - round_start
     print(f"[本轮耗时] 第 {iteration} 轮工具调用总耗时: {round_elapsed:.2f}s")
 
-    return forced_final_text, ree, warning_bundles, rolling_forecast_bundles
+    return forced_final_text, ree, warning_bundles, rolling_forecast_bundles, tianhe_passthrough_text
 
 
 async def _try_rainfall_img_fast_path(user_text: str, thinking_chain, tools, messages, callbacks) -> bool:
@@ -4783,7 +4795,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         await reasoning.stage("📡 查询数据", f"第 {iteration} 轮补充查询中...")
 
         timing.mark(f"tool_round_{iteration}")
-        forced_final_text, ree, warning_bundles, round_rolling_forecast_bundles = await _run_tool_round(
+        forced_final_text, ree, warning_bundles, round_rolling_forecast_bundles, tianhe_passthrough_text = await _run_tool_round(
             planner_msg, tools, messages, message.content, iteration, callbacks,
             parent_step_id=reasoning.step.id if reasoning and reasoning.step else None,
         )
@@ -4803,9 +4815,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         if forced_final_text:
             # 天河 Fixed QA 透传：answer 已是成品（含降级文案，文档 9.4），完全原样输出，
             # 不加“已查询…整理如下”前缀、不做滚动预报组装。
-            is_tianhe_passthrough = bool(cl.user_session.get("tianhe_passthrough"))
-            if is_tianhe_passthrough:
-                cl.user_session.set("tianhe_passthrough", False)
+            # 值绑定判定：仅当 forced_final_text 仍等于本轮天河原文（未被应急清空或后续工具覆盖）时按透传处理，
+            # 避免会话级标志残留误伤后续消息/轮次。
+            is_tianhe_passthrough = _is_tianhe_passthrough(
+                tianhe_passthrough_text, forced_final_text
+            )
             await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
             has_chart = cl.user_session.get("has_chart_generated", False) or False
             if is_tianhe_passthrough:
