@@ -37,7 +37,6 @@ from fastapi.responses import FileResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from starlette.middleware import Middleware
@@ -53,8 +52,9 @@ except Exception:
     THINKING_PROMPT = ""
     FAST_PATH_THINKING_PROMPT = ""
 
-from message_orchestrator import process_message, _sanitize_display_text
+from message_orchestrator import process_message, _sanitize_display_text, _trim_history_rounds
 from external_skill_tools import build_external_skill_tools
+from mcp_loader import load_sse_tools
 from tools.rain_analysis import build_rain_analysis_tools
 from tools.decision_weather import build_decision_weather_tools
 from tools.rainfall_river_impact import build_rainfall_river_impact_tools
@@ -900,6 +900,9 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
     execution_mode="chainlit"：逐 chunk 刷新 stream_msg.update()
     execution_mode="http"：仅在结尾更新一次，减少 per-chunk 开销
     """
+    # 限制带入 LLM 的历史轮数（副本裁剪，不改真实历史），防多轮累积输入膨胀超时
+    if isinstance(input_dict, dict) and isinstance(input_dict.get("messages"), list):
+        input_dict = {**input_dict, "messages": _trim_history_rounds(input_dict["messages"])}
     full_text = ""
     try:
         async for chunk in answer_chain.astream(input_dict, config=config):
@@ -986,6 +989,9 @@ async def _process_planner_stream(chain, input_dict, reasoning_step, config):
 
 async def astream_planner_think(chain, input_dict, reasoning_step, config: RunnableConfig | None = None):
     """流式调用模型，实时展示思考过程。带超时；推理超时不重试，连接/限流错误重试。"""
+    # 限制带入 planner LLM 的历史轮数（副本裁剪，不改真实历史），防多轮累积输入膨胀超时
+    if isinstance(input_dict, dict) and isinstance(input_dict.get("messages"), list):
+        input_dict = {**input_dict, "messages": _trim_history_rounds(input_dict["messages"])}
     timeout = int(os.environ.get("PLANNER_TIMEOUT_SECONDS", "60"))
     max_retries = int(os.environ.get("PLANNER_MAX_RETRIES", "2"))
     last_exc = None
@@ -1907,31 +1913,6 @@ def _build_partition_only_reply(raw_result) -> str:
         ]
     )
     return "\n".join(lines)
-
-
-async def load_sse_tools():
-    mcp_url = os.getenv("MCP_SERVER_URL", "http://localhost:3333/sse")
-    extrm_url = os.getenv("EXTRM_SERVER_URL", "http://10.226.107.133:8000/sse")
-    client = MultiServerMCPClient(
-        {
-            "weather": {
-                "transport": "sse",
-                "url": mcp_url,
-            },
-            "extreme-weather-statistics": {
-                "transport": "sse",
-                "url": extrm_url,
-            },
-        }
-    )
-    try:
-        tools = await client.get_tools()
-        print(f"✅ MCP 工具加载成功，共 {len(tools)} 个工具：{[t.name for t in tools]}")
-        return tools
-    except BaseException as e:
-        # 后端 MCP SSE 服务异常（包括 ExceptionGroup），打印错误并退化为无工具模式
-        print("❌ 加载 MCP 工具失败：", repr(e))
-        return []
 
 
 def _compact_warning_record(item):
