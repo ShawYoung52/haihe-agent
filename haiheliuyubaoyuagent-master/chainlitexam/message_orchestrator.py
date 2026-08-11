@@ -245,6 +245,24 @@ def _compress_messages(messages: list, max_tool_len: int = 500, max_ai_len: int 
                 msg.content = content[:max_ai_len] + "\n...(因历史过长已截断)"
 
 
+def _trim_history_rounds(messages: list, max_rounds: int = 6) -> list:
+    """限制带入 LLM 的历史轮数，返回新列表（不改原 messages）。
+
+    一轮 = 一个 HumanMessage 及其后的 AIMessage/ToolMessage。只保留最近 max_rounds 轮 +
+    当前 HumanMessage 之后的内容，防止多轮累积导致 planner/answer LLM 输入膨胀超时。
+    当前这轮（最后一个 HumanMessage 起）始终完整保留。
+    """
+    if not messages:
+        return messages
+    # 所有 HumanMessage 的下标
+    human_idxs = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if len(human_idxs) <= max_rounds:
+        return messages
+    # 保留最近 max_rounds 个 HumanMessage 及其后内容：从第 (len-max_rounds) 个 HumanMessage 开始
+    keep_from = human_idxs[len(human_idxs) - max_rounds]
+    return messages[keep_from:]
+
+
 def _clean_table_cell(text) -> str:
     """清理 Markdown 表格单元格中的换行、管道符、HTML 标签等会破坏表格的字符。"""
     if text is None:
@@ -2103,6 +2121,15 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     if img_msgs:
                         cl.user_session.set("has_chart_generated", True)
                         await cl.Message(content="📊 图表已生成：", elements=img_msgs).send()
+                elif tool_name == "query_tianhe_fixed_qa":
+                    # 天河 answer 是完整成品回答（含 HTTP 200 降级文案，按对接文档 9.4 原样展示）。
+                    # 直接作为 forced_final_text 收口，跳过 answer LLM——避免 LLM 超时/改写把现成答案拖死。
+                    # 标记为天河透传：主循环收口时不加“已查询…整理如下”前缀、不做滚动预报组装，完全原样。
+                    answer_text = str(_unwrap_tool_result(observation) or "").strip()
+                    observation_text = answer_text or "天河问答服务返回为空。"
+                    if answer_text:
+                        forced_final_text = answer_text
+                        cl.user_session.set("tianhe_passthrough", True)
                 else:
                     observation_text = callbacks["tool_observation_to_text"](observation)
 
@@ -4774,16 +4801,24 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             forced_final_text = None
 
         if forced_final_text:
+            # 天河 Fixed QA 透传：answer 已是成品（含降级文案，文档 9.4），完全原样输出，
+            # 不加“已查询…整理如下”前缀、不做滚动预报组装。
+            is_tianhe_passthrough = bool(cl.user_session.get("tianhe_passthrough"))
+            if is_tianhe_passthrough:
+                cl.user_session.set("tianhe_passthrough", False)
             await reasoning.stage("✅ 评估结果", "已获取足够数据，正在为您整理定制化结论...")
             has_chart = cl.user_session.get("has_chart_generated", False) or False
-            forced_final_text = assemble_rolling_forecast_answer(
-                forced_final_text,
-                rolling_forecast_bundles,
-            )
-            forced_final_text = _prepend_thinking_summary(forced_final_text, message.content, has_chart=has_chart)
+            if is_tianhe_passthrough:
+                final_text = str(forced_final_text or "")
+            else:
+                final_text = assemble_rolling_forecast_answer(
+                    forced_final_text,
+                    rolling_forecast_bundles,
+                )
+                final_text = _prepend_thinking_summary(final_text, message.content, has_chart=has_chart)
             await _maybe_close_reasoning(reasoning)
-            await callbacks["stream_text_to_message"](forced_final_text, stream_msg=stream_msg)
-            messages.append(AIMessage(content=forced_final_text))
+            await callbacks["stream_text_to_message"](final_text, stream_msg=stream_msg)
+            messages.append(AIMessage(content=final_text))
             print("\n=== 使用定制化收口答案，退出循环 ===\n")
             _log_query_exit(query_start_time, session_id, query_summary, "ok")
             answer_generated = True

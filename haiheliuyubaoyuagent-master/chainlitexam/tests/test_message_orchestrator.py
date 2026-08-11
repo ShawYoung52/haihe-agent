@@ -320,6 +320,124 @@ async def test_run_tool_round_parallelizes_pure_data_tools(monkeypatch):
     assert [m.tool_call_id for m in messages] == ["c1", "c2", "c3"]
 
 
+class _UserSessionStub:
+    """no-op 的 cl.user_session 替身（真实 chainlit 的需 Chainlit context）。"""
+
+    def get(self, *args, **kwargs):
+        return None
+
+    def set(self, *args, **kwargs):
+        return None
+
+
+def _tianhe_round_setup(monkeypatch, answer: str):
+    """构造一次 query_tianhe_fixed_qa 的 _run_tool_round 调用所需 mock，返回 (messages, forced...)。"""
+
+    class FakeTool:
+        name = "query_tianhe_fixed_qa"
+
+    class FakePlannerMsg:
+        tool_calls = [
+            {"name": "query_tianhe_fixed_qa", "args": {"query": "全市现在下了多少雨"}, "id": "call-t1"}
+        ]
+
+    class _CtxFreeStep:
+        """无 Chainlit context 的假 Step。
+
+        串行 _run_tool_round 用 `async with cl.Step(...)`（需 id/show_input/output/update）。
+        真实 chainlit.Step 在无 context 时抛 ChainlitContextException，会被当成工具失败，
+        导致 forced_final_text 不被设置。这里与 tests/stubs.py 的假 Step 同接口。
+        """
+
+        def __init__(self, **kwargs):
+            self.name = kwargs.get("name", "")
+            self.id = kwargs.get("id") or "fake-step"
+            self.show_input = False
+            self.input = ""
+            self.output = ""
+
+        async def send(self):
+            pass
+
+        async def update(self):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    async def fake_invoke(tool_name, tool, tool_args, step, user_text=""):
+        return answer, 1.0
+
+    monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", fake_invoke)
+    monkeypatch.setattr(mo.cl, "Step", _CtxFreeStep)
+    # 真实 chainlit 的 user_session 需 Chainlit context；tianhe 收口会 set("tianhe_passthrough")，
+    # 无 context 时抛 ChainlitContextException 被记成工具失败。stub 成 no-op 命名空间。
+    monkeypatch.setattr(
+        mo.cl,
+        "user_session",
+        _UserSessionStub(),
+    )
+    callbacks = {"tool_observation_to_text": lambda obs: str(obs)}
+    messages: list = []
+    return FakePlannerMsg(), [FakeTool()], messages, callbacks
+
+
+@pytest.mark.asyncio
+async def test_tianhe_answer_passthrough_sets_forced_final_text(monkeypatch):
+    """天河返回完整 answer 时，应直接作为 forced_final_text 收口（跳过 answer LLM 原样透传）。"""
+    answer = "【核心结论】\n全市近24小时平均降雨量：2.5毫米\n最大降雨量：79.8毫米"
+    planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, answer)
+
+    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+        planner_msg, tools, messages, "全市现在下了多少雨", 1, callbacks
+    )
+
+    assert forced == answer, "天河 answer 应原样作为 forced_final_text 透传"
+    assert rolling_bundles == [], "天河不是滚动预报，不应产生 bundle"
+    assert len(messages) == 1
+    assert messages[0].content == answer, "ToolMessage 也应保留原文供历史记录"
+
+
+@pytest.mark.asyncio
+async def test_tianhe_degraded_answer_also_passthrough(monkeypatch):
+    """天河 HTTP 200 但返回降级文案时，按对接文档 9.4 原样展示，不走本地兜底也不再过 LLM。"""
+    degraded = "智能体服务暂时不可用，请稍后重试。"
+    planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, degraded)
+
+    forced, ree, bundles, rolling_bundles = await mo._run_tool_round(
+        planner_msg, tools, messages, "今天雨下了多长时间", 1, callbacks
+    )
+
+    assert forced == degraded, "降级文案同样原样透传（文档 9.4），不当失败、不过 LLM"
+
+
+def _qa_round(q: str, a: str):
+    return [mo.HumanMessage(content=q), mo.AIMessage(content=a)]
+
+
+def test_trim_history_rounds_keeps_recent_n():
+    """历史超过 max_rounds 时只保留最近 N 轮，当前轮完整保留，返回新列表不改原列表。"""
+    messages = []
+    for i in range(10):
+        messages += _qa_round(f"问题{i}", f"回答{i}")
+    trimmed = mo._trim_history_rounds(messages, max_rounds=6)
+    # 保留最近 6 个 HumanMessage 起的内容 = 6 轮 × 2 条 = 12 条
+    assert len(trimmed) == 12
+    assert trimmed[0].content == "问题4", "应从第 4 个问题开始保留"
+    assert trimmed[-1].content == "回答9", "当前轮完整保留"
+    assert len(messages) == 20, "原列表不被修改"
+
+
+def test_trim_history_rounds_under_limit_unchanged():
+    """历史未超限时原样返回。"""
+    messages = _qa_round("问题0", "回答0") + _qa_round("问题1", "回答1")
+    trimmed = mo._trim_history_rounds(messages, max_rounds=6)
+    assert trimmed is messages
+
+
 @pytest.mark.asyncio
 async def test_process_message_skips_thinking_when_disabled(monkeypatch):
     """ENABLE_FAST_PATHS=false 且 ENABLE_LLM_THINKING=false 时，thinking_chain 调用次数严格为 0。"""
