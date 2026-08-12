@@ -3527,7 +3527,10 @@ def register_haihe_tools(mcp: FastMCP) -> None:
                     records = _observation_fetch_core(
                         basin_codes=basin_codes,
                         times=ts_str,
-                        elements=DEFAULT_OBS_ELEMENTS,
+                        # 分钟资料 SURF_CHN_PRE_MIN 必须用分钟要素（PRE/Q_PRE），
+                        # 不能用小时要素 DEFAULT_OBS_ELEMENTS（含 PRE_1h），否则天擎
+                        # 报 -3003 "Element:[PRE_1h] is not config"，取数失败被吞成"未触发"。
+                        elements=DEFAULT_MIN_PRE_ELEMENTS,
                     )
                     filtered = _observation_filter_core(
                         records=records,
