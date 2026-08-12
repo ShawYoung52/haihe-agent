@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -17,6 +20,11 @@ from haihe_mcp_tools import MusicClient, MusicConfig, _search_poi_core
 
 
 logger = logging.getLogger(__name__)
+
+# 实况短 TTL 缓存：同「入参 + 时次桶」在 TTL 内命中，跨时次必 miss。
+POI_NEAREST_OBS_CACHE_TTL = int(os.getenv("POI_NEAREST_OBS_CACHE_TTL", "60"))
+_poi_nearest_obs_cache: dict[str, tuple[float, dict]] = {}
+_poi_nearest_obs_cache_lock = threading.Lock()
 
 HOURLY_DATA_CODE = "SURF_CHN_MUL_HOR"
 TIANJIN_ADMIN_CODE = "120000"
@@ -329,6 +337,103 @@ def _error_payload(keyword: str, message: str, debug_reason: str = "") -> dict:
     }
 
 
+def _query_poi_nearest_observation_core(
+    keyword: str,
+    basin_codes: str = DEFAULT_BASIN_CODES,
+    hours_back: int = 6,
+    max_distance_km: float = 80.0,
+    admin_code: str = TIANJIN_ADMIN_CODE,
+) -> dict:
+    keyword = str(keyword or "").strip()
+    if not keyword:
+        return _error_payload(keyword, "POI 名称不能为空。")
+
+    cache_key = (
+        f"{keyword}|{basin_codes}|{hours_back}|{max_distance_km}|{admin_code}"
+        f"|{datetime.now().strftime('%Y%m%d%H')}"
+    )
+    with _poi_nearest_obs_cache_lock:
+        hit = _poi_nearest_obs_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < POI_NEAREST_OBS_CACHE_TTL:
+            return hit[1]
+
+    try:
+        poi = _pick_first_poi(keyword)
+        logger.warning(
+            "[poi_nearest_observation] poi keyword=%s name=%s address=%s lon=%s lat=%s",
+            keyword,
+            poi.get("name") if poi else None,
+            poi.get("address") if poi else None,
+            poi.get("longitude") if poi else None,
+            poi.get("latitude") if poi else None,
+        )
+    except Exception as exc:
+        return _error_payload(keyword, "POI 查询失败。", str(exc))
+    if not poi:
+        return _error_payload(keyword, f"未查询到“{keyword}”的天津范围内有效经纬度。")
+
+    try:
+        client = MusicClient(MusicConfig())
+        query_time, records, obs_source = _query_station_records(
+            client,
+            basin_codes,
+            hours_back,
+            admin_code,
+            poi,
+            max_distance_km,
+        )
+        nearest = _nearest_station(poi, records)
+    except Exception as exc:
+        logger.warning("[poi_nearest_observation] failed keyword=%s error=%s", keyword, exc)
+        return _error_payload(keyword, "最近观测站实况查询失败。", str(exc))
+
+    if not nearest:
+        return _error_payload(keyword, "未找到可用于匹配的最近观测站。")
+    if float(nearest["distance_km"]) > float(max_distance_km):
+        record = nearest.get("record") or {}
+        return _error_payload(
+            keyword,
+            f"已定位到 POI，但 {max_distance_km:g} 公里内未找到可用观测站。",
+            (
+                f"nearest_distance_km={nearest['distance_km']}; "
+                f"poi={poi.get('name')}({poi.get('address')},{poi.get('longitude')},{poi.get('latitude')}); "
+                f"station={_station_name(record)}({_safe_float(record.get('Lon'))},{_safe_float(record.get('Lat'))})"
+            ),
+        )
+
+    record = nearest["record"]
+    obs_utc = _observation_time(record, query_time)
+    obs_bjt = _to_beijing_time_text(obs_utc)
+    result = {
+        "status": "ok",
+        "query_type": "poi_nearest_observation",
+        "keyword": keyword,
+        "poi": poi,
+        "query_time": query_time,
+        "observation_time": obs_utc,
+        "observation_time_beijing": obs_bjt,
+        "observation_source": obs_source,
+        "data_code": HOURLY_DATA_CODE,
+        "interface_id": "getSurfEleInRegionByTime/getSurfEleInBasinByTime",
+        "nearest_station": {
+            "station_id": _station_id(record),
+            "station_name": _station_name(record),
+            "province": record.get("Province"),
+            "city": record.get("City"),
+            "county": record.get("Cnty"),
+            "town": record.get("Town"),
+            "longitude": _safe_float(record.get("Lon")),
+            "latitude": _safe_float(record.get("Lat")),
+            "distance_km": nearest["distance_km"],
+        },
+        "observation": _clean_observation(record),
+        "message": "已查询到 POI 最近观测站逐小时实况。",
+    }
+    with _poi_nearest_obs_cache_lock:
+        _poi_nearest_obs_cache[cache_key] = (time.time(), result)
+    return result
+
+
 def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
     @mcp.tool()
     def query_poi_nearest_observation(
@@ -339,79 +444,10 @@ def register_poi_nearest_observation_tool(mcp: FastMCP) -> None:
         admin_code: str = TIANJIN_ADMIN_CODE,
     ) -> dict:
         """查询某个 POI 的经纬度，并返回最近观测站逐小时实况值。"""
-        keyword = str(keyword or "").strip()
-        if not keyword:
-            return _error_payload(keyword, "POI 名称不能为空。")
-
-        try:
-            poi = _pick_first_poi(keyword)
-            logger.warning(
-                "[poi_nearest_observation] poi keyword=%s name=%s address=%s lon=%s lat=%s",
-                keyword,
-                poi.get("name") if poi else None,
-                poi.get("address") if poi else None,
-                poi.get("longitude") if poi else None,
-                poi.get("latitude") if poi else None,
-            )
-        except Exception as exc:
-            return _error_payload(keyword, "POI 查询失败。", str(exc))
-        if not poi:
-            return _error_payload(keyword, f"未查询到“{keyword}”的天津范围内有效经纬度。")
-
-        try:
-            client = MusicClient(MusicConfig())
-            query_time, records, obs_source = _query_station_records(
-                client,
-                basin_codes,
-                hours_back,
-                admin_code,
-                poi,
-                max_distance_km,
-            )
-            nearest = _nearest_station(poi, records)
-        except Exception as exc:
-            logger.warning("[poi_nearest_observation] failed keyword=%s error=%s", keyword, exc)
-            return _error_payload(keyword, "最近观测站实况查询失败。", str(exc))
-
-        if not nearest:
-            return _error_payload(keyword, "未找到可用于匹配的最近观测站。")
-        if float(nearest["distance_km"]) > float(max_distance_km):
-            record = nearest.get("record") or {}
-            return _error_payload(
-                keyword,
-                f"已定位到 POI，但 {max_distance_km:g} 公里内未找到可用观测站。",
-                (
-                    f"nearest_distance_km={nearest['distance_km']}; "
-                    f"poi={poi.get('name')}({poi.get('address')},{poi.get('longitude')},{poi.get('latitude')}); "
-                    f"station={_station_name(record)}({_safe_float(record.get('Lon'))},{_safe_float(record.get('Lat'))})"
-                ),
-            )
-
-        record = nearest["record"]
-        obs_utc = _observation_time(record, query_time)
-        obs_bjt = _to_beijing_time_text(obs_utc)
-        return {
-            "status": "ok",
-            "query_type": "poi_nearest_observation",
-            "keyword": keyword,
-            "poi": poi,
-            "query_time": query_time,
-            "observation_time": obs_utc,
-            "observation_time_beijing": obs_bjt,
-            "observation_source": obs_source,
-            "data_code": HOURLY_DATA_CODE,
-            "interface_id": "getSurfEleInRegionByTime/getSurfEleInBasinByTime",
-            "nearest_station": {
-                "station_id": _station_id(record),
-                "station_name": _station_name(record),
-                "province": record.get("Province"),
-                "city": record.get("City"),
-                "county": record.get("Cnty"),
-                "town": record.get("Town"),
-                "longitude": _safe_float(record.get("Lon")),
-                "latitude": _safe_float(record.get("Lat")),
-                "distance_km": nearest["distance_km"],
-            },
-            "observation": _clean_observation(record),
-            "message": "已查询到 POI 最近观测站逐小时实况。",
-        }
+        return _query_poi_nearest_observation_core(
+            keyword,
+            basin_codes=basin_codes,
+            hours_back=hours_back,
+            max_distance_km=max_distance_km,
+            admin_code=admin_code,
+        )

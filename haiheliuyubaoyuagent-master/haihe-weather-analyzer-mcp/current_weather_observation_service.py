@@ -2,13 +2,20 @@
 from __future__ import annotations
 
 import math
+import os
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 
 BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+# 实况短 TTL 缓存：同「时次桶 + hours_back」在 TTL 内命中，跨时次必 miss。
+CURRENT_WEATHER_CACHE_TTL = int(os.getenv("CURRENT_WEATHER_CACHE_TTL", "60"))
+_current_weather_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_current_weather_cache_lock = threading.Lock()
 REGION_ADMIN_CODES = "110000,120000,130000"
 HAIHE_BASIN_CODE = "HHLY"
 OBSERVATION_DATA_CODE = "SURF_CHN_MUL_MIN"
@@ -280,6 +287,15 @@ def query_current_weather_observation_core(
     hours_back: int = 6,
 ) -> dict[str, Any]:
     """查询同一时次的地区与流域实况，并返回代码统计结果。"""
+    current = now or datetime.now(BEIJING_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=BEIJING_TIMEZONE)
+    cache_key = f"{current.strftime('%Y%m%d%H')}|{hours_back}"
+    with _current_weather_cache_lock:
+        hit = _current_weather_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < CURRENT_WEATHER_CACHE_TTL:
+            return hit[1]
+
     client = client_factory()
     api_time, region_records, basin_records, attempts = _query_same_successful_time(
         client,
@@ -316,7 +332,7 @@ def query_current_weather_observation_core(
         if _is_jizhou_record(record)
     ]
 
-    return {
+    result = {
         "status": "ok",
         "data_source": "天擎自动站",
         "query_time_utc": api_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -354,3 +370,6 @@ def query_current_weather_observation_core(
         },
         "attempts": attempts,
     }
+    with _current_weather_cache_lock:
+        _current_weather_cache[cache_key] = (time.time(), result)
+    return result

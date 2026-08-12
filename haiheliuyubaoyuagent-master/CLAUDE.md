@@ -174,3 +174,13 @@ This project uses the superpowers plugin for disciplined development:
 - **Qwen3 思考块开关**：`LLM_DISABLE_THINKING=true` 时 `_build_chat_llm` 经 `extra_body={"chat_template_kwargs":{"enable_thinking":False}}` 关闭 `<think>` 隐藏推理块（planner 提速最大杠杆）。**默认关**——本地无法验证内网 vLLM/SGLang 是否支持，默认关时生产行为与现状完全一致；确认服务端支持后再开。新增辅助 `_env_bool`。
 - **应急时间段判定并发**：`haihe_mcp_tools._evaluate_one_synoptic_time(ts, basin_codes, allowed_station_levels)` 抽出单时次流水线（fetch→filter→evaluate→report→event dict，单时次失败容错返回 None）。`evaluate_emergency_response_by_time_range` 对 4 个整点时次改 `ThreadPoolExecutor` 并发取数（`EMERGENCY_FETCH_WORKERS`，默认 4），串行 ~127s → 并发≈最慢单次。线程安全依据：`_observation_fetch_core` 每次 `new MusicClient()`（独立 Session）。返回结构/排序/max_level 聚合口径不变。测试 `tests/test_emergency_time_range_parallel.py`（并发计数器证明 + 单点容错 + 排序聚合）、`chainlitexam/tests/test_build_chat_llm.py`。
 - **planner 第 2 次调用超时兜底（Fix B，8-12 生产日志"今天雨下了多长时间"超时无输出）**：根因是本地 Qwen LLM 服务响应波动（输入已压缩到 ~3400 字符仍 60s 超时，同查询一败一成），而非输入膨胀。修复两层：① `_astream_planner_think_retry_once` 在 orchestrator 层对超时重试一次（`chain_gzt.astream_planner_think` 超时立即重抛不重试的契约不动）；② 重试仍超时时，非滚动工具走 `_assemble_tool_observations_fallback` 把本轮已成功取回的工具观测（当前轮 ToolMessage 不被 `_compress_messages` 截断）用代码拼接输出，**保证"拿到数据必有输出"**、不再撞慢 LLM；`_is_failed_tool_observation` 过滤失败/占位/天河哨兵观测，无可组装数据则维持原错误路径。滚动完整时（Fix C 场景）不加 planner 重试、Fix C 行为零改动——二者由 `_has_complete_rolling_forecast` 互斥分流。
+
+### MCP 工具取数缓存（2026-08-12，全问题类型性能优化 · 第一批 A1-A3 已交付）
+
+口径（用户逐条确认）：**`ENABLE_FAST_PATHS` 保持关闭**（fast path 不作优化向量）；**实况类短 TTL 60-120s**；**思考过程必须显示**（主路径 LLM 行为不动）。主路径 LLM（planner+answer，2 次 LLM）已优化到底，剩余优化集中在 MCP 工具取数。复用既有模式：模块级 dict `{key:(ts,value)}` + 惰性过期 + env 可调 TTL + `threading.Lock`；**只有成功结果才写缓存，错误/失败不写**；实况类键含当前时次桶（跨时次必 miss）。
+
+- **A1 `query_current_weather_observation`**（current_weather_observation_service.py）：`CURRENT_WEATHER_CACHE_TTL` 默认 **60s**；键 = `时次桶(YYYYMMDDHH)|hours_back`。
+- **A2 `query_poi_nearest_observation`**（custom_tools/poi_nearest_observation_tool.py）：工具体提取为 `_query_poi_nearest_observation_core`；`POI_NEAREST_OBS_CACHE_TTL` 默认 **60s**；键 = `入参|时次桶`（POI 部分仍走 `_search_poi_core` 已有 3600s 缓存）。
+- **A3 `get_tianjin_wind_warning_assessment`**（haihe_mcp_tools.py）：工具体提取为 `_query_tianjin_wind_warning_core`；`TIANJIN_WIND_CACHE_TTL` 默认 **120s**；键 = `request_time`（同一请求时次数据 120s 稳定）；接口失败（`wind_observation_api_failed`）不写缓存。
+
+待做（第二批）：A4 预警 4 工具 / A5 `query_water_level` / A6 `rag_search` / A7 `search_poi_by_distance` 缓存；B MUSIC 多时次合并（以生产探针为准，region 接口多时次本地不可验证）；C `scripts/perf_stats.py` 消费 `[PERF].stages`。计划文件 `~/.claude/plans/lazy-mapping-dahl.md`。

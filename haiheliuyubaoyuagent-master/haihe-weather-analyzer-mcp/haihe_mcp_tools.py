@@ -158,6 +158,12 @@ _poi_search_cache: dict[str, tuple[float, Any]] = {}
 _POI_ES_CLIENT = None
 _POI_ES_LOCK = threading.Lock()
 
+# 天津大风预警评估缓存：同一请求时次（YYYYMMDDHHmmss）在 TTL 内直接返回。
+# 风力实况按固定时次刷新，120s 内同一次查询不重拉天擎。默认 120s。
+TIANJIN_WIND_CACHE_TTL = int(os.getenv("TIANJIN_WIND_CACHE_TTL", "120"))
+_tianjin_wind_cache: dict[str, tuple[float, Any]] = {}
+_tianjin_wind_cache_lock = threading.Lock()
+
 # RAG 请求体默认模板：name/key/query 在运行时按命中的知识库与用户问题填充
 RAG_REQUEST_DEFAULTS = {
     "top_k": 5,
@@ -2720,6 +2726,45 @@ def _search_poi_by_distance_core(
     return _build_poi_result("fuzzy", fuzzy_resp)
 
 
+def _query_tianjin_wind_warning_core(times: str = "") -> dict:
+    """查询天津市当前风力并按大风预警阈值判定（带 120s TTL 缓存）。
+
+    同一请求时次 request_time 在 TTL 内命中缓存；接口失败结果不写缓存。
+    """
+    # 服务器系统时钟为 UTC+0；接口 times 和前端展示时间均使用天津本地时间（UTC+8）。
+    tianjin_now = datetime.now(TIANJIN_TIMEZONE)
+    request_time = _normalize_time_param(times) if times else tianjin_now.strftime("%Y%m%d%H0000")
+    with _tianjin_wind_cache_lock:
+        hit = _tianjin_wind_cache.get(request_time)
+        if hit and (time.time() - hit[0]) < TIANJIN_WIND_CACHE_TTL:
+            return hit[1]
+
+    query_time = tianjin_now.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        records = MusicClient().get_surf_ele_in_region_by_time(
+            admin_codes="120000",
+            times=request_time,
+        )
+    except Exception as exc:
+        return {
+            "status": "wind_observation_api_failed",
+            "query_time": query_time,
+            "request_time": request_time,
+            "message": f"天津市风力实况查询失败：{exc}",
+            "station_table": [],
+            "threshold_comparison": [],
+            "area_distribution": [],
+            "attention_areas": [],
+            "recommendations": [],
+        }
+
+    result = _evaluate_tianjin_wind_warning(records, query_time=query_time)
+    result["request_time"] = request_time
+    with _tianjin_wind_cache_lock:
+        _tianjin_wind_cache[request_time] = (time.time(), result)
+    return result
+
+
 def register_haihe_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def query_current_weather_observation(hours_back: int = 6) -> dict:
@@ -3507,31 +3552,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         会出现在 station_table 明细表中。times 可传 YYYYMMDDHHmmss 用于指定时次，
         不传时按服务器当前整点查询。
         """
-        # 服务器系统时钟为 UTC+0；接口 times 和前端展示时间均使用天津本地时间（UTC+8）。
-        tianjin_now = datetime.now(TIANJIN_TIMEZONE)
-        request_time = _normalize_time_param(times) if times else tianjin_now.strftime("%Y%m%d%H0000")
-        query_time = tianjin_now.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            records = MusicClient().get_surf_ele_in_region_by_time(
-                admin_codes="120000",
-                times=request_time,
-            )
-        except Exception as exc:
-            return {
-                "status": "wind_observation_api_failed",
-                "query_time": query_time,
-                "request_time": request_time,
-                "message": f"天津市风力实况查询失败：{exc}",
-                "station_table": [],
-                "threshold_comparison": [],
-                "area_distribution": [],
-                "attention_areas": [],
-                "recommendations": [],
-            }
-
-        result = _evaluate_tianjin_wind_warning(records, query_time=query_time)
-        result["request_time"] = request_time
-        return result
+        return _query_tianjin_wind_warning_core(times=times)
 
     @mcp.tool()
     def evaluate_emergency_response_by_time_range(
