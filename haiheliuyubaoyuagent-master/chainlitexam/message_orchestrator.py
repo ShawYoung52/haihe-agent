@@ -71,6 +71,7 @@ from tools.rolling_forecast_response import (
     rolling_forecast_llm_instruction,
 )
 from tools import decision_weather_fast_path, warning_workflow
+from external_skill_tools import TIANHE_ERROR_TEXTS
 
 # Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
 ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
@@ -1963,6 +1964,67 @@ def _is_tianhe_passthrough(tianhe_text: str | None, forced_text: str | None) -> 
     return tianhe_text is not None and forced_text == tianhe_text
 
 
+async def _astream_planner_think_retry_once(callbacks, planner_chain, messages, reasoning):
+    """planner 调用的超时重试包装（Fix B）：本地 LLM 响应波动导致超时（asyncio.TimeoutError）
+    时重试一次，仍超时则把异常上抛给外层数据兜底。
+
+    连接/限流错误（ConnectionError/httpx 等）仍由 callbacks["astream_planner_think"] 内部
+    按既有策略处理，不在此重复；这里只补"超时"这一种 internal 不重试的情况（chain_gzt 的
+    astream_planner_think 对超时立即重抛，该契约由 test_astream_planner_think_timeout_no_retry 锁定）。
+    """
+    try:
+        return await callbacks["astream_planner_think"](
+            planner_chain, {"messages": messages}, reasoning
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        print("[Fix B] planner 调用超时，重试一次...")
+        return await callbacks["astream_planner_think"](
+            planner_chain, {"messages": messages}, reasoning
+        )
+
+
+def _is_failed_tool_observation(content: str) -> bool:
+    """判断 ToolMessage 观测是否为失败/占位文本（不应当作有效数据组装输出）。"""
+    c = (content or "").strip()
+    if not c:
+        return True
+    if c.startswith("工具未找到"):
+        return True
+    if c.startswith("工具 ") and "执行失败" in c:
+        return True
+    if c in TIANHE_ERROR_TEXTS or c == "天河问答服务返回为空。":
+        return True
+    return False
+
+
+def _assemble_tool_observations_fallback(messages: list) -> str:
+    """Fix B：planner 重试仍超时（非滚动预报场景）时，把本轮已成功取回的工具观测
+    用代码拼接成回答（不再调 LLM），保证"拿到数据必有输出"。
+
+    只取本轮（最后一个 HumanMessage 起）的 ToolMessage——_compress_messages 对当前轮保持完整，
+    超时点本轮观测文本是全的；跳过失败/占位/天河哨兵观测；无有效观测返回空串，交由调用方
+    走原错误路径。前导业务引导语由调用方 _prepend_thinking_summary 统一追加。
+    """
+    if not messages:
+        return ""
+    start = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            start = i + 1
+            break
+    parts = []
+    for msg in messages[start:]:
+        if not isinstance(msg, ToolMessage):
+            continue
+        content = str(getattr(msg, "content", "") or "").strip()
+        if _is_failed_tool_observation(content):
+            continue
+        parts.append(content)
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
+
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks,
                           parent_step_id: str | None = None):
     ree = None
@@ -2137,9 +2199,11 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     # 直接作为 forced_final_text 收口，跳过 answer LLM——避免 LLM 超时/改写把现成答案拖死。
                     # 透传判定在 process_message 收口处做值绑定：仅当 forced_final_text 仍等于本轮天河原文时
                     # 才原样透传，保证被后续工具覆盖或应急清空后不误判（不再用会话级标志，避免跨消息泄漏）。
+                    # 工具级失败（TIANHE_ERROR_TEXTS：空问题/连接超时/不可用/格式异常）不强制收口，
+                    # 作为普通 ToolMessage 观测交给 planner 回退本地工具（符合工具 docstring 设计意图）。
                     answer_text = str(_unwrap_tool_result(observation) or "").strip()
                     observation_text = answer_text or "天河问答服务返回为空。"
-                    if answer_text:
+                    if answer_text and answer_text not in TIANHE_ERROR_TEXTS:
                         forced_final_text = answer_text
                         tianhe_passthrough_text = answer_text
                 else:
@@ -4951,9 +5015,18 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     )
             except Exception:
                 pass
-            planner_msg = await callbacks["astream_planner_think"](
-                planner_chain, {"messages": messages}, reasoning
-            )
+            if _has_complete_rolling_forecast(rolling_forecast_bundles):
+                # 滚动预报已完整（多为伴随应急工具、上面滚动早收口未触发二次 planner 的场景）：
+                # 超时由外层 Fix C 兜底，planner 不再重试，避免无谓增加 60s 时延、也不改变已测试的 Fix C 行为。
+                planner_msg = await callbacks["astream_planner_think"](
+                    planner_chain, {"messages": messages}, reasoning
+                )
+            else:
+                # 非滚动工具：planner 超时重试一次（Fix B：planner 重试+数据兜底，与滚动 Fix C 互斥），
+                # 仍超时由外层数据兜底组装。
+                planner_msg = await _astream_planner_think_retry_once(
+                    callbacks, planner_chain, messages, reasoning
+                )
             try:
                 _timing = cl.user_session.get("timing_context")
                 if _timing is not None:
@@ -5107,6 +5180,22 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     stream_msg.content = text
                     await stream_msg.update()
                     messages.append(AIMessage(content=text))
+                cl.user_session.set("messages", messages)
+                answer_generated = True
+                break
+            # Fix B（新增）：非滚动工具，planner 重试仍超时，但本轮已成功取回工具数据时，
+            # 用代码把观测组装成回答直接输出，不再撞慢 LLM，保证"拿到数据必有输出"。
+            # 与 Fix C 互斥：滚动完整走上面 Fix C，其余非滚动工具才到这里。
+            fallback_text = _assemble_tool_observations_fallback(messages)
+            if fallback_text:
+                print("[Fix B] planner 重试仍超时，用代码组装已取回工具数据为回答。")
+                await _maybe_close_reasoning(reasoning)
+                text = callbacks["append_followup_if_needed"](fallback_text, message.content)
+                has_chart = cl.user_session.get("has_chart_generated", False) or False
+                text = _prepend_thinking_summary(text, message.content, has_chart=has_chart)
+                stream_msg.content = text
+                await stream_msg.update()
+                messages.append(AIMessage(content=text))
                 cl.user_session.set("messages", messages)
                 answer_generated = True
                 break

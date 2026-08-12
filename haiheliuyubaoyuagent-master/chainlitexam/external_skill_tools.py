@@ -136,6 +136,16 @@ _TIANHE_ERR_CONNECT = "天河问答服务连接超时，请稍后重试或换一
 _TIANHE_ERR_UNAVAILABLE = "天河问答服务暂时不可用，请稍后重试。"
 _TIANHE_ERR_FORMAT = "天河问答服务返回格式异常，请稍后重试。"
 
+# 工具级失败文案集合（单一事实源）：供 message_orchestrator 区分"工具级失败"与"命中/200 降级"。
+# 集合内是本工具自身生成的失败提示，应让 planner 回退本地工具；200 降级文案（对接文档 9.4，
+# 如"智能体服务暂时不可用"）由天河 API 在 200 时作为 answer 返回，不在此集合，应原样透传。
+TIANHE_ERROR_TEXTS = frozenset({
+    _TIANHE_ERR_EMPTY,
+    _TIANHE_ERR_CONNECT,
+    _TIANHE_ERR_UNAVAILABLE,
+    _TIANHE_ERR_FORMAT,
+})
+
 _tianhe_cache: dict[str, tuple[float, str]] = {}
 _tianhe_client: httpx.AsyncClient | None = None
 

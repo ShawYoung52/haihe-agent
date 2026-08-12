@@ -134,3 +134,16 @@ def test_tool_description_mentions_fixed_qa_examples():
     desc = est.query_tianhe_fixed_qa.description or ""
     assert "今天雨下了多长时间" in desc
     assert "暴雨天气的防范建议" in desc
+
+
+def test_tianhe_error_texts_exported():
+    """工具级失败文案应以单一事实源集合导出，供 orchestrator 区分"失败回退"与"命中/降级透传"。"""
+    assert isinstance(est.TIANHE_ERROR_TEXTS, frozenset)
+    assert est.TIANHE_ERROR_TEXTS == {
+        est._TIANHE_ERR_EMPTY,
+        est._TIANHE_ERR_CONNECT,
+        est._TIANHE_ERR_UNAVAILABLE,
+        est._TIANHE_ERR_FORMAT,
+    }
+    # 200 降级文案（文档 9.4）不在失败集合内——它由 API 在 200 时返回，应原样透传而非回退
+    assert "智能体服务暂时不可用，请稍后重试。" not in est.TIANHE_ERROR_TEXTS

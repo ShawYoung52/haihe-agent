@@ -17,6 +17,7 @@ ensure_stubs()
 
 import chainlit
 import chainlitexam.message_orchestrator as mo
+import external_skill_tools as est
 
 
 def test_enable_fast_paths_defaults_to_false(monkeypatch):
@@ -401,6 +402,31 @@ async def test_tianhe_degraded_answer_also_passthrough(monkeypatch):
     assert tianhe_text == degraded, "降级文案也记录进透传标记"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "err_text",
+    [
+        est._TIANHE_ERR_EMPTY,
+        est._TIANHE_ERR_CONNECT,
+        est._TIANHE_ERR_UNAVAILABLE,
+        est._TIANHE_ERR_FORMAT,
+    ],
+)
+async def test_tianhe_tool_level_failure_falls_back(monkeypatch, err_text):
+    """天河工具级失败（连接超时/不可用/格式异常/空问题）时，不得当最终答案透传：
+    forced_final_text 保持 None，失败文案作为普通 ToolMessage 观测交给 planner 回退本地工具。"""
+    planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, err_text)
+
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
+        planner_msg, tools, messages, "今天雨下了多长时间", 1, callbacks
+    )
+
+    assert forced is None, "工具级失败不应强制收口，否则 planner 无法回退本地工具"
+    assert tianhe_text is None, "工具级失败不应记录为透传原文"
+    assert len(messages) == 1
+    assert messages[0].content == err_text, "失败文案应进 ToolMessage，让 planner 看到后回退本地工具"
+
+
 def test_is_tianhe_passthrough_value_binding():
     """透传判定是值绑定的：仅当 forced_final_text 仍等于本轮天河原文时为真。
 
@@ -580,6 +606,80 @@ def test_fallback_on_planner_timeout_with_complete_data():
     assert mo._has_complete_rolling_forecast([{"code_section": "表格"}]) is True
 
 
+def test_is_failed_tool_observation():
+    """失败/占位/天河哨兵观测应被识别为失败，不应当作有效数据输出。"""
+    assert mo._is_failed_tool_observation("") is True
+    assert mo._is_failed_tool_observation("   ") is True
+    assert mo._is_failed_tool_observation("工具未找到：query_xxx") is True
+    assert mo._is_failed_tool_observation(
+        "工具 query_x 执行失败（TimeoutError），该数据暂不可用。错误摘要：boom"
+    ) is True
+    for err in est.TIANHE_ERROR_TEXTS:
+        assert mo._is_failed_tool_observation(err) is True, f"天河哨兵应判失败: {err}"
+    assert mo._is_failed_tool_observation("天河问答服务返回为空。") is True
+    assert mo._is_failed_tool_observation("过去24小时全市平均降雨2.5毫米") is False
+    assert mo._is_failed_tool_observation("| 时段 | 雨量 |\n| 今夜 | 中雨 |") is False
+
+
+def test_assemble_tool_observations_fallback_current_round_only():
+    """只拼接本轮（最后 HumanMessage 起）的有效工具观测，过滤失败/占位/天河哨兵，不纳入历史轮。"""
+    messages = [
+        mo.HumanMessage(content="历史问题"),
+        mo.AIMessage(content="历史回答"),
+        mo.ToolMessage(content="历史工具数据", tool_call_id="h1"),
+        mo.HumanMessage(content="今天雨下了多长时间"),
+        mo.AIMessage(content=""),
+        mo.ToolMessage(content="区域最大雨量：79.8毫米", tool_call_id="c1"),
+        mo.ToolMessage(content="工具 query_x 执行失败（TimeoutError），该数据暂不可用。", tool_call_id="c2"),
+        mo.ToolMessage(content=est._TIANHE_ERR_UNAVAILABLE, tool_call_id="c3"),
+    ]
+    result = mo._assemble_tool_observations_fallback(messages)
+    assert "区域最大雨量：79.8毫米" in result
+    assert "执行失败" not in result, "失败观测应被过滤"
+    assert "历史工具数据" not in result, "历史轮次不应纳入"
+    assert est._TIANHE_ERR_UNAVAILABLE not in result, "天河哨兵不应输出"
+
+
+def test_assemble_tool_observations_fallback_all_failed_returns_empty():
+    """本轮观测全部失败/占位时返回空串，交由调用方走原错误路径。"""
+    messages = [
+        mo.HumanMessage(content="今天雨下了多长时间"),
+        mo.ToolMessage(content="工具 query_x 执行失败（TimeoutError），该数据暂不可用。", tool_call_id="c1"),
+        mo.ToolMessage(content=est._TIANHE_ERR_CONNECT, tool_call_id="c2"),
+    ]
+    assert mo._assemble_tool_observations_fallback(messages) == ""
+
+
+@pytest.mark.asyncio
+async def test_astream_planner_think_retry_once_succeeds_on_retry():
+    """planner 超时后重试一次，第二次成功则返回结果。"""
+    calls = {"n": 0}
+
+    async def fake(chain, input_dict, reasoning):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise asyncio.TimeoutError("planner inference timeout")
+        return "ok"
+
+    result = await mo._astream_planner_think_retry_once(
+        {"astream_planner_think": fake}, None, [], None
+    )
+    assert result == "ok"
+    assert calls["n"] == 2, "应在超时后重试一次"
+
+
+@pytest.mark.asyncio
+async def test_astream_planner_think_retry_once_reraises_when_still_timeout():
+    """重试仍超时应把 TimeoutError 上抛给外层数据兜底。"""
+    async def fake(chain, input_dict, reasoning):
+        raise asyncio.TimeoutError("planner inference timeout")
+
+    with pytest.raises(asyncio.TimeoutError):
+        await mo._astream_planner_think_retry_once(
+            {"astream_planner_think": fake}, None, [], None
+        )
+
+
 @pytest.mark.asyncio
 async def test_second_planner_timeout_with_complete_data_falls_back_to_answer(monkeypatch):
     """Fix C：第 2 次 Planner 超时且滚动预报数据完整（含应急响应工具综合场景）时，
@@ -722,3 +822,205 @@ async def test_second_planner_timeout_with_complete_data_falls_back_to_answer(mo
         "应急响应已启动" in getattr(m, "content", "")
         for m in final_messages
     ), f"messages 末尾应追加回退生成的回答，实际: {[type(m).__name__ for m in final_messages]}"
+
+
+def _fixb_non_rolling_setup(monkeypatch, planner_behavior, observation):
+    """构造一次"非滚动工具 + planner 第 2 次调用超时"的 process_message 全链路 mock。
+
+    planner_behavior(round_no) 决定第 1 次之后的 planner 行为（超时/成功），
+    返回 (stream_contents, final_messages, counters, callbacks, tools, user_query)。
+    """
+    monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
+    monkeypatch.setattr(mo, "ENABLE_LLM_THINKING", False)
+
+    user_query = "今天雨下了多长时间"
+    stream_contents: list[str] = []
+    final_messages: list = []
+    counters = {"planner": 0, "answer": 0}
+
+    def make_planner_msg(tool_calls, content=""):
+        msg = type("FakePlannerMsg", (), {})()
+        msg.content = content
+        msg.tool_calls = tool_calls
+        return msg
+
+    async def fake_astream_planner_think(*args, **kwargs):
+        counters["planner"] += 1
+        if counters["planner"] == 1:
+            return make_planner_msg([
+                {"id": "c-cur", "name": "query_current_weather_observation", "args": {}},
+            ])
+        return planner_behavior(counters["planner"], make_planner_msg)
+
+    async def fake_answer_chain(*args, **kwargs):
+        counters["answer"] += 1
+        return "LLM生成的答案（不应出现：Fix B 应走代码组装兜底）"
+
+    async def noop_async(*args, **kwargs):
+        return None
+
+    async def fake_stream_text(text, stream_msg=None, **kwargs):
+        # 复用 planner 内容的路径经 stream_text_to_message 输出（不经 stream_msg.update），
+        # 与 update 一样记录到 stream_contents，便于断言最终输出文本。
+        stream_contents.append(text)
+        return None
+
+    class FakeStreamMsg:
+        def __init__(self, **kw):
+            self.content = ""
+
+        async def send(self):
+            return None
+
+        async def update(self):
+            stream_contents.append(self.content)
+            return None
+
+        async def remove(self):
+            return None
+
+    class FakeReasoning:
+        _closed = False
+        step = type("FakeStep", (), {"id": "reasoning-step"})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def stage(self, *a, **k):
+            return None
+
+        async def line(self, *a, **k):
+            return None
+
+        async def append(self, *a, **k):
+            return None
+
+        async def close(self):
+            self._closed = True
+            return None
+
+    class FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+        async def ainvoke(self, args):
+            return observation
+
+    tools = [FakeTool("query_current_weather_observation")]
+    callbacks = {
+        "astream_planner_think": fake_astream_planner_think,
+        "need_river_plot": lambda message: False,
+        "astream_thinking_to_reasoning": noop_async,
+        "append_followup_if_needed": lambda text, query: text,
+        "stream_text_to_message": fake_stream_text,
+        "astream_answer_chain_to_message": fake_answer_chain,
+        "tool_observation_to_text": lambda obs: str(obs),
+        "enrich_with_impact_time_tool": lambda **k: k.get("observation"),
+        "should_force_admin_units_reply": lambda text: False,
+        "build_admin_units_only_reply": lambda obs: obs,
+        "should_force_partition_table_reply": lambda text: False,
+        "build_partition_only_reply": lambda obs: obs,
+        "should_force_structured_impact_reply": lambda text: False,
+        "build_structured_impact_reply": lambda obs: obs,
+    }
+
+    monkeypatch.setattr(mo, "ReasoningStep", lambda name="": FakeReasoning())
+    monkeypatch.setattr(mo.cl, "Message", FakeStreamMsg)
+    # 非滚动工具不应产生完整滚动 bundle，保证 _has_complete_rolling_forecast 为 False。
+    monkeypatch.setattr(mo, "build_rolling_forecast_bundle", lambda user_text, payload: {})
+
+    try:
+        from chainlit.context import context_var, init_http_context
+        context_var.set(init_http_context(thread_id="test-fixb"))
+    except Exception:
+        pass
+
+    return stream_contents, final_messages, counters, callbacks, tools, user_query
+
+
+@pytest.mark.asyncio
+async def test_second_planner_retry_still_timeout_assembles_tool_data(monkeypatch):
+    """Fix B 核心：非滚动工具已取回数据，planner 第 2 次调用重试仍超时时，
+    应用代码把工具观测组装成回答输出（拿到数据必有输出），不再撞慢 LLM、不发 ❌ 错误。"""
+    def behavior(round_no, make_planner_msg):
+        raise asyncio.TimeoutError("planner inference timeout")
+
+    observation = "过去24小时全市平均降雨2.5毫米，区域最大雨量79.8毫米。"
+    stream_contents, final_messages, counters, callbacks, tools, user_query = \
+        _fixb_non_rolling_setup(monkeypatch, behavior, observation)
+
+    await mo.process_message(
+        type("FakeMessage", (), {"content": user_query})(),
+        planner_chain=None, answer_chain=None,
+        thinking_chain=None, tools=tools, messages=final_messages, callbacks=callbacks,
+    )
+
+    joined = "\n".join(stream_contents)
+    assert counters["planner"] == 3, f"planner 应调 3 次（第1次+超时+重试），实际 {counters['planner']}"
+    assert counters["answer"] == 0, "Fix B 代码组装兜底不应再调 answer LLM（避免再撞慢服务）"
+    assert "区域最大雨量79.8毫米" in joined, f"已取回的工具数据应被组装输出，实际: {joined!r}"
+    assert any(
+        "区域最大雨量79.8毫米" in getattr(m, "content", "") for m in final_messages
+    ), "messages 末尾应追加代码组装的 AIMessage 回答"
+
+
+@pytest.mark.asyncio
+async def test_second_planner_timeout_retry_success(monkeypatch):
+    """Fix B：planner 第 2 次调用首次超时、重试成功时，直接用重试结果，不走数据组装。"""
+    def behavior(round_no, make_planner_msg):
+        if round_no == 2:
+            raise asyncio.TimeoutError("planner inference timeout")
+        # 重试（第 3 次）成功：planner 直接给出最终回答（无 tool_calls）。
+        return make_planner_msg([], content="整理后的答案：今天降雨持续了3小时。")
+
+    observation = "过去24小时全市平均降雨2.5毫米。"
+    stream_contents, final_messages, counters, callbacks, tools, user_query = \
+        _fixb_non_rolling_setup(monkeypatch, behavior, observation)
+
+    await mo.process_message(
+        type("FakeMessage", (), {"content": user_query})(),
+        planner_chain=None, answer_chain=None,
+        thinking_chain=None, tools=tools, messages=final_messages, callbacks=callbacks,
+    )
+
+    joined = "\n".join(stream_contents)
+    assert counters["planner"] == 3, f"planner 应调 3 次（第1次+超时+重试成功），实际 {counters['planner']}"
+    assert "整理后的答案：今天降雨持续了3小时。" in joined, f"重试成功的回答应输出，实际: {joined!r}"
+
+
+@pytest.mark.asyncio
+async def test_second_planner_timeout_no_usable_data_falls_to_error(monkeypatch):
+    """Fix B 边界：planner 重试仍超时且本轮工具全部失败（无可组装数据）时，
+    维持原错误路径（loop 外兜底仍可能再调 answer LLM 争取最后一次机会）。"""
+    def behavior(round_no, make_planner_msg):
+        raise asyncio.TimeoutError("planner inference timeout")
+
+    # 工具抛异常 → 观测为失败文本，_assemble_tool_observations_fallback 返回空。
+    monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
+    monkeypatch.setattr(mo, "ENABLE_LLM_THINKING", False)
+    observation = "工具 query_current_weather_observation 执行失败（TimeoutError），该数据暂不可用。"
+    stream_contents, final_messages, counters, callbacks, tools, user_query = \
+        _fixb_non_rolling_setup(monkeypatch, behavior, observation)
+
+    await mo.process_message(
+        type("FakeMessage", (), {"content": user_query})(),
+        planner_chain=None, answer_chain=None,
+        thinking_chain=None, tools=tools, messages=final_messages, callbacks=callbacks,
+    )
+
+    joined = "\n".join(stream_contents)
+    assert counters["planner"] == 3, f"planner 应调 3 次，实际 {counters['planner']}"
+    # 负向护栏（终态断言）：无可组装数据时 Fix B 不得误置 answer_generated 短路——
+    # 循环外兜底应照常再调 answer LLM 争取最后一次机会。若 Fix B 在 fallback_text 为空时
+    # 错误短路，answer 计数会是 0，此断言即红。
+    assert counters["answer"] >= 1, (
+        f"无可用数据时应走原错误路径+循环外兜底再调 answer LLM，实际 answer 调 {counters['answer']} 次"
+    )
+    # 失败占位文本不得被组装成 AIMessage 答案输出（Fix B 只在有有效观测时才组装）。
+    assert not any(
+        isinstance(m, mo.AIMessage) and "执行失败" in getattr(m, "content", "")
+        for m in final_messages
+    ), "不应把'执行失败'占位文本当答案追加"
