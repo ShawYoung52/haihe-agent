@@ -165,3 +165,11 @@ This project uses the superpowers plugin for disciplined development:
 - **LLM 预热**：`chain_gzt._llm_warmup(runtime)` 对 planner/answer 各发一次最小非敏感请求（"请回复一个字：好"），30s 短超时，失败不阻断启动。`ENABLE_LLM_WARMUP=false` 默认关闭。
 - **[PERF] 统一出口**：`TimingContext.log()` 输出 JSON Lines（`as_dict`/`to_json`）。`timing.log()` 统一到 `_log_query_exit` finally（幂等 `_logged` + `query_timing_logged` 去重），所有退出路径记录一次。含 `http_queue_wait_ms`/`tool_queue_wait_ms`/`planner_input_chars`/`planner_output_chars`/`answer_input_chars`/`answer_output_chars` 字段。
 - **`_QUERY_TYPE_BY_TOOL` 插入顺序依赖**：`message_orchestrator.py:821-831` 的 dict 插入顺序即优先级（warning 工具最前，两轮时 warning 优先于 forecast/current/water_level/rain）。**勿排序或 alphabetize**。
+
+## 性能批次（2026-08-12，生成端限速 + 应急并发）
+
+背景：之前优化全在压「输入」（prompt 拆分/历史裁剪/候选召回/工具并行），但生产日志显示 planner 输入仅 2064 字符仍 60s 超时——瓶颈在**生成端**，不在输入。
+
+- **LLM max_tokens 默认上限**：`chain_gzt._build_chat_llm(role)` 工厂统一构造 planner/answer（`_build_orchestrator_runtime` 改用之）。**始终给 max_tokens 上限**，不再默认无界：`PLANNER_MAX_TOKENS`（默认 **2048**）、`ANSWER_MAX_TOKENS`（默认 **4096**），env 可覆盖；0/非法值回退默认。⚠️ PLANNER 取 2048 而非 1024：planner 除输出 tool_call 外，有时被复用为面向用户的完整回答（`message_orchestrator.py:4728`），1024 会截断。
+- **Qwen3 思考块开关**：`LLM_DISABLE_THINKING=true` 时 `_build_chat_llm` 经 `extra_body={"chat_template_kwargs":{"enable_thinking":False}}` 关闭 `<think>` 隐藏推理块（planner 提速最大杠杆）。**默认关**——本地无法验证内网 vLLM/SGLang 是否支持，默认关时生产行为与现状完全一致；确认服务端支持后再开。新增辅助 `_env_bool`。
+- **应急时间段判定并发**：`haihe_mcp_tools._evaluate_one_synoptic_time(ts, basin_codes, allowed_station_levels)` 抽出单时次流水线（fetch→filter→evaluate→report→event dict，单时次失败容错返回 None）。`evaluate_emergency_response_by_time_range` 对 4 个整点时次改 `ThreadPoolExecutor` 并发取数（`EMERGENCY_FETCH_WORKERS`，默认 4），串行 ~127s → 并发≈最慢单次。线程安全依据：`_observation_fetch_core` 每次 `new MusicClient()`（独立 Session）。返回结构/排序/max_level 聚合口径不变。测试 `tests/test_emergency_time_range_parallel.py`（并发计数器证明 + 单点容错 + 排序聚合）、`chainlitexam/tests/test_build_chat_llm.py`。

@@ -8,6 +8,7 @@ import random
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -1456,6 +1457,64 @@ def _observation_report_core(
     if include_records:
         result["records"] = list(records or [])
     return result
+
+
+def _evaluate_one_synoptic_time(
+    ts: datetime,
+    basin_codes: str,
+    allowed_station_levels: str,
+) -> Optional[Dict[str, Any]]:
+    """单个整点观测时次的应急判定流水线：fetch→filter→evaluate→report→event dict。
+
+    单时次失败返回 None（不拖垮其余时次）。模块级、无可变共享状态，供
+    `evaluate_emergency_response_by_time_range` 用线程池并发调用——
+    `_observation_fetch_core` 每次 `new MusicClient()`（独立 `requests.Session()`），
+    `_build_sign` 为纯函数，故并发安全。
+    """
+    try:
+        ts_str = ts.strftime("%Y%m%d%H%M%S")
+        records = _observation_fetch_core(
+            basin_codes=basin_codes,
+            times=ts_str,
+            # 分钟资料 SURF_CHN_PRE_MIN 必须用分钟要素（PRE/Q_PRE），
+            # 不能用小时要素 DEFAULT_OBS_ELEMENTS（含 PRE_1h），否则天擎
+            # 报 -3003 "Element:[PRE_1h] is not config"，取数失败被吞成"未触发"。
+            elements=DEFAULT_MIN_PRE_ELEMENTS,
+        )
+        filtered = _observation_filter_core(
+            records=records,
+            allowed_station_levels=allowed_station_levels,
+        )
+        evaluation = _observation_evaluate_core(
+            records=filtered["records"],
+            allowed_station_levels=filtered["allowed_station_levels"],
+            neighbor_km=50.0,
+            sustain_hourly_threshold_mm=0.1,
+            rainstorm_12h=30.0,
+            rainstorm_24h=50.0,
+            severe_rainstorm_24h=100.0,
+            extraordinary_24h=250.0,
+        )
+        report = _observation_report_core(
+            evaluation=evaluation,
+            basin_codes=basin_codes,
+            times=ts_str,
+            allowed_station_levels=filtered["allowed_station_levels"],
+            include_records=False,
+        )
+        lev = report.get("max_level") or evaluation.get("level")
+        if not lev:
+            return None
+        return {
+            "time": ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "max_level": lev,
+            "summary": report.get("summary", ""),
+            "reached_station_count": report.get("reached_station_count", 0),
+            "total_station_count": report.get("total_station_count", 0),
+        }
+    except Exception as e:
+        print(f"[应急响应] {ts} 判定失败: {e}")
+        return None
 
 
 def _parse_forecast_start_time(start_time: str) -> datetime:
@@ -3515,57 +3574,28 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         events = []
         synoptic_hours = [2, 8, 14, 20]
 
-        # 遍历时间段内的每个完整日，取整点观测时次
+        # 收集时间段内所有整点观测时次（按时间升序）
+        ts_list = []
         cur = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         while cur <= end_dt:
             for h in synoptic_hours:
                 ts = cur.replace(hour=h)
                 if ts < start_dt or ts > end_dt:
                     continue
-                try:
-                    ts_str = ts.strftime("%Y%m%d%H%M%S")
-                    records = _observation_fetch_core(
-                        basin_codes=basin_codes,
-                        times=ts_str,
-                        # 分钟资料 SURF_CHN_PRE_MIN 必须用分钟要素（PRE/Q_PRE），
-                        # 不能用小时要素 DEFAULT_OBS_ELEMENTS（含 PRE_1h），否则天擎
-                        # 报 -3003 "Element:[PRE_1h] is not config"，取数失败被吞成"未触发"。
-                        elements=DEFAULT_MIN_PRE_ELEMENTS,
-                    )
-                    filtered = _observation_filter_core(
-                        records=records,
-                        allowed_station_levels=allowed_station_levels,
-                    )
-                    evaluation = _observation_evaluate_core(
-                        records=filtered["records"],
-                        allowed_station_levels=filtered["allowed_station_levels"],
-                        neighbor_km=50.0,
-                        sustain_hourly_threshold_mm=0.1,
-                        rainstorm_12h=30.0,
-                        rainstorm_24h=50.0,
-                        severe_rainstorm_24h=100.0,
-                        extraordinary_24h=250.0,
-                    )
-                    report = _observation_report_core(
-                        evaluation=evaluation,
-                        basin_codes=basin_codes,
-                        times=ts_str,
-                        allowed_station_levels=filtered["allowed_station_levels"],
-                        include_records=False,
-                    )
-                    lev = report.get("max_level") or evaluation.get("level")
-                    if lev:
-                        events.append({
-                            "time": ts.strftime("%Y-%m-%d %H:%M:%S"),
-                            "max_level": lev,
-                            "summary": report.get("summary", ""),
-                            "reached_station_count": report.get("reached_station_count", 0),
-                            "total_station_count": report.get("total_station_count", 0),
-                        })
-                except Exception as e:
-                    print(f"[应急响应] {ts} 判定失败: {e}")
-                    continue
+                ts_list.append(ts)
             cur += _td(days=1)
+
+        # 并发执行各时次判定：fetch 是慢 IO（每次拉全流域 24h 分钟数据），
+        # 串行 4 次 ~127s，并发后≈最慢单次。单时次失败在 _evaluate_one_synoptic_time
+        # 内被容错为 None，不拖垮整体。pool.map 保持 ts_list 顺序，故结果仍按时间升序。
+        workers = int(os.getenv("EMERGENCY_FETCH_WORKERS", "4"))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(
+                lambda ts: _evaluate_one_synoptic_time(ts, basin_codes, allowed_station_levels),
+                ts_list,
+            ))
+        events = [r for r in results if r]
+        events.sort(key=lambda e: e["time"])
 
         if not events:
             return {
