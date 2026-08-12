@@ -2506,29 +2506,53 @@ def _env_int_optional(name: str) -> int | None:
         return None
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
+# LLM 代理默认地址（planner/answer 共用，可被 *_API_BASE env 覆盖）。
+DEFAULT_API_BASE = "http://10.226.188.156:8000/v1/"
+
+# planner/answer 的 max_tokens 默认上限：始终给上限，避免模型无界生成拖慢响应。
+# PLANNER 取 2048：planner 除输出 tool_call 外，有时被复用为面向用户的完整回答
+# （message_orchestrator.py:4728），1024 太紧可能截断。env 可覆盖。
+_DEFAULT_MAX_TOKENS = {"PLANNER": 2048, "ANSWER": 4096}
+
+
+def _build_chat_llm(role: str) -> "ChatOpenAI":
+    """构造 planner/answer 的 ChatOpenAI。
+
+    role: "PLANNER" | "ANSWER"，读取对应前缀的 env（{role}_MODEL / _TEMPERATURE /
+    _API_BASE / _API_KEY / _MAX_TOKENS）。
+
+    生成端限速（性能排查 2026-08-12）：
+    - 始终给 max_tokens 上限（默认 PLANNER=2048 / ANSWER=4096，env 可覆盖），不再默认无界。
+    - LLM_DISABLE_THINKING=true 时经 extra_body 传 chat_template_kwargs.enable_thinking=False，
+      关闭 Qwen3 思考块（默认关——服务端不支持时行为与现状完全一致）。
+    """
+    kwargs = dict(
+        model=_env_str(f"{role}_MODEL", "Qwen3.6-27B"),
+        streaming=True,
+        temperature=_env_float(f"{role}_TEMPERATURE", 0.7),
+        openai_api_base=_env_str(f"{role}_API_BASE", DEFAULT_API_BASE),
+        openai_api_key=_env_str(f"{role}_API_KEY", "EMPTY"),
+        max_tokens=_env_int_optional(f"{role}_MAX_TOKENS") or _DEFAULT_MAX_TOKENS[role],
+    )
+    if _env_bool("LLM_DISABLE_THINKING", False):
+        kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    return ChatOpenAI(**kwargs)
+
+
 async def _build_orchestrator_runtime() -> dict:
     """构造 planner / answer / thinking chain 与工具表。
 
     不碰 `cl.user_session`，因此可被网页会话与 HTTP 问答接口共用。
     """
-    DEFAULT_API_BASE = "http://10.226.188.156:8000/v1/"
-
-    planner_llm = ChatOpenAI(
-        model=_env_str("PLANNER_MODEL", "Qwen3.6-27B"),
-        streaming=True,
-        temperature=_env_float("PLANNER_TEMPERATURE", 0.7),
-        openai_api_base=_env_str("PLANNER_API_BASE", DEFAULT_API_BASE),
-        openai_api_key=_env_str("PLANNER_API_KEY", "EMPTY"),
-        **({"max_tokens": _env_int_optional("PLANNER_MAX_TOKENS")} if _env_int_optional("PLANNER_MAX_TOKENS") else {}),
-    )
-    answer_llm = ChatOpenAI(
-        model=_env_str("ANSWER_MODEL", "Qwen3.6-27B"),
-        streaming=True,
-        temperature=_env_float("ANSWER_TEMPERATURE", 0.7),
-        openai_api_base=_env_str("ANSWER_API_BASE", DEFAULT_API_BASE),
-        openai_api_key=_env_str("ANSWER_API_KEY", "EMPTY"),
-        **({"max_tokens": _env_int_optional("ANSWER_MAX_TOKENS")} if _env_int_optional("ANSWER_MAX_TOKENS") else {}),
-    )
+    planner_llm = _build_chat_llm("PLANNER")
+    answer_llm = _build_chat_llm("ANSWER")
 
     tools = await load_sse_tools()
     tools = tools + build_external_skill_tools() + build_rain_analysis_tools()

@@ -53,25 +53,23 @@ def test_helpers_exist_in_chain_gzt_source():
     assert "def _env_int_optional(" in source, "chain_gzt.py 缺少 _env_int_optional 定义"
 
 
-def test_planner_uses_env_str_in_runtime():
-    """验证 _build_orchestrator_runtime 中 planner_llm 使用 _env_str 读取 model。"""
+def test_chat_llm_factory_defined():
+    """验证 _build_chat_llm 工厂已定义（planner/answer 统一经它构造）。"""
     chain_gzt_path = Path(__file__).resolve().parent.parent / "chain_gzt.py"
     source = chain_gzt_path.read_text(encoding="utf-8")
-    assert '_env_str("PLANNER_MODEL"' in source, "planner_llm 未使用 _env_str 读取 PLANNER_MODEL"
+    assert "def _build_chat_llm(" in source, "chain_gzt.py 缺少 _build_chat_llm 工厂"
+    # planner/answer 都经工厂构造
+    assert '_build_chat_llm("PLANNER")' in source
+    assert '_build_chat_llm("ANSWER")' in source
 
 
-def test_planner_uses_env_float_in_runtime():
-    """验证 _build_orchestrator_runtime 中 planner_llm 使用 _env_float 读取 temperature。"""
+def test_factory_reads_role_prefixed_env():
+    """验证工厂按 role 前缀读 model/temperature/max_tokens env（f-string 形式）。"""
     chain_gzt_path = Path(__file__).resolve().parent.parent / "chain_gzt.py"
     source = chain_gzt_path.read_text(encoding="utf-8")
-    assert '_env_float("PLANNER_TEMPERATURE"' in source, "planner_llm 未使用 _env_float 读取 PLANNER_TEMPERATURE"
-
-
-def test_answer_uses_env_str_in_runtime():
-    """验证 _build_orchestrator_runtime 中 answer_llm 使用 _env_str 读取 model。"""
-    chain_gzt_path = Path(__file__).resolve().parent.parent / "chain_gzt.py"
-    source = chain_gzt_path.read_text(encoding="utf-8")
-    assert '_env_str("ANSWER_MODEL"' in source, "answer_llm 未使用 _env_str 读取 ANSWER_MODEL"
+    assert '_env_str(f"{role}_MODEL"' in source, "工厂未按 role 读 {role}_MODEL"
+    assert '_env_float(f"{role}_TEMPERATURE"' in source, "工厂未按 role 读 {role}_TEMPERATURE"
+    assert '_env_int_optional(f"{role}_MAX_TOKENS")' in source, "工厂未按 role 读 {role}_MAX_TOKENS"
 
 
 # ---------------------------------------------------------------------------
@@ -168,58 +166,53 @@ def test_env_int_optional_falls_back_on_invalid():
 # ---------------------------------------------------------------------------
 
 DEFAULT_API_BASE = "http://10.226.188.156:8000/v1/"
+_DEFAULT_MAX_TOKENS = {"PLANNER": 2048, "ANSWER": 4096}
+
+
+def _build_chat_llm_kwargs(role: str):
+    """与 chain_gzt.py 中 _build_chat_llm 完全一致的参数构建逻辑（镜像）。"""
+    kwargs = {
+        "model": _env_str(f"{role}_MODEL", "Qwen3.6-27B"),
+        "streaming": True,
+        "temperature": _env_float(f"{role}_TEMPERATURE", 0.7),
+        "openai_api_base": _env_str(f"{role}_API_BASE", DEFAULT_API_BASE),
+        "openai_api_key": _env_str(f"{role}_API_KEY", "EMPTY"),
+        # 始终给上限（env 可覆盖，0/非法值回退默认）。
+        "max_tokens": _env_int_optional(f"{role}_MAX_TOKENS") or _DEFAULT_MAX_TOKENS[role],
+    }
+    if os.environ.get("LLM_DISABLE_THINKING", "").strip().lower() in ("1", "true", "yes"):
+        kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    return kwargs
 
 
 def _build_planner_kwargs():
-    """与 chain_gzt.py 中 planner_llm 构造完全一致的参数构建逻辑。"""
-    kwargs = {
-        "model": _env_str("PLANNER_MODEL", "Qwen3.6-27B"),
-        "streaming": True,
-        "temperature": _env_float("PLANNER_TEMPERATURE", 0.7),
-        "openai_api_base": _env_str("PLANNER_API_BASE", DEFAULT_API_BASE),
-        "openai_api_key": _env_str("PLANNER_API_KEY", "EMPTY"),
-    }
-    max_tokens = _env_int_optional("PLANNER_MAX_TOKENS")
-    if max_tokens:
-        kwargs["max_tokens"] = max_tokens
-    return kwargs
+    return _build_chat_llm_kwargs("PLANNER")
 
 
 def _build_answer_kwargs():
-    """与 chain_gzt.py 中 answer_llm 构造完全一致的参数构建逻辑。"""
-    kwargs = {
-        "model": _env_str("ANSWER_MODEL", "Qwen3.6-27B"),
-        "streaming": True,
-        "temperature": _env_float("ANSWER_TEMPERATURE", 0.7),
-        "openai_api_base": _env_str("ANSWER_API_BASE", DEFAULT_API_BASE),
-        "openai_api_key": _env_str("ANSWER_API_KEY", "EMPTY"),
-    }
-    max_tokens = _env_int_optional("ANSWER_MAX_TOKENS")
-    if max_tokens:
-        kwargs["max_tokens"] = max_tokens
-    return kwargs
+    return _build_chat_llm_kwargs("ANSWER")
 
 
 def test_planner_defaults_match_current_config():
-    """默认配置下 planner 参数与现状一致：temp=0.7, model=Qwen3.6-27B, 无 max_tokens。"""
+    """默认配置下 planner 参数：temp=0.7, model=Qwen3.6-27B, max_tokens 默认 2048。"""
     kwargs = _build_planner_kwargs()
     assert kwargs["model"] == "Qwen3.6-27B"
     assert kwargs["temperature"] == 0.7
     assert kwargs["streaming"] is True
     assert kwargs["openai_api_base"] == DEFAULT_API_BASE
     assert kwargs["openai_api_key"] == "EMPTY"
-    assert "max_tokens" not in kwargs
+    assert kwargs["max_tokens"] == 2048
 
 
 def test_answer_defaults_match_current_config():
-    """默认配置下 answer 参数与现状一致：temp=0.7, model=Qwen3.6-27B, 无 max_tokens。"""
+    """默认配置下 answer 参数：temp=0.7, model=Qwen3.6-27B, max_tokens 默认 4096。"""
     kwargs = _build_answer_kwargs()
     assert kwargs["model"] == "Qwen3.6-27B"
     assert kwargs["temperature"] == 0.7
     assert kwargs["streaming"] is True
     assert kwargs["openai_api_base"] == DEFAULT_API_BASE
     assert kwargs["openai_api_key"] == "EMPTY"
-    assert "max_tokens" not in kwargs
+    assert kwargs["max_tokens"] == 4096
 
 
 def test_planner_env_override_model():
@@ -257,12 +250,11 @@ def test_planner_env_set_max_tokens():
         assert kwargs["max_tokens"] == 4096
 
 
-def test_planner_env_max_tokens_zero_not_added():
-    """PLANNER_MAX_TOKENS=0 时不添加 max_tokens（0 是 falsy）。"""
+def test_planner_env_max_tokens_zero_falls_back_to_default():
+    """PLANNER_MAX_TOKENS=0 时回退默认 2048（0 是 falsy，且 0 不是合法上限）。"""
     with patch.dict(os.environ, {"PLANNER_MAX_TOKENS": "0"}, clear=False):
         kwargs = _build_planner_kwargs()
-        # max_tokens=0 是 falsy，不会被添加
-        assert "max_tokens" not in kwargs
+        assert kwargs["max_tokens"] == 2048
 
 
 def test_answer_env_override_model():
