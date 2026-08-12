@@ -257,7 +257,7 @@ def test_build_poi_reminder_section_hazard_points():
         },
     }
     text = dw_core._build_poi_reminder_section(facts)
-    assert "⚠️ 注意事项" in text
+    assert "⚠ 注意事项" in text
     assert "周边 5 公里内隐患点" in text
     # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议
     assert "风险研判" in text
@@ -430,7 +430,7 @@ async def test_decision_weather_answer_reminder_position():
 
     callbacks = {"ainvoke_chain": _fake_ainvoke_chain}
     result = await dw_core._generate_decision_weather_answer("天津大学未来24小时天气怎么样", facts, None, callbacks)
-    assert "⚠️ 注意事项" in result
+    assert "⚠ 注意事项" in result
     # 提醒位于数据来源之前
-    assert result.find("⚠️ 注意事项") < result.find("数据来源：")
+    assert result.find("⚠ 注意事项") < result.find("数据来源：")
     assert result.rstrip().endswith("数据来源：天津市气象台滚动预报。")

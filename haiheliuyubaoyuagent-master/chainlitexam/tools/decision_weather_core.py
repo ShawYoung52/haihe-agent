@@ -702,7 +702,7 @@ def _build_poi_reminder_section(facts: dict) -> str:
     if not category and not has_hazard:
         return ""
 
-    lines: list[str] = ["⚠️ 注意事项\n"]
+    lines: list[str] = ["⚠ 注意事项"]
     if category:
         template = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
         if template:
@@ -743,7 +743,7 @@ def _build_poi_reminder_section(facts: dict) -> str:
                 lines.append(f"预计未来为{intensity_label}，周边灾害风险研判如下：")
             lines.append("")
             lines.append("| 隐患类型 | 数量 | 风险研判 | 防范建议 |")
-            lines.append("|---|---|---|---|")
+            lines.append("| --- | --- | --- | --- |")
             for key in ("dzzh", "sh", "zxhl"):
                 if key not in hazard_counts:
                     continue
