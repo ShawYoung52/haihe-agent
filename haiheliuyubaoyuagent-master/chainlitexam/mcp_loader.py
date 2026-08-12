@@ -37,7 +37,7 @@ async def load_sse_tools():
         return_exceptions=True,
     )
     all_tools = []
-    for (name, _), res in zip(servers.items(), results):
+    for name, res in zip(servers, results):
         if isinstance(res, BaseException):
             # 日志脱敏（CLAUDE.md）：只打 server 名与异常类型，不打印 SSE URL（含内网 IP）与完整异常 repr。
             print(f"❌ MCP server [{name}] 加载失败（{type(res).__name__}）→ 该服务工具降级，不影响其他 server")

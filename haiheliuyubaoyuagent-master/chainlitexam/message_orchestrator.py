@@ -1953,7 +1953,7 @@ def _has_complete_rolling_forecast(bundles: list) -> bool:
     return bool(str(valid[-1].get("code_section") or "").strip())
 
 
-def _is_tianhe_passthrough(tianhe_text, forced_text):
+def _is_tianhe_passthrough(tianhe_text: str | None, forced_text: str | None) -> bool:
     """天河 Fixed QA 透传判定（值绑定）。
 
     仅当当前 forced_final_text 仍等于本轮天河 answer 原文时为真。这样任何后续覆盖
