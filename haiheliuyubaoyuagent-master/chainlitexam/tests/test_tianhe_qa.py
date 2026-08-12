@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 import external_skill_tools as est
+import prompts as prompts_mod
 
 
 class _Resp:
@@ -134,6 +135,33 @@ def test_tool_description_mentions_fixed_qa_examples():
     desc = est.query_tianhe_fixed_qa.description or ""
     assert "今天雨下了多长时间" in desc
     assert "暴雨天气的防范建议" in desc
+
+
+def test_fixed_qa_catalog_fully_covered():
+    """文档 qa-api-integration-guide.md 5.2 的 4 个 Fixed QA 目录问题必须全部出现在
+    双轨 planner prompt 引导段与工具 docstring，否则标准问法会漏接天河（如"市区现在气温和风的实况"）。"""
+    catalog = [
+        "今天雨下了多长时间",
+        "全市现在下了多少雨",
+        "市区现在气温和风的实况",
+        "暴雨天气的防范建议",
+    ]
+    desc = est.query_tianhe_fixed_qa.description or ""
+    for q in catalog:
+        assert q in prompts_mod.PLANNER_SYSTEM_PROMPT, f"PLANNER prompt 缺目录问题：{q}"
+        assert q in prompts_mod.WEATHER_ASSISTANT_PROMPT, f"WEATHER prompt 缺目录问题：{q}"
+        assert q in desc, f"query_tianhe_fixed_qa docstring 缺目录问题：{q}"
+
+
+def test_tianhe_guidance_boundary_excludes_variables_not_fixed_words():
+    """0.5 引导段的"不含地点/时间/数值"边界必须区分"目录固定词"与"用户可替换变量"：
+    目录问句里的"全市/市区/今天"等是固定问句的组成部分，不算变量地点——否则 planner 可能
+    把"市区现在气温和风的实况"这类目录问题当成"含具体地点"而漏接天河（本次修复的目标问法）。"""
+    for name, prompt in (
+        ("PLANNER", prompts_mod.PLANNER_SYSTEM_PROMPT),
+        ("WEATHER", prompts_mod.WEATHER_ASSISTANT_PROMPT),
+    ):
+        assert "不算变量" in prompt, f"{name} prompt 边界未区分目录固定词与用户变量"
 
 
 def test_tianhe_error_texts_exported():
