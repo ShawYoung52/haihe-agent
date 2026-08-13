@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
+    _decision_fetch_hazard_context,
     _decision_historical_window_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
@@ -108,6 +109,17 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 f"nearest_lat={nearest['lat']}, distance_km={nearest['distance_km']:.2f}"
             )
 
+            # POI 地理类型分类 + 周边灾害隐患点（用于回答后追加“注意事项”），预报/历史两分支共用。
+            # 无类别不调隐患工具、工具缺失/失败均静默跳过（见 _decision_fetch_hazard_context）。
+            category = classify_poi_category(
+                point_name, poi_address, poi.get("category_1"), poi.get("category_2")
+            )
+            hazard_tool = _find_tool(tools, "query_poi_hazard_reminders")
+            hazard_points = await _decision_fetch_hazard_context(
+                category, poi_lon, poi_lat, hazard_tool,
+                lambda tool, args: tool.ainvoke(args), "DecisionWeatherTool",
+            )
+
             forecast_args = {
                 "user_query": user_text,
                 "regions": "",
@@ -132,7 +144,8 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                         _decision_historical_window_args(forecast_payload, poi_lon, poi_lat, point_name)
                     )
                     hist_text = await _generate_decision_historical_answer_from_raw(
-                        hist_raw, user_text, poi, point_name, normalized["question_type"], answer_chain, callbacks
+                        hist_raw, user_text, poi, point_name, normalized["question_type"], answer_chain, callbacks,
+                        poi_category=category, hazard_points=hazard_points,
                     )
                     append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)
                     return _sanitize_display_text(append_followup(hist_text or "", user_text))
@@ -153,25 +166,6 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             }
             facts["matched_station"] = nearest
             facts["question_type"] = normalized["question_type"]
-
-            # POI 地理类型分类 + 周边灾害隐患点（用于回答后追加“注意事项”）。
-            # 无类别不调隐患工具；工具缺失/失败均静默跳过，不打断天气主回答。
-            category = classify_poi_category(
-                point_name, poi_address, poi.get("category_1"), poi.get("category_2")
-            )
-            hazard_points = None
-            if category is not None:
-                hazard_tool = _find_tool(tools, "query_poi_hazard_reminders")
-                if hazard_tool is not None:
-                    try:
-                        hazard_raw = await hazard_tool.ainvoke(
-                            {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0}
-                        )
-                        hazard_payload = _unwrap_tool_result(hazard_raw)
-                        if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
-                            hazard_points = hazard_payload
-                    except Exception as exc:
-                        print(f"[DecisionWeatherTool] 隐患点查询失败（跳过注意事项）：{exc}")
             facts["poi_category"] = category
             facts["hazard_points"] = hazard_points
 

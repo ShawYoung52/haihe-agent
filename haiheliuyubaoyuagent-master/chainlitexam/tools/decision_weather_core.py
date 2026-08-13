@@ -13,7 +13,7 @@ import math
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import HumanMessage
 
@@ -564,6 +564,21 @@ def _decision_is_historical_facts(facts: dict) -> bool:
     return str(facts.get("query_mode") or "").startswith("historical")
 
 
+def _decision_historical_day_label(facts: dict) -> str:
+    """历史实况措辞的日期指代词：单日窗口（≤1 天，end 常为次日零点的排他边界）→“当日”，多日→“该时段”。
+
+    按目标窗口起止日期差判定：单日查询 target_end 通常是 target_start 的次日零点，
+    起止日期并不相同，不能据此判多日，必须以天数判定避免“当日/该时段”误导。
+    """
+    start = str(facts.get("target_start_time") or "")[:10]
+    end = str(facts.get("target_end_time") or "")[:10]
+    try:
+        days = (datetime.strptime(end, "%Y-%m-%d") - datetime.strptime(start, "%Y-%m-%d")).days
+    except (TypeError, ValueError):
+        days = 0
+    return "该时段" if days > 1 else "当日"
+
+
 async def _generate_decision_historical_answer(
     user_text: str,
     payload: dict,
@@ -572,11 +587,14 @@ async def _generate_decision_historical_answer(
     question_type: str,
     answer_chain: Any,
     callbacks: dict,
+    poi_category: str | None = None,
+    hazard_points: dict | None = None,
 ) -> str:
     """根据历史实况工具结果生成历史天气回答，与预报回答共用同一组装函数。
 
     由双路径调用方在滚动预报返回 past_date 标记后调用；payload 为
-    query_poi_historical_weather 的结果 dict。
+    query_poi_historical_weather 的结果 dict。poi_category/hazard_points
+    用于历史回答追加“注意事项”（措辞走历史式，见 _build_poi_reminder_section）。
     """
     status = str(payload.get("status") or "")
     # 真实工具 ok 分支带 forecast_start_time；no_data/error 分支只有 start_time，需回退
@@ -596,6 +614,8 @@ async def _generate_decision_historical_answer(
     }
     facts["matched_station"] = payload.get("nearest_station") or {}
     facts["question_type"] = question_type
+    facts["poi_category"] = poi_category
+    facts["hazard_points"] = hazard_points
     return await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
 
 
@@ -624,13 +644,16 @@ async def _generate_decision_historical_answer_from_raw(
     question_type: str,
     answer_chain: Any,
     callbacks: dict,
+    poi_category: str | None = None,
+    hazard_points: dict | None = None,
 ) -> str:
     """解包历史实况工具原始结果并生成历史回答文本（双路径共用）。"""
     hist_payload = _unwrap_tool_result(hist_raw)
     if not isinstance(hist_payload, dict):
         hist_payload = {}
     return await _generate_decision_historical_answer(
-        user_text, hist_payload, poi, point_name, question_type, answer_chain, callbacks
+        user_text, hist_payload, poi, point_name, question_type, answer_chain, callbacks,
+        poi_category=poi_category, hazard_points=hazard_points,
     )
 
 
@@ -895,12 +918,40 @@ _HAZARD_RAIN_RISK: dict[str, dict[int, tuple[str, str]]] = {
 }
 
 
+async def _decision_fetch_hazard_context(
+    poi_category: str | None,
+    poi_lon: float,
+    poi_lat: float,
+    hazard_tool: Any,
+    invoke: Callable[[Any, dict], Awaitable[Any]],
+    label: str = "DecisionWeather",
+) -> dict | None:
+    """查询点位周边灾害隐患点（供注意事项使用）；失败均静默返回 None，不打断主回答。
+
+    双路径共用同一份查询逻辑，仅调用方式不同：
+    - Planner 工具传 ``lambda tool, args: tool.ainvoke(args)``
+    - fast path 传 ``lambda tool, args: runtime.invoke_fast_tool(tool.name, tool, args, user_text)``
+    无类别或工具缺失时不发起查询；只接受 status==ok 的载荷。
+    """
+    if poi_category is None or hazard_tool is None:
+        return None
+    try:
+        hazard_raw = await invoke(hazard_tool, {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0})
+        hazard_payload = _unwrap_tool_result(hazard_raw)
+        if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
+            return hazard_payload
+    except Exception as exc:
+        print(f"[{label}] 隐患点查询失败（跳过注意事项）：{exc}")
+    return None
+
+
 def _build_poi_reminder_section(facts: dict) -> str:
     """根据点位类别 + 周边隐患点确定性生成“⚠️ 注意事项”段落。
 
     无可展示内容（既无类别模板、也无降雨期隐患点）时返回空串。
     隐患点只在预报有降雨时提醒（有降雨才存在诱发风险），且只给类型+数量汇总表，
     不逐条列举隐患点名称/位置。天气断言只来自 facts 实际数值，不编造。
+    历史实况用“当日实际/该时段实际”等过去措辞，预报用“预计/未来”措辞。
     """
     category = facts.get("poi_category")
     hp_raw = facts.get("hazard_points")
@@ -915,6 +966,8 @@ def _build_poi_reminder_section(facts: dict) -> str:
     show_hazard = has_hazard and intensity > 0
     if not category and not show_hazard:
         return ""
+    is_historical = _decision_is_historical_facts(facts)
+    day_label = _decision_historical_day_label(facts) if is_historical else ""
 
     lines: list[str] = ["⚠ 注意事项"]
     if category:
@@ -923,9 +976,15 @@ def _build_poi_reminder_section(facts: dict) -> str:
             clauses: list[str] = []
             periods = [p for p in (facts.get("periods") or []) if isinstance(p, dict)]
             if facts.get("has_rain_signal") is True:
-                clauses.append("当前预报时段内有降雨信号，请携带雨具并注意防滑。")
+                clauses.append(
+                    f"{day_label}实际有降雨，请携带雨具并注意防滑。" if is_historical
+                    else "当前预报时段内有降雨信号，请携带雨具并注意防滑。"
+                )
             elif facts.get("total_rain_mm") is not None and float(facts["total_rain_mm"]) >= 10:
-                clauses.append(f"未来累计降雨可达约 {float(facts['total_rain_mm']):.0f} 毫米，请注意防范。")
+                clauses.append(
+                    f"{day_label}累计降雨约 {float(facts['total_rain_mm']):.0f} 毫米，请注意防范。" if is_historical
+                    else f"未来累计降雨可达约 {float(facts['total_rain_mm']):.0f} 毫米，请注意防范。"
+                )
             max_wind = _decision_max_wind_level(periods)
             if not clauses and max_wind is not None and max_wind >= 6:
                 clauses.append("风力较大，请注意大风防范。")
@@ -947,12 +1006,18 @@ def _build_poi_reminder_section(facts: dict) -> str:
             if key and label and count > 0:
                 hazard_counts[key] = (label, count)
         if hazard_counts:
-            # 风险研判表：预报降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
+            # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
             intensity_label = _RAIN_INTENSITY_LEVELS.get(intensity, "无明显降雨")
             if mm is not None and mm > 0:
-                lines.append(f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：")
+                lines.append(
+                    f"{day_label}实际降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：" if is_historical
+                    else f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下："
+                )
             else:
-                lines.append(f"预计未来为{intensity_label}，周边灾害风险研判如下：")
+                lines.append(
+                    f"{day_label}实际为{intensity_label}，周边灾害风险研判如下：" if is_historical
+                    else f"预计未来为{intensity_label}，周边灾害风险研判如下："
+                )
             lines.append("")
             lines.append("| 隐患类型 | 数量 | 风险研判 | 防范建议 |")
             lines.append("| --- | --- | --- | --- |")
@@ -1007,8 +1072,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     answer = getattr(result, "content", None) or str(result)
     core = _decision_core_only(answer, user_text)
     table = _build_decision_weather_table(user_text, facts)
-    # 历史实况为过去日期的确定性回顾，不追加面向未来的“注意事项”。
-    reminder = _build_poi_reminder_section(facts) if not is_historical else ""
+    # 历史实况同样追加注意事项，但措辞走“当日实际/该时段实际”等历史式（见 _build_poi_reminder_section）。
+    reminder = _build_poi_reminder_section(facts)
     source = _decision_table_cell(facts.get("data_source"), "天津市气象台滚动预报")
     sections = [f"【核心结论】\n{core}".rstrip()]
     if table:

@@ -663,7 +663,7 @@ async def test_generate_decision_historical_answer_error_message():
 
 @pytest.mark.asyncio
 async def test_generate_decision_historical_answer_ok_title_and_no_reminder():
-    """历史实况 ok → 表格标题【X历史实况】、无注意事项、数据来源为历史实况。"""
+    """历史实况 ok 未传隐患上下文 → 表格标题【X历史实况】、无注意事项、数据来源为历史实况。"""
     callbacks = {"ainvoke_chain": await _fake_answer("【核心结论】8月10日天津大学以多云为主，最高气温31℃，最低气温22℃，实际有2.5毫米降雨。")}
     text = await dw_core._generate_decision_historical_answer(
         "8月10号天津大学天气怎么样",
@@ -676,7 +676,7 @@ async def test_generate_decision_historical_answer_ok_title_and_no_reminder():
     )
     assert "【核心结论】" in text
     assert "【天津大学历史实况】" in text
-    assert "⚠ 注意事项" not in text  # 历史回顾不追加面向未来的隐患提醒
+    assert "⚠ 注意事项" not in text  # 未传 poi_category/hazard_points 时不追加；有隐患上下文时见 *_with_hazard_reminder 用例
     assert "数据来源：自动站历史实况。" in text
     assert text.rstrip().endswith("数据来源：自动站历史实况。")
 
@@ -750,6 +750,27 @@ class FakeHistoricalTool:
 
     def __init__(self, payload=None):
         self._payload = payload if payload is not None else _historical_payload()
+        self.last_args = None
+
+    async def ainvoke(self, args):
+        self.last_args = args
+        return [{"text": json.dumps(self._payload, ensure_ascii=False)}]
+
+
+class FakeHazardTool:
+    """返回周边隐患点 ok 载荷的假工具，用于验证历史路由同样查询隐患点。"""
+    name = "query_poi_hazard_reminders"
+
+    def __init__(self, payload=None):
+        self._payload = payload if payload is not None else {
+            "status": "ok",
+            "query_type": "poi_hazard_reminders",
+            "total_found": 2,
+            "categories": [
+                {"key": "dzzh", "label": "地质灾害", "count": 1},
+                {"key": "sh", "label": "山洪", "count": 1},
+            ],
+        }
         self.last_args = None
 
     async def ainvoke(self, args):
@@ -860,3 +881,189 @@ async def test_fast_path_routes_to_historical(monkeypatch):
     assert historical_tool.last_args is not None
     assert historical_tool.last_args["start_time"] == "2026-08-10 00:00"
     assert historical_tool.last_args["end_time"] == "2026-08-11 00:00"
+
+
+# ---------- 历史实况提醒（注意事项）：历史式措辞 + 隐患点接线（双入口 parity） ----------
+
+
+def test_build_poi_reminder_section_historical_wording():
+    """历史实况的注意事项用“当日实际/累计”等过去措辞，不使用“预计/未来”。"""
+    facts = {
+        "poi_category": "school",
+        "query_mode": "historical_obs",
+        "has_rain_signal": True,
+        "total_rain_mm": 2.5,
+        "target_start_time": "2026-08-10 00:00",
+        "target_end_time": "2026-08-11 00:00",
+        "periods": [{"rainfall_mm": 2.5}],
+        "hazard_points": None,
+    }
+    text = dw_core._build_poi_reminder_section(facts)
+    assert "⚠ 注意事项" in text
+    assert "当日实际有降雨" in text
+    assert "当前预报时段内" not in text
+    assert "预计" not in text
+    assert "未来" not in text
+
+
+def test_build_poi_reminder_section_historical_rain_amount_clause():
+    """历史实况累计降雨 ≥10mm → “当日累计降雨约 X 毫米”措辞，不用“未来累计降雨可达”。"""
+    facts = {
+        "poi_category": "scenic",
+        "query_mode": "historical_obs",
+        "has_rain_signal": False,
+        "total_rain_mm": 30.0,
+        "target_start_time": "2026-08-10 00:00",
+        "target_end_time": "2026-08-11 00:00",
+        "periods": [{"rainfall_mm": 30.0}],
+        "hazard_points": None,
+    }
+    text = dw_core._build_poi_reminder_section(facts)
+    assert "当日累计降雨约 30 毫米" in text
+    assert "未来累计降雨可达" not in text
+
+
+def test_build_poi_reminder_section_historical_hazard_table():
+    """历史实况含隐患点 → 风险研判表头用“当日实际降雨”，只含历史式措辞。"""
+    facts = {
+        "poi_category": "mountain",
+        "query_mode": "historical_obs",
+        "has_rain_signal": True,
+        "total_rain_mm": 30.0,
+        "target_start_time": "2026-08-10 00:00",
+        "target_end_time": "2026-08-11 00:00",
+        "periods": [{"rainfall_mm": 30.0}],
+        "hazard_points": {
+            "status": "ok",
+            "total_found": 3,
+            "categories": [
+                {"key": "dzzh", "label": "地质灾害", "count": 2},
+                {"key": "sh", "label": "山洪", "count": 1},
+            ],
+        },
+    }
+    text = dw_core._build_poi_reminder_section(facts)
+    assert "⚠ 注意事项" in text
+    assert "当日实际降雨约 30 毫米（大雨），周边灾害风险研判如下：" in text
+    assert "| 地质灾害 | 2 处 |" in text
+    assert "| 山洪 | 1 处 |" in text
+    assert "预计未来" not in text
+
+
+def test_build_poi_reminder_section_historical_multi_day_label():
+    """多日历史时段用“该时段”指代日期，避免“当日”误导。"""
+    facts = {
+        "poi_category": "school",
+        "query_mode": "historical_obs",
+        "has_rain_signal": True,
+        "total_rain_mm": 15.0,
+        "target_start_time": "2026-08-10 00:00",
+        "target_end_time": "2026-08-13 00:00",
+        "periods": [{"rainfall_mm": 5.0}, {"rainfall_mm": 10.0}],
+        "hazard_points": None,
+    }
+    text = dw_core._build_poi_reminder_section(facts)
+    assert "该时段实际有降雨" in text
+    assert "当日" not in text
+
+
+@pytest.mark.asyncio
+async def test_generate_decision_historical_answer_with_hazard_reminder():
+    """历史实况回答传入 poi_category+hazard_points → 追加注意事项（当日实际措辞）。"""
+    callbacks = {"ainvoke_chain": await _fake_answer("【核心结论】8月10日天津大学实际有2.5毫米降雨。")}
+    text = await dw_core._generate_decision_historical_answer(
+        "8月10号天津大学天气怎么样",
+        _historical_payload(),
+        {"address": "天津市南开区卫津路92号", "longitude": 117.16, "latitude": 39.11},
+        "天津大学",
+        "general_weather",
+        None,
+        callbacks,
+        poi_category="school",
+        hazard_points={
+            "status": "ok",
+            "total_found": 1,
+            "categories": [{"key": "dzzh", "label": "地质灾害", "count": 1}],
+        },
+    )
+    assert "【核心结论】" in text
+    assert "【天津大学历史实况】" in text
+    assert "⚠ 注意事项" in text
+    assert "风险研判" in text
+    assert "当日实际" in text
+    assert "预计" not in text
+    assert "未来" not in text
+    assert text.rstrip().endswith("数据来源：自动站历史实况。")
+
+
+@pytest.mark.asyncio
+async def test_query_decision_weather_for_poi_historical_routes_with_hazard():
+    """历史日期路由同样分类并查询隐患点 → 回答追加注意事项（风险研判）。"""
+    answer_chain = FakeChain()
+    hazard_tool = FakeHazardTool()
+    tools = [FakePoiTool(), FakePastForecastTool(), FakeHistoricalTool(), hazard_tool]
+    callbacks = {"ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke()}
+
+    tool = dw.build_decision_weather_tools(answer_chain, tools, callbacks)[0]
+    result = await tool.ainvoke({"user_text": "8月10号天津大学天气怎么样"})
+
+    assert isinstance(result, str)
+    assert "【天津大学历史实况】" in result
+    assert "⚠ 注意事项" in result
+    assert "风险研判" in result
+    assert "当日实际" in result
+    # 隐患工具收到点位坐标
+    assert hazard_tool.last_args is not None
+    assert hazard_tool.last_args["lon"] == 117.16
+    assert hazard_tool.last_args["lat"] == 39.11
+
+
+@pytest.mark.asyncio
+async def test_fast_path_routes_to_historical_with_hazard(monkeypatch):
+    """fast path 历史路由同样分类并查询隐患点 → 注意事项（与 planner 工具一致）。"""
+    monkeypatch.setattr(dw_fp.cl.user_session, "set", lambda *a, **k: None)
+    answer_chain = FakeChain()
+    hazard_tool = FakeHazardTool()
+    fake_tools = {
+        "search_poi": FakePoiTool(),
+        "query_rolling_forecast": FakePastForecastTool(),
+        "query_poi_historical_weather": FakeHistoricalTool(),
+        "query_poi_hazard_reminders": hazard_tool,
+    }
+    emitted = {}
+
+    class _Runtime:
+        def find_tool(self, tools, name):
+            return fake_tools.get(name)
+
+        async def invoke_fast_tool(self, name, tool, args, user_text):
+            return await tool.ainvoke(args)
+
+        def clean_table_cell(self, value):
+            return dw_core._decision_table_cell(value)
+
+        def sanitize_display_text(self, text):
+            return text
+
+        def prepend_thinking_summary(self, text, user_text, has_chart=False):
+            return text
+
+    async def _emit_fn(text):
+        emitted["text"] = text
+
+    callbacks = {
+        "ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke(),
+        "append_followup_if_needed": lambda text, user_text: text,
+        "stream_text_to_message": _emit_fn,
+    }
+    runtime = _Runtime()
+    service = dw_fp.DecisionWeatherQAService(answer_chain, list(fake_tools.values()), callbacks, runtime)
+    handled = await service.try_handle("8月10号天津大学天气怎么样", [])
+    assert handled is True
+    assert "⚠ 注意事项" in emitted["text"]
+    assert "风险研判" in emitted["text"]
+    assert "当日实际" in emitted["text"]
+    assert hazard_tool.last_args is not None
+    assert hazard_tool.last_args["lon"] == 117.16
+    assert hazard_tool.last_args["lat"] == 39.11
+
