@@ -255,8 +255,18 @@ def _parse_small_number(value: str) -> int | None:
     return None
 
 
+# 无年份日期判定：近期过去（含当月）保持当年/当月，供历史实况判定；
+# 远期过去视为“最近的未来同月同日”（如 8 月问 3 月 5 日 → 明年 3 月 5 日）。
+PAST_DATE_RECENCY_DAYS = 15
+
+
 def _extract_explicit_query_dates(user_query: str, current: datetime) -> list[date]:
-    """从用户原问中提取明确公历日期，未写年份时取最近的未来同月同日。"""
+    """从用户原问中提取明确公历日期。
+
+    写全年份的日期严格按该年解析（过去即历史）；无年份日期按“最近的未来”
+    惯例解析，但近期过去（``PAST_DATE_RECENCY_DAYS`` 天内）保持当年/当月，
+    供调用方判定为历史实况。支持“8月10日 / 8月10号 / 10号 / 2026年8月10日 / 2026-8-10”。
+    """
     text = str(user_query or "")
     matches: list[tuple[int, date]] = []
     occupied_spans: list[tuple[int, int]] = []
@@ -268,15 +278,34 @@ def _extract_explicit_query_dates(user_query: str, current: datetime) -> list[da
         except ValueError:
             continue
 
-    short_pattern = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+    short_pattern = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)")
     for match in short_pattern.finditer(text):
         if any(start <= match.start() < end for start, end in occupied_spans):
             continue
         try:
             candidate = date(current.year, int(match.group(1)), int(match.group(2)))
-            if candidate < current.date():
+            if candidate < current.date() and (current.date() - candidate).days > PAST_DATE_RECENCY_DAYS:
                 candidate = date(current.year + 1, candidate.month, candidate.day)
             matches.append((match.start(), candidate))
+            occupied_spans.append(match.span())
+        except ValueError:
+            continue
+
+    # 裸“N号/日”后紧跟地点/建筑名词首字（教学楼/病房/2号院/车间等）时视为门牌/编号而非日期。
+    # 第/数字前置守卫防台风编号（第10号台风），此处后缀守卫防地址/建筑编号（3号教学楼）。
+    _BARE_DAY_PLACE_SUFFIX = "楼馆室院栋房门间单元层床车台站区坊店堂厅所厂库班队组线教学医病办宿餐厨卫洗储机房"
+    bare_pattern = re.compile(r"(?<![0-9第])(\d{1,2})\s*(?:日|号)(?![%s])" % _BARE_DAY_PLACE_SUFFIX)
+    for match in bare_pattern.finditer(text):
+        if any(start <= match.start() < end for start, end in occupied_spans):
+            continue
+        try:
+            candidate = date(current.year, current.month, int(match.group(1)))
+            if candidate < current.date() and (current.date() - candidate).days > PAST_DATE_RECENCY_DAYS:
+                next_month = current.month % 12 + 1
+                next_year = current.year + (1 if current.month == 12 else 0)
+                candidate = date(next_year, next_month, candidate.day)
+            matches.append((match.start(), candidate))
+            occupied_spans.append(match.span())
         except ValueError:
             continue
     return [item for _, item in sorted(matches, key=lambda pair: pair[0])]
@@ -313,6 +342,10 @@ def resolve_requested_calendar_window(
         return resolve_calendar_query_window(current.date() + timedelta(days=2), 1, now=current)
     if "明天" in query or "明日" in query:
         return resolve_calendar_query_window(current.date() + timedelta(days=1), 1, now=current)
+    if "前天" in query:
+        return resolve_calendar_query_window(current.date() - timedelta(days=2), 1, now=current)
+    if "昨天" in query or "昨日" in query:
+        return resolve_calendar_query_window(current.date() - timedelta(days=1), 1, now=current)
     if "今天" in query or "今日" in query:
         return resolve_calendar_query_window(current.date(), 1, now=current)
     explicit_dates = _extract_explicit_query_dates(user_query, current)
@@ -969,6 +1002,82 @@ def analyze_rolling_forecast_periods(periods: list[dict]) -> dict:
     }
 
 
+def _build_point_mode_query_point(
+    point_mode: bool,
+    lon: float | None,
+    lat: float | None,
+    point_name: str,
+    matched_region: str,
+) -> dict | None:
+    """点位模式下构造结构化 query_point 字段（区域模式返回 None）。"""
+    if not point_mode:
+        return None
+    return {
+        "point_name": point_name or None,
+        "matched_region": matched_region or None,
+        "lon": format_rolling_forecast_coord(lon) if lon is not None else None,
+        "lat": format_rolling_forecast_coord(lat) if lat is not None else None,
+    }
+
+
+def _build_past_date_payload(
+    window: dict,
+    point_mode: bool,
+    region_names: list[str],
+    lon: float | None,
+    lat: float | None,
+    point_name: str,
+    matched_region: str,
+    now: datetime,
+) -> dict:
+    """将过去日历日转换为结构化历史日期标记，由调用方转历史实况查询。"""
+    target_start = window["target_start"]
+    target_end = window["target_end"]
+    query_point = _build_point_mode_query_point(point_mode, lon, lat, point_name, matched_region)
+    return {
+        "status": "past_date",
+        "query_mode": "historical_obs_request",
+        "data_source": "历史日期",
+        "historical_window": {
+            "target_start": target_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "target_end": target_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "forecast_start_date": window.get("forecast_start_date"),
+            "forecast_days": window.get("forecast_days"),
+        },
+        "query_regions": region_names,
+        "query_point": query_point,
+        "query_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "message": (
+            f"您查询的目标日期（{target_start.strftime('%Y-%m-%d')}）已属于历史日期，"
+            "滚动预报仅覆盖未来时效。请调用 query_poi_historical_weather "
+            "查询该点位/区域该日期的历史实况；若该日无历史实况数据，请如实告知用户暂不支持该日期的历史查询。"
+        ),
+    }
+
+
+def _build_calendar_error_payload(
+    message: str,
+    point_mode: bool,
+    region_names: list[str],
+    lon: float | None,
+    lat: float | None,
+    point_name: str,
+    matched_region: str,
+    now: datetime,
+) -> dict:
+    """将日历日窗口的 ValueError（超时效等）转换为清晰的结构化提示。"""
+    query_point = _build_point_mode_query_point(point_mode, lon, lat, point_name, matched_region)
+    return {
+        "status": "out_of_range",
+        "query_mode": "calendar_out_of_range",
+        "data_source": "滚动预报",
+        "message": f"{message}，请调整查询日期（滚动预报仅覆盖未来 10 天）。",
+        "query_regions": region_names,
+        "query_point": query_point,
+        "query_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def _cached_rolling_forecast_request(params: dict) -> dict:
     """带 TTL 缓存的滚动预报接口查询。
 
@@ -1051,12 +1160,37 @@ def query_rolling_forecast_core(
         or resolve_future_hour_query_window(user_query=user_query, now=now)
         or resolve_current_hour_query_window(user_query=user_query, now=now)
     )
-    calendar_window = resolve_requested_calendar_window(
-        user_query=user_query,
-        forecast_start_date=forecast_start_date,
-        forecast_days=forecast_days,
-        now=now,
-    ) if hourly_window is None else None
+    calendar_window = None
+    historical_window = None
+    calendar_error = None
+    if hourly_window is None:
+        try:
+            calendar_window = resolve_requested_calendar_window(
+                user_query=user_query,
+                forecast_start_date=forecast_start_date,
+                forecast_days=forecast_days,
+                now=now,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if "240" in message or "时效" in message or "负数" in message:
+                calendar_error = message
+            else:
+                raise
+    if calendar_window is not None:
+        target_day = calendar_window.get("target_start")
+        if target_day is not None and getattr(target_day, "date", None) and target_day.date() < now.date():
+            # 目标日早于今天：属历史日期，返回结构化标记，由调用方转历史实况查询。
+            historical_window = calendar_window
+            calendar_window = None
+    if historical_window is not None:
+        return _build_past_date_payload(
+            historical_window, point_mode, region_names, lon, lat, point_name, matched_region, now
+        )
+    if calendar_error is not None:
+        return _build_calendar_error_payload(
+            calendar_error, point_mode, region_names, lon, lat, point_name, matched_region, now
+        )
     if hourly_window:
         selected_fcst_time = hourly_window["fcst_time"]
         start_period = hourly_window["start_period"]

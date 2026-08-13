@@ -2,6 +2,9 @@
 from custom_tools.historical_same_period_rainfall_tool import (
     register_historical_same_period_rainfall_tool,
 )
+from custom_tools.historical_weather_service import (
+    register_historical_weather_tool,
+)
 from custom_tools.last_month_areal_rainfall_tool import (
     register_last_month_areal_rainfall_tool,
 )
@@ -24,6 +27,7 @@ from custom_tools.year_to_date_areal_rainfall_tool import (
 
 __all__ = [
     "register_historical_same_period_rainfall_tool",
+    "register_historical_weather_tool",
     "register_last_month_areal_rainfall_tool",
     "register_last_year_max_daily_rainfall_tool",
     "register_poi_nearest_observation_tool",

@@ -7,6 +7,7 @@ import fixed_rainfall_impact_tool as rainfall_impact_tool
 from tools import register_tools
 from custom_tools import (
     register_historical_same_period_rainfall_tool,
+    register_historical_weather_tool,
     register_last_month_areal_rainfall_tool,
     register_last_year_max_daily_rainfall_tool,
     register_poi_nearest_observation_tool,
@@ -40,6 +41,7 @@ class HaiheWeatherAnalyzerMCP:
         register_year_to_date_areal_rainfall_tool(self.mcp)
         register_poi_nearest_observation_tool(self.mcp)
         register_poi_hazard_reminder_tool(self.mcp)
+        register_historical_weather_tool(self.mcp)
         register_risk_warning_tool(self.mcp)
         register_safe_emergency_response_tool(self.mcp)
         register_forecast_evaluate_tool(self.mcp)
@@ -60,6 +62,7 @@ class HaiheWeatherAnalyzerMCP:
                     "get_rainfall_forecast - 降雨预报（历史占位，建议改用新工具）",
                     "check_rainfall_alerts - 预警检查（历史占位，建议改用新工具）",
                     "get_available_stations - 可用站点列表（历史占位，建议改用新工具）",
+                    "query_poi_historical_weather - 点位/区域历史日期自动站实况（02/08/14/20时聚合），适合“8月10号某某地方天气怎么样”",
                     "locate_river_regions - 查询河流所在行政区与分区",
                     "locate_downstream_rivers - 查询下游河流及定位",
                     "get_rainstorm_self_context - 暴雨影响拆分工具(本河)",

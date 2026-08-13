@@ -13,10 +13,13 @@ from langchain_core.tools import tool
 
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
+    _decision_historical_window_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
     _extract_decision_weather_slots,
+    _generate_decision_historical_answer_from_raw,
     _generate_decision_weather_answer,
+    _is_past_date_forecast_payload,
     _nearest_decision_station,
     _normalize_decision_weather_slots,
     classify_poi_category,
@@ -118,6 +121,26 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             forecast_payload = _unwrap_tool_result(forecast_raw)
             if not isinstance(forecast_payload, dict) or forecast_payload.get("api_code") not in (None, "200", 200):
                 print(f"[DecisionWeatherTool] forecast raw payload: {forecast_payload}")
+
+            # 历史日期：滚动预报返回 past_date 标记 → 转历史实况查询（回答仍走同一组装函数）
+            if _is_past_date_forecast_payload(forecast_payload):
+                historical_tool = _find_tool(tools, "query_poi_historical_weather")
+                if historical_tool is None:
+                    return "该日期已属历史日期，历史实况查询工具暂不可用，请稍后重试或换用未来日期查询。"
+                try:
+                    hist_raw = await historical_tool.ainvoke(
+                        _decision_historical_window_args(forecast_payload, poi_lon, poi_lat, point_name)
+                    )
+                    hist_text = await _generate_decision_historical_answer_from_raw(
+                        hist_raw, user_text, poi, point_name, normalized["question_type"], answer_chain, callbacks
+                    )
+                    append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)
+                    return _sanitize_display_text(append_followup(hist_text or "", user_text))
+                except Exception as exc:
+                    print(f"[DecisionWeatherTool] 历史实况查询失败：{exc}")
+                    import traceback
+                    traceback.print_exc()
+                    return "历史实况查询遇到异常，请稍后重试或换用未来日期查询。"
 
             facts = _compact_decision_forecast_facts(
                 forecast_payload if isinstance(forecast_payload, dict) else {}

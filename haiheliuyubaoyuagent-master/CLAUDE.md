@@ -99,7 +99,7 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - Internal service addresses: MUSIC `10.226.90.120`, PostgreSQL `10.226.107.130`, RAG `10.226.188.156:8033` — never include these in user-facing output or checked-in documentation (replace with env-var placeholders like `${ROLLING_FORECAST_API_URL}`)
 - Data sources: MUSIC/Tianqing stations (实况), ECMWF AIFS (预报), CMA warnings, PostgreSQL/PostGIS (河网/行政区划), RAG knowledge base
 - **Fast-path contract:** every `_try_*_fast_path` in `message_orchestrator.py` must call `_show_business_reasoning(...)`, close the reasoning step on every return path, and reference `thinking_chain` or `generate_fast_path_thinking(...)`; `tests/test_fast_paths.py` enforces this statically
-- **Decision-weather dual entry points:** `DecisionWeatherQAService` (fast path) and `query_decision_weather_for_poi` (LangChain tool) both consume `tools/decision_weather_core.py`; when `_normalize_decision_weather_slots`, `_compact_decision_forecast_facts`, or `_decision_hourly_window` change, update both callers
+- **Decision-weather dual entry points:** `DecisionWeatherQAService` (fast path) and `query_decision_weather_for_poi` (LangChain tool) both consume `tools/decision_weather_core.py`; when `_normalize_decision_weather_slots`, `_compact_decision_forecast_facts`, or `_decision_hourly_window` change, update both callers. 历史日期路由（`_is_past_date_forecast_payload` → `query_poi_historical_weather`）也走双入口，参数拼装与解包/生成共用 `_decision_historical_window_args` / `_generate_decision_historical_answer_from_raw`，新逻辑必须同时接两入口保持 parity。
 - **Decision-weather wrapper parity:** `DecisionWeatherQAService._normalize_slots` is a thin wrapper around `_normalize_decision_weather_slots`; keep signatures in sync so new optional arguments (e.g. `hourly_request`) are forwarded
 - **Tool-result unwrapping:** always use `_unwrap_tool_result()` from `utils/tool_result`; do not introduce alternate names like `_unwrap_tool_observation`
 - **Decision-weather prompt facts:** `_generate_decision_weather_answer` needs both `"预报时段"` (periods) and `"小时级降雨计算"` (hourly_rain) in `business_facts`; omitting either breaks general or hourly answer formats
@@ -184,3 +184,19 @@ This project uses the superpowers plugin for disciplined development:
 - **A3 `get_tianjin_wind_warning_assessment`**（haihe_mcp_tools.py）：工具体提取为 `_query_tianjin_wind_warning_core`；`TIANJIN_WIND_CACHE_TTL` 默认 **120s**；键 = `request_time`（同一请求时次数据 120s 稳定）；接口失败（`wind_observation_api_failed`）不写缓存。
 
 待做（第二批）：A4 预警 4 工具 / A5 `query_water_level` / A6 `rag_search` / A7 `search_poi_by_distance` 缓存；B MUSIC 多时次合并（以生产探针为准，region 接口多时次本地不可验证）；C `scripts/perf_stats.py` 消费 `[PERF].stages`。计划文件 `~/.claude/plans/lazy-mapping-dahl.md`。
+
+### 历史日期 → 历史实况查询（2026-08-13）
+
+客户反馈"查历史数据查不出来"（如"8月10号某某地方天气怎么样"）。三重根因 + 修复：
+
+- **根因一（"号"字不识别）**：`_extract_explicit_query_dates` 的短格式正则在 `8月10号` 中只匹配到 `8月10`，`号` 被当分隔符吞掉 → **静默丢失日期**（连未来日期也丢）。修复：短格式加 `(?:日|号)`，并新增裸日正则解析 `10号`；`月|日|号|年` 占位消费 span 防重复匹配。**裸"N号"加后缀守卫** `_BARE_DAY_PLACE_SUFFIX`（楼馆室院栋房门…教学医病办…）：`3号教学楼/5号病房/2号院` 等门牌/建筑编号不当日期（第/数字前置守卫防台风编号）。
+- **根因二（过去日期回退未来预报）**：`8月10日`（今天 8/13）被推送下一年 → 240h 错误；`2025年8月10日` 被当 reforecast 服务返回"历史日期的未来预报"。修复：`query_rolling_forecast_core` 对过去日历日返回结构化 `past_date` 标记（`status:"past_date"`、`query_mode:"historical_obs_request"`、`historical_window:{target_start,target_end}`），不再静默回退未来预报、不再抛 240h 原始异常；远期未来（>240h）返回 `out_of_range` 结构化提示。
+- **根因三（无历史实况工具）**：原先完全没有历史实况查询工具（`get_station_history`/`query_time_range` 为注释占位；`historical_same_period_rainfall_tool` 是十年平均非实际天气）。新增 MCP 工具 **`query_poi_historical_weather`**（custom_tools/historical_weather_service.py），从 MUSIC `SURF_CHM_MUL_HOR` 聚合自动站逐时观测（BJT 02/08/14/20 四个时次）生成与预报 `periods` 兼容的每日行（weather/tmax/tmin/EDA/rain/visibility），`data_source="自动站历史实况"`。最近 `MAX_HISTORICAL_DAYS=10` 天。
+- **决策天气双入口接线**：`query_decision_weather_for_poi`（planner 工具）+ `DecisionWeatherQAService`（fast path）在 forecast 调用后检测 `_is_past_date_forecast_payload`，命中则调 `query_poi_historical_weather`（参数经 core 辅助 `_decision_historical_window_args` 拼装，解包+生成走 `_generate_decision_historical_answer_from_raw`，双路径共用零重复），走 `_generate_decision_historical_answer`（复用 `_generate_decision_weather_answer`，标题 `【X历史实况】`、跳过注意事项、prompt 强制"实况/当日实际"措辞，禁止"预计/将/未来"）。
+- **日期解析规则**（`PAST_DATE_RECENCY_DAYS=15`）：无年份过去日期若 ≤15 天前保持当年（历史）；>15 天前推送下一年（保留"3月5日"在八月 → 明年 3/5 行为）；完整年份严格按该年解析。`昨天/前天` 直接映射最近两天（max 1 天窗口）。
+- **零编造约束（review 修复）**：某日所有观测时次均无降水要素（`rains` 空）→ `rainfall_mm=None`、天气现象 `"无降水数据"` 而非 `"无降雨"`（缺测≠实测 0mm）。**单日锚定站**：当日首个有数据的时次确定锚定站，后续时次优先取该站自身记录（`_station_id` 匹配），锚定站缺报才回退该时次最近站——防 tmax/tmin/累计雨量由多台混拼。`no_data` 消息日期从 `start_time` 回退（真实工具 no_data 分支无 `forecast_start_time`）。
+- **槽位剥离**：`_extract_decision_slots_rule_based` 头部剥离 `昨天|前天|昨日`，并清理前导虚词/量词残留（`^[的了是有在从到给为想问看这那份去]+`）——"8月10号天津大学/昨天天津大学/前天的天津大学/10月份去天津大学"均得位置名"天津大学"。
+
+关键文件：`haihe-weather-analyzer-mcp/rolling_forecast_service.py`、`haihe-weather-analyzer-mcp/custom_tools/historical_weather_service.py`、`chainlitexam/tools/decision_weather_core.py`、`chainlitexam/tools/decision_weather.py`、`chainlitexam/tools/decision_weather_fast_path.py`、`chainlitexam/prompts.py`。
+
+测试：`haihe-weather-analyzer-mcp/tests/test_rolling_forecast_past_date.py`（28）+ `test_historical_weather_service.py`、`chainlitexam/tests/test_decision_weather_tool.py`（37 含历史路由 + fast-path parity）。

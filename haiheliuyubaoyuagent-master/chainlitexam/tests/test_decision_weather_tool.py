@@ -547,3 +547,316 @@ async def test_decision_weather_answer_reminder_position():
     # 提醒位于数据来源之前
     assert result.find("⚠ 注意事项") < result.find("数据来源：")
     assert result.rstrip().endswith("数据来源：天津市气象台滚动预报。")
+
+
+# ---------- 历史日期 → 历史实况查询 ----------
+
+
+def test_rule_based_slot_extraction_hao_date():
+    """“8月10号天津大学”规则抽取不得把日期带进位置名。"""
+    assert dw_core._extract_decision_slots_rule_based("8月10号天津大学天气怎么样")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("2025年8月10日天津大学天气怎么样")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("昨天天津大学天气怎么样")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("前天梅江会展中心天气怎么样")["location_name"] == "梅江会展中心"
+
+
+def test_rule_based_slot_extraction_particle_cleanup():
+    """前导虚词/量词残留不得污染位置名（“前天的天津大学”的“的”、“10月份去”的“份/去”）。"""
+    assert dw_core._extract_decision_slots_rule_based("前天的天津大学天气怎么样")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("10月份去天津大学天气怎么样")["location_name"] == "天津大学"
+
+
+def test_rule_based_slot_extraction_hao_date_rain():
+    """带“号”的历史日期问法仍能识别降雨意图。"""
+    slots = dw_core._extract_decision_slots_rule_based("8月10号天津大学下雨了吗")
+    assert slots["location_name"] == "天津大学"
+    assert slots["question_type"] == "rain_now"
+
+
+def test_is_past_date_forecast_payload():
+    """past_date 标记识别：含 historical_window 的 dict 才算。"""
+    assert dw_core._is_past_date_forecast_payload({"status": "past_date", "historical_window": {}}) is True
+    assert dw_core._is_past_date_forecast_payload({"status": "past_date"}) is False
+    assert dw_core._is_past_date_forecast_payload({"status": "ok", "periods": []}) is False
+    assert dw_core._is_past_date_forecast_payload(None) is False
+    assert dw_core._is_past_date_forecast_payload("字符串") is False
+
+
+def test_decision_is_historical_facts():
+    """query_mode 以 historical 开头判定为历史实况。"""
+    assert dw_core._decision_is_historical_facts({"query_mode": "historical_obs"}) is True
+    assert dw_core._decision_is_historical_facts({"query_mode": "calendar_daily"}) is False
+    assert dw_core._decision_is_historical_facts({}) is False
+
+
+# 历史实况工具 ok 返回（与 query_poi_historical_weather 结构一致）
+def _historical_payload():
+    return {
+        "status": "ok",
+        "query_type": "historical_observation",
+        "query_mode": "historical_obs",
+        "data_source": "自动站历史实况",
+        "forecast_start_time": "2026-08-10 00:00",
+        "forecast_end_time": "2026-08-11 00:00",
+        "lon": 117.16,
+        "lat": 39.11,
+        "nearest_station": {"station_name": "天津大学站", "distance_km": 0.8},
+        "periods": [
+            {
+                "region": "天津大学",
+                "start_time": "2026-08-10 00:00",
+                "end_time": "2026-08-11 00:00",
+                "period_label": "8月10日",
+                "weather": "多云",
+                "tmax": 31.0,
+                "tmin": 22.0,
+                "EDA": "东南风2级",
+                "wind": "东南风2级",
+                "rain_1h": 2.5,
+                "rainfall_mm": 2.5,
+                "TP1H": 2.5,
+                "visibility_min_km": 10.0,
+                "sampled_hours": 4,
+            }
+        ],
+    }
+
+
+class _FakeResult:
+    def __init__(self, text):
+        self.content = text
+
+
+async def _fake_answer(text):
+    async def _fn(chain, inputs):
+        return _FakeResult(text)
+    return _fn
+
+
+@pytest.mark.asyncio
+async def test_generate_decision_historical_answer_no_data_message():
+    """历史实况 no_data → 明确提示该日不可查，不编造天气；真实工具只有 start_time 也能带出日期。"""
+    # 真实 _no_data_payload 结构：只有 start_time/end_time，无 forecast_start_time
+    payload = {
+        "status": "no_data",
+        "query_mode": "historical_obs",
+        "start_time": "2026-08-10 00:00",
+        "end_time": "2026-08-11 00:00",
+        "message": "未查询到历史实况数据。",
+    }
+    text = await dw_core._generate_decision_historical_answer(
+        "8月10号天津大学天气怎么样", payload, {}, "天津大学", "general_weather", None, {}
+    )
+    assert "2026-08-10" in text
+    assert "暂无可用历史实况数据" in text
+    assert "换用未来日期" in text
+
+
+@pytest.mark.asyncio
+async def test_generate_decision_historical_answer_error_message():
+    """历史实况 error → 通用不可用提示。"""
+    text = await dw_core._generate_decision_historical_answer(
+        "8月10号天津大学天气怎么样", {"status": "error", "query_mode": "historical_obs"}, {}, "天津大学", "general_weather", None, {}
+    )
+    assert "历史实况查询暂不可用" in text
+
+
+@pytest.mark.asyncio
+async def test_generate_decision_historical_answer_ok_title_and_no_reminder():
+    """历史实况 ok → 表格标题【X历史实况】、无注意事项、数据来源为历史实况。"""
+    callbacks = {"ainvoke_chain": await _fake_answer("【核心结论】8月10日天津大学以多云为主，最高气温31℃，最低气温22℃，实际有2.5毫米降雨。")}
+    text = await dw_core._generate_decision_historical_answer(
+        "8月10号天津大学天气怎么样",
+        _historical_payload(),
+        {"address": "天津市南开区卫津路92号", "longitude": 117.16, "latitude": 39.11},
+        "天津大学",
+        "general_weather",
+        None,
+        callbacks,
+    )
+    assert "【核心结论】" in text
+    assert "【天津大学历史实况】" in text
+    assert "⚠ 注意事项" not in text  # 历史回顾不追加面向未来的隐患提醒
+    assert "数据来源：自动站历史实况。" in text
+    assert text.rstrip().endswith("数据来源：自动站历史实况。")
+
+
+@pytest.mark.asyncio
+async def test_decision_historical_answer_prompt_wording():
+    """历史实况回答 prompt 强制“实况/当日实际”措辞，禁止“预计/将”。"""
+    captured = {}
+
+    async def _capture(chain, inputs):
+        captured["prompt"] = inputs["messages"][0].content
+        return _FakeResult("【核心结论】8月10日天津大学以多云为主，实际有2.5毫米降雨。")
+
+    text = await dw_core._generate_decision_weather_answer(
+        "8月10号天津大学天气怎么样",
+        {
+            "poi": {"name": "天津大学", "address": "天津市南开区卫津路92号", "lon": 117.16, "lat": 39.11},
+            "question_type": "general_weather",
+            "query_mode": "historical_obs",
+            "data_source": "自动站历史实况",
+            "target_start_time": "2026-08-10 00:00",
+            "target_end_time": "2026-08-11 00:00",
+            "has_rain_signal": True,
+            "total_rain_mm": 2.5,
+            "periods": [
+                {
+                    "start_time": "2026-08-10 00:00",
+                    "end_time": "2026-08-11 00:00",
+                    "period_label": "8月10日",
+                    "weather": "多云",
+                    "tmax": "31",
+                    "tmin": "22",
+                    "EDA": "东南风2级",
+                }
+            ],
+        },
+        None,
+        {"ainvoke_chain": _capture},
+    )
+    assert "8月10日实际" in captured["prompt"]
+    assert "实况/实际/当日" in captured["prompt"]
+    assert "不得使用“预计/将/未来”" in captured["prompt"]
+    assert "【天津大学历史实况】" in text
+    assert "⚠ 注意事项" not in text
+
+
+class FakePastForecastTool:
+    """返回 past_date 标记的滚动预报工具，模拟“8月10号”历史日期。"""
+    name = "query_rolling_forecast"
+
+    async def ainvoke(self, args):
+        return [{
+            "text": json.dumps({
+                "status": "past_date",
+                "query_mode": "historical_obs_request",
+                "data_source": "历史日期",
+                "message": "该日期已属过去，请调用 query_poi_historical_weather 查询历史实况。",
+                "historical_window": {
+                    "target_start": "2026-08-10 00:00",
+                    "target_end": "2026-08-11 00:00",
+                    "forecast_start_date": "2026-08-10",
+                    "forecast_days": 1,
+                },
+                "periods": [],
+            }, ensure_ascii=False)
+        }]
+
+
+class FakeHistoricalTool:
+    name = "query_poi_historical_weather"
+
+    def __init__(self, payload=None):
+        self._payload = payload if payload is not None else _historical_payload()
+        self.last_args = None
+
+    async def ainvoke(self, args):
+        self.last_args = args
+        return [{"text": json.dumps(self._payload, ensure_ascii=False)}]
+
+
+@pytest.mark.asyncio
+async def test_query_decision_weather_for_poi_routes_to_historical():
+    """决策天气工具遇 past_date 标记 → 自动调历史实况工具并生成历史实况回答。"""
+    answer_chain = FakeChain()
+    tools = [FakePoiTool(), FakePastForecastTool(), FakeHistoricalTool()]
+    callbacks = {"ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke()}
+
+    tool = dw.build_decision_weather_tools(answer_chain, tools, callbacks)[0]
+    result = await tool.ainvoke({"user_text": "8月10号天津大学天气怎么样"})
+
+    assert isinstance(result, str)
+    assert "【天津大学历史实况】" in result
+    assert "数据来源：自动站历史实况。" in result
+
+
+@pytest.mark.asyncio
+async def test_query_decision_weather_for_poi_historical_tool_missing():
+    """历史实况工具缺失时给出明确提示，不静默回退未来预报。"""
+    answer_chain = FakeChain()
+    tools = [FakePoiTool(), FakePastForecastTool()]
+    callbacks = {"ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke()}
+
+    tool = dw.build_decision_weather_tools(answer_chain, tools, callbacks)[0]
+    result = await tool.ainvoke({"user_text": "8月10号天津大学天气怎么样"})
+
+    assert isinstance(result, str)
+    assert "历史" in result
+    assert "暂不可用" in result
+
+
+@pytest.mark.asyncio
+async def test_query_decision_weather_for_poi_historical_no_data_keeps_message():
+    """历史实况 no_data 时明确提示该日不可查，不得回退未来预报。"""
+    answer_chain = FakeChain()
+    tools = [FakePoiTool(), FakePastForecastTool(), FakeHistoricalTool({
+        "status": "no_data",
+        "query_mode": "historical_obs",
+        "forecast_start_time": "2026-08-10 00:00",
+        "message": "未查询到历史实况数据。",
+    })]
+    callbacks = {"ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke()}
+
+    tool = dw.build_decision_weather_tools(answer_chain, tools, callbacks)[0]
+    result = await tool.ainvoke({"user_text": "8月10号天津大学天气怎么样"})
+
+    assert isinstance(result, str)
+    assert "暂无可用历史实况数据" in result
+    assert "未来日期" in result
+
+
+# ---------- fast path（DecisionWeatherQAService）历史路由 parity ----------
+
+import chainlitexam.tools.decision_weather_fast_path as dw_fp  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_fast_path_routes_to_historical(monkeypatch):
+    """fast path 遇 past_date 标记同样自动转历史实况工具，与 planner 工具行为一致。"""
+    # _emit 尾部写会话消息需要 chainlit 上下文，测试里打成 no-op
+    monkeypatch.setattr(dw_fp.cl.user_session, "set", lambda *a, **k: None)
+    answer_chain = FakeChain()
+    historical_tool = FakeHistoricalTool()
+    fake_tools = {
+        "search_poi": FakePoiTool(),
+        "query_rolling_forecast": FakePastForecastTool(),
+        "query_poi_historical_weather": historical_tool,
+    }
+    emitted = {}
+
+    class _Runtime:
+        def find_tool(self, tools, name):
+            return fake_tools.get(name)
+
+        async def invoke_fast_tool(self, name, tool, args, user_text):
+            return await tool.ainvoke(args)
+
+        def clean_table_cell(self, value):
+            return dw_core._decision_table_cell(value)
+
+        def sanitize_display_text(self, text):
+            return text
+
+        def prepend_thinking_summary(self, text, user_text, has_chart=False):
+            return text
+
+    async def _emit_fn(text):
+        emitted["text"] = text
+
+    callbacks = {
+        "ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke(),
+        "append_followup_if_needed": lambda text, user_text: text,
+        "stream_text_to_message": _emit_fn,
+    }
+    runtime = _Runtime()
+    service = dw_fp.DecisionWeatherQAService(answer_chain, list(fake_tools.values()), callbacks, runtime)
+    handled = await service.try_handle("8月10号天津大学天气怎么样", [])
+    assert handled is True
+    assert "【天津大学历史实况】" in emitted["text"]
+    assert "数据来源：自动站历史实况。" in emitted["text"]
+    # 历史工具收到 historical_window 的起止时间
+    assert historical_tool.last_args is not None
+    assert historical_tool.last_args["start_time"] == "2026-08-10 00:00"
+    assert historical_tool.last_args["end_time"] == "2026-08-11 00:00"

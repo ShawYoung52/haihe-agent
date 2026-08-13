@@ -18,6 +18,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from tools.rolling_forecast_response import sanitize_forecast_core_summary
+from utils.tool_result import _unwrap_tool_result
 
 DECISION_WEATHER_STATIONS = [
     {"region": "天津市区", "lon": 117.14, "lat": 39.24},
@@ -39,6 +40,7 @@ DECISION_WEATHER_INTERNAL_TOOLS = {
     "search_poi_by_distance",
     "query_rolling_forecast",
     "query_poi_hazard_reminders",
+    "query_poi_historical_weather",
     "get_server_time",
     "analyze_rainfall_by_time",
     "local_analyze_rainfall_by_time",
@@ -170,11 +172,17 @@ def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
         idx = t.find(suffix)
         if idx < 0:
             continue
-        # 取后缀前的一段（跳过标点/介词/时间词）
+        # 取后缀前的一段（跳过标点/介词/时间词/日期词，防"8月10号天津大学"把日期带进位置名）
         head = t[:idx]
-        head = re.split(r"[，。？?！!、\s，]|今天|明天|后天|周末|未来|现在|上午|下午|晚上|夜里|[一二三四五六七八九十\d]+(小时|天|日|周)", head)[-1]
+        head = re.split(
+            r"[，。？?！!、\s，]|今天|明天|后天|昨天|前天|昨日|周末|未来|现在|上午|下午|晚上|夜里|"
+            r"[一二三四五六七八九十\d]+(小时|天|日|周|月|号|年)",
+            head,
+        )[-1]
         # 去掉结尾的"在/去/到/位于/附近"等
         head = re.sub(r"(在|去|到|位于|附近|周边|旁边|距|距离)$", "", head)
+        # 去掉前导虚词/量词残留（"前天的天津大学"的"的"、"10月份去天津大学"的"份/去"，可连续多个）
+        head = re.sub(r"^[的了是有在从到给为想问看这那份去]+", "", head)
         candidate = (head + suffix).strip()
         if candidate and len(candidate) >= 2 and head:
             location = candidate
@@ -542,6 +550,90 @@ def _compact_decision_forecast_facts(
     return facts
 
 
+def _is_past_date_forecast_payload(forecast_payload: Any) -> bool:
+    """判断滚动预报返回是否为历史日期标记（过去日期 → 转历史实况查询）。"""
+    return (
+        isinstance(forecast_payload, dict)
+        and forecast_payload.get("status") == "past_date"
+        and isinstance(forecast_payload.get("historical_window"), dict)
+    )
+
+
+def _decision_is_historical_facts(facts: dict) -> bool:
+    """根据 facts 判断是否历史实况（query_mode 以 historical 开头）。"""
+    return str(facts.get("query_mode") or "").startswith("historical")
+
+
+async def _generate_decision_historical_answer(
+    user_text: str,
+    payload: dict,
+    poi: dict,
+    point_name: str,
+    question_type: str,
+    answer_chain: Any,
+    callbacks: dict,
+) -> str:
+    """根据历史实况工具结果生成历史天气回答，与预报回答共用同一组装函数。
+
+    由双路径调用方在滚动预报返回 past_date 标记后调用；payload 为
+    query_poi_historical_weather 的结果 dict。
+    """
+    status = str(payload.get("status") or "")
+    # 真实工具 ok 分支带 forecast_start_time；no_data/error 分支只有 start_time，需回退
+    date_text = _decision_table_cell(
+        str(payload.get("forecast_start_time") or payload.get("start_time") or "")[:10], "该日"
+    )
+    if status != "ok":
+        if status == "no_data":
+            return f"您查询的目标日期（{date_text}）暂无可用历史实况数据，无法提供该日的实际天气，请换用未来日期查询预报。"
+        return "历史实况查询暂不可用，请稍后重试或换用未来日期查询预报。"
+    facts = _compact_decision_forecast_facts(payload)
+    facts["poi"] = {
+        "name": point_name,
+        "address": str(poi.get("address") or ""),
+        "lon": poi.get("longitude"),
+        "lat": poi.get("latitude"),
+    }
+    facts["matched_station"] = payload.get("nearest_station") or {}
+    facts["question_type"] = question_type
+    return await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
+
+
+def _decision_historical_window_args(
+    forecast_payload: dict,
+    lon: float | None,
+    lat: float | None,
+    point_name: str,
+) -> dict:
+    """从 past_date 标记构造 query_poi_historical_weather 调用参数（双路径共用）。"""
+    historical_window = forecast_payload["historical_window"]
+    return {
+        "lon": lon,
+        "lat": lat,
+        "start_time": historical_window.get("target_start"),
+        "end_time": historical_window.get("target_end"),
+        "point_name": point_name,
+    }
+
+
+async def _generate_decision_historical_answer_from_raw(
+    hist_raw: Any,
+    user_text: str,
+    poi: dict,
+    point_name: str,
+    question_type: str,
+    answer_chain: Any,
+    callbacks: dict,
+) -> str:
+    """解包历史实况工具原始结果并生成历史回答文本（双路径共用）。"""
+    hist_payload = _unwrap_tool_result(hist_raw)
+    if not isinstance(hist_payload, dict):
+        hist_payload = {}
+    return await _generate_decision_historical_answer(
+        user_text, hist_payload, poi, point_name, question_type, answer_chain, callbacks
+    )
+
+
 def _ainvoke_chain(callbacks: dict) -> Any:
     """从 callbacks 中取出 LLM 调用函数。"""
     fn = callbacks.get("ainvoke_chain")
@@ -631,7 +723,9 @@ def _build_decision_weather_table(user_text: str, facts: dict) -> str:
     location = _decision_table_cell((facts.get("poi") or {}).get("name"), "该位置")
     hourly_rain = facts.get("hourly_rain") if isinstance(facts.get("hourly_rain"), dict) else {}
     mode = str(hourly_rain.get("mode") or "")
-    if mode == "rain_current_hour":
+    if _decision_is_historical_facts(facts):
+        title = f"【{location}历史实况】"
+    elif mode == "rain_current_hour":
         title = f"【{location}当前小时预报】"
     elif mode == "rain_next_hours":
         title = f"【{location}逐小时预报】"
@@ -875,6 +969,13 @@ def _build_poi_reminder_section(facts: dict) -> str:
 
 async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_chain: Any, callbacks: dict) -> str:
     """由模型生成一句结论，再由代码生成点位天气表、注意事项和数据来源。"""
+    is_historical = _decision_is_historical_facts(facts)
+    historical_note = ""
+    if is_historical:
+        historical_note = (
+            "当“是否为历史实况”为 true 时，按历史实况回顾表述（如“8月10日实际…”），"
+            "必须使用“实况/实际/当日”等过去措辞，不得使用“预计/将/未来”等预报措辞。\n"
+        )
     business_facts = {
         "位置名称": (facts.get("poi") or {}).get("name") or "该位置",
         "位置地址": (facts.get("poi") or {}).get("address") or "",
@@ -883,6 +984,7 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "问题类型": facts.get("question_type"),
         "是否有降雨信号": facts.get("has_rain_signal"),
         "累计降水量毫米": facts.get("total_rain_mm"),
+        "是否为历史实况": is_historical,
         "预报时段": facts.get("periods") or [],
         "小时级降雨计算": facts.get("hourly_rain"),
         "数据来源": facts.get("data_source") or "天津市气象台滚动预报",
@@ -890,7 +992,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     prompt = (
         "请仅依据下面 JSON 中的业务天气事实回答用户问题。不要编造未返回的天气、雨量、温度、风力或能见度。\n"
         "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
-        "只输出【核心结论】及其正文，正文严格且只能有一句；只围绕用户明确询问的"
+        + historical_note
+        + "只输出【核心结论】及其正文，正文严格且只能有一句；只围绕用户明确询问的"
         "降雨、天气、气温、风力、能见度或活动适宜性直接作答，不主动扩展无关风险、背景或建议。\n"
         "不要机械补充“无降水/无降雨”或“风力为X级”等泛化描述；只有用户明确询问降水或风力时才回答对应要素。\n"
         "所有温度数值必须按四舍五入展示为整数，不得输出小数。\n"
@@ -904,7 +1007,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     answer = getattr(result, "content", None) or str(result)
     core = _decision_core_only(answer, user_text)
     table = _build_decision_weather_table(user_text, facts)
-    reminder = _build_poi_reminder_section(facts)
+    # 历史实况为过去日期的确定性回顾，不追加面向未来的“注意事项”。
+    reminder = _build_poi_reminder_section(facts) if not is_historical else ""
     source = _decision_table_cell(facts.get("data_source"), "天津市气象台滚动预报")
     sections = [f"【核心结论】\n{core}".rstrip()]
     if table:
