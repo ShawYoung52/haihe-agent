@@ -76,7 +76,7 @@ class DecisionWeatherQAService:
             poi_tool.name, poi_tool, {"keyword": location_name, "size": 5}, user_text
         )
         poi_payload = _unwrap_tool_result(poi_raw)
-        poi = _decision_pick_first_poi(poi_payload if isinstance(poi_payload, dict) else {})
+        poi = _decision_pick_first_poi(poi_payload, location_name)
         if not poi:
             text = f"未检索到“{self.runtime.clean_table_cell(location_name)}”的可用经纬度信息，请换一个更明确的位置名称。"
             await self._emit(text, user_text, messages)

@@ -219,6 +219,23 @@ def test_classify_poi_category_five_categories():
     assert dw_core.classify_poi_category("某山区乡镇", "") == "mountain"
 
 
+def test_classify_poi_category_known_scenic_names():
+    """知名天津景点（名称无景区/公园等类别词）能关联到景区。"""
+    assert dw_core.classify_poi_category("五大道", "") == "scenic"
+    assert dw_core.classify_poi_category("古文化街", "") == "scenic"
+    assert dw_core.classify_poi_category("意式风情区", "") == "scenic"
+    assert dw_core.classify_poi_category("天津之眼", "") == "scenic"
+    # 行政/服务/聚落语义不得因知名景点名单误判
+    assert dw_core.classify_poi_category("五大道街道政务服务中心", "") is None
+    assert dw_core.classify_poi_category("五大道派出所", "") is None
+    # 裸“盘山”是蓟州名山也是辽宁县名，保守优先不归类；盘山风景名胜区走“风景名胜”关键词
+    assert dw_core.classify_poi_category("盘山", "") is None
+    assert dw_core.classify_poi_category("盘山县", "") is None
+    assert dw_core.classify_poi_category("盘山风景名胜区", "") == "scenic"
+    # 地址落入知名景区旅游区同样命中（走“旅游区”关键词，非知名名单）
+    assert dw_core.classify_poi_category("某商业中心", "天津市和平区五大道文化旅游区") == "scenic"
+
+
 def test_classify_poi_category_false_positives():
     """普通地名/机构不得误判为五类点位（保守优先，返回 None）。"""
     assert dw_core.classify_poi_category("石家庄", "河北省石家庄市") is None
@@ -235,8 +252,101 @@ def test_classify_poi_category_uses_es_categories():
     assert dw_core.classify_poi_category("XX活动中心", "", "风景名胜", "景点") == "scenic"
 
 
+def _poi_item(name, address, lon=117.0, lat=39.0):
+    return {
+        "name": name,
+        "address": address,
+        "longitude": lon,
+        "latitude": lat,
+    }
+
+
+def test_decision_pick_first_poi_tianjin_preference():
+    """同名大众点按区域偏好优先天津，不取检索结果第一个外省同名点。"""
+    payload = {"pois": [
+        _poi_item("实验中学", "河北省唐山市路北区", 118.18, 39.62),
+        _poi_item("实验中学", "天津市和平区", 117.19, 39.12),
+    ]}
+    # 无显式区域 → 默认主场天津，取天津点
+    picked = dw_core._decision_pick_first_poi(payload, "实验中学")
+    assert picked is not None
+    assert "天津" in picked["address"]
+    # 显式含“天津” → 严格过滤，外省同名点被排除
+    picked2 = dw_core._decision_pick_first_poi(payload, "天津实验中学")
+    assert picked2 is not None and "天津" in picked2["address"]
+    # 只有外省点 + 显式天津 → 宁可查不到也不冒充
+    only_hebei = {"pois": [_poi_item("实验中学", "河北省唐山市路北区", 118.18, 39.62)]}
+    assert dw_core._decision_pick_first_poi(only_hebei, "天津实验中学") is None
+    # 兼容旧签名：不传 keyword 也能挑第一个有效条目
+    assert dw_core._decision_pick_first_poi(payload) is not None
+
+
+def test_decision_pick_first_poi_hexiqu_prefers_tianjin():
+    """河西中心等同名问法默认主场天津，且天津河北区点位不被误杀。"""
+    payload = {"pois": [
+        _poi_item("河西中心", "安徽省合肥市庐阳区", 117.28, 31.86),
+        _poi_item("河西中心", "天津市河西区越秀路", 117.22, 39.11),
+    ]}
+    picked = dw_core._decision_pick_first_poi(payload, "河西中心")
+    assert picked is not None
+    assert "天津市" in picked["address"]
+
+
+def test_decision_pick_first_poi_shijiazhuang_explicit_region():
+    """关键词显式指定外省城市（石家庄）时，尊重该城市而非默认主场天津。"""
+    payload = {"pois": [
+        _poi_item("实验中学", "天津市和平区", 117.19, 39.12),
+        _poi_item("实验中学", "河北省石家庄市长安区", 114.51, 38.05),
+    ]}
+    picked = dw_core._decision_pick_first_poi(payload, "石家庄实验中学")
+    assert picked is not None
+    assert "石家庄" in picked["address"]
+    # 省+市连写同样解析到具体城市（先城市后省份，不命中天津河北区的“河北”）
+    picked2 = dw_core._decision_pick_first_poi(payload, "河北省石家庄市实验中学")
+    assert picked2 is not None
+    assert "石家庄" in picked2["address"]
+
+
+def test_decision_pick_first_poi_strict_excludes_outside_province():
+    """显式“天津”严格过滤不得被外省同名区县（河东区-临沂等）误认成天津点。"""
+    payload = {"pois": [
+        _poi_item("中心医院", "山东省临沂市河东区", 118.35, 35.05),
+        _poi_item("中心医院", "天津市河东区", 117.25, 39.13),
+    ]}
+    picked = dw_core._decision_pick_first_poi(payload, "天津中心医院")
+    assert picked is not None
+    assert "天津市" in picked["address"]
+    # 只有外省同名区县点 + 显式天津 → 宁可查不到也不冒充
+    only_linyi = {"pois": [_poi_item("实验中学", "山东省临沂市河东区", 118.35, 35.05)]}
+    assert dw_core._decision_pick_first_poi(only_linyi, "天津实验中学") is None
+    # 沈阳和平区同样被排除；天津“河北区”不被误杀
+    only_shenyang = {"pois": [_poi_item("实验中学", "辽宁省沈阳市和平区", 123.43, 41.80)]}
+    assert dw_core._decision_pick_first_poi(only_shenyang, "天津实验中学") is None
+    tianjin_hebei = {"pois": [_poi_item("某中学", "河北区昆纬路", 117.20, 39.15)]}
+    kept = dw_core._decision_pick_first_poi(tianjin_hebei, "天津某中学")
+    assert kept is not None and "河北区" in kept["address"]
+
+
+def test_poi_reminder_rain_signal_zero_mm_header():
+    """has_rain_signal 有雨但累计 0mm 时，风险表标题不出现自相矛盾的“0 毫米”。"""
+    facts = {
+        "poi_category": "mountain",
+        "has_rain_signal": True,
+        "total_rain_mm": 0.0,
+        "periods": [],
+        "hazard_points": {
+            "status": "ok", "total_found": 1, "radius_km": 5.0,
+            "categories": [{"key": "dzzh", "label": "地质灾害", "count": 1, "records": []}],
+        },
+    }
+    text = dw_core._build_poi_reminder_section(facts)
+    assert "风险研判" in text
+    assert "0 毫米" not in text
+    assert "预计未来为小雨/有降雨" in text
+
+
 def test_build_poi_reminder_section_hazard_points():
-    """含周边隐患点时输出⚠️注意事项，且隐患点信息来自工具返回。"""
+    """含周边隐患点且有降雨时输出风险研判表，不逐条列举隐患点。"""
     facts = {
         "poi_category": "scenic",
         "has_rain_signal": True,
@@ -258,16 +368,17 @@ def test_build_poi_reminder_section_hazard_points():
     }
     text = dw_core._build_poi_reminder_section(facts)
     assert "⚠ 注意事项" in text
-    assert "周边 5 公里内隐患点" in text
     # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议
     assert "风险研判" in text
     assert "| 地质灾害 | 1 处 |" in text
     assert "| 山洪 | 1 处 |" in text
     assert "有降雨，注意陡坡、边坡区域湿滑" in text
     assert "有降雨，避免在山洪沟道、河谷低洼处停留" in text
-    assert "**地质灾害（1处）**" in text
-    assert "滑坡隐患点A（蓟州区，约 1.2 公里）" in text
-    assert "山洪危险区B（宝坻区，约 4.1 公里）" in text
+    # 只给类型+数量汇总，不逐条列举隐患点（名称/位置/距离不再出现）
+    assert "隐患点：" not in text
+    assert "**地质灾害" not in text
+    assert "滑坡隐患点A" not in text
+    assert "山洪危险区B" not in text
     # 天气条件从句来自实际 facts 数值
     assert "当前预报时段内有降雨信号" in text
 
@@ -279,7 +390,7 @@ def test_build_poi_reminder_section_empty():
 
 
 def test_build_poi_reminder_section_rain_risk_matrix():
-    """风险研判表随降雨强度分档变化：暴雨→风险高，无雨→风险低。"""
+    """风险研判表随降雨强度分档变化：暴雨→风险高，无雨→不出风险表。"""
     base_hazard = {
         "status": "ok",
         "total_found": 1,
@@ -301,7 +412,7 @@ def test_build_poi_reminder_section_rain_risk_matrix():
     assert "（暴雨）" in heavy
     assert "风险高" in heavy
     assert "暴雨极易诱发滑坡、崩塌、泥石流" in heavy
-    # 无雨（0mm）→ 风险低
+    # 无雨（0mm）→ 不提醒隐患点（有降雨才提示），只保留类别模板
     dry = dw_core._build_poi_reminder_section({
         "poi_category": "mountain",
         "has_rain_signal": False,
@@ -309,9 +420,11 @@ def test_build_poi_reminder_section_rain_risk_matrix():
         "periods": [],
         "hazard_points": base_hazard,
     })
-    assert "（无明显降雨）" in dry
-    assert "风险低" in dry
-    assert "可正常出行" in dry
+    assert "⚠ 注意事项" in dry
+    assert "山区" in dry
+    assert "风险低" not in dry
+    assert "可正常出行" not in dry
+    assert "| 隐患类型" not in dry
     # 缺 total_rain_mm，仅 has_rain_signal=True → 兜底为小雨
     fallback = dw_core._build_poi_reminder_section({
         "poi_category": "mountain",

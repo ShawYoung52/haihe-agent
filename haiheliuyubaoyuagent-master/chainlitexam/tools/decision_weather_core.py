@@ -207,14 +207,108 @@ def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
     }
 
 
-def _decision_pick_first_poi(poi_payload: dict) -> dict | None:
-    """从 POI 检索结果中挑选第一个带有效经纬度的条目。"""
+# POI 区域偏好：与 poi_nearest_observation_tool._pick_first_poi 同口径。
+# 决策天气面向天津主场（天津市气象台），同名大众点（河西中心/实验中学等）必须优先天津，
+# 否则检索结果可能把外省同名点当成目标点位。
+# 显式区域先匹城市名再匹省名（“河北省石家庄市实验中学”须取“石家庄”而非“河北”，
+# 避免命中天津河北区的“河北”子串）；海河流域地级市/省会全覆盖，防“石家庄实验中学”被主场天津抢占。
+_POI_EXPLICIT_CITY_WORDS = (
+    "石家庄", "唐山", "丰润", "保定", "廊坊", "沧州", "秦皇岛", "邯郸", "邢台",
+    "承德", "张家口", "衡水", "太原", "大同", "朔州", "忻州", "阳泉",
+    "呼和浩特", "包头", "赤峰", "集宁", "济南", "青岛", "德州", "聊城",
+    "滨州", "东营", "郑州", "安阳", "新乡", "鹤壁", "焦作", "濮阳",
+)
+_POI_EXPLICIT_PROVINCE_WORDS = ("北京", "天津", "河北", "山西", "内蒙古", "山东", "河南", "辽宁")
+# 显式区域词合并常量：城市在前（“河北省石家庄市实验中学”须命中“石家庄”而非“河北”），省份在后
+_POI_EXPLICIT_REGION_WORDS = _POI_EXPLICIT_CITY_WORDS + _POI_EXPLICIT_PROVINCE_WORDS
+# 海河流域省市词（默认主场外，其次优先流域内点位）
+_POI_HAIHE_REGION_WORDS = ("北京", "天津", "河北", "山西", "内蒙古", "山东", "河南")
+_TIANJIN_DISTRICTS = (
+    "和平区", "河东区", "河西区", "南开区", "河北区", "红桥区", "东丽区", "西青区",
+    "津南区", "北辰区", "武清区", "宝坻区", "滨海新区", "宁河区", "静海区", "蓟州区",
+)
+# 外省证据词（省/直辖市）：天津区县与外地城市同名（和平区-沈阳、河东区-临沂、滨海新区等），
+# 出现这些词说明 POI 更可能在外省。河北区/北京路/山西路/山东路/河南路/河北路是天津区县/街道名，
+# 用负向断言排除，避免误杀天津本地点位。
+_POI_NON_TIANJIN_REGION_RE = re.compile(
+    r"河北(?!区|路)|北京(?!路)|山西(?!路)|山东(?!路)|河南(?!路)|"
+    r"辽宁|内蒙古|黑龙江|吉林|江苏|安徽|浙江|福建|江西|湖北|湖南|"
+    r"广东|广西|海南|四川|贵州|云南|西藏|陕西|甘肃|青海|宁夏|新疆|"
+    r"重庆|上海|香港|澳门|台湾"
+)
+
+
+def _decision_poi_text(poi: dict) -> str:
+    """POI 的名称/地址/类别拼接文本，用于区域判定。"""
+    return " ".join(
+        str(poi.get(k) or "") for k in ("name", "address", "category_1", "category_2")
+    )
+
+
+def _decision_is_tianjin_poi(poi: dict) -> bool:
+    """POI 是否天津证据充分：名称含“天津”、地址含“天津市”即认定。
+
+    仅凭区县名（和平区/河东区/滨海新区等与外地城市同名）算弱证据，出现明确外省
+    省/直辖市词时不再认定天津，避免“山东省临沂市河东区”等外省点冒充天津点。
+    """
+    text = _decision_poi_text(poi)
+    if "天津" in str(poi.get("name") or ""):
+        return True
+    if "天津市" in text:
+        return True
+    if not any(district in text for district in _TIANJIN_DISTRICTS):
+        return False
+    return not bool(_POI_NON_TIANJIN_REGION_RE.search(text))
+
+
+def _decision_poi_expected_region(keyword: str) -> str:
+    """关键词显式指定区域则尊重之，否则默认天津（系统主场）。"""
+    for word in _POI_EXPLICIT_REGION_WORDS:
+        if word in keyword:
+            return word
+    return "天津"
+
+
+def _decision_poi_region_rank(poi: dict, keyword: str) -> int:
+    """按期望区域给候选 POI 排序分档（越大越优先）。
+
+    默认（无显式区域）主场天津：天津证据充分 > 海河流域内 > 其它。
+    显式指定区域时：命中期望区域 > 天津 > 其它。
+    """
+    text = _decision_poi_text(poi)
+    expected = _decision_poi_expected_region(keyword)
+    if expected != "天津":
+        if expected in text:
+            return 2
+        return 1 if _decision_is_tianjin_poi(poi) else 0
+    if _decision_is_tianjin_poi(poi):
+        return 2
+    if any(word in text for word in _POI_HAIHE_REGION_WORDS):
+        return 1
+    return 0
+
+
+def _decision_pick_first_poi(poi_payload: dict, keyword: str = "") -> dict | None:
+    """从 POI 检索结果中挑选第一个带有效经纬度的条目。
+
+    keyword 提供区域上下文：显式含“天津”时严格过滤（只认天津证据充分的点位，
+    宁可查不到也不拿外省同名点冒充）；否则按主场天津偏好排序。
+    修复“河西中心/实验中学”等同名点被定位到其它城市的问题。
+    """
     pois = poi_payload.get("pois") if isinstance(poi_payload, dict) else None
-    if not isinstance(pois, list):
+    if not isinstance(pois, list) or not pois:
         return None
+    keyword = str(keyword or "")
+    pois = [poi for poi in pois if isinstance(poi, dict)]
+    if "天津" in keyword:
+        pois = [poi for poi in pois if _decision_is_tianjin_poi(poi)]
+    else:
+        pois = sorted(
+            pois,
+            key=lambda poi: _decision_poi_region_rank(poi, keyword),
+            reverse=True,
+        )
     for poi in pois:
-        if not isinstance(poi, dict):
-            continue
         lon = poi.get("longitude")
         lat = poi.get("latitude")
         if lon is None or lat is None:
@@ -247,11 +341,32 @@ POI_CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "scenic": [
         "风景区", "风景名胜", "景区", "景点", "旅游区", "古镇", "公园",
         "湿地公园", "乐园", "游乐场", "游乐园", "度假区", "博物", "展览馆",
-        "博物馆", "纪念馆", "会展",
+        "博物馆", "纪念馆", "会展", "风情区", "文化街",
     ],
     "mountain": ["山区", "山地", "山间", "山脚", "山腰", "山沟", "山坡", "峡谷", "山洪"],
 }
 _POI_CATEGORY_ORDER = ("school", "airport", "station", "scenic", "mountain")
+
+# 知名天津景点（名称本身不含景区/公园等类别词，须点名关联景区）。
+# 只对 name 匹配，且名称含街道/办事处/政务/社区/派出所/医院/村/县/镇/乡等非景区语义时跳过，
+# 防“五大道街道政务中心”“五大道派出所”误判。裸“盘山”既是蓟州名山也是辽宁县名，
+# 已从名单移除（保守优先；盘山风景名胜区仍走“风景名胜”关键词）。
+_POI_KNOWN_SCENIC_NAMES: tuple[str, ...] = (
+    "五大道", "古文化街", "意式风情区", "瓷房子", "天津之眼",
+    "石家大院", "黄崖关长城", "独乐寺", "天后宫",
+)
+_POI_KNOWN_SCENIC_EXCLUDE = (
+    "街道", "办事处", "政务", "社区", "派出所", "医院", "村", "县", "镇", "乡",
+)
+
+
+def _decision_is_known_scenic_name(name: str) -> bool:
+    name = str(name or "").strip()
+    if not name:
+        return False
+    if any(word in name for word in _POI_KNOWN_SCENIC_EXCLUDE):
+        return False
+    return any(spot in name for spot in _POI_KNOWN_SCENIC_NAMES)
 
 
 def classify_poi_category(
@@ -272,6 +387,8 @@ def classify_poi_category(
     if not text:
         return None
     for category in _POI_CATEGORY_ORDER:
+        if category == "scenic" and _decision_is_known_scenic_name(name):
+            return "scenic"
         if any(kw in text for kw in POI_CATEGORY_KEYWORDS[category]):
             return category
     return None
@@ -687,9 +804,9 @@ _HAZARD_RAIN_RISK: dict[str, dict[int, tuple[str, str]]] = {
 def _build_poi_reminder_section(facts: dict) -> str:
     """根据点位类别 + 周边隐患点确定性生成“⚠️ 注意事项”段落。
 
-    无可展示内容（既无类别模板、也无周边隐患点）时返回空串。
-    天气断言只来自 facts 实际数值（has_rain_signal/total_rain_mm/风力/能见度），
-    隐患点名称、区县、距离均来自 MCP 工具返回，不编造。
+    无可展示内容（既无类别模板、也无降雨期隐患点）时返回空串。
+    隐患点只在预报有降雨时提醒（有降雨才存在诱发风险），且只给类型+数量汇总表，
+    不逐条列举隐患点名称/位置。天气断言只来自 facts 实际数值，不编造。
     """
     category = facts.get("poi_category")
     hp_raw = facts.get("hazard_points")
@@ -699,7 +816,10 @@ def _build_poi_reminder_section(facts: dict) -> str:
         and hazard_points.get("status") == "ok"
         and int(hazard_points.get("total_found") or 0) > 0
     )
-    if not category and not has_hazard:
+    # 有降雨才展示隐患点风险研判；无雨时不打扰。
+    intensity, mm = _decision_rain_intensity(facts)
+    show_hazard = has_hazard and intensity > 0
+    if not category and not show_hazard:
         return ""
 
     lines: list[str] = ["⚠ 注意事项"]
@@ -720,9 +840,9 @@ def _build_poi_reminder_section(facts: dict) -> str:
                 clauses.append("能见度较低，出行请注意交通安全。")
             lines.append(template + (clauses[0] if clauses else ""))
 
-    if hazard_points and hazard_points.get("status") == "ok":
+    if show_hazard:
         categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []
-        # 统计各隐患类型数量，供风险研判表使用
+        # 统计各隐患类型数量，供风险研判表使用（隐患点不逐条列举，只给类型+数量汇总）
         hazard_counts: dict[str, tuple[str, int]] = {}
         for category_item in categories:
             if not isinstance(category_item, dict):
@@ -732,12 +852,10 @@ def _build_poi_reminder_section(facts: dict) -> str:
             count = int(category_item.get("count") or 0)
             if key and label and count > 0:
                 hazard_counts[key] = (label, count)
-
-        # 风险研判表：预报降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
-        intensity, mm = _decision_rain_intensity(facts)
         if hazard_counts:
+            # 风险研判表：预报降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
             intensity_label = _RAIN_INTENSITY_LEVELS.get(intensity, "无明显降雨")
-            if mm is not None:
+            if mm is not None and mm > 0:
                 lines.append(f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：")
             else:
                 lines.append(f"预计未来为{intensity_label}，周边灾害风险研判如下：")
@@ -751,30 +869,6 @@ def _build_poi_reminder_section(facts: dict) -> str:
                 risk, advice = _HAZARD_RAIN_RISK[key][intensity]
                 lines.append(f"| {label} | {count} 处 | {risk} | {advice} |")
             lines.append("")
-
-        # 隐患点清单
-        radius_km = hazard_points.get("radius_km")
-        radius_text = f"{float(radius_km):.0f}" if isinstance(radius_km, (int, float)) else "5"
-        lines.append(f"周边 {radius_text} 公里内隐患点：")
-        for category_item in categories:
-            if not isinstance(category_item, dict):
-                continue
-            label = str(category_item.get("label") or "")
-            count = int(category_item.get("count") or 0)
-            if not label or count <= 0:
-                continue
-            lines.append(f"**{label}（{count}处）**")
-            records = category_item.get("records") if isinstance(category_item.get("records"), list) else []
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                name = str(record.get("name") or "未命名隐患点").strip()
-                county = str(record.get("county") or "").strip()
-                city = str(record.get("city") or "").strip()
-                location = county or city or "位置未知"
-                distance = record.get("distance_km")
-                distance_text = f"约 {float(distance):.1f} 公里" if isinstance(distance, (int, float)) else ""
-                lines.append(f"- {name}（{location}，{distance_text}）")
 
     return "\n".join(line.rstrip() for line in lines).strip()
 

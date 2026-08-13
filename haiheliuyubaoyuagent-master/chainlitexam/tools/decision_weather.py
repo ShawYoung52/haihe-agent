@@ -88,7 +88,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
 
             poi_raw = await poi_tool.ainvoke({"keyword": location_name, "size": 5})
             poi_payload = _unwrap_tool_result(poi_raw)
-            poi = _decision_pick_first_poi(poi_payload if isinstance(poi_payload, dict) else {})
+            poi = _decision_pick_first_poi(poi_payload, location_name)
             if not poi:
                 return f"未检索到“{_clean_table_cell(location_name)}”的可用经纬度信息，请换一个更明确的位置名称。"
 
