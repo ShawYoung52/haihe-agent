@@ -222,6 +222,38 @@ def _calculate_area_stats(
     }
 
 
+def _record_time_key(record: dict[str, Any]) -> str | None:
+    """把记录 Datetime 归一化为 UTC YYYYMMDDHHMMSS（天擎 times 格式）。
+
+    天擎 ByTime 接口 times 参数为 UTC 时次，记录 Datetime 也是 UTC——按字符串直解
+    不做时区换算（naive .timestamp() 依赖服务器时区，会错位）。
+    """
+    text = str(record.get("Datetime") or record.get("Datatime") or "").strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y%m%d%H%M%S",
+        "%Y-%m-%d %H:%M",
+    ):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y%m%d%H%M%S")
+        except ValueError:
+            continue
+    return None
+
+
+def _group_records_by_time(records: Any) -> dict[str, list[dict[str, Any]]]:
+    """按记录时间字段分组（天擎多时次一次返回的全部记录，按时次切回）。"""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in records or []:
+        if not isinstance(item, dict):
+            continue
+        key = _record_time_key(item)
+        if key:
+            grouped.setdefault(key, []).append(item)
+    return grouped
+
+
 def _query_same_successful_time(
     client: Any,
     *,
@@ -229,7 +261,61 @@ def _query_same_successful_time(
     hours_back: int,
 ) -> tuple[datetime | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     attempts: list[dict[str, str]] = []
-    for candidate in build_latest_utc_hour_candidates(now=now, hours_back=hours_back):
+    candidates = build_latest_utc_hour_candidates(now=now, hours_back=hours_back)
+
+    # 多时次合并：MUSIC ByTime 接口 times 支持逗号连接，一次请求返回全部时次 →
+    # region/basin 各 1 次调用（12 次 → 2 次）。服务端不支持（只回单个时次 / 抛错）
+    # 时回退逐时次串行，行为与原实现完全一致。
+    coalesced_region: list[dict[str, Any]] = []
+    coalesced_basin: list[dict[str, Any]] = []
+    coalesced_ok = True
+    try:
+        times_joined = ",".join(c.strftime("%Y%m%d%H%M%S") for c in candidates)
+        coalesced_region = client.get_surf_ele_in_region_by_time(
+            admin_codes=REGION_ADMIN_CODES,
+            times=times_joined,
+            elements=OBSERVATION_ELEMENTS,
+            data_code=OBSERVATION_DATA_CODE,
+        )
+        coalesced_basin = client.get_surf_ele_in_basin_by_time(
+            basin_codes=HAIHE_BASIN_CODE,
+            times=times_joined,
+            elements=OBSERVATION_ELEMENTS,
+            data_code=OBSERVATION_DATA_CODE,
+        )
+    except Exception:
+        coalesced_ok = False
+
+    region_by_time = _group_records_by_time(coalesced_region)
+    basin_by_time = _group_records_by_time(coalesced_basin)
+    if coalesced_ok and len(region_by_time) >= 2 and len(basin_by_time) >= 2:
+        # 从新到旧选第一个「region 覆盖完整 + basin 非空」时次（与原循环语义等价）。
+        for candidate in candidates:
+            times = candidate.strftime("%Y%m%d%H%M%S")
+            raw_region = region_by_time.get(times) or []
+            raw_basin = basin_by_time.get(times) or []
+            region_records = _deduplicate_station_records(raw_region)
+            attempts.append({
+                "times_utc": times,
+                "region_count": str(len(raw_region)),
+                "basin_count": str(len(raw_basin)),
+                "region_coverage": (
+                    "complete" if _has_required_region_coverage(region_records) else "incomplete"
+                ),
+                "region_error": "",
+                "basin_error": "",
+            })
+            if region_records and _has_required_region_coverage(region_records) and raw_basin:
+                return (
+                    candidate,
+                    region_records,
+                    _deduplicate_station_records(raw_basin),
+                    attempts,
+                )
+        return None, [], [], attempts
+
+    # 回退：逐时次串行（原逻辑逐字保留）
+    for candidate in candidates:
         times = candidate.strftime("%Y%m%d%H%M%S")
         region_records: list[dict[str, Any]] = []
         basin_records: list[dict[str, Any]] = []

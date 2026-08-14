@@ -16,6 +16,7 @@ import time
 import networkx as nx
 from fastmcp import FastMCP
 
+import requests
 import pandas as pd
 from analyzers.RainfallAnalyzer import RainfallAnalyzer
 from exception.CustomException import BusinessException
@@ -63,6 +64,12 @@ _RAINFALL_CACHE: dict[tuple, dict] = {}
 _RAINFALL_CACHE_TTL_SEC = int(os.getenv("RAINFALL_CACHE_TTL_SEC", "120"))
 _RAINFALL_CACHE_MAX_SIZE = int(os.getenv("RAINFALL_CACHE_MAX_SIZE", "50"))
 _RAINFALL_CACHE_LOCK = threading.Lock()
+
+# 水位查询缓存：默认查询（不传 begin/end）键 = 河名|类型|今日零点（跨天必 miss），
+# TTL 管新鲜度；显式时间段按完整时间段做键。接口失败结果不写缓存。默认 120s。
+WATER_LEVEL_CACHE_TTL = int(os.getenv("WATER_LEVEL_CACHE_TTL", "120"))
+_water_level_cache: dict[str, tuple[float, dict]] = {}
+_water_level_cache_lock = threading.Lock()
 
 
 def _pg_pool_key(pg_conf: dict) -> tuple:
@@ -1415,6 +1422,126 @@ def _analyze_rainfall_core(time_str: str, pg_conf: dict, custom_timerange: str =
         "summary": "".join(summary_parts),
     }
     _set_cached_rainfall(timestr, custom_timerange, result)
+    return result
+
+
+def _query_water_level_core(
+    river_name: str = "",
+    begin_time: str = "",
+    end_time: str = "",
+    data_type: str = "river",
+) -> dict:
+    """调用十四所接口查询水位数据（河道/水库/堰闸），带 120s TTL 缓存。"""
+    from datetime import datetime as _dt
+
+    now = _dt.now()
+    end = end_time or now.strftime("%Y-%m-%d %H:%M:%S")
+    begin = begin_time or (
+        now.replace(hour=0, minute=0, second=0, microsecond=0)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    # 默认查询（不传时间段）键只含今日零点，跨天必 miss，TTL 管新鲜度；
+    # 显式传时间段按完整时间段做键。
+    if begin_time or end_time:
+        cache_key = f"{river_name}|{data_type}|{begin}|{end}"
+    else:
+        cache_key = f"{river_name}|{data_type}|{begin}"
+    with _water_level_cache_lock:
+        hit = _water_level_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < WATER_LEVEL_CACHE_TTL:
+            return hit[1]
+
+    base_url = os.getenv("WATER_LEVEL_API_URL", "http://10.226.107.35:8001")
+    area_ids_str = os.getenv("WATER_LEVEL_AREA_IDS", "6,7,8,9,10,11,12,13,14")
+    area_ids = [int(x.strip()) for x in area_ids_str.split(",") if x.strip().isdigit()]
+    urls = {
+        "river": f"{base_url}/openapi/water_level/river",
+        "reservoir": f"{base_url}/openapi/water_level/reservoir",
+        "gate": f"{base_url}/openapi/water_level/gate",
+    }
+    api_url = urls.get(data_type, urls["river"])
+    payload = {"areaIds": area_ids, "beginTime": begin, "endTime": end, "sources": ["hwdb"]}
+    logger.info(f"[水位查询] {data_type} {api_url}")
+    try:
+        resp = requests.post(api_url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # 统一字段名，让LLM能读懂
+        normalized = []
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                n = {
+                    "station_name": item.get("stationName") or item.get("station_name", ""),
+                    "area_name": item.get("areaName") or item.get("area_name", ""),
+                    "area_id": item.get("areaId") or item.get("area_id"),
+                    "time": item.get("bjDatetime") or item.get("time", ""),
+                    "longitude": item.get("lan") or item.get("longitude"),
+                    "latitude": item.get("lat") or item.get("latitude"),
+                    "data_source": item.get("source") or item.get("data_source", ""),
+                    "data_type": data_type,
+                    "raw": item,
+                }
+                # 河道特有
+                if data_type == "river":
+                    n["water_level_m"] = item.get("waterLevel")
+                    n["warning_level_m"] = item.get("waterWarn")
+                    n["flow_rate_m3s"] = item.get("waterFlow")
+                    n["水位(m)"] = item.get("waterLevel")
+                    n["警戒水位(m)"] = item.get("waterWarn")
+                    n["超警戒(m)"] = item.get("overLimit")
+                    n["流量(m³/s)"] = item.get("waterFlow")
+                    n["涨率"] = item.get("waterRate")
+                    n["水势"] = item.get("levelStatus")
+                # 水库特有
+                elif data_type == "reservoir":
+                    n["water_level_m"] = item.get("waterStageUp")
+                    n["库上水位(m)"] = item.get("waterStageUp")
+                    n["库下水位(m)"] = item.get("waterStageDown")
+                    n["入库流量(m³/s)"] = item.get("stationFlowIn")
+                    n["出库流量(m³/s)"] = item.get("stationFlowOut")
+                    n["蓄水量(百万m³)"] = item.get("waterStorage")
+                    n["汛限水位(m)"] = item.get("floodLimit")
+                    n["水势"] = item.get("stationWaterFlow")
+                # 堰闸特有
+                elif data_type == "gate":
+                    n["闸上水位(m)"] = item.get("waterGateUp")
+                    n["闸下水位(m)"] = item.get("waterGateDown")
+                    n["总过闸流量(m³/s)"] = item.get("waterGateOver")
+                    n["闸上水势"] = item.get("gateFlowUp")
+                    n["闸下水势"] = item.get("gateFlowDown")
+                    n["警戒水位(m)"] = item.get("warnWaterLevel")
+                normalized.append(n)
+
+        if river_name and normalized:
+            kw = river_name.strip()
+            filtered = [
+                n for n in normalized
+                if kw in n.get("station_name", "") or kw in n.get("area_name", "")
+            ]
+            result = {
+                "data_type": data_type,
+                "river_name": river_name,
+                "count": len(filtered),
+                "records": filtered,
+                "source": "十四所水位接口",
+            }
+        else:
+            result = {
+                "data_type": data_type,
+                "count": len(normalized),
+                "records": normalized,
+                "source": "十四所水位接口",
+            }
+    except requests.exceptions.Timeout:
+        return {"error": "水位服务请求超时", "data_type": data_type}
+    except requests.exceptions.ConnectionError:
+        return {"error": "无法连接水位服务", "data_type": data_type}
+    except Exception as e:
+        return {"error": f"水位查询失败: {e}", "data_type": data_type}
+    with _water_level_cache_lock:
+        _water_level_cache[cache_key] = (time.time(), result)
     return result
 
 
@@ -4473,82 +4600,12 @@ def register_tools(mcp: FastMCP):
         Returns:
             dict: 水位数据列表
         """
-        import requests as _req
-        from datetime import datetime as _dt
-        base_url = os.getenv("WATER_LEVEL_API_URL", "http://10.226.107.35:8001")
-        now = _dt.now()
-        end = end_time or now.strftime("%Y-%m-%d %H:%M:%S")
-        begin = begin_time or (now.replace(hour=0, minute=0, second=0, microsecond=0)).strftime("%Y-%m-%d %H:%M:%S")
-        area_ids_str = os.getenv("WATER_LEVEL_AREA_IDS", "6,7,8,9,10,11,12,13,14")
-        area_ids = [int(x.strip()) for x in area_ids_str.split(",") if x.strip().isdigit()]
-        urls = {"river": f"{base_url}/openapi/water_level/river", "reservoir": f"{base_url}/openapi/water_level/reservoir", "gate": f"{base_url}/openapi/water_level/gate"}
-        api_url = urls.get(data_type, urls["river"])
-        payload = {"areaIds": area_ids, "beginTime": begin, "endTime": end, "sources": ["hwdb"]}
-        logger.info(f"[水位查询] {data_type} {api_url}")
-        try:
-            resp = _req.post(api_url, json=payload, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-
-            # 统一字段名，让LLM能读懂
-            normalized = []
-            if isinstance(data, list):
-                for item in data:
-                    if not isinstance(item, dict):
-                        continue
-                    n = {
-                        "station_name": item.get("stationName") or item.get("station_name", ""),
-                        "area_name": item.get("areaName") or item.get("area_name", ""),
-                        "area_id": item.get("areaId") or item.get("area_id"),
-                        "time": item.get("bjDatetime") or item.get("time", ""),
-                        "longitude": item.get("lan") or item.get("longitude"),
-                        "latitude": item.get("lat") or item.get("latitude"),
-                        "data_source": item.get("source") or item.get("data_source", ""),
-                        "data_type": data_type,
-                        "raw": item,
-                    }
-                    # 河道特有
-                    if data_type == "river":
-                        n["water_level_m"] = item.get("waterLevel")
-                        n["warning_level_m"] = item.get("waterWarn")
-                        n["flow_rate_m3s"] = item.get("waterFlow")
-                        n["水位(m)"] = item.get("waterLevel")
-                        n["警戒水位(m)"] = item.get("waterWarn")
-                        n["超警戒(m)"] = item.get("overLimit")
-                        n["流量(m³/s)"] = item.get("waterFlow")
-                        n["涨率"] = item.get("waterRate")
-                        n["水势"] = item.get("levelStatus")
-                    # 水库特有
-                    elif data_type == "reservoir":
-                        n["water_level_m"] = item.get("waterStageUp")
-                        n["库上水位(m)"] = item.get("waterStageUp")
-                        n["库下水位(m)"] = item.get("waterStageDown")
-                        n["入库流量(m³/s)"] = item.get("stationFlowIn")
-                        n["出库流量(m³/s)"] = item.get("stationFlowOut")
-                        n["蓄水量(百万m³)"] = item.get("waterStorage")
-                        n["汛限水位(m)"] = item.get("floodLimit")
-                        n["水势"] = item.get("stationWaterFlow")
-                    # 堰闸特有
-                    elif data_type == "gate":
-                        n["闸上水位(m)"] = item.get("waterGateUp")
-                        n["闸下水位(m)"] = item.get("waterGateDown")
-                        n["总过闸流量(m³/s)"] = item.get("waterGateOver")
-                        n["闸上水势"] = item.get("gateFlowUp")
-                        n["闸下水势"] = item.get("gateFlowDown")
-                        n["警戒水位(m)"] = item.get("warnWaterLevel")
-                    normalized.append(n)
-
-            if river_name and normalized:
-                kw = river_name.strip()
-                filtered = [n for n in normalized if kw in n.get("station_name", "") or kw in n.get("area_name", "")]
-                return {"data_type": data_type, "river_name": river_name, "count": len(filtered), "records": filtered, "source": "十四所水位接口"}
-            return {"data_type": data_type, "count": len(normalized), "records": normalized, "source": "十四所水位接口"}
-        except _req.exceptions.Timeout:
-            return {"error": "水位服务请求超时", "data_type": data_type}
-        except _req.exceptions.ConnectionError:
-            return {"error": "无法连接水位服务", "data_type": data_type}
-        except Exception as e:
-            return {"error": f"水位查询失败: {e}", "data_type": data_type}
+        return _query_water_level_core(
+            river_name=river_name,
+            begin_time=begin_time,
+            end_time=end_time,
+            data_type=data_type,
+        )
     # @mcp.tool()
     # def get_station_history(station_id: str, hours_back: int = 24) -> List[RainfallData]:
     #     """

@@ -37,14 +37,41 @@ def summarize(records: list[dict]) -> dict:
         n = r.get("planner_rounds", 0)
         rounds[n] = rounds.get(n, 0) + 1
     tool_times = {}
+    stage_times: dict[str, list[float]] = {}
+    tool_share: list[float] = []
+    tools_per_req: list[float] = []
     for r in records:
+        for name, ms in (r.get("stages") or {}).items():
+            if isinstance(ms, (int, float)):
+                stage_times.setdefault(name, []).append(ms)
         for t in r.get("tools", []):
-            name = t.get("name", "?")
-            tool_times[name] = tool_times.get(name, 0) + t.get("ms", 0)
+            if isinstance(t, dict):
+                name = t.get("name", "?")
+                tool_times[name] = tool_times.get(name, 0) + t.get("ms", 0)
+        tools = [t for t in r.get("tools", []) if isinstance(t, dict)]
+        tools_per_req.append(float(len(tools)))
+        tool_ms = sum(t.get("ms", 0) for t in tools)
+        total = r.get("total_ms")
+        if isinstance(total, (int, float)) and total > 0:
+            tool_share.append(tool_ms / total * 100.0)
+    stages_ms = {
+        name: compute_percentiles(vals)
+        for name, vals in sorted(
+            stage_times.items(),
+            key=lambda kv: compute_percentiles(kv[1])["p50"],
+            reverse=True,
+        )
+    }
     return {
         "total_requests": len(records),
         "total_ms": compute_percentiles(totals),
         "planner_rounds_dist": rounds,
+        # [PERF].stages 分阶段耗时分布（按 p50 降序），用于定位慢在 planner/tool/answer
+        "stages_ms": stages_ms,
+        # tool 取数耗时占总耗时百分比（前后对比：缓存命中后应显著下降）
+        "tool_share_of_total_pct": compute_percentiles(tool_share),
+        # 每请求工具调用次数（前后对比：多时次合并 12→2 应在此体现）
+        "tools_per_request": compute_percentiles(tools_per_req),
         "top_tools_by_ms": sorted(tool_times.items(), key=lambda kv: kv[1], reverse=True)[:10],
     }
 

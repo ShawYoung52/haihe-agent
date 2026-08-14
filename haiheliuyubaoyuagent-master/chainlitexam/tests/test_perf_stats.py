@@ -49,3 +49,30 @@ def test_summarize():
     # 工具耗时按累计排序，只保留前 10
     assert s["top_tools_by_ms"][0] == ("a", 80.0)
     assert s["top_tools_by_ms"][1] == ("b", 40.0)
+
+
+def test_summarize_stages_and_tool_share():
+    """消费 [PERF].stages 与 tools[].ms：按阶段分布 + tool 耗时占比 + 每请求工具数。"""
+    records = [
+        {"total_ms": 100.0, "planner_rounds": 1,
+         "stages": {"planner_round_1": 20.0, "tool_round_1": 30.0, "answer": 40.0, "done": 10.0},
+         "tools": [{"name": "a", "ms": 30.0}]},
+        {"total_ms": 200.0, "planner_rounds": 1,
+         "stages": {"planner_round_1": 40.0, "tool_round_1": 60.0, "answer": 80.0, "done": 20.0},
+         "tools": [{"name": "a", "ms": 60.0}]},
+    ]
+    s = summarize(records)
+    # n=2 时 p50 取上界 s[1]
+    assert s["stages_ms"]["tool_round_1"]["p50"] == pytest.approx(60.0)
+    assert s["stages_ms"]["answer"]["p50"] == pytest.approx(80.0)
+    assert s["tools_per_request"]["p50"] == pytest.approx(1.0)
+    # tool 占比：30/100=30%，60/200=30% → p50 30%
+    assert s["tool_share_of_total_pct"]["p50"] == pytest.approx(30.0)
+
+
+def test_summarize_missing_stages_tools():
+    """无 stages/tools 字段的记录不报错，相关统计为空或 0。"""
+    s = summarize([{"total_ms": 50.0, "planner_rounds": 1}])
+    assert s["stages_ms"] == {}
+    assert s["tools_per_request"]["p50"] == 0
+    assert s["tool_share_of_total_pct"]["p50"] == 0

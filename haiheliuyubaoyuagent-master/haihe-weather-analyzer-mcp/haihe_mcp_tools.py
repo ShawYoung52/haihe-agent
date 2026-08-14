@@ -158,11 +158,39 @@ _poi_search_cache: dict[str, tuple[float, Any]] = {}
 _POI_ES_CLIENT = None
 _POI_ES_LOCK = threading.Lock()
 
+# 按距离 POI 检索缓存：与 _search_poi_core 同族补齐。POI 数据静态，
+# 同 keyword+坐标+size+距离 在 TTL 内命中，默认 1 小时。
+POI_BY_DISTANCE_CACHE_TTL = int(os.getenv("POI_BY_DISTANCE_CACHE_TTL", "3600"))
+_poi_by_distance_cache: dict[str, tuple[float, Any]] = {}
+_poi_by_distance_cache_lock = threading.Lock()
+
 # 天津大风预警评估缓存：同一请求时次（YYYYMMDDHHmmss）在 TTL 内直接返回。
 # 风力实况按固定时次刷新，120s 内同一次查询不重拉天擎。默认 120s。
 TIANJIN_WIND_CACHE_TTL = int(os.getenv("TIANJIN_WIND_CACHE_TTL", "120"))
 _tianjin_wind_cache: dict[str, tuple[float, Any]] = {}
 _tianjin_wind_cache_lock = threading.Lock()
+
+# 预警信息缓存：effective/history 范围各自独立，TTL 内不重复请求预警接口。
+# include_raw=True（接口排查路径）不缓存。默认 120s。
+WARNING_INFO_CACHE_TTL = int(os.getenv("WARNING_INFO_CACHE_TTL", "120"))
+_warning_info_cache: dict[str, tuple[float, Any]] = {}
+_warning_info_cache_lock = threading.Lock()
+
+# 今日预警动态汇总缓存：每次汇总内部会请求 history+effective 两次接口，TTL 内不重复。默认 120s。
+TODAY_WARNING_SUMMARY_CACHE_TTL = int(os.getenv("TODAY_WARNING_SUMMARY_CACHE_TTL", "120"))
+_today_warning_summary_cache: dict[str, tuple[float, Any]] = {}
+_today_warning_summary_cache_lock = threading.Lock()
+
+# 中央气象台/国家局预警缓存：同关键词 + max_items 在 TTL 内命中。默认 120s。
+NATIONAL_WARNING_CACHE_TTL = int(os.getenv("NATIONAL_WARNING_CACHE_TTL", "120"))
+_national_warning_cache: dict[str, tuple[float, Any]] = {}
+_national_warning_cache_lock = threading.Lock()
+
+# RAG 知识库检索缓存：知识库为静态文档（非实况），同 query + kb_key 在 TTL 内命中。
+# 默认 600s；unknown_kb_key / rag_api_failed 等错误结果不写缓存。
+RAG_SEARCH_CACHE_TTL = int(os.getenv("RAG_SEARCH_CACHE_TTL", "600"))
+_rag_search_cache: dict[str, tuple[float, Any]] = {}
+_rag_search_cache_lock = threading.Lock()
 
 # RAG 请求体默认模板：name/key/query 在运行时按命中的知识库与用户问题填充
 RAG_REQUEST_DEFAULTS = {
@@ -330,6 +358,11 @@ def _build_today_warning_summary(history_raw_data: list[dict], effective_raw_dat
 
 def _fetch_warning_info(path: str, warning_status: str, include_raw: bool = False) -> dict:
     """请求预警接口"""
+    if not include_raw:
+        with _warning_info_cache_lock:
+            hit = _warning_info_cache.get(warning_status)
+            if hit and (time.time() - hit[0]) < WARNING_INFO_CACHE_TTL:
+                return hit[1]
     now = datetime.now()
     query_time = now.strftime("%Y-%m-%d %H:%M:%S")
     query_hour_text = now.strftime("%H时")
@@ -376,10 +409,18 @@ def _fetch_warning_info(path: str, warning_status: str, include_raw: bool = Fals
     if include_raw:
         result["raw_data"] = raw_data
         result["raw_response"] = payload
+    else:
+        with _warning_info_cache_lock:
+            _warning_info_cache[warning_status] = (time.time(), result)
     return result
 
 
 def _fetch_today_warning_summary() -> dict:
+    cache_key = "today_summary"
+    with _today_warning_summary_cache_lock:
+        hit = _today_warning_summary_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < TODAY_WARNING_SUMMARY_CACHE_TTL:
+            return hit[1]
     now = datetime.now()
     history = _fetch_warning_info(WARNING_HISTORY_PATH, "history", include_raw=True)
     effective = _fetch_warning_info(WARNING_EFFECTIVE_PATH, "effective", include_raw=True)
@@ -387,11 +428,14 @@ def _fetch_today_warning_summary() -> dict:
         return history
     if effective.get("error"):
         return effective
-    return _build_today_warning_summary(
+    result = _build_today_warning_summary(
         history_raw_data=history.get("raw_data") or [],
         effective_raw_data=effective.get("raw_data") or [],
         now=now,
     )
+    with _today_warning_summary_cache_lock:
+        _today_warning_summary_cache[cache_key] = (time.time(), result)
+    return result
 
 
 def _normalize_national_warning_row(row: list) -> dict:
@@ -446,6 +490,11 @@ def _national_warning_matches_keywords(item: dict, keywords: list[str]) -> bool:
 
 def _fetch_national_warning_info(keywords: str | None = None, max_items: int | None = None) -> dict:
     """请求中央气象台预警接口，返回筛选后的轻量化预警记录。"""
+    cache_key = f"{keywords}|{max_items}"
+    with _national_warning_cache_lock:
+        hit = _national_warning_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < NATIONAL_WARNING_CACHE_TTL:
+            return hit[1]
     now = datetime.now()
     query_time = now.strftime("%Y-%m-%d %H:%M:%S")
     query_hour_text = now.strftime("%H时")
@@ -483,7 +532,7 @@ def _fetch_national_warning_info(keywords: str | None = None, max_items: int | N
 
     warnings = matched_warnings[:limit] if limit > 0 else matched_warnings
 
-    return {
+    result = {
         "warning_status": "national",
         "source": "中央气象台预警接口",
         "url": NATIONAL_WARNING_API_URL,
@@ -508,6 +557,9 @@ def _fetch_national_warning_info(keywords: str | None = None, max_items: int | N
             "详情链接": "warnings[].url",
         },
     }
+    with _national_warning_cache_lock:
+        _national_warning_cache[cache_key] = (time.time(), result)
+    return result
 
 
 def _rag_search_doc() -> str:
@@ -2649,6 +2701,12 @@ def _search_poi_by_distance_core(
     except Exception as exc:
         raise BusinessException("lon 和 lat 必须是数字") from exc
 
+    cache_key = f"{keyword}|{lon}|{lat}|{size}|{distance_km}"
+    with _poi_by_distance_cache_lock:
+        hit = _poi_by_distance_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < POI_BY_DISTANCE_CACHE_TTL:
+            return hit[1]
+
     body = {
         "size": size,
         "_source": [
@@ -2723,7 +2781,10 @@ def _search_poi_by_distance_core(
         ],
     }
     fuzzy_resp = _get_poi_es_client().search(index=POI_ES_INDEX, body=body)
-    return _build_poi_result("fuzzy", fuzzy_resp)
+    result = _build_poi_result("fuzzy", fuzzy_resp)
+    with _poi_by_distance_cache_lock:
+        _poi_by_distance_cache[cache_key] = (time.time(), result)
+    return result
 
 
 def _query_tianjin_wind_warning_core(times: str = "") -> dict:
@@ -2762,6 +2823,71 @@ def _query_tianjin_wind_warning_core(times: str = "") -> dict:
     result["request_time"] = request_time
     with _tianjin_wind_cache_lock:
         _tianjin_wind_cache[request_time] = (time.time(), result)
+    return result
+
+
+def _rag_search_core(query: str, kb_key: str) -> dict:
+    """检索业务知识库，返回参考内容片段（带 600s TTL 缓存）。
+
+    知识库为静态文档，同 query + kb_key 在 TTL 内命中；错误结果（unknown_kb_key /
+    rag_api_failed）不写缓存。
+    """
+    cache_key = f"{query}|{kb_key}"
+    with _rag_search_cache_lock:
+        hit = _rag_search_cache.get(cache_key)
+        if hit and (time.time() - hit[0]) < RAG_SEARCH_CACHE_TTL:
+            return hit[1]
+
+    kb = _rag_find_kb_by_key(kb_key)
+    if kb is None:
+        return {
+            "error": "unknown_kb_key",
+            "kb_key": kb_key,
+            "available_keys": [k["key"] for k in RAG_KNOWLEDGE_BASES],
+            "contexts": [],
+            "chunks": [],
+            "sources": [],
+            "count": 0,
+        }
+
+    request_body = _rag_build_request(kb, query)
+    try:
+        resp = requests.post(RAG_API_URL, json=request_body, timeout=RAG_API_TIMEOUT)
+        resp.raise_for_status()
+        rag_result = resp.json()
+    except Exception as e:
+        print(f"[RAG] 检索接口调用失败：{e}")
+        return {
+            "knowledge_base": kb["name"],
+            "kb_key": kb["key"],
+            "query": query,
+            "error": "rag_api_failed",
+            "contexts": [],
+            "chunks": [],
+            "sources": [],
+            "count": 0,
+        }
+
+    contexts = _rag_extract_contexts(rag_result, max_contexts=int(request_body.get("top_k") or 5))
+    chunks = _rag_contexts_to_chunks(contexts)
+    sources = sorted(
+        {
+            str(item.get("source") or "").strip()
+            for item in contexts
+            if str(item.get("source") or "").strip()
+        }
+    )
+    result = {
+        "knowledge_base": kb["name"],
+        "kb_key": kb["key"],
+        "query": query,
+        "contexts": contexts,
+        "chunks": chunks,
+        "sources": sources,
+        "count": len(contexts),
+    }
+    with _rag_search_cache_lock:
+        _rag_search_cache[cache_key] = (time.time(), result)
     return result
 
 
@@ -3637,54 +3763,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         }
 
     def rag_search(query: str, kb_key: str) -> dict:
-        kb = _rag_find_kb_by_key(kb_key)
-        if kb is None:
-            return {
-                "error": "unknown_kb_key",
-                "kb_key": kb_key,
-                "available_keys": [k["key"] for k in RAG_KNOWLEDGE_BASES],
-                "contexts": [],
-                "chunks": [],
-                "sources": [],
-                "count": 0,
-            }
-
-        request_body = _rag_build_request(kb, query)
-        try:
-            resp = requests.post(RAG_API_URL, json=request_body, timeout=RAG_API_TIMEOUT)
-            resp.raise_for_status()
-            rag_result = resp.json()
-        except Exception as e:
-            print(f"[RAG] 检索接口调用失败：{e}")
-            return {
-                "knowledge_base": kb["name"],
-                "kb_key": kb["key"],
-                "query": query,
-                "error": "rag_api_failed",
-                "contexts": [],
-                "chunks": [],
-                "sources": [],
-                "count": 0,
-            }
-
-        contexts = _rag_extract_contexts(rag_result, max_contexts=int(request_body.get("top_k") or 5))
-        chunks = _rag_contexts_to_chunks(contexts)
-        sources = sorted(
-            {
-                str(item.get("source") or "").strip()
-                for item in contexts
-                if str(item.get("source") or "").strip()
-            }
-        )
-        return {
-            "knowledge_base": kb["name"],
-            "kb_key": kb["key"],
-            "query": query,
-            "contexts": contexts,
-            "chunks": chunks,
-            "sources": sources,
-            "count": len(contexts),
-        }
+        return _rag_search_core(query, kb_key)
 
     # 采用函数式注册，把知识库目录注入工具说明。
     rag_search.__doc__ = _rag_search_doc()
