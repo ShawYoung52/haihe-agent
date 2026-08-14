@@ -6,6 +6,7 @@ from constants import RIVER_TABLE_FULL
 import fixed_rainfall_impact_tool as rainfall_impact_tool
 from tools import register_tools
 from custom_tools import (
+    register_basin_drawing_tool,
     register_historical_same_period_rainfall_tool,
     register_historical_weather_tool,
     register_last_month_areal_rainfall_tool,
@@ -44,6 +45,7 @@ class HaiheWeatherAnalyzerMCP:
         register_historical_weather_tool(self.mcp)
         register_risk_warning_tool(self.mcp)
         register_safe_emergency_response_tool(self.mcp)
+        register_basin_drawing_tool(self.mcp)
         register_forecast_evaluate_tool(self.mcp)
 
         @self.mcp.tool()

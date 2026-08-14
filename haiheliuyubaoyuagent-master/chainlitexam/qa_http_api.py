@@ -111,14 +111,46 @@ _SCRUB_PATTERNS = [
     (re.compile(r"postgresql(?:\+\w+)?://[^\s\"']+"), "[数据库连接]"),
 ]
 
+# 图片代理 allowlist：默认只放行 14所出图代理（10.226.107.35:8080）的 URL，使其
+# 能作为 markdown 图链/HTTP images 字段正常展示；其余内网 IP 仍照常脱敏。
+_IMAGE_URL_ALLOW_HOSTS = [
+    h.strip()
+    for h in os.getenv("IMAGE_URL_ALLOW_HOSTS", "10.226.107.35:8080").split(",")
+    if h.strip()
+]
+
+# 答案文本里的外部 markdown 图片图链（如 14所出图代理 URL）：![title](https://...)
+_MARKDOWN_IMAGE_URL_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)")
+
 
 def _scrub(text: str) -> str:
-    """抹掉内网 IP、绝对路径、数据库连接串。"""
+    """抹掉内网 IP、绝对路径、数据库连接串。
+
+    图片代理 allowlist（_IMAGE_URL_ALLOW_HOSTS）内的 URL 先占位保护、后还原，
+    保证出图结果能正常展示；其余内网 IP/路径照常脱敏。
+    """
     if not text:
         return text
     out = text if isinstance(text, str) else str(text)
+    if _IMAGE_URL_ALLOW_HOSTS:
+        image_proxy_pattern = re.compile(
+            r"https?://(?:"
+            + "|".join(re.escape(h) for h in _IMAGE_URL_ALLOW_HOSTS)
+            + r")[^\s\"'<>|]*"
+        )
+        saved: list[str] = []
+
+        def _save(match) -> str:
+            saved.append(match.group(0))
+            return f"《imgproxy{len(saved) - 1}》"
+
+        out = image_proxy_pattern.sub(_save, out)
+    else:
+        saved = []
     for pattern, repl in _SCRUB_PATTERNS:
         out = pattern.sub(repl, out)
+    for index, url in enumerate(saved):
+        out = out.replace(f"《imgproxy{index}》", url, 1)
     return out
 
 
@@ -494,12 +526,15 @@ async def cleanup_expired_files_async(ttl_seconds: int = FILE_TTL_SECONDS) -> in
     return await asyncio.to_thread(cleanup_expired_files, ttl_seconds)
 
 
-def _build_image_payload(emitter: CapturingEmitter, session) -> list[dict]:
-    """把 emitter 收到的图片元素映射成可访问 URL。
+def _build_image_payload(emitter: CapturingEmitter, session, answer: str = "") -> list[dict]:
+    """把 emitter 收到的图片元素映射成可访问 URL，并顺带收集答案里的外部 markdown 图链。
 
     URL 里的目录段用图片**实际落盘的父目录名**，而不是直接写 `session.id`。
     二者当前等价（Chainlit `BaseSession.files_dir` 返回 `FILES_DIRECTORY / self.id`），
     但取实际路径可在 Chainlit 改变该规则时自动跟随，不至于让所有图片 URL 失效。
+
+    `answer`：合并后的答案文本。14所等外部代理图 URL 以 markdown `![title](url)`
+    形式出现在答案里，追加为 `{name, url, mime:"image/png"}` 条目供前端独立渲染。
     """
     files = getattr(session, "files", None) or {}
     images = []
@@ -518,6 +553,13 @@ def _build_image_payload(emitter: CapturingEmitter, session) -> list[dict]:
             "url": f"/api/v1/qa/files/{path.parent.name}/{path.name}",
             "mime": el.get("mime") or entry.get("type") or "image/png",
         })
+
+    seen = {img["url"] for img in images}
+    for title, url in _MARKDOWN_IMAGE_URL_RE.findall(str(answer or "")):
+        if url in seen or url.startswith("/api/v1/qa/files/"):
+            continue
+        images.append({"name": title.strip() or "image", "url": url, "mime": "image/png"})
+        seen.add(url)
     return images
 
 
@@ -755,7 +797,7 @@ class QARuntime:
         return {
             "answer": _scrub(answer),
             "conversation_id": conversation_id,
-            "images": _build_image_payload(emitter, ctx.session),
+            "images": _build_image_payload(emitter, ctx.session, answer=answer),
             "gis": list(emitter.gis_packets) if include_gis else [],
             "reasoning": [_scrub(t) for t in emitter.reasoning_texts()] if include_reasoning else [],
             "elapsed_seconds": total_elapsed,

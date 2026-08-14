@@ -1,4 +1,5 @@
 """Custom tools package - 海河流域气象分析扩展工具集。"""
+from custom_tools.basin_drawing_tool import register_basin_drawing_tool
 from custom_tools.historical_same_period_rainfall_tool import (
     register_historical_same_period_rainfall_tool,
 )
@@ -26,6 +27,7 @@ from custom_tools.year_to_date_areal_rainfall_tool import (
 )
 
 __all__ = [
+    "register_basin_drawing_tool",
     "register_historical_same_period_rainfall_tool",
     "register_historical_weather_tool",
     "register_last_month_areal_rainfall_tool",

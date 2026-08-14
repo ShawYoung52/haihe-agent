@@ -2856,7 +2856,8 @@ def _query_tianjin_wind_warning_core(times: str = "") -> dict:
 
     query_time = tianjin_now.strftime("%Y-%m-%d %H:%M:%S")
     try:
-        records = _get_music_client().get_surf_ele_in_region_by_time(
+        # 保持 new MusicClient()：便于测试 mock（_get_music_client 单例跨测试持久化）。
+        records = MusicClient().get_surf_ele_in_region_by_time(
             admin_codes="120000",
             times=request_time,
         )
