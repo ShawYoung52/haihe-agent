@@ -81,7 +81,9 @@ ENABLE_LLM_THINKING = os.environ.get("ENABLE_LLM_THINKING", "false").strip().low
 from tools.decision_weather_core import (
     _decision_weather_prefilter,
     _extract_first_json_object,
+    _generate_decision_historical_answer,
     _parse_decision_dt,
+    classify_poi_category,
     filter_redundant_decision_weather_calls,
 )
 
@@ -2026,7 +2028,7 @@ def _assemble_tool_observations_fallback(messages: list) -> str:
 
 
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks,
-                          parent_step_id: str | None = None):
+                          parent_step_id: str | None = None, answer_chain=None):
     ree = None
     forced_final_text = None
     tianhe_passthrough_text = None  # 本轮 forced_final_text 若来自天河 answer，记录原文用于透传判定
@@ -2189,6 +2191,42 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         json.dumps(compact_facts, ensure_ascii=False, default=str)
                         + rolling_forecast_llm_instruction(bundle)
                     )
+                elif tool_name == "query_poi_historical_weather" and answer_chain is not None:
+                    # planner 直调历史实况工具（未走 query_decision_weather_for_poi）时，
+                    # 与决策天气历史分支共用同一格式化器组装回答并追加隐患点注意事项，
+                    # 保证无论 planner 选哪个工具，历史回答格式统一、都带注意事项。
+                    hist_payload = _unwrap_tool_result(observation)
+                    if isinstance(hist_payload, dict) and hist_payload.get("status") == "ok":
+                        point_name = str(hist_payload.get("point_name") or tool_args.get("point_name") or "该点位")
+                        poi_lon = hist_payload.get("lon")
+                        poi_lat = hist_payload.get("lat")
+                        category = classify_poi_category(point_name, "", None, None)
+                        hazard_points = None
+                        if category is not None and poi_lon is not None and poi_lat is not None:
+                            hazard_tool = _find_tool(tools, "query_poi_hazard_reminders")
+                            if hazard_tool is not None:
+                                try:
+                                    hazard_raw = await hazard_tool.ainvoke(
+                                        {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0}
+                                    )
+                                    hazard_payload = _unwrap_tool_result(hazard_raw)
+                                    if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
+                                        hazard_points = hazard_payload
+                                except Exception as hazard_err:
+                                    print(f"[orchestrator] 历史实况隐患点查询失败（跳过注意事项）：{hazard_err}")
+                        hist_text = await _generate_decision_historical_answer(
+                            user_text,
+                            hist_payload,
+                            {"address": "", "longitude": poi_lon, "latitude": poi_lat},
+                            point_name,
+                            "general_weather",
+                            answer_chain,
+                            callbacks,
+                            poi_category=category,
+                            hazard_points=hazard_points,
+                        )
+                        observation_text = _sanitize_display_text(str(hist_text or ""))
+                        forced_final_text = observation_text
                 elif tool_name.startswith("historical_weather_"):
                     img_msgs, observation_text = _extract_historical_weather_images(observation)
                     if img_msgs:
@@ -4862,6 +4900,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         forced_final_text, ree, warning_bundles, round_rolling_forecast_bundles, tianhe_passthrough_text = await _run_tool_round(
             planner_msg, tools, messages, message.content, iteration, callbacks,
             parent_step_id=reasoning.step.id if reasoning and reasoning.step else None,
+            answer_chain=answer_chain,
         )
         timing.mark(f"tool_round_{iteration}")
         timing.tool_call_count += len(planner_msg.tool_calls)

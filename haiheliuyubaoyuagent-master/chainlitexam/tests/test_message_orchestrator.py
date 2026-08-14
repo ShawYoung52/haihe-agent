@@ -1024,3 +1024,89 @@ async def test_second_planner_timeout_no_usable_data_falls_to_error(monkeypatch)
         isinstance(m, mo.AIMessage) and "执行失败" in getattr(m, "content", "")
         for m in final_messages
     ), "不应把'执行失败'占位文本当答案追加"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_round_direct_historical_assembles_with_hazard(monkeypatch):
+    """planner 直调 query_poi_historical_weather → orchestrator 用历史格式化器组装回答并追加隐患点注意事项。"""
+    import json as _json
+
+    hist_payload = {
+        "status": "ok",
+        "query_type": "historical_observation",
+        "query_mode": "historical_obs",
+        "data_source": "自动站历史实况",
+        "lon": 117.2,
+        "lat": 39.1,
+        "point_name": "同乐小学",
+        "forecast_start_time": "2026-07-11 00:00",
+        "forecast_end_time": "2026-07-12 00:00",
+        "periods": [
+            {
+                "start_time": "2026-07-11 00:00",
+                "end_time": "2026-07-12 00:00",
+                "period_label": "7月11日",
+                "weather": "暴雨",
+                "tmax": 26.0,
+                "tmin": 24.0,
+                "EDA": "东南风2级",
+                "rainfall_mm": 52.5,
+                "rain_1h": 52.5,
+                "TP1H": 52.5,
+                "visibility_min_km": 5.0,
+            }
+        ],
+        "nearest_station": {"station_name": "同乐小学站", "distance_km": 0.5},
+    }
+
+    class FakeHistoricalTool:
+        name = "query_poi_historical_weather"
+
+        async def ainvoke(self, args):
+            return [{"text": _json.dumps(hist_payload, ensure_ascii=False)}]
+
+    class FakeHazardTool:
+        name = "query_poi_hazard_reminders"
+
+        async def ainvoke(self, args):
+            return [{"text": _json.dumps({
+                "status": "ok",
+                "total_found": 1,
+                "categories": [{"key": "dzzh", "label": "地质灾害", "count": 1}],
+            }, ensure_ascii=False)}]
+
+    class FakePlannerMsg:
+        tool_calls = [{"name": "query_poi_historical_weather", "args": {}, "id": "call-h1"}]
+
+    class FakeAnswer:
+        def __init__(self, text):
+            self.content = text
+
+    async def _fake_answer(chain, inputs):
+        return FakeAnswer("【核心结论】7月11日同乐小学实际出现暴雨天气，当日累计降水量达52.5毫米。")
+
+    callbacks = {
+        "ainvoke_chain": _fake_answer,
+        "tool_observation_to_text": lambda obs: str(obs),
+    }
+    tools = [FakeHistoricalTool(), FakeHazardTool()]
+    messages = []
+    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+    # 直调 _run_tool_round 走真实 chainlit.Step 需要 Chainlit 上下文；自包含设置避免依赖测试顺序。
+    from chainlit.context import context_var, init_http_context
+
+    context_var.set(init_http_context(thread_id="test-direct-historical"))
+
+    forced, ree, bundles, rolling_bundles, _ = await mo._run_tool_round(
+        FakePlannerMsg(), tools, messages, "同乐小学7月11日天气怎么样", 1, callbacks,
+        answer_chain=object(),
+    )
+
+    assert forced is not None
+    assert "【核心结论】" in forced
+    assert "【同乐小学历史实况】" in forced
+    assert "⚠ 注意事项" in forced
+    assert "风险研判" in forced
+    assert "当日实际" in forced
+    assert "数据来源：自动站历史实况。" in forced
+    assert not any("执行失败" in getattr(m, "content", "") for m in messages)

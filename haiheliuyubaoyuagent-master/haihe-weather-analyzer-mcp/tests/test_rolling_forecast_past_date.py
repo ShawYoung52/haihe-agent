@@ -1,7 +1,7 @@
 """滚动预报过去日期解析与历史实况路由标记测试。
 
 覆盖两类修复：
-1. "号"字日期解析（8月10号 / 裸 10号 / 写全年份严格 / 远期过去推到明年）；
+1. "号"字日期解析（8月10号 / 裸 10号 / 写全年份严格 / 同一年已过去日期按今年历史实况）；
 2. 过去日历日在 query_rolling_forecast_core 返回结构化 past_date 标记，
    不再静默回退未来预报、不再报 240h 原始异常、不再把过去日期当回算预报返回。
 """
@@ -60,9 +60,19 @@ class TestExtractExplicitQueryDatesHao:
         # 天气问法里的裸日期仍正常解析
         assert _extract("10号天津天气") == [date(2026, 8, 10)]
 
-    def test_far_past_no_year_pushes_next_year(self):
-        """3月5日（5个月前）：无年份时仍取最近的未来同月同日（明年），不误判为历史。"""
-        assert _extract("3月5日天津天气") == [date(2027, 3, 5)]
+    def test_far_past_no_year_keeps_current_year_historical(self):
+        """3月5日（5个月前）：无年份今年已过去日期按今年历史实况处理，不推明年（天气问答推明年超240h无答案）。"""
+        assert _extract("3月5日天津天气") == [date(2026, 3, 5)]
+
+    def test_far_past_ri_and_hao_same_year_historical(self):
+        """7月11日/7月11号（同一年已过去>15天）：一律保持今年历史，号与日解析一致。"""
+        assert _extract("同乐小学7月11日天气怎么样") == [date(2026, 7, 11)]
+        assert _extract("同乐小学7月11号天气怎么样") == [date(2026, 7, 11)]
+
+    def test_bare_far_past_keeps_current_month(self):
+        """裸 2号（本月已过去>15天，如 8/20 问 2号）：保持当月，不推下月。"""
+        current = datetime(2026, 8, 20, 10, 0, tzinfo=rfs.TIANJIN_TIMEZONE)
+        assert rfs._extract_explicit_query_dates("2号天津天气", current) == [date(2026, 8, 2)]
 
     def test_full_year_exact_past(self):
         """写全年份的过去日期严格按该年解析，不做未来化。"""
@@ -137,9 +147,15 @@ class TestPastDateMarker:
         assert result.get("status") == "past_date"
         assert result["historical_window"]["target_start"].startswith("2026-08-11")
 
-    def test_far_future_out_of_range_clean_message(self, monkeypatch):
-        """远期未来日期（明年3月5日）超出240h时效 → 结构化提示而非原始异常。"""
+    def test_same_year_far_past_returns_marker(self, monkeypatch):
+        """同一年已过去>15天的日期（7月11日/3月5日）→ 返回 past_date 标记，不再报 240h 越界。"""
         monkeypatch.setattr(rfs.requests, "get", self._fake_get)
+        result = rfs.query_rolling_forecast_core(
+            "同乐小学7月11日天气怎么样", lon=117.2, lat=39.1, point_name="同乐小学", now=NOW
+        )
+        assert result.get("status") == "past_date"
+        assert result["historical_window"]["target_start"].startswith("2026-07-11")
+
         result = rfs.query_rolling_forecast_core("3月5日天津天气", now=NOW)
-        assert result.get("status") == "out_of_range"
-        assert "240" in result.get("message", "") or "10" in result.get("message", "")
+        assert result.get("status") == "past_date"
+        assert result["historical_window"]["target_start"].startswith("2026-03-05")

@@ -255,17 +255,17 @@ def _parse_small_number(value: str) -> int | None:
     return None
 
 
-# 无年份日期判定：近期过去（含当月）保持当年/当月，供历史实况判定；
-# 远期过去视为“最近的未来同月同日”（如 8 月问 3 月 5 日 → 明年 3 月 5 日）。
-PAST_DATE_RECENCY_DAYS = 15
-
-
+# 无年份日期一律按当前日历解释（今年/当月已发生 = 历史实况，未发生 = 预报）。
+# 不做"最近的未来同月同日"改写：推明年/下月对 240h 时效的滚动预报无法回答。
 def _extract_explicit_query_dates(user_query: str, current: datetime) -> list[date]:
     """从用户原问中提取明确公历日期。
 
-    写全年份的日期严格按该年解析（过去即历史）；无年份日期按“最近的未来”
-    惯例解析，但近期过去（``PAST_DATE_RECENCY_DAYS`` 天内）保持当年/当月，
-    供调用方判定为历史实况。支持“8月10日 / 8月10号 / 10号 / 2026年8月10日 / 2026-8-10”。
+    写全年份的日期严格按该年解析（过去即历史）；无年份日期一律按当前日历解释：
+    今年/当月未发生为未来（预报），今年/当月已发生为今年历史实况。
+    天气问答场景下"推明年/下月"对滚动预报（240h 时效）永远无法回答，故不做
+    "最近的未来同月同日"改写（原 15 天规则把 7月11日 这类同一年已过去日期
+    推去明年，导致"暂无具体天气预报信息"）。支持"8月10日 / 8月10号 / 10号 /
+    2026年8月10日 / 2026-8-10"。
     """
     text = str(user_query or "")
     matches: list[tuple[int, date]] = []
@@ -284,8 +284,6 @@ def _extract_explicit_query_dates(user_query: str, current: datetime) -> list[da
             continue
         try:
             candidate = date(current.year, int(match.group(1)), int(match.group(2)))
-            if candidate < current.date() and (current.date() - candidate).days > PAST_DATE_RECENCY_DAYS:
-                candidate = date(current.year + 1, candidate.month, candidate.day)
             matches.append((match.start(), candidate))
             occupied_spans.append(match.span())
         except ValueError:
@@ -300,10 +298,6 @@ def _extract_explicit_query_dates(user_query: str, current: datetime) -> list[da
             continue
         try:
             candidate = date(current.year, current.month, int(match.group(1)))
-            if candidate < current.date() and (current.date() - candidate).days > PAST_DATE_RECENCY_DAYS:
-                next_month = current.month % 12 + 1
-                next_year = current.year + (1 if current.month == 12 else 0)
-                candidate = date(next_year, next_month, candidate.day)
             matches.append((match.start(), candidate))
             occupied_spans.append(match.span())
         except ValueError:
