@@ -105,7 +105,6 @@ def _fetch_basin_drawing_areas() -> dict[str, Any]:
             "areaName": str(item.get("areaName") or "").strip(),
             "children": children,
         })
-    supported = [a for a in areas if a["children"]]
     if not areas:
         # 上游 HTTP 200 但无分区数据（可能未配置/鉴权失败）：按 no_data 处理，
         # 不写 3600s 缓存（与共享缓存「无数据不缓存」契约一致）。
@@ -118,7 +117,7 @@ def _fetch_basin_drawing_areas() -> dict[str, Any]:
     return {
         "status": "ok",
         "areas": areas,
-        "supported_count": len(supported),
+        "supported_count": sum(1 for a in areas if a["children"]),
     }
 
 

@@ -28,6 +28,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Protocol
+from urllib.parse import urlparse
 
 from chainlit.emitter import BaseChainlitEmitter
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -123,24 +124,20 @@ _IMAGE_URL_ALLOW_HOSTS = [
 # 答案文本里的外部 markdown 图片图链（如 14所出图代理 URL）：![title](https://...)
 _MARKDOWN_IMAGE_URL_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)")
 
-# 通用 URL 候选（供 _scrub 保护与 images 提取共用）
+# 通用 URL 候选（供 _scrub 保护使用；images 提取走 _MARKDOWN_IMAGE_URL_RE）
 _ALL_URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
+
+# _scrub 里 allowlist URL 的占位符：纯 CJK 全角，不会被脱敏正则命中
+_SAVED_URL_MARK = "《imgproxy》"
 
 
 def _is_allowed_image_url(url: str) -> bool:
     """URL 的 authority（host:port，精确匹配）是否在图片代理 allowlist 内。
 
     精确匹配而非前缀匹配：`10.226.107.35:8080x` 等畸形 authority 不放行。
+    allowlist 在调用时现读（测试会 monkeypatch），不缓存成模块级 set。
     """
-    if not _IMAGE_URL_ALLOW_HOSTS or not url:
-        return False
-    allowed = set(_IMAGE_URL_ALLOW_HOSTS)
-    for scheme in ("http://", "https://"):
-        if url.startswith(scheme):
-            rest = url[len(scheme):]
-            authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-            return authority in allowed
-    return False
+    return urlparse(url).netloc in _IMAGE_URL_ALLOW_HOSTS
 
 
 def _scrub(text: str) -> str:
@@ -158,15 +155,15 @@ def _scrub(text: str) -> str:
         url = match.group(0)
         if _is_allowed_image_url(url):
             saved.append(url)
-            return f"《imgproxy{len(saved) - 1}》"
+            return _SAVED_URL_MARK
         # 未放行：原样留下，交给 _SCRUB_PATTERNS 脱敏
         return url
 
     out = _ALL_URL_RE.sub(_save, out)
     for pattern, repl in _SCRUB_PATTERNS:
         out = pattern.sub(repl, out)
-    for index, url in enumerate(saved):
-        out = out.replace(f"《imgproxy{index}》", url, 1)
+    for url in saved:
+        out = out.replace(_SAVED_URL_MARK, url, 1)
     return out
 
 
@@ -572,11 +569,9 @@ def _build_image_payload(emitter: CapturingEmitter, session, answer: str = "") -
 
     seen = {img["url"] for img in images}
     for title, url in _MARKDOWN_IMAGE_URL_RE.findall(str(answer or "")):
-        if url in seen or url.startswith("/api/v1/qa/files/"):
-            continue
-        # 只放行 allowlist 主机的图链（authority 精确匹配），与 _scrub 脱敏边界一致，
+        # 只放行 allowlist 主机的图链（authority 精确匹配），与 _scrub 脱敏边界一致；
         # 未放行的内网 URL 不进 images 字段。
-        if not _is_allowed_image_url(url):
+        if url in seen or not _is_allowed_image_url(url):
             continue
         images.append({"name": title.strip() or "image", "url": url, "mime": "image/png"})
         seen.add(url)
