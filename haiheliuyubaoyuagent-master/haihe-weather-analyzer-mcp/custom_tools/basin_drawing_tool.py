@@ -19,6 +19,9 @@ from custom_tools._ttl_cache import make_ttl_cache
 
 
 BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+# ⚠️ 与 chainlitexam/qa_http_api.py 的 IMAGE_URL_ALLOW_HOSTS 默认同值但独立配置：
+# 部署改 BASIN_DRAWING_API_BASE 时必须同步扩展 IMAGE_URL_ALLOW_HOSTS，否则图链会被
+# _scrub 脱敏成 [内网地址]、images 字段也不收录。
 BASIN_DRAWING_API_BASE = os.getenv("BASIN_DRAWING_API_BASE", "http://10.226.107.35:8080")
 AREAS_URL = f"{BASIN_DRAWING_API_BASE}/openapi/basin_drawing/areas"
 IMAGE_URL = f"{BASIN_DRAWING_API_BASE}/openapi/basin_drawing/image"
@@ -103,6 +106,15 @@ def _fetch_basin_drawing_areas() -> dict[str, Any]:
             "children": children,
         })
     supported = [a for a in areas if a["children"]]
+    if not areas:
+        # 上游 HTTP 200 但无分区数据（可能未配置/鉴权失败）：按 no_data 处理，
+        # 不写 3600s 缓存（与共享缓存「无数据不缓存」契约一致）。
+        return {
+            "status": "no_data",
+            "message": "分区列表为空（可能未配置或接口鉴权失败）",
+            "areas": [],
+            "supported_count": 0,
+        }
     return {
         "status": "ok",
         "areas": areas,
@@ -182,7 +194,12 @@ def generate_basin_rainfall_image_core(
     if scene == "FORECAST":
         body["forecastTime"] = ft_dt.strftime("%Y-%m-%d %H:%M")
 
-    url = f"{IMAGE_URL}?forceCreate={int(force_create or 0)}"
+    try:
+        force = int(force_create or 0)
+    except (TypeError, ValueError):
+        return {"status": "error", "message": f"force_create 必须是 0/1，当前 {force_create!r}"}
+
+    url = f"{IMAGE_URL}?forceCreate={force}"
     try:
         resp = requests.post(url, json=body, timeout=60)
         resp.raise_for_status()
@@ -248,6 +265,10 @@ def register_basin_drawing_tool(mcp: FastMCP) -> None:
         - 实况站点雨量图 → product_type=STATION_RAIN（仅 scene_type=REALTIME）
         - 格点预报降水图 → product_type=GRID_RAIN（仅 scene_type=FORECAST，自动取最近 08/20 起报时次）
         - 出图前先调 query_basin_drawing_areas 拿 parent_area_id 与 areaCodes（二级编码，ALL=全部）
+
+        边界：海河 9 大分区/子流域的「9分区降雨分布图」走既有工具
+        get_station_rainfall_real_img（8001 端口 base64 出图）；本工具为 14所
+        一级分区+Shapefile 二级分区的面雨量/格点/站点雨量出图，支持自定义标题。
 
         Args:
             scene_type: REALTIME 实况 / FORECAST 预报

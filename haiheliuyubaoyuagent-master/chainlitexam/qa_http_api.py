@@ -100,7 +100,8 @@ class QANotConfigured(RuntimeError):
 
 # ---------------------------------------------------------------- 脱敏
 
-# 内网地址与本地路径不得出现在响应里。HTTP 接口面向外部客户端（天河小程序），
+# 内网地址与本地路径不得出现在响应里（图片代理 allowlist _IMAGE_URL_ALLOW_HOSTS
+# 放行的出图 URL 除外）。HTTP 接口面向外部客户端（天河小程序），
 # 暴露面比只给内部业务人员看的网页端大得多。
 # `message_orchestrator` 的 `reasoning.line(f"❌ ...{str(e)[:200]}")` 会把**未脱敏的
 # 原始异常**写进思考过程，实测能带出内网 IP 和绝对路径，所以出口必须再过一道。
@@ -122,31 +123,46 @@ _IMAGE_URL_ALLOW_HOSTS = [
 # 答案文本里的外部 markdown 图片图链（如 14所出图代理 URL）：![title](https://...)
 _MARKDOWN_IMAGE_URL_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)")
 
+# 通用 URL 候选（供 _scrub 保护与 images 提取共用）
+_ALL_URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
+
+
+def _is_allowed_image_url(url: str) -> bool:
+    """URL 的 authority（host:port，精确匹配）是否在图片代理 allowlist 内。
+
+    精确匹配而非前缀匹配：`10.226.107.35:8080x` 等畸形 authority 不放行。
+    """
+    if not _IMAGE_URL_ALLOW_HOSTS or not url:
+        return False
+    allowed = set(_IMAGE_URL_ALLOW_HOSTS)
+    for scheme in ("http://", "https://"):
+        if url.startswith(scheme):
+            rest = url[len(scheme):]
+            authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+            return authority in allowed
+    return False
+
 
 def _scrub(text: str) -> str:
     """抹掉内网 IP、绝对路径、数据库连接串。
 
-    图片代理 allowlist（_IMAGE_URL_ALLOW_HOSTS）内的 URL 先占位保护、后还原，
-    保证出图结果能正常展示；其余内网 IP/路径照常脱敏。
+    图片代理 allowlist（_IMAGE_URL_ALLOW_HOSTS）内主机的 URL（authority 精确匹配）
+    先占位保护、后还原，保证出图结果能正常展示；其余内网 IP/路径照常脱敏。
     """
     if not text:
         return text
     out = text if isinstance(text, str) else str(text)
-    if _IMAGE_URL_ALLOW_HOSTS:
-        image_proxy_pattern = re.compile(
-            r"https?://(?:"
-            + "|".join(re.escape(h) for h in _IMAGE_URL_ALLOW_HOSTS)
-            + r")[^\s\"'<>|]*"
-        )
-        saved: list[str] = []
+    saved: list[str] = []
 
-        def _save(match) -> str:
-            saved.append(match.group(0))
+    def _save(match) -> str:
+        url = match.group(0)
+        if _is_allowed_image_url(url):
+            saved.append(url)
             return f"《imgproxy{len(saved) - 1}》"
+        # 未放行：原样留下，交给 _SCRUB_PATTERNS 脱敏
+        return url
 
-        out = image_proxy_pattern.sub(_save, out)
-    else:
-        saved = []
+    out = _ALL_URL_RE.sub(_save, out)
     for pattern, repl in _SCRUB_PATTERNS:
         out = pattern.sub(repl, out)
     for index, url in enumerate(saved):
@@ -557,6 +573,10 @@ def _build_image_payload(emitter: CapturingEmitter, session, answer: str = "") -
     seen = {img["url"] for img in images}
     for title, url in _MARKDOWN_IMAGE_URL_RE.findall(str(answer or "")):
         if url in seen or url.startswith("/api/v1/qa/files/"):
+            continue
+        # 只放行 allowlist 主机的图链（authority 精确匹配），与 _scrub 脱敏边界一致，
+        # 未放行的内网 URL 不进 images 字段。
+        if not _is_allowed_image_url(url):
             continue
         images.append({"name": title.strip() or "image", "url": url, "mime": "image/png"})
         seen.add(url)

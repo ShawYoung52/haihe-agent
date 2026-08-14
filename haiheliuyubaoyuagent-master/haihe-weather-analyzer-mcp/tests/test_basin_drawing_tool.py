@@ -103,6 +103,23 @@ class TestBasinDrawingAreas:
         bdt.query_basin_drawing_areas_core()
         assert calls["n"] == 2, "未缓存应重新请求"
 
+    def test_empty_areas_not_cached(self, monkeypatch):
+        """上游返回空 data（HTTP 200 但无分区）→ no_data 不缓存，下个请求重取。"""
+        calls = {"n": 0}
+
+        def fake_get(url, timeout=None):
+            calls["n"] += 1
+            return _FakeResp({"code": 1, "success": True, "data": []})
+
+        monkeypatch.setattr(bdt.requests, "get", fake_get)
+        bdt._basin_areas_cache.clear()
+
+        r1 = bdt.query_basin_drawing_areas_core()
+        assert r1["status"] == "no_data", "空分区应按无数据处理"
+        assert bdt._basin_areas_cache == {}, "空数据不应被 3600s 缓存"
+        bdt.query_basin_drawing_areas_core()
+        assert calls["n"] == 2, "空数据未缓存应重新请求"
+
 
 class TestGenerateBasinRainfallImage:
     def _setup(self, monkeypatch, calls: dict, data="http://10.226.107.35:8080/hhly/img/2026/08/12/DYPQ/ECMF/a.png"):
@@ -200,3 +217,15 @@ class TestGenerateBasinRainfallImage:
         assert r["status"] == "error"
         assert "10" in r["message"]
         assert calls["n"] == 0, "跨度超限不应打接口"
+
+    def test_force_create_non_numeric_returns_error(self, monkeypatch):
+        """force_create 非数字 → 结构化 error，不打接口（不抛未捕获异常）。"""
+        calls = {"n": 0}
+        self._setup(monkeypatch, calls)
+        r = bdt.generate_basin_rainfall_image_core(
+            scene_type="REALTIME", product_type="STATION_RAIN", parent_area_id=1,
+            area_codes="ALL", begin_time="2026-08-03 20:00", end_time="2026-08-04 20:00",
+            main_title="x", sub_title="", force_create="是",
+        )
+        assert r["status"] == "error"
+        assert calls["n"] == 0, "force_create 非法不应打接口"

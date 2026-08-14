@@ -206,14 +206,14 @@ This project uses the superpowers plugin for disciplined development:
 - **B4 `query_risk_warning` 缓存**（risk_warning_tool）：`RISK_WARNING_CACHE_TTL=120s`，键=类型|时间窗|extra（region 不上接口不进键）。
 
 **基础设施**：
-- **MUSIC client 单例**（haihe_mcp_tools `_get_music_client()`）：复用 requests.Session/TCP 连接（tools.py 既有同款先例）。`_observation_fetch_core`/`_forecast_fetch_core` 线程池路径保留 `new MusicClient()` 独立 Session。
+- **MUSIC client 单例**（haihe_mcp_tools `_get_music_client()`）：复用 requests.Session/TCP 连接（tools.py 既有同款先例）。`_observation_fetch_core`/`_forecast_fetch_core` 线程池路径保留 `new MusicClient()` 独立 Session；`_query_tianjin_wind_warning_core` 也保留 `new MusicClient()`（测试 mock `hmt.MusicClient` 需要，单例跨测试持久化会让 mock 失效）。
 - **`_load_mcp_config` 惰性缓存**（chainlitexam/tools/rainfall_river_impact.py）：config.ini 静态，不再每次工具调用重读磁盘。
 
 **报告不修（被 message_orchestrator.py 并行会话占用，不能提交）**：`record_tool_call` 生产未调用 → `[PERF].tools` 恒空（perf_stats 的 tool_share/tools_per_request 生产无数据，需补埋点后生效）；answer 60s 硬超时加 `ANSWER_TIMEOUT_SECONDS` env（六处 wait_for 在该文件）。**本轮延后**：静态映射缓存（nine-zone WKT / fine→9 / 河道几何 / 分区边界）、Web 端运行时进程级缓存（跨会话污染风险，需日期失效设计）、POI 最近观测多时次合并（风险>收益）。
 
 ### 14所 basin_drawing 出图接口（2026-08-14，新功能接入）
 
-接入 14所「可出图分区列表 + 实况/预报格点雨量或面雨量出图」两个接口，让用户问「XX分区降水图/面雨量分布图/格点预报降水图」时能出图。口径（用户逐条确认）：**单工具参数化**（sceneType/productType 由 planner 按 docstring 路由）；**图片返回代理 URL**（答案 markdown 图链 + HTTP `images` 字段）；**base 默认 `http://10.226.107.35:8080`**，env `BASIN_DRAWING_API_BASE` 可覆盖；时间自动规整到 10 分钟刻度；**只有带 children 的一级分区可出图**。
+接入 14所「可出图分区列表 + 实况/预报格点雨量或面雨量出图」两个接口，让用户问「XX分区降水图/面雨量分布图/格点预报降水图」时能出图。口径（用户逐条确认）：**单工具参数化**（sceneType/productType 由 planner 按 docstring 路由）；**图片返回代理 URL**（答案 markdown 图链 + HTTP `images` 字段）；**base 默认 `${BASIN_DRAWING_API_BASE}`**（env 可覆盖）；时间自动规整到 10 分钟刻度；**只有带 children 的一级分区可出图**。
 
 - **新工具**（`haihe-weather-analyzer-mcp/custom_tools/basin_drawing_tool.py`，已注册 `server.py`）：
   - `query_basin_drawing_areas()`：GET `/openapi/basin_drawing/areas`，返回归一化分区树 + `supported_count`（带 children 的一级分区数）。`BASIN_DRAWING_AREAS_CACHE_TTL` 默认 **3600s**（分区静态）。
@@ -221,7 +221,7 @@ This project uses the superpowers plugin for disciplined development:
   - **路由口径**：分区面雨量/雨量分布图→AREA_RAIN；实况站点雨量图→STATION_RAIN（仅 REALTIME）；格点预报降水图→GRID_RAIN（仅 FORECAST）。与旧 `get_station_rainfall_real_img`（8001 端口 base64 工具）并存，docstring 已区分。
 - **HTTP `images` 字段 + 答案展示**（chainlitexam/qa_http_api.py）：
   - `_build_image_payload(emitter, session, answer="")` 扩展：答案文本里的 markdown 图链 `![title](https://…)` 追加为外部 images 条目（`{name, url, mime:"image/png"}`）；本地文件元素逻辑不变。`_run_once` 已传 `answer=answer`。
-  - **`_scrub` 图片代理 allowlist**：默认只放行 `10.226.107.35:8080`（env `IMAGE_URL_ALLOW_HOSTS` 可扩展），该前缀 URL 先占位保护后还原，保证图链能展示；**其余内网 IP 照常脱敏**（安全边界不变）。⚠️ 改动了脱敏逻辑，若生产需要放行其它图片代理主机用 env 扩展，不要放宽默认。
+  - **`_scrub` 图片代理 allowlist**：默认只放行 `${IMAGE_URL_ALLOW_HOSTS}`（env 可扩展，**authority 精确匹配**，非前缀匹配），放行 URL 先占位保护后还原，保证图链能展示；**其余内网 IP 照常脱敏**（安全边界不变）。⚠️ 改动了脱敏逻辑，若生产需要放行其它图片代理主机用 env 扩展，不要放宽默认；且改 `BASIN_DRAWING_API_BASE` 时必须同步扩展 `IMAGE_URL_ALLOW_HOSTS`（二者独立配置）。
 - 测试：`tests/test_basin_drawing_tool.py`（areas 归一化/缓存/失败不缓存 + image body/时间规整/参数校验/相对路径拼接）、`tests/test_qa_http_images.py`（images 外部图链 + _scrub allowlist）。
 
 ### 历史日期 → 历史实况查询（2026-08-13）
