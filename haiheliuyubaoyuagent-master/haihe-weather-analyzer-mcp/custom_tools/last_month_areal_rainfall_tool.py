@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
@@ -13,6 +14,7 @@ import psycopg2
 from fastmcp import FastMCP
 from psycopg2.extras import RealDictCursor
 
+from custom_tools._ttl_cache import make_ttl_cache
 from tools import config
 
 
@@ -228,7 +230,14 @@ def _aggregate_fine_rows_to_zone9(fine_rows: list[dict]) -> list[dict]:
 
 
 def register_last_month_areal_rainfall_tool(mcp: FastMCP) -> None:
+    # 上月数据静态，同「分区|月份」3600s 内命中缓存（键含月份，跨月必 miss）。
+    _decorator, _last_month_cache, _last_month_lock = make_ttl_cache(
+        int(os.getenv("LAST_MONTH_AREAL_CACHE_TTL", "3600")),
+        lambda zone_type="9": f"{zone_type}|{_previous_calendar_month_range()[3]}",
+    )
+
     @mcp.tool()
+    @_decorator
     def query_last_month_areal_rainfall(zone_type: str = "9") -> dict:
         """查询上一个自然月的海河9分区累计面雨量。"""
         start_s, end_s, readable, month_label = _previous_calendar_month_range()

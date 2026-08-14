@@ -17,6 +17,8 @@ from typing import Any
 import requests
 from fastmcp import FastMCP
 
+from custom_tools._ttl_cache import make_ttl_cache
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_RISK_WARN_BASE = "http://10.226.107.35:8070"
@@ -272,7 +274,17 @@ def _error_payload(kind: str, message: str, debug_reason: str = "") -> dict[str,
 
 
 def register_risk_warning_tool(mcp: FastMCP) -> None:
+    # 风险预警按起报时次刷新，同「类型|时间窗|extra」120s 内命中；region 不上接口故不进键。
+    _decorator, _risk_warning_cache, _risk_warning_lock = make_ttl_cache(
+        int(os.getenv("RISK_WARNING_CACHE_TTL", "120")),
+        lambda risk_kind="", region="", start_time="", end_time="", fcst_time="",
+               extra_params_json="": (
+            f"{risk_kind}|{start_time}|{end_time}|{fcst_time}|{extra_params_json}"
+        ),
+    )
+
     @mcp.tool()
+    @_decorator
     def query_risk_warning(
         risk_kind: str,
         region: str = "",

@@ -1,12 +1,14 @@
 """去年最大日降雨量 MCP 工具。"""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
 from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES
+from custom_tools._ttl_cache import make_ttl_cache
 from tools import _get_music_client
 
 
@@ -171,7 +173,16 @@ def _query_daily_by_basin_time(client, start: datetime, end: datetime, top_n: in
 
 
 def register_last_year_max_daily_rainfall_tool(mcp: FastMCP) -> None:
+    # 去年全年数据静态，同「top_n|回退开关|年」3600s 内命中（键含年份，跨年必 miss）。
+    _decorator, _lym_cache, _lym_lock = make_ttl_cache(
+        int(os.getenv("LAST_YEAR_MAX_CACHE_TTL", "3600")),
+        lambda top_n=10, allow_slow_fallback=False: (
+            f"{top_n}|{allow_slow_fallback}|{_previous_calendar_year_range()[3]}"
+        ),
+    )
+
     @mcp.tool()
+    @_decorator
     def query_last_year_max_daily_rainfall(top_n: int = 10, allow_slow_fallback: bool = False) -> dict:
         """查询上一个自然年海河流域最大日降雨量。"""
         start, end, readable, year_label = _previous_calendar_year_range()

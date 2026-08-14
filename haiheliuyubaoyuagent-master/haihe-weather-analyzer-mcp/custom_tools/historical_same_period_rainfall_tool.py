@@ -1,12 +1,14 @@
 """历史同期平均降雨量 MCP 工具。"""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES
+from custom_tools._ttl_cache import make_ttl_cache
 from tools import _get_music_client
 
 
@@ -231,7 +233,16 @@ def _query_impl(reference_start_time: Optional[str], reference_end_time: Optiona
 
 
 def register_historical_same_period_rainfall_tool(mcp: FastMCP) -> None:
+    # 历史同期数据静态（默认窗口按当日，TTL 管新鲜度），600s 内同参命中。
+    _decorator, _hsp_cache, _hsp_lock = make_ttl_cache(
+        int(os.getenv("HISTORICAL_SAME_PERIOD_CACHE_TTL", "600")),
+        lambda reference_start_time=None, reference_end_time=None, years=10: (
+            f"{reference_start_time}|{reference_end_time}|{years}"
+        ),
+    )
+
     @mcp.tool()
+    @_decorator
     def query_historical_same_period_avg_rainfall(reference_start_time: Optional[str] = None, reference_end_time: Optional[str] = None, years: int = 10) -> dict:
         """查询历史同期平均降雨量。"""
         ref_start, ref_end = _default_reference_window()

@@ -18,6 +18,7 @@ chain / callbacks 由 `chain_gzt` 在自身初始化完成后通过 `configure()
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -64,6 +65,8 @@ TIMEOUT_SECONDS = _env_int("QA_API_TIMEOUT_SECONDS", 180)
 FILE_TTL_SECONDS = _env_int("QA_API_FILE_TTL_SECONDS", 1800, minimum=0)
 CONVERSATION_TTL_SECONDS = _env_int("QA_API_CONVERSATION_TTL_SECONDS", 3600, minimum=0)
 RESPONSE_CACHE_TTL_SECONDS = _env_int("QA_API_RESPONSE_CACHE_TTL", 300, minimum=0)
+# 单轮响应缓存最大条目数：超限时修剪过期条目，防无界增长（内存泄漏）。
+RESPONSE_CACHE_MAX_SIZE = _env_int("QA_API_RESPONSE_CACHE_MAX_SIZE", 200)
 MAX_HISTORY_TURNS = _env_int("QA_API_MAX_HISTORY_TURNS", 10)
 MAX_QUESTION_LENGTH = 2000
 
@@ -521,6 +524,32 @@ def _build_image_payload(emitter: CapturingEmitter, session) -> list[dict]:
 # ---------------------------------------------------------------- 运行时
 
 
+@contextlib.contextmanager
+def _suppress_chainlit_data_layer():
+    """HTTP 请求期间临时令 chainlit 数据层返回 None，跳过 step 持久化写库。
+
+    HTTP 客户端不读 DB（答案走 CapturingEmitter 内存捕获、多轮上下文走
+    InMemoryConversationStore），每请求 ~20-50 次 fire-and-forget 写库 +
+    孤儿 thread/step 行只增不减，是纯浪费。chainlit 的 step.send/update 在
+    data_layer 为 None 时不产生持久化任务（`if data_layer:` 分支不执行），
+    恢复前无后台任务引用旧层，退出后可安全还原。
+
+    必须同时置 `_data_layer_initialized=True`：chain_gzt 手工装 SQLAlchemyDataLayer
+    时未置该标志，若只置 None 会让 `get_data_layer()` 走懒加载分支重建一个真层。
+    """
+    import chainlit.data as _cl_data
+
+    prev_layer = getattr(_cl_data, "_data_layer", None)
+    prev_initialized = getattr(_cl_data, "_data_layer_initialized", False)
+    _cl_data._data_layer = None
+    _cl_data._data_layer_initialized = True
+    try:
+        yield
+    finally:
+        _cl_data._data_layer = prev_layer
+        _cl_data._data_layer_initialized = prev_initialized
+
+
 class QARuntime:
     """持有注入的 chain 与 callbacks，供 HTTP 请求复用。
 
@@ -570,6 +599,19 @@ class QARuntime:
                     self._runtime = None  # 允许后续请求重试
                     raise
         return self._runtime
+
+    def _maybe_prune_response_cache(self) -> None:
+        """单轮响应缓存超限时修剪过期条目（防无界增长）。
+
+        只在超过 RESPONSE_CACHE_MAX_SIZE 时才扫描，避免每请求白扫。
+        """
+        if len(self._response_cache) <= RESPONSE_CACHE_MAX_SIZE:
+            return
+        cutoff = time.time() - RESPONSE_CACHE_TTL_SECONDS
+        for key in [
+            k for k, (ts, _) in self._response_cache.items() if ts < cutoff
+        ]:
+            del self._response_cache[key]
 
     async def ask(
         self,
@@ -639,6 +681,7 @@ class QARuntime:
 
         if response_cache_key is not None and RESPONSE_CACHE_TTL_SECONDS > 0:
             self._response_cache[response_cache_key] = (time.time(), result)
+            self._maybe_prune_response_cache()
         return result
     async def _run_once(
         self,
@@ -676,15 +719,17 @@ class QARuntime:
 
         pq_started = time.time()
         try:
-            await process_message(
-                message=cl.Message(content=question),
-                planner_chain=runtime["planner_chain"],
-                answer_chain=runtime["answer_chain"],
-                thinking_chain=runtime["thinking_chain"],
-                tools=runtime["tools"],
-                messages=history,
-                callbacks=runtime["callbacks"],
-            )
+            # HTTP 模式跳过 chainlit data-layer 落库（见 _suppress_chainlit_data_layer）。
+            with _suppress_chainlit_data_layer():
+                await process_message(
+                    message=cl.Message(content=question),
+                    planner_chain=runtime["planner_chain"],
+                    answer_chain=runtime["answer_chain"],
+                    thinking_chain=runtime["thinking_chain"],
+                    tools=runtime["tools"],
+                    messages=history,
+                    callbacks=runtime["callbacks"],
+                )
         finally:
             # 即使超时被取消，也要落盘本轮历史——否则用户下一轮上下文断裂。
             # shield 防止 save 自身被同一个 CancelledError 打断。

@@ -189,6 +189,28 @@ This project uses the superpowers plugin for disciplined development:
 - **B MUSIC 多时次合并**（current_weather_observation_service.py）：`_query_same_successful_time` 用 `times` 逗号连接把「6 候选 × 2 接口」合并为 **region/basin 各 1 次调用**，`_group_records_by_time` 按时次切回、从新到旧选第一个「region 覆盖完整 + basin 非空」时次（与原循环语义等价）。**安全回退**：服务端只回单时次或合并请求抛错时自动回退逐时次串行（行为不变），多时次检测 = region 与 basin 都返回 ≥2 个不同时次。生产确认探针：`haihe-weather-analyzer-mcp/probe_music_multi_times.py`（用户内网跑）。`query_poi_nearest_observation` 的 `_query_station_records` 合并未做（循环复杂：2 模式×2 元素集×nearest 语义，风险大于收益，且 A2 缓存已覆盖重复查询）。
 - **C `scripts/perf_stats.py`**：`summarize` 新增 `stages_ms`（`[PERF].stages` 分阶段 p50 降序）、`tool_share_of_total_pct`（tool 取数占总耗时百分比）、`tools_per_request`（每请求工具数，对比多时次合并 12→2），用于前后对比证明收益。
 
+### 前后端遍历优化批（2026-08-14，均不改变问答结果）
+
+遍历三路（chainlitexam 前端 / MCP 后端 / HTTP·流式·观测）后的安全优化，全部 TDD。口径不变：**不改变问答结果**（模型输入/数据/回答文本逐字不动）；只省重复工作、重复取数、无效 I/O。
+
+**前端（chainlitexam）**：
+- **A1 HTTP 免 data-layer 落库**（qa_http_api.py `_suppress_chainlit_data_layer` + `_run_once` 包住 process_message）：HTTP 客户端不读 DB（答案走 CapturingEmitter、多轮走 InMemoryConversationStore），每请求 ~20-50 次 fire-and-forget PG 写 + 孤儿 thread/step 行是纯浪费。必须同时置 `_data_layer_initialized=True` 防 `get_data_layer()` 懒加载重建真层（chain_gzt 手工装 SQLAlchemy 时未置该标志）。
+- **A2 `stream_text_to_message` 按 execution_mode 累积**（chain_gzt.py）：HTTP 下不逐 32 字块 update+sleep，一次更新；chainlit 模式逐块不变。`_build_orchestrator_callbacks` 用 `_stream_text` 包装注入 mode。
+- **A3 `_response_cache` 修剪**（qa_http_api.py）：`RESPONSE_CACHE_MAX_SIZE`（默认 200）超限时 `_maybe_prune_response_cache` 清过期条目，防无界增长。
+- **A4 answer 流式连接错误重试**（chain_gzt.py `astream_answer_chain_to_message`）：ConnectionError/httpx 连接/读超时在无部分内容时重试（`ANSWER_MAX_RETRIES` 默认 2），与 planner 对称；非连接错误/超时保持原回退。
+
+**MCP 后端**：
+- **B1 `forecast_evaluate_tool` 缓存顺序缺陷**：原 `_validate_params_and_fetch` 在缓存查询前就调检验 API（1h 缓存形同虚设）。拆成 `_parse_evaluate_params`（廉价校验/解析）+ `_fetch_evaluate_api`（昂贵取数），`_evaluate_forecast_core` 顺序 = 解析 → 缓存命中 → 取数（仅 miss）。
+- **B2 应急实况判定缓存**（haihe_mcp_tools `evaluate_emergency_response_core`）：`EMERGENCY_EVALUATION_CACHE_TTL` 默认 **120s**，键=判定入参（不含 include_records）；include_records=True 不缓存。省同参重复 24h 分钟取数（~43s）；不触碰 `_evaluate_one_synoptic_time`/`_fetch_minute_hourly_curve`。
+- **B3 静态历史降雨系列缓存**（custom_tools，共享装饰器 `custom_tools/_ttl_cache.py` `make_ttl_cache`，只缓存 status=="ok"）：`LAST_MONTH_AREAL_CACHE_TTL=3600s`、`YEAR_TO_DATE_AREAL_CACHE_TTL=120s`、`LAST_YEAR_MAX_CACHE_TTL=3600s`、`HISTORICAL_SAME_PERIOD_CACHE_TTL=600s`、`HISTORICAL_WEATHER_CACHE_TTL=600s`。
+- **B4 `query_risk_warning` 缓存**（risk_warning_tool）：`RISK_WARNING_CACHE_TTL=120s`，键=类型|时间窗|extra（region 不上接口不进键）。
+
+**基础设施**：
+- **MUSIC client 单例**（haihe_mcp_tools `_get_music_client()`）：复用 requests.Session/TCP 连接（tools.py 既有同款先例）。`_observation_fetch_core`/`_forecast_fetch_core` 线程池路径保留 `new MusicClient()` 独立 Session。
+- **`_load_mcp_config` 惰性缓存**（chainlitexam/tools/rainfall_river_impact.py）：config.ini 静态，不再每次工具调用重读磁盘。
+
+**报告不修（被 message_orchestrator.py 并行会话占用，不能提交）**：`record_tool_call` 生产未调用 → `[PERF].tools` 恒空（perf_stats 的 tool_share/tools_per_request 生产无数据，需补埋点后生效）；answer 60s 硬超时加 `ANSWER_TIMEOUT_SECONDS` env（六处 wait_for 在该文件）。**本轮延后**：静态映射缓存（nine-zone WKT / fine→9 / 河道几何 / 分区边界）、Web 端运行时进程级缓存（跨会话污染风险，需日期失效设计）、POI 最近观测多时次合并（风险>收益）。
+
 ### 历史日期 → 历史实况查询（2026-08-13）
 
 客户反馈"查历史数据查不出来"（如"8月10号某某地方天气怎么样"）。三重根因 + 修复：

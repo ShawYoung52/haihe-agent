@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _MCP_IMPACT_MOD: Any = None
 _MCP_TOOLS_MOD: Any = None
+_MCP_CONFIG_CACHE: configparser.ConfigParser | None = None
 
 
 def _load_module_from_path(module_name: str, file_path: Path) -> Any:
@@ -47,11 +48,14 @@ def _load_mcp_modules() -> tuple[Any, Any]:
 
 
 def _load_mcp_config() -> configparser.ConfigParser:
-    repo_root = Path(__file__).resolve().parents[2]
-    config_path = repo_root / "haihe-weather-analyzer-mcp" / "config.ini"
-    config = configparser.ConfigParser()
-    config.read(config_path, encoding="utf-8-sig")
-    return config
+    global _MCP_CONFIG_CACHE
+    if _MCP_CONFIG_CACHE is None:
+        repo_root = Path(__file__).resolve().parents[2]
+        config_path = repo_root / "haihe-weather-analyzer-mcp" / "config.ini"
+        config = configparser.ConfigParser()
+        config.read(config_path, encoding="utf-8-sig")
+        _MCP_CONFIG_CACHE = config
+    return _MCP_CONFIG_CACHE
 
 
 def _call_affected_river_network(

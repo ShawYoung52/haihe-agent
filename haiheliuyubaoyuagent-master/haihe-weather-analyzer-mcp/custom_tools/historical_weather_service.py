@@ -12,12 +12,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_OBS_ELEMENTS
+from custom_tools._ttl_cache import make_ttl_cache
 from custom_tools.poi_nearest_observation_tool import (
     FULL_OBS_ELEMENTS,
     OBS_ELEMENT_CANDIDATES,
@@ -312,7 +314,18 @@ def _query_historical_obs_core(
 
 
 def register_historical_weather_tool(mcp: FastMCP) -> None:
+    # 过去日期实况不可变，同「点位|时间窗|半径|流域|区划」600s 内命中。
+    _decorator, _hist_weather_cache, _hist_weather_lock = make_ttl_cache(
+        int(os.getenv("HISTORICAL_WEATHER_CACHE_TTL", "600")),
+        lambda keyword="", lon=None, lat=None, start_time="", end_time="",
+               point_name="", max_distance_km=80.0, basin_codes=DEFAULT_BASIN_CODES,
+               admin_code=TIANJIN_ADMIN_CODE: (
+            f"{keyword}|{lon}|{lat}|{start_time}|{end_time}|{max_distance_km}|{basin_codes}|{admin_code}"
+        ),
+    )
+
     @mcp.tool()
+    @_decorator
     def query_poi_historical_weather(
         keyword: str = "",
         lon: float | None = None,

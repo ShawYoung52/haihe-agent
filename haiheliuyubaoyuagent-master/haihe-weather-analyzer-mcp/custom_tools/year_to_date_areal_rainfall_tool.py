@@ -5,11 +5,13 @@
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any
 
 from fastmcp import FastMCP
 
+from custom_tools._ttl_cache import make_ttl_cache
 from .last_month_areal_rainfall_tool import (
     _aggregate_fine_rows_to_zone9,
     _aggregate_raw_areal_rows,
@@ -82,7 +84,14 @@ def _to_zone9_rows(raw: list[dict], rain_field: str) -> list[dict]:
 
 
 def register_year_to_date_areal_rainfall_tool(mcp: FastMCP) -> None:
+    # 窗口截至当前时刻，数据小时级更新：短 TTL 120s（键含年初起点，TTL 管新鲜度）。
+    _decorator, _ytd_cache, _ytd_lock = make_ttl_cache(
+        int(os.getenv("YEAR_TO_DATE_AREAL_CACHE_TTL", "120")),
+        lambda zone_type="9": f"{zone_type}|{_year_to_date_range()[0]}",
+    )
+
     @mcp.tool()
+    @_decorator
     def query_year_to_date_areal_rainfall(zone_type: str = "9") -> dict:
         """查询今年以来海河9分区累计面雨量。"""
         zone_type = str(zone_type or "9").strip()

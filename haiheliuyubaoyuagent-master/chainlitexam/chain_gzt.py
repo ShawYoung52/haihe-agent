@@ -899,46 +899,70 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
 
     execution_mode="chainlit"：逐 chunk 刷新 stream_msg.update()
     execution_mode="http"：仅在结尾更新一次，减少 per-chunk 开销
+
+    连接类错误（ConnectionError/httpx 连接/读超时）在未产生任何内容时重试一次
+    （`ANSWER_MAX_RETRIES`，默认 2），与 planner 的 ainvoke_chain/astream_planner_think
+    对称；已有部分内容时无法重发部分流，直接按部分内容输出。超时/其他错误保持原回退。
     """
     # 限制带入 LLM 的历史轮数（副本裁剪，不改真实历史），防多轮累积输入膨胀超时
     if isinstance(input_dict, dict) and isinstance(input_dict.get("messages"), list):
         input_dict = {**input_dict, "messages": _trim_history_rounds(input_dict["messages"])}
+    max_retries = int(os.environ.get("ANSWER_MAX_RETRIES", "2"))
     full_text = ""
-    try:
-        async for chunk in answer_chain.astream(input_dict, config=config):
-            text = ""
-            if hasattr(chunk, "content"):
-                text = chunk.content or ""
-            elif isinstance(chunk, str):
-                text = chunk
-            if text:
-                # 实时清理可能泄露的工具调用标记
-                text = _sanitize_display_text(text)
-                full_text += text
-                if execution_mode == "chainlit":
-                    stream_msg.content += text
-                    await stream_msg.update()
-        # 最终再清理一次，防止跨 chunk 残留
-        final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
-        stream_msg.content = final_text
-        if execution_mode == "chainlit":
-            await stream_msg.update()
-        else:
-            await stream_msg.update()
-        return _sanitize_display_text(full_text)
-    except Exception as e:
-        print(f"[流式回答] 失败，回退到非流式：{e}")
-        if full_text.strip():
+    for attempt in range(max_retries):
+        try:
+            async for chunk in answer_chain.astream(input_dict, config=config):
+                text = ""
+                if hasattr(chunk, "content"):
+                    text = chunk.content or ""
+                elif isinstance(chunk, str):
+                    text = chunk
+                if text:
+                    # 实时清理可能泄露的工具调用标记
+                    text = _sanitize_display_text(text)
+                    full_text += text
+                    if execution_mode == "chainlit":
+                        stream_msg.content += text
+                        await stream_msg.update()
+            # 最终再清理一次，防止跨 chunk 残留
             final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
             stream_msg.content = final_text
             await stream_msg.update()
-            return stream_msg.content
-        result = await answer_chain.ainvoke(input_dict, config=config)
-        text = getattr(result, "content", None) or ""
-        text = _sanitize_display_text(text)
-        stream_msg.content += text
+            return _sanitize_display_text(full_text)
+        except (ConnectionError, httpx.ConnectError, httpx.ReadTimeout) as exc:
+            if full_text.strip():
+                # 已有部分内容：无法重发部分流，按部分内容输出（原语义保留）。
+                print(f"[流式回答] 连接中断（已有部分内容），按部分内容输出：{exc}")
+                break
+            if attempt + 1 >= max_retries:
+                break
+            print(f"[流式回答] 第 {attempt + 1} 次连接失败，准备重试...")
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"[流式回答] 失败，回退到非流式：{e}")
+            if full_text.strip():
+                final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
+                stream_msg.content = final_text
+                await stream_msg.update()
+                return stream_msg.content
+            result = await answer_chain.ainvoke(input_dict, config=config)
+            text = getattr(result, "content", None) or ""
+            text = _sanitize_display_text(text)
+            stream_msg.content += text
+            await stream_msg.update()
+            return text
+    # 连接错误重试耗尽：无部分内容则 ainvoke 兜底，有部分内容则返回部分
+    if full_text.strip():
+        final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
+        stream_msg.content = final_text
         await stream_msg.update()
-        return text
+        return stream_msg.content
+    result = await answer_chain.ainvoke(input_dict, config=config)
+    text = getattr(result, "content", None) or ""
+    text = _sanitize_display_text(text)
+    stream_msg.content += text
+    await stream_msg.update()
+    return text
 
 
 async def ainvoke_chain(chain, input_dict, config: RunnableConfig | None = None):
@@ -1039,12 +1063,15 @@ async def astream_thinking_to_reasoning(thinking_chain, input_dict, reasoning_st
         await reasoning_step.line(f"\n\n（思考生成遇到异常：{str(e)[:100]}，继续为您查询数据...）")
         return ""
 
-async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None, chunk_size: int = 32, delay_ms: float | None = None):
+async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None, chunk_size: int = 32, delay_ms: float | None = None, execution_mode: str = "chainlit"):
     """
     统一的前端流式输出：
     - 传入现有 stream_msg：在同一条消息上持续刷新
     - 不传 stream_msg：新建一条消息并流式刷新
     默认延迟极低（0.5ms/块），可通过 CHAINLIT_STREAM_DELAY_MS 环境变量调整。
+
+    execution_mode="chainlit"：逐 32 字块刷新（渐进显示观感）
+    execution_mode="http"：仅在结尾更新一次（HTTP 客户端最后才拿结果，逐块是纯浪费）
 
     若文本包含 Markdown 表格，则直接完整发送，避免流式切片破坏表格结构。
     """
@@ -1070,6 +1097,13 @@ async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None
     if delay_ms is None:
         delay_ms = float(os.getenv("CHAINLIT_STREAM_DELAY_MS", "0.5"))
     delay = max(delay_ms / 1000.0, 0.0)
+
+    if execution_mode == "http":
+        # HTTP 模式客户端最后才拿结果，逐块 update+sleep 是纯浪费（每块一次
+        # emitter 记录 + data-layer 写 + sleep）；一次性更新即可，文本不变。
+        stream_msg.content = text
+        await stream_msg.update()
+        return stream_msg
 
     for i in range(0, len(text), chunk_size):
         stream_msg.content += text[i:i + chunk_size]
@@ -3814,6 +3848,11 @@ def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
         return astream_answer_chain_to_message(
             answer_chain, input_dict, stream_msg, config, execution_mode=execution_mode
         )
+
+    def _stream_text(text, stream_msg, chunk_size=32, delay_ms=None):
+        return stream_text_to_message(
+            text, stream_msg, chunk_size, delay_ms, execution_mode=execution_mode
+        )
     return {
         "need_river_plot": _need_river_plot,
         "extract_river_name": _extract_river_name,
@@ -3821,7 +3860,7 @@ def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
         "render_and_send_plot": render_and_send_plot,
         "build_river_network_brief": _build_river_network_brief,
         "append_followup_if_needed": _append_followup_if_needed,
-        "stream_text_to_message": stream_text_to_message,
+        "stream_text_to_message": _stream_text,
         "user_forbids_followup": _user_forbids_followup,
         "make_followup_question": _make_followup_question,
         "ainvoke_chain": ainvoke_chain,

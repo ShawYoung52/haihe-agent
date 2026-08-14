@@ -192,6 +192,13 @@ RAG_SEARCH_CACHE_TTL = int(os.getenv("RAG_SEARCH_CACHE_TTL", "600"))
 _rag_search_cache: dict[str, tuple[float, Any]] = {}
 _rag_search_cache_lock = threading.Lock()
 
+# 应急实况判定缓存：判定是单次最贵工具（24h 分钟取数 ~43s），同一判定入参
+# （basin_codes+times+阈值）在 TTL 内命中。include_records=True（要原始记录）不缓存。
+# 默认 120s；只包 evaluate_emergency_response_core 外壳，不触碰 _evaluate_one_synoptic_time。
+EMERGENCY_EVALUATION_CACHE_TTL = int(os.getenv("EMERGENCY_EVALUATION_CACHE_TTL", "120"))
+_emergency_evaluation_cache: dict[str, tuple[float, Any]] = {}
+_emergency_evaluation_cache_lock = threading.Lock()
+
 # RAG 请求体默认模板：name/key/query 在运行时按命中的知识库与用户问题填充
 RAG_REQUEST_DEFAULTS = {
     "top_k": 5,
@@ -823,6 +830,29 @@ class MusicClient:
         if staLevels is not None:
             params["staLevels"] = staLevels
         return self.call_api("statSurfPreInBasin", **params)
+
+
+_MUSIC_CLIENT_SINGLETON: Optional["MusicClient"] = None
+_MUSIC_CLIENT_SINGLETON_LOCK = threading.Lock()
+
+
+def _get_music_client() -> "MusicClient":
+    """进程级 MUSIC client 单例（复用 requests.Session/TCP 连接）。
+
+    `requests.Session` 对并发 GET 是线程安全的（urllib3 连接池有内部锁），
+    sign/timestamp/nonce 每请求独立计算，复用安全——与 tools.py 既有
+    `_get_music_client()` 单例同款模式（生产并发使用验证过）。
+
+    例外：`_observation_fetch_core`/`_forecast_fetch_core` 等线程池路径
+    仍用 `new MusicClient()`（独立 Session），避免共享连接池在并发上的额外顾虑。
+    """
+    global _MUSIC_CLIENT_SINGLETON
+    if _MUSIC_CLIENT_SINGLETON is not None:
+        return _MUSIC_CLIENT_SINGLETON
+    with _MUSIC_CLIENT_SINGLETON_LOCK:
+        if _MUSIC_CLIENT_SINGLETON is None:
+            _MUSIC_CLIENT_SINGLETON = MusicClient(MusicConfig())
+    return _MUSIC_CLIENT_SINGLETON
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -2464,7 +2494,28 @@ def evaluate_emergency_response_core(
 ) -> dict:
     """
     应急响应判定核心函数（模块级，可被 MCP 工具和 REST API 共同调用）。
+
+    带 120s TTL 缓存：同一判定入参（basin_codes+times+阈值）在 TTL 内命中，
+    避免重复 24h 分钟取数（~43s）；include_records=True 时不缓存（结果含原始记录）。
     """
+    cache_key: str | None = None
+    if not include_records:
+        cache_key = json.dumps({
+            "basin_codes": basin_codes,
+            "times": times,
+            "neighbor_km": neighbor_km,
+            "sustain_hourly_threshold_mm": sustain_hourly_threshold_mm,
+            "allowed_station_levels": allowed_station_levels,
+            "rainstorm_12h": rainstorm_12h,
+            "rainstorm_24h": rainstorm_24h,
+            "severe_rainstorm_24h": severe_rainstorm_24h,
+            "extraordinary_24h": extraordinary_24h,
+        }, sort_keys=True, ensure_ascii=False)
+        with _emergency_evaluation_cache_lock:
+            hit = _emergency_evaluation_cache.get(cache_key)
+            if hit and (time.time() - hit[0]) < EMERGENCY_EVALUATION_CACHE_TTL:
+                return hit[1]
+
     records = _observation_fetch_core(
         basin_codes=basin_codes,
         times=times,
@@ -2489,6 +2540,9 @@ def evaluate_emergency_response_core(
         include_records=include_records,
         records=records,
     )
+    if cache_key is not None:
+        with _emergency_evaluation_cache_lock:
+            _emergency_evaluation_cache[cache_key] = (time.time(), result)
     return result
 
 
@@ -2802,7 +2856,7 @@ def _query_tianjin_wind_warning_core(times: str = "") -> dict:
 
     query_time = tianjin_now.strftime("%Y-%m-%d %H:%M:%S")
     try:
-        records = MusicClient().get_surf_ele_in_region_by_time(
+        records = _get_music_client().get_surf_ele_in_region_by_time(
             admin_codes="120000",
             times=request_time,
         )
@@ -2906,7 +2960,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             hours_back: 无数据时最多向前尝试的整点数，默认6。正常问答不要修改。
         """
         return query_current_weather_observation_core(
-            lambda: MusicClient(MusicConfig()),
+            lambda: _get_music_client(),
             hours_back=hours_back,
         )
 
@@ -3086,7 +3140,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
                 sort_desc = parts[-1].upper() == "DESC"
                 api_order_by = sort_field
 
-        client = MusicClient()
+        client = _get_music_client()
         result = client.get_surf_ele_in_basin_by_time(
             basin_codes=basin_codes,
             times=times,
@@ -3132,7 +3186,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         data_province_id: str | None = None,
     ) -> list[dict]:
         """按流域和时间段统计降水。适合问：海河流域过去24小时哪些站降水最大、某类站累计情况怎样。"""
-        client = MusicClient()
+        client = _get_music_client()
         return client.stat_surf_pre_in_basin_new(
             basin_codes=basin_codes,
             timeRange=time_range,

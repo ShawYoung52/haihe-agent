@@ -132,14 +132,13 @@ def _metric_unit(metric_name: str) -> str:
     return ""
 
 
-def _validate_params_and_fetch(
+def _parse_evaluate_params(
     element: str, test_type: str, rain_type: str,
-    begin_time: str, end_time: str, time_session: int, area_codes: str,
+    begin_time: str, end_time: str,
 ) -> dict[str, Any]:
-    """Shared validation + default-time + API fetch for both MCP tools.
+    """廉价步骤：参数校验 + 默认时间解析（不调检验 API）。
 
-    Returns a dict with 'is_rain', 'rain_type', 'b_time', 'e_time',
-    'api_result', or 'error' on failure.
+    Returns dict with 'is_rain', 'rain_type', 'b_time', 'e_time', or 'error'.
     """
     # 参数校验
     valid_elements = set(EvalConfig.ALL_ELEMENTS.keys())
@@ -164,18 +163,29 @@ def _validate_params_and_fetch(
     b_time = begin_time if begin_time else month_begin.strftime("%Y-%m-%d %H:%M:%S")
     e_time = end_time if end_time else yesterday_end.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 实时调用检验API
+    return {
+        "is_rain": is_rain,
+        "rain_type": rain_type,
+        "b_time": b_time,
+        "e_time": e_time,
+    }
+
+
+def _fetch_evaluate_api(
+    parsed: dict[str, Any], test_type: str, time_session: int, area_codes: str,
+) -> dict[str, Any]:
+    """昂贵步骤：调用检验 API。Returns dict with 'api_result' or 'error'."""
     try:
         area = area_codes if area_codes else None
-        if is_rain:
+        if parsed["is_rain"]:
             api_result = run_rain_eva(
-                test_type=test_type, rain_type=rain_type,
-                begin_time=b_time, end_time=e_time,
+                test_type=test_type, rain_type=parsed["rain_type"],
+                begin_time=parsed["b_time"], end_time=parsed["e_time"],
                 time_session=time_session, save_json=False, area_codes=area,
             )
         else:
             api_result = run_temp_eva(
-                test_type=test_type, begin_time=b_time, end_time=e_time,
+                test_type=test_type, begin_time=parsed["b_time"], end_time=parsed["e_time"],
                 time_session=time_session, save_json=False, area_codes=area,
             )
 
@@ -186,16 +196,58 @@ def _validate_params_and_fetch(
             raw = api_result.get("raw_response", {})
             return {"error": f"检验API返回失败: {raw.get('code', 'unknown')}"}
 
-        return {
-            "is_rain": is_rain,
-            "rain_type": rain_type,
-            "b_time": b_time,
-            "e_time": e_time,
-            "api_result": api_result,
-        }
+        return {"api_result": api_result}
     except Exception as exc:
         logger.exception("[forecast_evaluate] 检验API调用异常")
         return {"error": "预报检验查询失败，请稍后重试。"}
+
+
+def _validate_params_and_fetch(
+    element: str, test_type: str, rain_type: str,
+    begin_time: str, end_time: str, time_session: int, area_codes: str,
+) -> dict[str, Any]:
+    """校验 + 默认时间 + 取数一步到位（generate_forecast_charts 等无缓存场景用）。"""
+    parsed = _parse_evaluate_params(element, test_type, rain_type, begin_time, end_time)
+    if "error" in parsed:
+        return parsed
+    fetched = _fetch_evaluate_api(parsed, test_type, time_session, area_codes)
+    if "error" in fetched:
+        return fetched
+    return {**parsed, **fetched}
+
+
+def _evaluate_forecast_core(
+    element: str,
+    test_type: str,
+    rain_type: str = "",
+    begin_time: str = "",
+    end_time: str = "",
+    time_session: int = 24,
+    area_codes: str = "",
+) -> dict[str, Any]:
+    """预报检验评分查询（带 1h 缓存，命中时不调检验 API）。
+
+    顺序：廉价校验/解析 → 缓存命中判断 → 昂贵取数（仅 miss 时）。
+    """
+    parsed = _parse_evaluate_params(element, test_type, rain_type, begin_time, end_time)
+    if "error" in parsed:
+        return parsed
+
+    ck = _cache_key(element, test_type, parsed["rain_type"],
+                    parsed["b_time"], parsed["e_time"], time_session, area_codes)
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+
+    fetched = _fetch_evaluate_api(parsed, test_type, time_session, area_codes)
+    if "error" in fetched:
+        return fetched
+
+    formatted = _format_evaluate_result(
+        fetched["api_result"], element, test_type, parsed["rain_type"],
+    )
+    _cache_set(ck, formatted)
+    return formatted
 
 
 def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
@@ -222,25 +274,10 @@ def register_forecast_evaluate_tool(mcp: FastMCP) -> None:
         :param end_time: 结束时间 YYYY-MM-DD HH:MM:SS，默认昨天
         :param time_session: 预报时效(小时)，24/48/72，默认24
         """
-        # 缓存查找 — 使用解析后的时间值确保缓存正确（原始参数可能为空字符串/默认值）
-        fetched_raw = _validate_params_and_fetch(
+        return _evaluate_forecast_core(
             element, test_type, rain_type,
             begin_time, end_time, time_session, area_codes,
         )
-        if "error" in fetched_raw:
-            return fetched_raw
-
-        ck = _cache_key(element, test_type, fetched_raw["rain_type"],
-                        fetched_raw["b_time"], fetched_raw["e_time"], time_session, area_codes)
-        cached = _cache_get(ck)
-        if cached is not None:
-            return cached
-
-        formatted = _format_evaluate_result(
-            fetched_raw["api_result"], element, test_type, fetched_raw["rain_type"],
-        )
-        _cache_set(ck, formatted)
-        return formatted
 
     @mcp.tool()
     def generate_forecast_charts(
