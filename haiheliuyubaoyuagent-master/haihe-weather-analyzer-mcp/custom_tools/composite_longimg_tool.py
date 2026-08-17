@@ -52,19 +52,47 @@ _SCRUB_PATTERNS = [
 # 常见栅格图片魔数。
 _IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"BM", b"II*\x00", b"MM\x00*")
 
-# 长图版式
-_BOARD_WIDTH = 1080
-_MARGIN = 48
+# 长图版式（模板化：bg 浅蓝背景 + top-bg 顶部 + title 标题 + publish 发布单位）
+_ASSETS_DIR = os.getenv(
+    "LONGIMG_ASSETS_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "longimg"),
+)
+_BOARD_WIDTH = 1125          # 画布宽 = 模板宽
+_MARGIN = 56
+_TOP_HEIGHT = 900            # top-bg 顶部背景高度
+_TOP_TITLE_PAD = 90          # 标题在顶部背景中的上偏移
+_TITLE_W = 700               # 标题缩放宽度
+_BOTTOM_PAD = 70             # 发布单位区底部留白
 _SEC_TITLE_SIZE = 34
 _BODY_SIZE = 28
 _LINE_RATIO = 1.65
 _SEC_GAP = 18
-_IMG_MAX_HEIGHT = 560          # 单张子图最大高度（超过则等比缩小）
+_IMG_MAX_HEIGHT = 640        # 单张子图最大高度（超过则等比缩小）
 _TABLE_ROW_H = 40
-_TABLE_HEAD_BG = (235, 240, 248)
-_BG = (255, 255, 255)
+_TABLE_HEAD_BG = (232, 242, 250)
+_BG = (138, 210, 251)        # 浅蓝背景（bg.png 主色）
 _FG = (20, 20, 20)
-_SEC_FG = (30, 90, 170)        # 板块标题颜色
+_SEC_FG = (18, 84, 156)      # 板块标题深蓝
+
+# 模板图懒加载缓存
+_TEMPLATE_CACHE: dict[str, Any] = {}
+
+
+def _load_template(name: str) -> Any | None:
+    """加载长图模板（bg/top-bg/title/publish-depart），懒加载缓存；缺失返回 None。"""
+    cached = _TEMPLATE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    path = os.path.join(_ASSETS_DIR, name)
+    if not os.path.isfile(path):
+        return None
+    try:
+        from PIL import Image
+        img = Image.open(path)
+        _TEMPLATE_CACHE[name] = img
+        return img
+    except Exception:
+        return None
 
 
 def _scrub_text(text: Any) -> str:
@@ -350,39 +378,6 @@ def _fit_image(img: Any, usable_w: int) -> Any:
     return img
 
 
-def _render_sections(draw, fonts, usable_w: int, x: int, y: int, sections: list[tuple[str, str, Any]], body_lines: list[str]) -> int:
-    """绘制各板块，返回结束 y 坐标。sections: (标题, 类型, 内容)。"""
-    from PIL import Image
-
-    sec_font, body_font = fonts
-    line_h = int(_BODY_SIZE * _LINE_RATIO)
-    sec_h = int(_SEC_TITLE_SIZE * _LINE_RATIO)
-    for title, kind, content in sections:
-        # 板块标题
-        draw.text((x, y), title, font=sec_font, fill=_SEC_FG)
-        y += sec_h + 6
-        if kind == "text":
-            text = str(content or "")
-            lines = _wrap_text(draw, body_font, text, usable_w)
-            for ln in lines:
-                body_lines.append(ln)
-                draw.text((x, y), ln, font=body_font, fill=_FG)
-                y += line_h
-            if not lines:
-                draw.text((x, y), "暂无内容", font=body_font, fill=_FG)
-                y += line_h
-        elif kind == "image":
-            img = _fit_image(content, usable_w)
-            paste_x = x + (usable_w - img.size[0]) // 2
-            draw._image.paste(img, (paste_x, y))
-            y += img.size[1] + 8
-        elif kind == "table":
-            headers, rows = content
-            y = _render_table(draw, body_font, x, y, usable_w, headers, rows)
-        y += _SEC_GAP
-    return y
-
-
 def _render_table(draw, font, x: int, y: int, usable_w: int, headers: list[str], rows: list[list[str]]) -> int:
     """绘制简单表格，返回结束 y 坐标。"""
     n = len(headers) or 1
@@ -412,7 +407,12 @@ def _render_table(draw, font, x: int, y: int, usable_w: int, headers: list[str],
 
 
 def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
-    """把板块列表渲染成一张长图 PNG。缺 Pillow/缺中文字体返回 None。"""
+    """把板块列表渲染成一张模板化长图 PNG。缺 Pillow/缺中文字体返回 None。
+
+    版式（用户模板）：顶部 top-bg.png 背景 + title.png 标题（海河流域气象服务），
+    中部浅蓝背景（bg.png 主色）放 7 个板块，底部 publish-depart.png 发布单位。
+    模板缺失时降级为浅蓝背景 + 白标题区，不报错。
+    """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
@@ -430,27 +430,73 @@ def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
     line_h = int(_BODY_SIZE * _LINE_RATIO)
     sec_h = int(_SEC_TITLE_SIZE * _LINE_RATIO)
 
-    # 先估算总高度
+    # 内容高度估算（板块标题 + 内容）
     probe_img = Image.new("RGB", (1, 1), _BG)
     probe = ImageDraw.Draw(probe_img)
-    height = _MARGIN
+    content_h = 30
     for title, kind, content in sections:
-        height += sec_h + 6 + _SEC_GAP
+        content_h += sec_h + 6 + _SEC_GAP
         if kind == "text":
             lines = _wrap_text(probe, body_font, str(content or ""), usable_w)
-            height += max(len(lines), 1) * line_h
+            content_h += max(len(lines), 1) * line_h
         elif kind == "image":
             img = _fit_image(content, usable_w)
-            height += img.size[1] + 8
+            content_h += img.size[1] + 8
         elif kind == "table":
             headers, rows = content
-            height += _TABLE_ROW_H * (1 + min(len(rows), 15)) + 6
-    height += _MARGIN
+            content_h += _TABLE_ROW_H * (1 + min(len(rows), 15)) + 6
 
-    img = Image.new("RGB", (_BOARD_WIDTH, max(height, 200)), _BG)
+    # 模板加载（缺失时降级）
+    top_bg = _load_template("top-bg.png")
+    title_img = _load_template("title.png")
+    pub_img = _load_template("publish-depart.png")
+    top_h = top_bg.size[1] if top_bg else 240
+    bottom_h = 170
+    total_h = top_h + content_h + bottom_h
+
+    img = Image.new("RGB", (_BOARD_WIDTH, max(total_h, top_h + 420)), _BG)
     draw = ImageDraw.Draw(img)
-    body_lines: list[str] = []
-    _render_sections(draw, (sec_font, body_font), usable_w, _MARGIN, _MARGIN, sections, body_lines)
+
+    # 顶部背景 + 标题
+    if top_bg:
+        tb = top_bg.resize((_BOARD_WIDTH, top_h)) if top_bg.size[0] != _BOARD_WIDTH else top_bg
+        img.paste(tb, (0, 0))
+    if title_img:
+        th = int(title_img.size[1] * _TITLE_W / title_img.size[0])
+        ti = title_img.resize((_TITLE_W, th))
+        img.paste(ti, ((_BOARD_WIDTH - _TITLE_W) // 2, _TOP_TITLE_PAD), ti if title_img.mode == "RGBA" else None)
+
+    # 内容区：浅蓝背景上放板块标题 + 文字/图/表
+    y = top_h + 30
+    for title, kind, content in sections:
+        draw.text((_MARGIN, y), title, font=sec_font, fill=_SEC_FG)
+        y += sec_h + 6
+        if kind == "text":
+            text = str(content or "")
+            lines = _wrap_text(draw, body_font, text, usable_w)
+            for ln in lines:
+                draw.text((_MARGIN, y), ln, font=body_font, fill=_FG)
+                y += line_h
+            if not lines:
+                draw.text((_MARGIN, y), "暂无内容", font=body_font, fill=_FG)
+                y += line_h
+        elif kind == "image":
+            img2 = _fit_image(content, usable_w)
+            paste_x = _MARGIN + (usable_w - img2.size[0]) // 2
+            img.paste(img2, (paste_x, y))
+            y += img2.size[1] + 8
+        elif kind == "table":
+            headers, rows = content
+            y = _render_table(draw, body_font, _MARGIN, y, usable_w, headers, rows)
+        y += _SEC_GAP
+
+    # 底部发布单位
+    if pub_img:
+        pw = 520
+        ph = int(pub_img.size[1] * pw / pub_img.size[0])
+        pi = pub_img.resize((pw, ph))
+        img.paste(pi, ((_BOARD_WIDTH - pw) // 2, total_h - ph - _BOTTOM_PAD), pi if pub_img.mode == "RGBA" else None)
+
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
