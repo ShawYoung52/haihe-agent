@@ -52,27 +52,27 @@ _SCRUB_PATTERNS = [
 # 常见栅格图片魔数。
 _IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"BM", b"II*\x00", b"MM\x00*")
 
-# 长图版式（模板化：bg 浅蓝背景 + top-bg 顶部 + title 标题 + publish 发布单位）
+# 长图版式（贴近示范图：顶部蓝绿装饰带 + 浅色标题横幅 + 近白内容 + 底部发布单位）
 _ASSETS_DIR = os.getenv(
     "LONGIMG_ASSETS_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "longimg"),
 )
 _BOARD_WIDTH = 1125          # 画布宽 = 模板宽
-_MARGIN = 56
-_TOP_HEIGHT = 900            # top-bg 顶部背景高度
-_TOP_TITLE_PAD = 90          # 标题在顶部背景中的上偏移
+_MARGIN = 64
+_TOP_STRIP = 320             # 顶部蓝绿装饰带高度（top-bg 上部）
+_TITLE_BANNER_H = 340        # 标题横幅区高度（浅色底，放 title 黑字）
 _TITLE_W = 700               # 标题缩放宽度
 _BOTTOM_PAD = 70             # 发布单位区底部留白
-_SEC_TITLE_SIZE = 34
-_BODY_SIZE = 28
-_LINE_RATIO = 1.65
-_SEC_GAP = 18
-_IMG_MAX_HEIGHT = 640        # 单张子图最大高度（超过则等比缩小）
-_TABLE_ROW_H = 40
-_TABLE_HEAD_BG = (232, 242, 250)
-_BG = (138, 210, 251)        # 浅蓝背景（bg.png 主色）
-_FG = (20, 20, 20)
-_SEC_FG = (18, 84, 156)      # 板块标题深蓝
+_SEC_TITLE_SIZE = 36
+_BODY_SIZE = 30
+_LINE_RATIO = 1.6
+_SEC_GAP = 16
+_IMG_MAX_HEIGHT = 700        # 单张子图最大高度（超过则等比缩小）
+_TABLE_ROW_H = 42
+_TABLE_HEAD_BG = (226, 238, 246)
+_BG = (247, 251, 253)        # 近白背景（示范图内容区底色）
+_FG = (30, 30, 30)
+_SEC_FG = (16, 76, 148)      # 板块标题深蓝
 
 # 模板图懒加载缓存
 _TEMPLATE_CACHE: dict[str, Any] = {}
@@ -407,11 +407,11 @@ def _render_table(draw, font, x: int, y: int, usable_w: int, headers: list[str],
 
 
 def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
-    """把板块列表渲染成一张模板化长图 PNG。缺 Pillow/缺中文字体返回 None。
+    """把板块列表渲染成一张贴近示范图的模板化长图 PNG。缺 Pillow/缺中文字体返回 None。
 
-    版式（用户模板）：顶部 top-bg.png 背景 + title.png 标题（海河流域气象服务），
-    中部浅蓝背景（bg.png 主色）放 7 个板块，底部 publish-depart.png 发布单位。
-    模板缺失时降级为浅蓝背景 + 白标题区，不报错。
+    版式（对齐示范图 download.png）：顶部 top-bg 上部作蓝绿装饰带（~320px），
+    下方浅色标题横幅放 title.png（海河流域气象服务，黑字），中部近白背景放 7 个
+    板块，底部 publish-depart.png 发布单位。模板缺失时降级为近白背景不报错。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -433,7 +433,7 @@ def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
     # 内容高度估算（板块标题 + 内容）
     probe_img = Image.new("RGB", (1, 1), _BG)
     probe = ImageDraw.Draw(probe_img)
-    content_h = 30
+    content_h = 24
     for title, kind, content in sections:
         content_h += sec_h + 6 + _SEC_GAP
         if kind == "text":
@@ -450,24 +450,29 @@ def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
     top_bg = _load_template("top-bg.png")
     title_img = _load_template("title.png")
     pub_img = _load_template("publish-depart.png")
-    top_h = top_bg.size[1] if top_bg else 240
+
+    top_h = _TOP_STRIP + _TITLE_BANNER_H
     bottom_h = 170
     total_h = top_h + content_h + bottom_h
 
     img = Image.new("RGB", (_BOARD_WIDTH, max(total_h, top_h + 420)), _BG)
     draw = ImageDraw.Draw(img)
 
-    # 顶部背景 + 标题
+    # 顶部蓝绿装饰带：top-bg 上部 320px（贴近示范图顶部观感）
     if top_bg:
-        tb = top_bg.resize((_BOARD_WIDTH, top_h)) if top_bg.size[0] != _BOARD_WIDTH else top_bg
-        img.paste(tb, (0, 0))
+        strip = top_bg.crop((0, 0, top_bg.size[0], min(_TOP_STRIP, top_bg.size[1])))
+        strip = strip.resize((_BOARD_WIDTH, _TOP_STRIP))
+        img.paste(strip, (0, 0))
+
+    # 标题横幅：浅色底（画布近白）+ title 黑字居中
     if title_img:
         th = int(title_img.size[1] * _TITLE_W / title_img.size[0])
         ti = title_img.resize((_TITLE_W, th))
-        img.paste(ti, ((_BOARD_WIDTH - _TITLE_W) // 2, _TOP_TITLE_PAD), ti if title_img.mode == "RGBA" else None)
+        title_y = _TOP_STRIP + (_TITLE_BANNER_H - th) // 2
+        img.paste(ti, ((_BOARD_WIDTH - _TITLE_W) // 2, title_y), ti if title_img.mode == "RGBA" else None)
 
-    # 内容区：浅蓝背景上放板块标题 + 文字/图/表
-    y = top_h + 30
+    # 内容区：近白背景上放板块标题 + 文字/图/表
+    y = top_h + 24
     for title, kind, content in sections:
         draw.text((_MARGIN, y), title, font=sec_font, fill=_SEC_FG)
         y += sec_h + 6
