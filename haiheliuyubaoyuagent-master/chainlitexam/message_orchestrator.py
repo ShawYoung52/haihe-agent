@@ -1786,15 +1786,31 @@ def _decision_weather_runtime() -> decision_weather_fast_path.DecisionWeatherRun
     )
 
 
-async def _render_base64_tool_image(
-    data: dict, *, title: str, name: str, ok_text: str, decode_err_text: str, send_err_text: str
-) -> str:
-    """把工具返回的 base64 图片解码并作为 cl.Image 发送，返回 observation_text。
+def _attach_pending_images(stream_msg) -> None:
+    """把工具执行阶段暂存的图片元素附加到最终回答消息（stream_msg）。
 
-    单一事实源：get_station_rainfall_real_img 与 generate_rainfall_describe_longimg
-    两个 base64 出图工具的展示路径共用本函数，避免同类逻辑多份拷贝漂移。
-    解码失败与发送失败分开捕获、分开报告——发送失败不再被误报为"解码失败"。
-    本函数不抛异常，一律返回中文兜底文本。
+    统一出口：_run_tool_round 的 base64 出图工具把 cl.Image 暂存到会话
+    `_pending_answer_images`，由最终回答的 stream_text_to_message 在首次输出前
+    附加——保证图片显示在**最终回答**里，而不是思考过程（ReasoningStep）里。
+    """
+    if stream_msg is None:
+        return
+    pending = cl.user_session.get("_pending_answer_images") or []
+    if not pending:
+        return
+    stream_msg.elements = list(stream_msg.elements or []) + list(pending)
+    cl.user_session.set("_pending_answer_images", [])
+
+
+async def _render_base64_tool_image(
+    data: dict, *, title: str, name: str, ok_text: str, decode_err_text: str
+) -> str:
+    """把工具返回的 base64 图片解码并暂存到会话，最终回答时附加展示。
+
+    单一事实源：get_station_rainfall_real_img / generate_rainfall_describe_longimg /
+    generate_haihe_composite_longimg 三个 base64 出图工具的展示路径共用本函数。
+    图片不在此发独立 cl.Message（否则落在思考过程），而是经 _attach_pending_images
+    附加到最终回答消息。本函数不抛异常，一律返回中文兜底文本。
     """
     b64_str = data.get("base64")
     if not b64_str:
@@ -1808,13 +1824,12 @@ async def _render_base64_tool_image(
         return decode_err_text
     cl.user_session.set("has_chart_generated", True)
     try:
-        await cl.Message(
-            content=f"📊 已生成{title}：",
-            elements=[cl.Image(content=img_bytes, name=name)],
-        ).send()
-    except Exception as send_err:
-        print(f"[{name}] 图片发送失败：{send_err}")
-        return send_err_text
+        pending = cl.user_session.get("_pending_answer_images") or []
+        pending.append(cl.Image(content=img_bytes, name=name))
+        cl.user_session.set("_pending_answer_images", pending)
+    except Exception as store_err:
+        print(f"[{name}] 图片暂存失败：{store_err}")
+        return decode_err_text
     return ok_text
 
 
@@ -2197,7 +2212,6 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                 f"区间{range_type}分区。不要输出坐标数据，请继续用自然语言简要说明时间范围和分区类型）"
                             ),
                             decode_err_text="已获取降水实况图，但图片数据解码失败。",
-                            send_err_text="已获取降水实况图，但图片发送展示失败，请稍后重试。",
                         )
                     elif isinstance(data, dict) and "error" in data:
                         raw_err = str(data["error"])
@@ -2227,7 +2241,6 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                     f"请继续用自然语言简要说明统计时段与分区类型）"
                                 ),
                                 decode_err_text="已获取降水实况文字，但图片数据解码失败。",
-                                send_err_text="已获取降水实况文字，但图片发送展示失败，请稍后重试。",
                             )
                         else:
                             # 降级纯文字（服务器缺中文字体/Pillow）：直接展示接口返回的原文
@@ -2260,7 +2273,6 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                     f"不要输出坐标或站点明细，请继续用自然语言简要说明统计时段与包含板块）"
                                 ),
                                 decode_err_text="已获取组合长图，但图片数据解码失败。",
-                                send_err_text="已获取组合长图，但图片发送展示失败，请稍后重试。",
                             )
                         else:
                             # 降级纯文字（缺中文字体/Pillow）：直接展示各板块文字

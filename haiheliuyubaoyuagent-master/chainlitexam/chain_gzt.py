@@ -52,7 +52,7 @@ except Exception:
     THINKING_PROMPT = ""
     FAST_PATH_THINKING_PROMPT = ""
 
-from message_orchestrator import process_message, _sanitize_display_text, _trim_history_rounds
+from message_orchestrator import process_message, _attach_pending_images, _sanitize_display_text, _trim_history_rounds
 from external_skill_tools import build_external_skill_tools
 from mcp_loader import load_sse_tools
 from tools.rain_analysis import build_rain_analysis_tools
@@ -1090,6 +1090,9 @@ async def stream_text_to_message(text: str, stream_msg: cl.Message | None = None
     if stream_msg is None:
         stream_msg = cl.Message(content="")
         await stream_msg.send()
+
+    # 附加工具执行阶段暂存的图片（base64 出图工具）到最终回答，而非思考过程。
+    _attach_pending_images(stream_msg)
 
     if not text:
         return stream_msg
