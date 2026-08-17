@@ -9,3 +9,13 @@ WechatRPA/
 # 客户交付包（整理产物，不入库）
 qa-agent-delivery/
 qa-agent-delivery.zip
+
+# Claude Code 本地配置（含本机授权白名单，不入库）
+.claude/settings.local.json
+
+# 本地环境/缓存
+.venv-frozen.txt
+.venv-test/
+__pycache__/
+*.pyc
+
