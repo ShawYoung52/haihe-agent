@@ -604,11 +604,17 @@ def generate_haihe_composite_longimg_core(
     else:
         sections.append(("⑦ 面雨量预报", "text", "（暂无面雨量预报数据）"))
 
+    render_warning = ""
     try:
         png = _compose_longimg(sections)
     except Exception as exc:
-        print(f"[composite_longimg] 组合长图渲染失败（降级文字）：{_safe_err(exc)}")
+        render_warning = _safe_err(exc)
+        print(f"[composite_longimg] 组合长图渲染失败（降级文字）：{render_warning}")
+        # 把渲染失败原因写进降级文字，便于联调直接看到（脱敏后）
+        texts.append(f"组合长图渲染失败：{render_warning}")
         png = None
+    if png is None and not render_warning:
+        render_warning = "服务器缺少中文字体或 Pillow，本次以文字展示"
 
     b64 = base64.b64encode(png).decode("ascii") if png else ""
     joined = "\n".join(t for t in texts if t)
@@ -616,7 +622,7 @@ def generate_haihe_composite_longimg_core(
         "status": "ok",
         "base64": b64,
         "text": joined or "（各板块文字见图片）",
-        "render_warning": "" if b64 else "服务器缺少中文字体或 Pillow，本次以文字展示",
+        "render_warning": render_warning,
         "beginTime": begin,
         "endTime": end,
         "range": range_,
