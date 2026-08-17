@@ -79,7 +79,11 @@ def _safe_err(exc: Exception) -> str:
 
 
 def _find_cjk_font() -> str | None:
-    """探测系统可用中文字体；env RAINFALL_DESCRIBE_FONT 可显式指定。"""
+    """探测系统可用中文字体；env RAINFALL_DESCRIBE_FONT 可显式指定。
+
+    不依赖联网安装：依次尝试 ①显式指定 ②常见路径 ③fc-list ④matplotlib 字体表。
+    内网服务器可能没装 yum 中文字体，但 conda 环境 / matplotlib 常自带 CJK 字体。
+    """
     override = os.getenv("RAINFALL_DESCRIBE_FONT", "").strip()
     candidates: list[str] = []
     if override:
@@ -99,10 +103,38 @@ def _find_cjk_font() -> str | None:
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
             "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/arphic/ukai.ttc",
+            "/opt/conda/fonts/NotoSansCJK-Regular.ttc",
+            "/opt/anaconda3/fonts/NotoSansCJK-Regular.ttc",
+            "/usr/local/share/fonts/NotoSansCJK-Regular.ttc",
+            "/usr/lib/fonts/NotoSansCJK-Regular.ttc",
         ]
     for p in candidates:
         if p and os.path.isfile(p):
             return p
+
+    # fc-list :lang=zh（系统已装 fontconfig 时最可靠）
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["fc-list", ":lang=zh", "file"], stderr=subprocess.DEVNULL, timeout=10
+        )
+        for line in out.decode("utf-8", "ignore").splitlines():
+            path = line.split(":", 1)[0].strip()
+            if path and os.path.isfile(path):
+                return path
+    except Exception:
+        pass
+
+    # matplotlib 已注册的中文字体（项目用 matplotlib 画图，若中文正常则此处必命中）
+    try:
+        import matplotlib.font_manager as fm
+        for f in fm.fontManager.ttflist:
+            if any(k in f.name for k in ("CJK", "Hei", "Song", "Wen", "Noto", "Droid", "AR PL", "Kai", "Ming")):
+                if os.path.isfile(f.fname):
+                    return f.fname
+    except Exception:
+        pass
     return None
 
 
