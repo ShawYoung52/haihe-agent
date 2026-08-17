@@ -2206,26 +2206,33 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         observation_text = "已获取降水实况图数据。"
                 elif tool_name == "generate_rainfall_describe_longimg":
                     data = _unwrap_tool_result(observation)
-                    if isinstance(data, dict) and data.get("status") == "ok" and data.get("base64"):
-                        begin_time = data.get("beginTime", "")
-                        end_time = data.get("endTime", "")
-                        range_type = str(data.get("range") or "9")
-                        station_type = str(data.get("type") or "0")
-                        rng_desc = {"9": "九", "11": "十一"}.get(range_type, range_type)
-                        type_desc = {"0": "国家站", "1": "区域站"}.get(station_type, station_type)
-                        title = f"降水实况文字长图（{begin_time} ~ {end_time}）"
-                        observation_text = await _render_base64_tool_image(
-                            data,
-                            title=title,
-                            name="rainfall_describe_longimg",
-                            ok_text=(
-                                f"（系统消息：已成功在前端为用户绘制了{title}。"
-                                f"区间{rng_desc}分区、{type_desc}。不要输出坐标或站点明细，"
-                                f"请继续用自然语言简要说明统计时段与分区类型）"
-                            ),
-                            decode_err_text="已获取降水实况文字，但图片数据解码失败。",
-                            send_err_text="已获取降水实况文字，但图片发送展示失败，请稍后重试。",
-                        )
+                    if isinstance(data, dict) and data.get("status") == "ok":
+                        if data.get("base64"):
+                            # 渲染成功 → 长图展示
+                            begin_time = data.get("beginTime", "")
+                            end_time = data.get("endTime", "")
+                            range_type = str(data.get("range") or "9")
+                            station_type = str(data.get("type") or "0")
+                            rng_desc = {"9": "九", "11": "十一"}.get(range_type, range_type)
+                            type_desc = {"0": "国家站", "1": "区域站"}.get(station_type, station_type)
+                            title = f"降水实况文字长图（{begin_time} ~ {end_time}）"
+                            observation_text = await _render_base64_tool_image(
+                                data,
+                                title=title,
+                                name="rainfall_describe_longimg",
+                                ok_text=(
+                                    f"（系统消息：已成功在前端为用户绘制了{title}。"
+                                    f"区间{rng_desc}分区、{type_desc}。不要输出坐标或站点明细，"
+                                    f"请继续用自然语言简要说明统计时段与分区类型）"
+                                ),
+                                decode_err_text="已获取降水实况文字，但图片数据解码失败。",
+                                send_err_text="已获取降水实况文字，但图片发送展示失败，请稍后重试。",
+                            )
+                        else:
+                            # 降级纯文字（服务器缺中文字体/Pillow）：直接展示接口返回的原文
+                            observation_text = str(
+                                data.get("text") or data.get("message") or "已获取降水实况文字。"
+                            )
                     elif isinstance(data, dict) and data.get("status") == "no_data":
                         observation_text = str(data.get("message") or "所选时段暂无有效降水实况文字数据，请确认时段后重试。")
                     elif isinstance(data, dict) and data.get("status") == "error":
