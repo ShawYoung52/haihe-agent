@@ -224,6 +224,16 @@ This project uses the superpowers plugin for disciplined development:
   - **`_scrub` 图片代理 allowlist**：默认只放行 `${IMAGE_URL_ALLOW_HOSTS}`（env 可扩展，**authority 精确匹配**，非前缀匹配），放行 URL 先占位保护后还原，保证图链能展示；**其余内网 IP 照常脱敏**（安全边界不变）。⚠️ 改动了脱敏逻辑，若生产需要放行其它图片代理主机用 env 扩展，不要放宽默认；且改 `BASIN_DRAWING_API_BASE` 时必须同步扩展 `IMAGE_URL_ALLOW_HOSTS`（二者独立配置）。
 - 测试：`tests/test_basin_drawing_tool.py`（areas 归一化/缓存/失败不缓存 + image body/时间规整/参数校验/相对路径拼接）、`tests/test_qa_http_images.py`（images 外部图链 + _scrub allowlist）。
 
+### 14所降水实况文字长图（2026-08-17，新功能接入）
+
+接入 14所 `/openapi/rainfall_describe/real`（降水实况文字长图）接口，让用户问「降水实况文字/生成降水实况文字/降水实况文字长图」，或**只说"长图/生成长图/出一张长图"（无具体图类型时默认本工具）**时生成长图并展示。口径（遵循同端口既有 `get_station_rainfall_real_img` 类比）：**响应按 base64 图片处理**（防御性取 data/result/image/base64 多键；若上游返回图片 URL 则工具内部拉取字节转 base64），走 `_run_tool_round` 特判的 base64 → `cl.Image` 展示路径，**不改动 `_IMAGE_URL_ALLOW_HOSTS` 网络安全白名单**（图片以本地落盘文件 URL 经 HTTP `images` 字段下发，不暴露内网出图代理 URL）。
+
+- **新工具**（`haihe-weather-analyzer-mcp/custom_tools/rainfall_describe_tool.py`，已注册 `server.py` + `custom_tools/__init__.py`）：
+  - `generate_rainfall_describe_longimg(beginTime="", endTime="", areaIds=None, interval=24, range="9", type="0", isClimateImg=False)`：POST `/openapi/rainfall_describe/real`，返回 `{status, base64, beginTime, endTime, interval, range, type, message}`。base 默认 `http://10.226.107.35:8001`，env `RAINFALL_DESCRIBE_API_BASE` 可覆盖。**防御性解析**：兼容裸 base64（剥 `data:...;base64,` 前缀）、图片绝对 URL、相对路径（拼 base 后拉取）；所有口径都做**图片魔数校验**（PNG/JPEG/GIF/WebP/BMP/TIFF），错误文案/垃圾串按 no_data 处理绝不报成功；URL 拉取带 20MB 字节上限。**interval 口径**：空→24、<1→钳 1；begin/end 均显式给出且未指定 interval 时自动对齐窗口时长（48h 窗口→48，符合接口「超过24h使用累计」语义）。areaIds 非法项丢弃/空→默认海河9分区。实时出图**不做 TTL 缓存**。**脱敏**：异常文本与 no_data 的 `msg` 都经 `_scrub_text`（URL host+path、IP:port、本地路径）后再返给 LLM/用户。
+  - **路由口径**：与 `get_station_rainfall_real_img`（各子流域降雨分布图/降水实况图）区分——本工具是**降水实况的文字长图**；**问句含"图"字（降水实况图/降雨分布图/面雨量分布图）一律走旧工具**（docstring + 双轨 prompt roster :174/:717、rule :406/:1070 都写死这条边界，防「生成降水实况图」被误路由到文字长图）。
+- **前端展示**（chainlitexam/message_orchestrator.py）：`TOOL_DISPLAY_NAMES` 新增"生成降水实况文字长图"；`_run_tool_round` 特判 `generate_rainfall_describe_longimg`（:2207）。**共享渲染辅助 `_render_base64_tool_image`**（:1787 附近）：base64 解码 → `cl.Image` 发送 → observation_text，**get_station_rainfall_real_img 与 generate_rainfall_describe_longimg 两个 base64 出图工具共用**，解码失败与发送失败分开捕获、分开报告（发送失败不再误报"解码失败"）；observation_text 携带 `区间九/十一分区、国家/区域站` 供 LLM 如实说明；`no_data`/`error` 分支给 LLM 中文观测文本（原始错误仅 console 隐藏打印）。
+- 测试：`haihe-weather-analyzer-mcp/tests/test_rainfall_describe_tool.py`（26 条：base64 多键/前缀剥离/魔数校验拒绝非图片、URL 与相对路径拉取转 base64、超大图上限、默认窗口与 body、参数透传/清洗/钳制、interval 对齐显式窗口、no_data/error、异常与 msg 脱敏）。测试经 importlib 按文件路径直接加载模块，绕开 `custom_tools/__init__.py` 重依赖链（networkx/rasterio）。
+
 ### 历史日期 → 历史实况查询（2026-08-13）
 
 客户反馈"查历史数据查不出来"（如"8月10号某某地方天气怎么样"）。三重根因 + 修复：

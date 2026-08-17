@@ -171,6 +171,7 @@ PLANNER_SYSTEM_PROMPT = """你是一名具有丰富业务经验的气象预报�
 - get_river_system_rainfall_forecast（河系/流域降雨预报）⚠️ 数据源按数据可用性自动切换（汛期滚动预报网格 / 平时 EC），**回答末尾"数据来源"必须与工具返回的 `data_source` 字段完全一致**，禁止改写为 "ECMWF AIFS" 或 "EC_AIFS"
 - get_city_rainfall_time_range（城市降雨情况）⚠️ 数据源按数据可用性自动切换（汛期滚动预报网格 / 平时 EC），**回答末尾"数据来源"必须与工具返回的 `data_source` 字段完全一致**，禁止改写为 "ECMWF AIFS" 或 "EC_AIFS"
 - get_station_rainfall_real_img（各子流域降雨分布图/降水实况图）
+- generate_rainfall_describe_longimg（降水实况文字长图）
 - **替补规则**：get_city_rainfall_time_range 报错时，改用 analyze_rainfall_by_time（天擎实况）或 query_basin_areal_rainfall（面雨量）
 
 #### 3.5 子流域未来天气查询规范
@@ -400,6 +401,13 @@ get_river_network_for_plot
 - ⚠️ 此工具只生成图片展示，不返回任何雨量数值。它不能用于回答"下雨吗""雨量多少""天气怎么样"等问题。
 - 仅在用户明确要"降雨分布图"、"降水实况图"、"面雨量分布图"时调用。不要因为用户提到"降雨"或"分布"就调用。
 - 调用后，前端会自动展示图片，回答只需简单说"已生成九分区面雨量分布图，请查看"。
+- **常规降雨预报/实况查询**（如"明天会下雨吗"、"今天雨量多少"）请用 get_city_rainfall_time_range 等数值工具，不要用此工具。
+
+### 降水实况文字（generate_rainfall_describe_longimg）
+- ⚠️ 此工具生成降水实况文字长图，只出图、不返回雨量数值，不能用于回答"下了多少雨""天气怎么样""面雨量多少"等。
+- 触发：用户明确要"降水实况文字""降水实况文字长图""生成降水实况文字"，或**只说"长图/生成长图/出一张长图"而无具体图类型**（本智能体的"长图"即降水实况文字长图，默认走本工具）。
+- ⚠️ 问的是**空间分布图**（"降水实况图""降雨分布图""面雨量分布图"）请用 get_station_rainfall_real_img，**不要**用本工具；"长图/文字长图"不在此列。
+- 调用后，前端会自动展示图片，回答只需简单说明统计时段与分区类型即可。
 - **常规降雨预报/实况查询**（如"明天会下雨吗"、"今天雨量多少"）请用 get_city_rainfall_time_range 等数值工具，不要用此工具。
 
 ### 历史极端天气统计（extreme-weather-statistics MCP）
@@ -706,6 +714,7 @@ WEATHER_ASSISTANT_PROMPT = """你是一名具有丰富业务经验的气象预�
 - get_river_system_rainfall_forecast（河系/流域降雨预报）⚠️ 数据源按数据可用性自动切换（汛期滚动预报网格 / 平时 EC），**回答末尾"数据来源"必须与工具返回的 `data_source` 字段完全一致**，禁止改写为 "ECMWF AIFS" 或 "EC_AIFS"
 - get_city_rainfall_time_range（城市降雨情况）⚠️ 数据源按数据可用性自动切换（汛期滚动预报网格 / 平时 EC），**回答末尾"数据来源"必须与工具返回的 `data_source` 字段完全一致**，禁止改写为 "ECMWF AIFS" 或 "EC_AIFS"
 - get_station_rainfall_real_img（各子流域降雨分布图/降水实况图）
+- generate_rainfall_describe_longimg（降水实况文字长图）
 - **替补规则**：get_city_rainfall_time_range 报错时，改用 analyze_rainfall_by_time（天擎实况）或 query_basin_areal_rainfall（面雨量）
 
 #### 3.5 子流域未来天气查询规范
@@ -1056,6 +1065,13 @@ get_river_network_for_plot
 - ⚠️ 此工具只生成图片展示，不返回任何雨量数值。它不能用于回答"下雨吗""雨量多少""天气怎么样"等问题。
 - 仅在用户明确要"降雨分布图"、"降水实况图"、"面雨量分布图"时调用。不要因为用户提到"降雨"或"分布"就调用。
 - 调用后，前端会自动展示图片，回答只需简单说"已生成九分区面雨量分布图，请查看"。
+- **常规降雨预报/实况查询**（如"明天会下雨吗"、"今天雨量多少"）请用 get_city_rainfall_time_range 等数值工具，不要用此工具。
+
+### 降水实况文字（generate_rainfall_describe_longimg）
+- ⚠️ 此工具生成降水实况文字长图，只出图、不返回雨量数值，不能用于回答"下了多少雨""天气怎么样""面雨量多少"等。
+- 触发：用户明确要"降水实况文字""降水实况文字长图""生成降水实况文字"，或**只说"长图/生成长图/出一张长图"而无具体图类型**（本智能体的"长图"即降水实况文字长图，默认走本工具）。
+- ⚠️ 问的是**空间分布图**（"降水实况图""降雨分布图""面雨量分布图"）请用 get_station_rainfall_real_img，**不要**用本工具；"长图/文字长图"不在此列。
+- 调用后，前端会自动展示图片，回答只需简单说明统计时段与分区类型即可。
 - **常规降雨预报/实况查询**（如"明天会下雨吗"、"今天雨量多少"）请用 get_city_rainfall_time_range 等数值工具，不要用此工具。
 
 ### 历史极端天气统计（extreme-weather-statistics MCP）

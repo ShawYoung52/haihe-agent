@@ -1,82 +1,49 @@
-# Progress Log: 有向图 pkl 与数据库表 v5 → v6 升级
+# 会话日志：58智能体接入 14所长图接口（降水实况文字）
 
-**会话日期:** 2026-07-14
+## 2026-08-17 会话（已完成，含代码评审修复轮）
 
-## Phase 1: Requirements & Discovery
-- **Status:** complete
-- Actions taken:
-  - 用户告知有向图 pkl 与数据库表已从 v5 升级为 v6
-  - 创建/更新 `task_plan.md`、`findings.md`、`progress.md`
-  - 全项目搜索 v5 引用并分类
-- Files created/modified:
-  - `task_plan.md`、`findings.md`、`progress.md`
+### 第一轮（初版交付）
+- [x] 探索代码库：确认 14所同族模式（basin_drawing port8080 URL、get_station_rainfall_real_img port8001 base64）
+- [x] 决策 D1/D2：base64 展示路径（不碰 _scrub 白名单）、仅 planner 主路径不加 fast path
+- [x] P2 新建 `custom_tools/rainfall_describe_tool.py` + server.py / custom_tools/__init__.py 注册
+- [x] P3 message_orchestrator.py + prompts.py 双轨路由
+- [x] P4 测试（17 条）+ FastMCP 注册确认 + 6 文件 py_compile
+- [x] P5 文档：CLAUDE.md 功能节、chainlitexam/README.md 工具表
 
-## Phase 2: Impact Analysis
-- **Status:** complete
-- Actions taken:
-  - 列出 12+ 需修改文件及对应修改点
-  - 区分必须升级项与保留项（历史 diff、v4 fallback、归档规划文件不修改）
-  - 确认 GeoJSON 属性字符串 `full_v5_*` 作为数据源标签需同步升级
-- Files created/modified:
-  - `findings.md`
+### 第二轮（code-review 修复轮，9 项全部处理）
+- [x] F1 图片魔数校验：base64/URL/相对路径三口径都校验是真实图片，错误文案/垃圾串→no_data 不报成功；相对路径拼 base 拉取（与 basin_drawing 同族）
+- [x] F2 interval 对齐显式窗口：begin/end 均给出且未指定 interval→自动取窗口时长（48h→48）
+- [x] F3 prompt 路由边界：问句含"图"字（降水实况图/降雨分布图/面雨量分布图）一律走旧工具
+- [x] F4 no_data 的 msg 也过 `_scrub_text` 脱敏
+- [x] F5 `_scrub_text` 升级：完整 URL host+path、IP:port、本地路径
+- [x] F6 observation_text 携带 区间九/十一分区、国家/区域站 供 LLM 如实说明
+- [x] F7 抽共享 `_render_base64_tool_image`：get_station_rainfall_real_img 与新工具共用（单一事实源）
+- [x] F8 URL 拉取 20MB 字节上限
+- [x] F9 解码失败与发送失败分开捕获、分开报告
+- [x] 测试增至 26 条（全过）、FastMCP 注册复验、6 文件 py_compile 全 OK、CLAUDE.md 更新
 
-## Phase 3: Implementation
-- **Status:** complete
-- Actions taken:
-  - 将 `river_directed_v5.pkl` 更新为 `river_directed_v6.pkl`
-  - 将 `haihe_river_directed_full_v5` 更新为 `haihe_river_directed_full_v6`
-  - 将 `haihe_river_directed_simple_v5` 更新为 `haihe_river_directed_simple_v6`
-  - 将 GeoJSON 属性/注释中的 `full_v5` 更新为 `full_v6`
-  - 保持 v4 fallback 与历史归档文件不变
-- Files created/modified:
-  - `chainlitexam/chain_gzt.py`
-  - `chainlitexam/tools/rain_analysis.py`
-  - `haihe-weather-analyzer-mcp/config.ini`
-  - `haihe-weather-analyzer-mcp/fixed_rainfall_impact_tool.py`
-  - `haihe-weather-analyzer-mcp/server.py`
-  - `haihe-weather-analyzer-mcp/tools.py`
-  - `haihe-weather-analyzer-mcp/vector_boundary_api.py`
-  - `../hhlyqyxt-master/docs/rainstorm_impact_map_config.md`
-  - `../hhlyqyxt-master/utils/rainfall_impact_geojson.py`
-  - `../hhlyqyxt-master/utils/rainstorm_impact_map_service.py`
-  - `../hhlyqyxt-master/utils/test_rain_impact_internal.py`
-  - `../hhlyqyxt-master/utils/test_rainfall_impact_geojson_db_local.py`
+## 改动文件清单
 
-## Phase 4: Testing & Verification
-- **Status:** complete
-- Actions taken:
-  - 运行 `pytest ../hhlyqyxt-master/utils/tests/test_rainfall_impact_geojson.py`：6/6 passed
-  - 运行 `python tests/test_fast_paths.py`：18/18 passed
-  - 运行 `cd chainlitexam && pytest tests/ -v`：51/51 passed
-  - 运行 `py_compile` 检查全部修改文件：通过
-- Files created/modified:
-  - `progress.md`
+| 文件 | 动作 |
+|---|---|
+| haihe-weather-analyzer-mcp/custom_tools/rainfall_describe_tool.py | 新建 |
+| haihe-weather-analyzer-mcp/custom_tools/__init__.py | 注册 |
+| haihe-weather-analyzer-mcp/server.py | 注册 |
+| haihe-weather-analyzer-mcp/tests/test_rainfall_describe_tool.py | 新建（26 条） |
+| chainlitexam/message_orchestrator.py | TOOL_DISPLAY_NAMES + 特判 + 共享 `_render_base64_tool_image` |
+| chainlitexam/prompts.py | 双轨路由（含"图"字边界） |
+| chainlitexam/README.md | 工具表 |
+| CLAUDE.md | 功能节（含评审加固说明） |
+| task_plan.md / findings.md / progress.md | 规划文件 |
 
-## Phase 5: Code Review, Simplification, Memory Update
-- **Status:** complete
-- Actions taken:
-  - 人工 code-review 确认 v5→v6 迁移范围正确，无活动代码遗漏
-  - 使用 code-simplifier:code-simplifier agent 集中版本常量：新增/复用 `haihe-weather-analyzer-mcp/constants.py` 与 `hhlyqyxt-master/utils/rainfall_impact_geojson.py` 中的 `DIRECTED_GRAPH_FILENAME`、`RIVER_TABLE_VERSION`、`RIVER_TABLE_FULL` / `DEFAULT_RIVER_TABLE`
-  - 使用 superpowers:verification-before-completion 独立重新验证：测试与编译均通过
-  - 更新 `CLAUDE.md` 与 memory（`rain-impact-river-defaults.md`、`MEMORY.md`）
-- Files created/modified:
-  - `haihe-weather-analyzer-mcp/constants.py`
-  - `chainlitexam/chain_gzt.py`（常量集中后）
-  - `haihe-weather-analyzer-mcp/fixed_rainfall_impact_tool.py`（常量集中后）
-  - `haihe-weather-analyzer-mcp/server.py`（常量集中后）
-  - `haihe-weather-analyzer-mcp/tools.py`（常量集中后）
-  - `haihe-weather-analyzer-mcp/vector_boundary_api.py`（常量集中后）
-  - `../hhlyqyxt-master/utils/rainfall_impact_geojson.py`（常量集中后）
-  - `../hhlyqyxt-master/utils/rainstorm_impact_map_service.py`（常量集中后）
-  - `../hhlyqyxt-master/utils/test_rain_impact_internal.py`（常量集中后）
-  - `../hhlyqyxt-master/utils/test_rainfall_impact_geojson_db_local.py`（常量集中后）
-  - `CLAUDE.md`
-  - memory 文件
+## 环境备注
 
-## Test Results
-| Test | Input | Expected | Actual | Status |
-|------|-------|----------|--------|--------|
-| test_rainfall_impact_geojson.py | 起点选择逻辑 | 6 条断言全部通过 | 6/6 passed | ✓ |
-| test_fast_paths.py | 18 条 fast path | reasoning_call/returns_covered/thinking | 18/18 passed | ✓ |
-| pytest tests/ | 问答智能体全量测试 | 无失败 | 51 passed | ✓ |
-| py_compile | 全部修改的 Python 文件 | 语法正确 | 通过 | ✓ |
+- 系统只有全局 Python 3.13（D:\Python\Python313），项目 venv 依赖缺失；
+  测试用 `haihe-weather-analyzer-mcp/.venv-test`（自建，装 requests/pytest/fastmcp/tzdata）。**勿提交**。
+- 测试经文件路径 importlib 直接加载模块，绕开 custom_tools/__init__.py 的重依赖链（networkx/rasterio）。
+
+## 联调待确认
+
+- D1 响应格式假设：base64 图片（同端口 get_station_rainfall_real_img 类比）。若实测为 URL，
+  工具已支持 URL/相对路径拉取转 base64（含魔数校验），无需改前端。
+- 触发话术：`降水实况文字 / 降水实况文字长图 / 生成降水实况文字`；问句含"图"字走旧工具。

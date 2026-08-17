@@ -1738,6 +1738,7 @@ TOOL_DISPLAY_NAMES = {
     "analyze_rainstorm_impact": "暴雨影响分析",
     "analyze_rainfall_by_time": "降雨量时段分析",
     "get_station_rainfall_real_img": "生成降雨实况分布图",
+    "generate_rainfall_describe_longimg": "生成降水实况文字长图",
     "get_city_rainfall_time_range": "查询城市降雨时段",
     "get_river_system_rainfall_forecast": "查询河系降雨预报",
     "query_rolling_forecast": "查询滚动预报",
@@ -1782,6 +1783,38 @@ def _decision_weather_runtime() -> decision_weather_fast_path.DecisionWeatherRun
         sanitize_display_text=_sanitize_display_text,
         prepend_thinking_summary=_prepend_thinking_summary,
     )
+
+
+async def _render_base64_tool_image(
+    data: dict, *, title: str, name: str, ok_text: str, decode_err_text: str, send_err_text: str
+) -> str:
+    """把工具返回的 base64 图片解码并作为 cl.Image 发送，返回 observation_text。
+
+    单一事实源：get_station_rainfall_real_img 与 generate_rainfall_describe_longimg
+    两个 base64 出图工具的展示路径共用本函数，避免同类逻辑多份拷贝漂移。
+    解码失败与发送失败分开捕获、分开报告——发送失败不再被误报为"解码失败"。
+    本函数不抛异常，一律返回中文兜底文本。
+    """
+    b64_str = data.get("base64")
+    if not b64_str:
+        return ""
+    if "," in b64_str:
+        b64_str = b64_str.split(",", 1)[1]
+    try:
+        img_bytes = base64.b64decode(b64_str)
+    except Exception as decode_err:
+        print(f"[{name}] base64解码失败：{decode_err}")
+        return decode_err_text
+    cl.user_session.set("has_chart_generated", True)
+    try:
+        await cl.Message(
+            content=f"📊 已生成{title}：",
+            elements=[cl.Image(content=img_bytes, name=name)],
+        ).send()
+    except Exception as send_err:
+        print(f"[{name}] 图片发送失败：{send_err}")
+        return send_err_text
+    return ok_text
 
 
 def _extract_historical_weather_images(data):
@@ -2149,36 +2182,58 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     )
                 elif tool_name == "get_station_rainfall_real_img":
                     data = _unwrap_tool_result(observation)
-                    if isinstance(data, dict) and "base64" in data:
-                        b64_str = data["base64"]
-                        # 去掉 data:image/...;base64, 前缀（如有）
-                        if "," in b64_str:
-                            b64_str = b64_str.split(",")[1]
-
-                        try:
-                            img_bytes = base64.b64decode(b64_str)
-                            begin_time = data.get("beginTime", "")
-                            end_time = data.get("endTime", "")
-                            range_type = data.get("range", "9")
-                            title = f"九分区面雨量分布图（{begin_time} ~ {end_time}）"
-                            cl.user_session.set("has_chart_generated", True)
-                            await cl.Message(
-                                content=f"📊 已生成{title}：",
-                                elements=[cl.Image(content=img_bytes, name="station_rainfall_real_img")],
-                            ).send()
-                            observation_text = (
+                    if isinstance(data, dict) and data.get("base64"):
+                        begin_time = data.get("beginTime", "")
+                        end_time = data.get("endTime", "")
+                        range_type = data.get("range", "9")
+                        title = f"九分区面雨量分布图（{begin_time} ~ {end_time}）"
+                        observation_text = await _render_base64_tool_image(
+                            data,
+                            title=title,
+                            name="station_rainfall_real_img",
+                            ok_text=(
                                 f"（系统消息：已成功在前端为用户绘制了{title}。"
                                 f"区间{range_type}分区。不要输出坐标数据，请继续用自然语言简要说明时间范围和分区类型）"
-                            )
-                        except Exception as decode_err:
-                            print(f"base64解码失败：{decode_err}")
-                            observation_text = "已获取降水实况图，但图片数据解码失败。"
+                            ),
+                            decode_err_text="已获取降水实况图，但图片数据解码失败。",
+                            send_err_text="已获取降水实况图，但图片发送展示失败，请稍后重试。",
+                        )
                     elif isinstance(data, dict) and "error" in data:
                         raw_err = str(data["error"])
                         print(f"[降水实况图] 后端返回错误（已隐藏）：{raw_err}")
                         observation_text = "获取降水实况图失败，请稍后重试。"
                     else:
                         observation_text = "已获取降水实况图数据。"
+                elif tool_name == "generate_rainfall_describe_longimg":
+                    data = _unwrap_tool_result(observation)
+                    if isinstance(data, dict) and data.get("status") == "ok" and data.get("base64"):
+                        begin_time = data.get("beginTime", "")
+                        end_time = data.get("endTime", "")
+                        range_type = str(data.get("range") or "9")
+                        station_type = str(data.get("type") or "0")
+                        rng_desc = {"9": "九", "11": "十一"}.get(range_type, range_type)
+                        type_desc = {"0": "国家站", "1": "区域站"}.get(station_type, station_type)
+                        title = f"降水实况文字长图（{begin_time} ~ {end_time}）"
+                        observation_text = await _render_base64_tool_image(
+                            data,
+                            title=title,
+                            name="rainfall_describe_longimg",
+                            ok_text=(
+                                f"（系统消息：已成功在前端为用户绘制了{title}。"
+                                f"区间{rng_desc}分区、{type_desc}。不要输出坐标或站点明细，"
+                                f"请继续用自然语言简要说明统计时段与分区类型）"
+                            ),
+                            decode_err_text="已获取降水实况文字，但图片数据解码失败。",
+                            send_err_text="已获取降水实况文字，但图片发送展示失败，请稍后重试。",
+                        )
+                    elif isinstance(data, dict) and data.get("status") == "no_data":
+                        observation_text = str(data.get("message") or "所选时段暂无有效降水实况文字数据，请确认时段后重试。")
+                    elif isinstance(data, dict) and data.get("status") == "error":
+                        raw_err = str(data.get("message") or "")
+                        print(f"[降水实况文字] 后端返回错误（已隐藏）：{raw_err}")
+                        observation_text = "获取降水实况文字失败，请稍后重试。"
+                    else:
+                        observation_text = "已获取降水实况文字数据。"
                 elif tool_name == "query_rolling_forecast":
                     data = _unwrap_tool_result(observation)
                     bundle = build_rolling_forecast_bundle(user_text, data)

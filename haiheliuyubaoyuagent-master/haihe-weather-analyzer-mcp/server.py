@@ -13,6 +13,7 @@ from custom_tools import (
     register_last_year_max_daily_rainfall_tool,
     register_poi_nearest_observation_tool,
     register_poi_hazard_reminder_tool,
+    register_rainfall_describe_tool,
     register_risk_warning_tool,
     register_safe_emergency_response_tool,
     register_year_to_date_areal_rainfall_tool,
@@ -42,6 +43,7 @@ class HaiheWeatherAnalyzerMCP:
         register_year_to_date_areal_rainfall_tool(self.mcp)
         register_poi_nearest_observation_tool(self.mcp)
         register_poi_hazard_reminder_tool(self.mcp)
+        register_rainfall_describe_tool(self.mcp)
         register_historical_weather_tool(self.mcp)
         register_risk_warning_tool(self.mcp)
         register_safe_emergency_response_tool(self.mcp)

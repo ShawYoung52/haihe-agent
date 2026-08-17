@@ -126,6 +126,7 @@
 |------|------|
 | `get_city_rainfall_time_range` | 城市降雨预报（ECMWF AIFS）。 |
 | `get_station_rainfall_real_img` | 子流域降雨分布图/降水实况图。 |
+| `generate_rainfall_describe_longimg` | 降水实况文字长图（14所 /openapi/rainfall_describe/real）。 |
 | `analyze_rainfall_by_time` | 天擎站点降雨分析。 |
 | `query_basin_areal_rainfall` | 子流域面雨量实况对比。 |
 | `analyze_rainstorm_impact` | 暴雨影响范围分析（行政区划/分区）。 |
