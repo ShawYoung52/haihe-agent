@@ -1,8 +1,8 @@
-"""14所接口聚焦诊断脚本（第三轮，内网运行）。
+"""14所接口聚焦诊断脚本（第四轮，内网运行）。
 
-目标：
-1. 中文字体是否可用（渲染长图的前提）；
-2. 组合长图失败的三个板块接口——实况面雨量图 / 预报面雨量图 / 面雨量预报——的真实响应。
+目标：验证"预报接口 500 根因 = 预报窗口用了实况窗口（beginTime 早于 foreTime）"的修复假设：
+用 foreTime==beginTime（起报对齐）的窗口测 fore_img / forecast；并连续 3 次调
+area_rain_real_img 确认它是否稳定 200（组合长图里曾"未加载成功"）。
 
 运行：python diagnose_14su.py   （需要 requests）
 """
@@ -11,67 +11,55 @@ from datetime import datetime, timedelta
 
 HOST = "10.226.107.35"
 BASE = f"http://{HOST}:8001"
-
-print("=" * 60)
-print("【0】中文字体检查")
-try:
-    from custom_tools.composite_longimg_tool import _find_cjk_font
-    print("font:", _find_cjk_font())
-except Exception as e:
-    print(f"import/探测异常: {e}")
-
-now = datetime.now()
-end = now.replace(minute=0, second=0, microsecond=0)
-begin = end - timedelta(hours=24)
 AREA_IDS = [6, 7, 8, 9, 10, 11, 12, 13, 14]
-B, E = begin.strftime("%Y-%m-%d %H:00:00"), end.strftime("%Y-%m-%d %H:00:00")
+now = datetime.now()
+END = now.replace(minute=0, second=0, microsecond=0)
+B = (END - timedelta(hours=24)).strftime("%Y-%m-%d %H:00:00")
+E = END.strftime("%Y-%m-%d %H:00:00")
+FT = "2026-08-17 08:00:00"   # 今天 08 时起报
+FE = "2026-08-18 08:00:00"   # 未来 24h
 
 
-def probe(label, method, url, payload=None, timeout=60):
+def probe(label, url, payload, times=1):
     print(f"\n===== {label} =====")
-    try:
-        if method == "POST":
-            r = requests.post(url, json=payload, timeout=timeout)
-        else:
-            r = requests.get(url, params=payload, timeout=timeout)
-        print(f"HTTP {r.status_code} ct={r.headers.get('content-type')}")
-        text = r.text
-        print("body head(300):", repr(text[:300]))
+    for i in range(times):
         try:
-            obj = r.json()
-            if isinstance(obj, dict) and "data" in obj:
-                d = obj["data"]
-                print("data type:", type(d).__name__)
+            r = requests.post(url, json=payload, timeout=60)
+            ok = r.status_code
+            head = r.text[:120]
+            try:
+                d = r.json().get("data")
                 if isinstance(d, str):
-                    print("data head(150):", repr(d[:150]), "len=", len(d))
-                elif isinstance(d, dict):
-                    print("data keys:", list(d.keys()))
+                    head = f"data=str len={len(d)} head={d[:60]!r}"
                 elif isinstance(d, list):
-                    print("data len:", len(d), "| first:", repr(str(d[0])[:150]) if d else "empty")
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"EXC {type(e).__name__}: {e}")
+                    head = f"data=list len={len(d)}"
+            except Exception:
+                pass
+            print(f"  [{i}] HTTP {ok} | {head}")
+        except Exception as e:
+            print(f"  [{i}] EXC {type(e).__name__}: {e}")
 
 
-# 【1】实况面雨量图
-probe("area_rain_real_img POST",
-      "POST", f"{BASE}/openapi/meteor_img/area_rain_real_img?forceCreate=1",
-      {"areaIds": AREA_IDS, "beginTime": B, "endTime": E, "interval": 24, "range": "9", "type": "0", "isClimateImg": False})
+# 【1】area_rain_real_img 连续 3 次（间歇 500 检测）
+probe("area_rain_real_img ×3（实况窗口）",
+      f"{BASE}/openapi/meteor_img/area_rain_real_img?forceCreate=1",
+      {"areaIds": AREA_IDS, "beginTime": B, "endTime": E, "interval": 24, "range": "9", "type": "0", "isClimateImg": False},
+      times=3)
 
-# 【2】预报面雨量图（foreTime 取最近 08/20 起报）
-probe("area_rain_fore_img POST",
-      "POST", f"{BASE}/openapi/meteor_img/area_rain_fore_img?forceCreate=1",
-      {"areaIds": AREA_IDS, "foreTime": "2026-08-17 08:00:00", "beginTime": B, "endTime": E,
+# 【2】area_rain_fore_img：起报对齐窗口（foreTime==beginTime）
+probe("area_rain_fore_img（foreTime==beginTime 对齐）",
+      f"{BASE}/openapi/meteor_img/area_rain_fore_img?forceCreate=1",
+      {"areaIds": AREA_IDS, "foreTime": FT, "beginTime": FT, "endTime": FE,
        "intval": 24, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": False})
 
-# 【3】面雨量预报
-probe("area_rainfall/forecast POST",
-      "POST", f"{BASE}/openapi/area_rainfall/forecast",
-      {"areaIds": AREA_IDS, "foreTime": "2026-08-17 08:00:00", "beginTime": B, "endTime": E,
-       "intval": 24, "modelTypes": ["ECMF"], "range": "9"})
+# 【3】area_rain_fore_img：用昨天的 foreTime（8-16 08:00）试一次（若今天时次未起报）
+probe("area_rain_fore_img（foreTime=昨天08时）",
+      f"{BASE}/openapi/meteor_img/area_rain_fore_img?forceCreate=1",
+      {"areaIds": AREA_IDS, "foreTime": "2026-08-16 08:00:00", "beginTime": "2026-08-16 08:00:00", "endTime": "2026-08-17 08:00:00",
+       "intval": 24, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": False})
 
-# 【4】顺带确认：降水实况图（组合长图里成功的那几个）
-probe("stationRainRealImg POST（对照组）",
-      "POST", f"{BASE}/openapi/meteor_img/stationRainRealImg?forceCreate=1",
-      {"areaIds": AREA_IDS, "beginTime": B, "endTime": E, "interval": 24, "range": "9", "type": "0", "isClimateImg": False})
+# 【4】area_rainfall/forecast：起报对齐窗口
+probe("area_rainfall/forecast（foreTime==beginTime 对齐）",
+      f"{BASE}/openapi/area_rainfall/forecast",
+      {"areaIds": AREA_IDS, "foreTime": FT, "beginTime": FT, "endTime": FE,
+       "intval": 24, "modelTypes": ["ECMF"], "range": "9"})

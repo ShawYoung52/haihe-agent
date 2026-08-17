@@ -99,6 +99,7 @@ def _find_cjk_font() -> str | None:
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/simhei.ttf",
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
@@ -481,6 +482,12 @@ def generate_haihe_composite_longimg_core(
         begin, end = _window(interval_hours)
     fore_time = _latest_fore_cycle()
     query_time = datetime.now(BEIJING_TIMEZONE).strftime("%Y%m%d%H0000")
+    # 预报窗口从起报时次起算（接口示例 foreTime == beginTime），不能用实况窗口。
+    try:
+        fore_dt = datetime.strptime(fore_time, "%Y-%m-%d %H:00:00")
+        fore_end = (fore_dt + timedelta(hours=interval_hours)).strftime("%Y-%m-%d %H:00:00")
+    except Exception:
+        fore_end = ""
 
     # 各板块独立取数，失败各自占位
     sections: list[tuple[str, str, Any]] = []
@@ -551,18 +558,19 @@ def generate_haihe_composite_longimg_core(
     else:
         sections.append(("⑤ 点雨量列表", "text", "（暂无点雨量数据）"))
 
-    # ⑥ 预报面雨量图
+    # ⑥ 预报面雨量图（起报对齐窗口；fore_end 为空时回退实况窗口）
     try:
-        fore_img_bytes = _fetch_area_rain_fore_img(fore_time, begin, end, area_ids, interval_hours)
+        fb, fe = (fore_time, fore_end) if fore_end else (begin, end)
+        fore_img_bytes = _fetch_area_rain_fore_img(fore_time, fb, fe, area_ids, interval_hours)
     except Exception as exc:
         fore_img_bytes = None
         texts.append(f"预报面雨量图获取失败：{_safe_err(exc)}")
     fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
     sections.append((f"⑥ 预报面雨量图（起报 {fore_time}）", "image", fore_img) if fore_img else ("⑥ 预报面雨量图", "text", "（预报面雨量图获取失败）"))
 
-    # ⑦ 面雨量预报（分区 → 表格）
+    # ⑦ 面雨量预报（分区 → 表格），同样用起报对齐窗口。
     try:
-        forecasts = _fetch_forecast(fore_time, begin, end, area_ids, interval_hours)
+        forecasts = _fetch_forecast(fore_time, fb, fe, area_ids, interval_hours)
     except Exception as exc:
         forecasts = []
         texts.append(f"面雨量预报获取失败：{_safe_err(exc)}")
