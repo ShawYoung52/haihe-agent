@@ -1067,3 +1067,113 @@ async def test_fast_path_routes_to_historical_with_hazard(monkeypatch):
     assert hazard_tool.last_args["lon"] == 117.16
     assert hazard_tool.last_args["lat"] == 39.11
 
+
+class TestPoiCategoryExtended:
+    """港口/水库/山洪区 POI 分类（用户要求的天津港、密云水库、蓟州场景）。"""
+
+    def test_tianjin_port(self):
+        assert dw_core.classify_poi_category("天津港", "天津市滨海新区") == "port"
+        assert dw_core.classify_poi_category("天津新港", "") == "port"
+        assert dw_core.classify_poi_category("塘沽港", "") == "port"
+        assert dw_core.classify_poi_category("天津港码头", "") == "port"
+        assert dw_core.classify_poi_category("天津港保税区", "") == "port"
+
+    def test_reservoir(self):
+        assert dw_core.classify_poi_category("密云水库", "北京市密云区") == "reservoir"
+        assert dw_core.classify_poi_category("于桥水库", "天津市蓟州区") == "reservoir"
+
+    def test_jizhou_mountain_risk(self):
+        assert dw_core.classify_poi_category("蓟州", "天津市蓟州区") == "mountain"
+        assert dw_core.classify_poi_category("蓟县", "") == "mountain"
+
+    def test_existing_categories_unchanged(self):
+        assert dw_core.classify_poi_category("盘山风景名胜区", "") == "scenic"
+        assert dw_core.classify_poi_category("泰达航母主题公园", "") == "scenic"
+        assert dw_core.classify_poi_category("天津大学", "") == "school"
+        assert dw_core.classify_poi_category("盘山", "") is None
+        assert dw_core.classify_poi_category("石家庄", "河北省石家庄市") is None
+
+
+class TestPoiReminderExtended:
+    def test_reservoir_water_level_reminder(self):
+        facts = {
+            "poi_category": "reservoir",
+            "has_rain_signal": False,
+            "periods": [],
+            "total_rain_mm": None,
+            "water_level_info": {
+                "reservoir_name": "密云水库",
+                "water_level_m": "133.5",
+                "flood_limit_m": "152.0",
+                "storage": "12.3",
+                "outflow_m3s": "45.0",
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "水库区域" in out, "应输出水库模板"
+        assert "密云水库" in out
+        assert "库上水位约 133.5 米" in out
+        assert "汛限水位 152.0 米" in out
+
+    def test_port_reminder(self):
+        facts = {"poi_category": "port", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "港口区域请注意大风" in out
+        assert "船舶作业和航行安全" in out
+
+    def test_reservoir_without_water_info_no_crash(self):
+        facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "水库区域" in out
+        assert "库上水位" not in out, "无水位数据时不应编造水位"
+
+
+class TestFetchWaterLevel:
+    @pytest.mark.asyncio
+    async def test_fetch_water_level_ok(self):
+        class _Tool:
+            async def ainvoke(self, args):
+                return {
+                    "data_type": "reservoir",
+                    "count": 1,
+                    "records": [{
+                        "station_name": "密云水库",
+                        "time": "2026-08-17 15:00:00",
+                        "water_level_m": "133.5",
+                        "汛限水位(m)": "152.0",
+                        "蓄水量(百万m³)": "12.3",
+                        "出库流量(m³/s)": "45.0",
+                    }],
+                    "source": "十四所水位接口",
+                }
+        info = await dw_core._decision_fetch_water_level("密云水库", _Tool(), lambda t, a: t.ainvoke(a))
+        assert info is not None
+        assert info["reservoir_name"] == "密云水库"
+        assert info["water_level_m"] == "133.5"
+        assert info["flood_limit_m"] == "152.0"
+
+    @pytest.mark.asyncio
+    async def test_fetch_water_level_no_tool(self):
+        assert await dw_core._decision_fetch_water_level("密云水库", None, lambda t, a: t.ainvoke(a)) is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_water_level_error_payload(self):
+        class _Tool:
+            async def ainvoke(self, args):
+                return {"error": "水位服务请求超时", "data_type": "reservoir"}
+        assert await dw_core._decision_fetch_water_level("密云水库", _Tool(), lambda t, a: t.ainvoke(a)) is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_water_level_exception(self):
+        class _Tool:
+            async def ainvoke(self, args):
+                raise RuntimeError("boom")
+        assert await dw_core._decision_fetch_water_level("密云水库", _Tool(), lambda t, a: t.ainvoke(a)) is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_water_level_empty_records(self):
+        class _Tool:
+            async def ainvoke(self, args):
+                return {"data_type": "reservoir", "count": 0, "records": [], "source": "x"}
+        assert await dw_core._decision_fetch_water_level("密云水库", _Tool(), lambda t, a: t.ainvoke(a)) is None
+

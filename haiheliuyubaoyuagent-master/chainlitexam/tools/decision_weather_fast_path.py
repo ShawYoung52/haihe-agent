@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
     _decision_fetch_hazard_context,
+    _decision_fetch_water_level,
     _decision_historical_window_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
@@ -108,6 +109,16 @@ class DecisionWeatherQAService:
             lambda tool, args: self.runtime.invoke_fast_tool(tool.name, tool, args, user_text),
             "DecisionWeather",
         )
+        # 水库类别：查 14所 水库水位（data_type=reservoir），数值来自接口、不编造
+        water_level_tool = self.runtime.find_tool(self.tools, "query_water_level")
+        water_level_info = (
+            await _decision_fetch_water_level(
+                point_name, water_level_tool,
+                lambda tool, args: self.runtime.invoke_fast_tool(tool.name, tool, args, user_text),
+                "DecisionWeather",
+            )
+            if category == "reservoir" else None
+        )
 
         forecast_args = {
             "user_query": user_text,
@@ -137,7 +148,7 @@ class DecisionWeatherQAService:
                 )
                 hist_text = await _generate_decision_historical_answer_from_raw(
                     hist_raw, user_text, poi, point_name, normalized["question_type"], self.answer_chain, self.callbacks,
-                    poi_category=category, hazard_points=hazard_points,
+                    poi_category=category, hazard_points=hazard_points, water_level_info=water_level_info,
                 )
                 final_text = self.runtime.sanitize_display_text(
                     self.callbacks["append_followup_if_needed"](hist_text or "", user_text)
@@ -157,6 +168,7 @@ class DecisionWeatherQAService:
         facts["question_type"] = normalized["question_type"]
         facts["poi_category"] = category
         facts["hazard_points"] = hazard_points
+        facts["water_level_info"] = water_level_info
 
         final_text = await _generate_decision_weather_answer(user_text, facts, self.answer_chain, self.callbacks)
         final_text = self.runtime.sanitize_display_text(

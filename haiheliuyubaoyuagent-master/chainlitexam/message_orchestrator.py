@@ -79,6 +79,7 @@ ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower()
 ENABLE_LLM_THINKING = os.environ.get("ENABLE_LLM_THINKING", "false").strip().lower() in ("1", "true", "yes")
 
 from tools.decision_weather_core import (
+    _decision_fetch_water_level,
     _decision_weather_prefilter,
     _extract_first_json_object,
     _generate_decision_historical_answer,
@@ -2322,6 +2323,14 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                                         hazard_points = hazard_payload
                                 except Exception as hazard_err:
                                     print(f"[orchestrator] 历史实况隐患点查询失败（跳过注意事项）：{hazard_err}")
+                        # 水库类别：历史日期也查水库水位（数值来自接口、不编造）
+                        water_level_info = None
+                        if category == "reservoir":
+                            water_level_tool = _find_tool(tools, "query_water_level")
+                            water_level_info = await _decision_fetch_water_level(
+                                point_name, water_level_tool,
+                                lambda tool, args: tool.ainvoke(args), "orchestrator",
+                            )
                         hist_text = await _generate_decision_historical_answer(
                             user_text,
                             hist_payload,
@@ -2332,6 +2341,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                             callbacks,
                             poi_category=category,
                             hazard_points=hazard_points,
+                            water_level_info=water_level_info,
                         )
                         observation_text = _sanitize_display_text(str(hist_text or ""))
                         forced_final_text = observation_text

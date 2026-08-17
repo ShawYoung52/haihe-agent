@@ -332,9 +332,9 @@ def _decision_pick_first_poi(poi_payload: dict, keyword: str = "") -> dict | Non
 
 
 # POI 地理类型分类：用于点位天气回答时追加“注意事项”。
-# 优先级 school → airport → station → scenic → mountain，先命中者返回。
+# 优先级 school → airport → station → port → reservoir → scenic → mountain，先命中者返回。
 # 关键词匹配保守优先：mountain 只认复合词，排除“石家庄/唐山/燕山”等单字“山”地名；
-# station 只认列表内复合词，不认裸“站”。
+# station 只认列表内复合词，不认裸“站”；port/reservoir 只认明确港区/水库词，不认裸“港/库”。
 POI_CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "school": [
         "小学", "中学", "学校", "校区", "学院", "大学", "高中", "初中",
@@ -346,14 +346,24 @@ POI_CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "天津站", "天津西站", "天津南站", "天津北站", "滨海站", "塘沽站",
         "车站",
     ],
+    "port": [
+        "港口", "港区", "码头", "港务", "装卸区", "保税港", "临港", "船闸", "港",
+    ],
+    "reservoir": [
+        "水库", "拦河坝", "蓄水工程", "水电站",
+    ],
     "scenic": [
         "风景区", "风景名胜", "景区", "景点", "旅游区", "古镇", "公园",
         "湿地公园", "乐园", "游乐场", "游乐园", "度假区", "博物", "展览馆",
         "博物馆", "纪念馆", "会展", "风情区", "文化街",
     ],
-    "mountain": ["山区", "山地", "山间", "山脚", "山腰", "山沟", "山坡", "峡谷", "山洪"],
+    # 区域级山洪/地灾风险区（蓟州等），POI 命中即走 mountain 类隐患点研判。
+    "mountain": [
+        "山区", "山地", "山间", "山脚", "山腰", "山沟", "山坡", "峡谷", "山洪",
+        "蓟州", "蓟县",
+    ],
 }
-_POI_CATEGORY_ORDER = ("school", "airport", "station", "scenic", "mountain")
+_POI_CATEGORY_ORDER = ("school", "airport", "station", "port", "reservoir", "scenic", "mountain")
 
 # 知名天津景点（名称本身不含景区/公园等类别词，须点名关联景区）。
 # 只对 name 匹配，且名称含街道/办事处/政务/社区/派出所/医院/村/县/镇/乡等非景区语义时跳过，
@@ -385,8 +395,8 @@ def classify_poi_category(
 ) -> str | None:
     """按名称/地址/ES 类别识别 POI 地理类型。
 
-    返回 school|scenic|mountain|airport|station 之一，无法可靠分类时返回 None
-    （保守优先，避免把“石家庄/唐山”等普通地名误判成山区）。
+    返回 school|scenic|mountain|airport|station|port|reservoir 之一，无法可靠分类时
+    返回 None（保守优先，避免把“石家庄/唐山”等普通地名误判成山区）。
     """
     if not name:
         return None
@@ -589,12 +599,14 @@ async def _generate_decision_historical_answer(
     callbacks: dict,
     poi_category: str | None = None,
     hazard_points: dict | None = None,
+    water_level_info: dict | None = None,
 ) -> str:
     """根据历史实况工具结果生成历史天气回答，与预报回答共用同一组装函数。
 
     由双路径调用方在滚动预报返回 past_date 标记后调用；payload 为
-    query_poi_historical_weather 的结果 dict。poi_category/hazard_points
-    用于历史回答追加“注意事项”（措辞走历史式，见 _build_poi_reminder_section）。
+    query_poi_historical_weather 的结果 dict。poi_category/hazard_points/
+    water_level_info 用于历史回答追加“注意事项”（措辞走历史式，
+    见 _build_poi_reminder_section）。
     """
     status = str(payload.get("status") or "")
     # 真实工具 ok 分支带 forecast_start_time；no_data/error 分支只有 start_time，需回退
@@ -616,6 +628,7 @@ async def _generate_decision_historical_answer(
     facts["question_type"] = question_type
     facts["poi_category"] = poi_category
     facts["hazard_points"] = hazard_points
+    facts["water_level_info"] = water_level_info
     return await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
 
 
@@ -646,6 +659,7 @@ async def _generate_decision_historical_answer_from_raw(
     callbacks: dict,
     poi_category: str | None = None,
     hazard_points: dict | None = None,
+    water_level_info: dict | None = None,
 ) -> str:
     """解包历史实况工具原始结果并生成历史回答文本（双路径共用）。"""
     hist_payload = _unwrap_tool_result(hist_raw)
@@ -653,7 +667,7 @@ async def _generate_decision_historical_answer_from_raw(
         hist_payload = {}
     return await _generate_decision_historical_answer(
         user_text, hist_payload, poi, point_name, question_type, answer_chain, callbacks,
-        poi_category=poi_category, hazard_points=hazard_points,
+        poi_category=poi_category, hazard_points=hazard_points, water_level_info=water_level_info,
     )
 
 
@@ -804,6 +818,8 @@ _POI_CATEGORY_REMINDER_TEMPLATES: dict[str, str] = {
     "mountain": "山区地形复杂，强降雨时易诱发地质灾害与山洪，请避免进入山谷、沟道等危险区域。",
     "airport": "机场区域请注意降雨、大风、雷暴及低能见度对航班起降的影响。",
     "station": "车站人流密集，请注意雨天路滑、乘车安全及列车运行调整信息。",
+    "port": "港口区域请注意大风、低能见度、强对流及降雨对船舶作业和航行安全的影响。",
+    "reservoir": "水库区域请注意降雨引起的水位上涨与泄洪调度，关注下游河道安全。",
 }
 
 
@@ -945,6 +961,49 @@ async def _decision_fetch_hazard_context(
     return None
 
 
+async def _decision_fetch_water_level(
+    poi_name: str,
+    water_level_tool: Any,
+    invoke: Callable[[Any, dict], Awaitable[Any]],
+    label: str = "DecisionWeather",
+) -> dict | None:
+    """水库类别点位：查 14所 水库水位（query_water_level data_type=reservoir）。
+
+    失败/无工具/无记录均静默返回 None，不打断主回答。返回的数值全部来自接口
+    records（库上水位/汛限水位/蓄水量/出库流量），供 _build_poi_reminder_section
+    追加水位提示，不编造。
+    """
+    if water_level_tool is None:
+        return None
+    try:
+        raw = await invoke(
+            water_level_tool, {"river_name": poi_name, "data_type": "reservoir"}
+        )
+        payload = _unwrap_tool_result(raw)
+        if not isinstance(payload, dict) or payload.get("error"):
+            return None
+        records = [r for r in (payload.get("records") or []) if isinstance(r, dict)]
+        if not records:
+            return None
+        # 取最新一条（time 降序）
+        latest = sorted(records, key=lambda r: str(r.get("time") or ""), reverse=True)[0]
+        water_level = latest.get("water_level_m") or latest.get("库上水位(m)")
+        if water_level is None:
+            return None
+        return {
+            "reservoir_name": str(latest.get("station_name") or poi_name),
+            "water_level_m": water_level,
+            "flood_limit_m": latest.get("汛限水位(m)"),
+            "storage": latest.get("蓄水量(百万m³)"),
+            "outflow_m3s": latest.get("出库流量(m³/s)"),
+            "count": len(records),
+            "source": payload.get("source") or "十四所水位接口",
+        }
+    except Exception as exc:
+        print(f"[{label}] 水库水位查询失败（跳过水位提示）：{exc}")
+    return None
+
+
 def _build_poi_reminder_section(facts: dict) -> str:
     """根据点位类别 + 周边隐患点确定性生成“⚠️ 注意事项”段落。
 
@@ -992,6 +1051,21 @@ def _build_poi_reminder_section(facts: dict) -> str:
             if not clauses and min_vis is not None and min_vis < 1.0:
                 clauses.append("能见度较低，出行请注意交通安全。")
             lines.append(template + (clauses[0] if clauses else ""))
+
+        # 水库：追加 14所 接口实际水位（数值来自 facts.water_level_info，不编造）
+        if category == "reservoir":
+            water_info = facts.get("water_level_info")
+            if isinstance(water_info, dict) and water_info.get("water_level_m") is not None:
+                wl = water_info["water_level_m"]
+                fl = water_info.get("flood_limit_m")
+                wl_line = f"目前{water_info.get('reservoir_name') or '水库'}库上水位约 {wl} 米"
+                if fl is not None:
+                    wl_line += f"（汛限水位 {fl} 米）"
+                lines.append(wl_line)
+                if water_info.get("storage") is not None:
+                    lines.append(f"蓄水量约 {water_info['storage']} 百万立方米")
+                if water_info.get("outflow_m3s") is not None:
+                    lines.append(f"出库流量约 {water_info['outflow_m3s']} 立方米/秒")
 
     if show_hazard:
         categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []

@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from tools.decision_weather_core import (
     _compact_decision_forecast_facts,
     _decision_fetch_hazard_context,
+    _decision_fetch_water_level,
     _decision_historical_window_args,
     _decision_pick_first_poi,
     _decision_weather_prefilter,
@@ -119,6 +120,15 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 category, poi_lon, poi_lat, hazard_tool,
                 lambda tool, args: tool.ainvoke(args), "DecisionWeatherTool",
             )
+            # 水库类别：查 14所 水库水位（data_type=reservoir），数值来自接口、不编造
+            water_level_tool = _find_tool(tools, "query_water_level")
+            water_level_info = (
+                await _decision_fetch_water_level(
+                    point_name, water_level_tool,
+                    lambda tool, args: tool.ainvoke(args), "DecisionWeatherTool",
+                )
+                if category == "reservoir" else None
+            )
 
             forecast_args = {
                 "user_query": user_text,
@@ -145,7 +155,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                     )
                     hist_text = await _generate_decision_historical_answer_from_raw(
                         hist_raw, user_text, poi, point_name, normalized["question_type"], answer_chain, callbacks,
-                        poi_category=category, hazard_points=hazard_points,
+                        poi_category=category, hazard_points=hazard_points, water_level_info=water_level_info,
                     )
                     append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)
                     return _sanitize_display_text(append_followup(hist_text or "", user_text))
@@ -168,6 +178,7 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             facts["question_type"] = normalized["question_type"]
             facts["poi_category"] = category
             facts["hazard_points"] = hazard_points
+            facts["water_level_info"] = water_level_info
 
             final_text = await _generate_decision_weather_answer(user_text, facts, answer_chain, callbacks)
             append_followup = callbacks.get("append_followup_if_needed", lambda t, u: t)
