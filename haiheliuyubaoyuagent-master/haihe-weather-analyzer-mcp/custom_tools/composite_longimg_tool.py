@@ -245,7 +245,7 @@ def _fetch_station_rain_img(begin: str, end: str, area_ids: list[int], interval:
     """③ 降水实况图。"""
     return _resolve_image_bytes(_post(f"{BASE}/openapi/meteor_img/stationRainRealImg?forceCreate=1", {
         "areaIds": area_ids, "beginTime": begin, "endTime": end,
-        "interval": interval, "range": range_, "type": type_,
+        "interval": interval, "range": range_, "type": type_, "isClimateImg": False,
     }))
 
 
@@ -253,7 +253,7 @@ def _fetch_area_rain_real_img(begin: str, end: str, area_ids: list[int], interva
     """④ 实况面雨量图。"""
     return _resolve_image_bytes(_post(f"{BASE}/openapi/meteor_img/area_rain_real_img?forceCreate=1", {
         "areaIds": area_ids, "beginTime": begin, "endTime": end,
-        "interval": interval, "range": range_, "type": type_,
+        "interval": interval, "range": range_, "type": type_, "isClimateImg": False,
     }))
 
 
@@ -285,14 +285,26 @@ def _fetch_forecast(fore_time: str, begin: str, end: str, area_ids: list[int], i
     return [d for d in (data or []) if isinstance(d, dict)]
 
 
-def _latest_fore_cycle() -> str:
+def _fore_cycle_candidates(max_days: int = 4) -> list[str]:
+    """最近 N 天 08/20 起报时次（新→旧），用于预报接口时次回退。
+
+    14所 的某一起报时次预报数据未就绪时出图接口会返回 500（实测今天 08 时次 500、
+    昨天 08 时次 200），因此按序尝试最近时次，取第一个能出图的。
+    """
     now = datetime.now(BEIJING_TIMEZONE)
-    if now.hour >= 20:
-        return now.replace(hour=20, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:00:00")
-    if now.hour >= 8:
-        return now.replace(hour=8, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:00:00")
-    prev = now - timedelta(days=1)
-    return prev.replace(hour=20, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:00:00")
+    cycles: list[datetime] = []
+    for offset in range(0, max_days):
+        day = now.replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=offset)
+        cycles.append(day)
+        cycles.append(day + timedelta(hours=12))  # 20 时
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in sorted(cycles, reverse=True):
+        key = c.strftime("%Y-%m-%d %H:00:00")
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
 
 
 # ---------------------------------------------------------------- 渲染
@@ -480,14 +492,9 @@ def generate_haihe_composite_longimg_core(
             interval_hours = _window_hours(begin, end)
     else:
         begin, end = _window(interval_hours)
-    fore_time = _latest_fore_cycle()
+    fore_cycles = _fore_cycle_candidates()
+    fore_time = fore_cycles[0]
     query_time = datetime.now(BEIJING_TIMEZONE).strftime("%Y%m%d%H0000")
-    # 预报窗口从起报时次起算（接口示例 foreTime == beginTime），不能用实况窗口。
-    try:
-        fore_dt = datetime.strptime(fore_time, "%Y-%m-%d %H:00:00")
-        fore_end = (fore_dt + timedelta(hours=interval_hours)).strftime("%Y-%m-%d %H:00:00")
-    except Exception:
-        fore_end = ""
 
     # 各板块独立取数，失败各自占位
     sections: list[tuple[str, str, Any]] = []
@@ -558,22 +565,32 @@ def generate_haihe_composite_longimg_core(
     else:
         sections.append(("⑤ 点雨量列表", "text", "（暂无点雨量数据）"))
 
-    # ⑥ 预报面雨量图（起报对齐窗口；fore_end 为空时回退实况窗口）
-    try:
-        fb, fe = (fore_time, fore_end) if fore_end else (begin, end)
-        fore_img_bytes = _fetch_area_rain_fore_img(fore_time, fb, fe, area_ids, interval_hours)
-    except Exception as exc:
-        fore_img_bytes = None
-        texts.append(f"预报面雨量图获取失败：{_safe_err(exc)}")
+    # ⑥⑦ 预报板块：起报时次自动回退（14所 某时次数据未就绪时出图接口 500，实测今天08时500/昨天08时200）
+    used_fore = ""
+    fore_img_bytes = None
+    fore_end = ""
+    for fc in fore_cycles:
+        try:
+            fdt = datetime.strptime(fc, "%Y-%m-%d %H:00:00")
+            fe = (fdt + timedelta(hours=interval_hours)).strftime("%Y-%m-%d %H:00:00")
+            img = _fetch_area_rain_fore_img(fc, fc, fe, area_ids, interval_hours)
+            if img:
+                used_fore, fore_img_bytes, fore_end = fc, img, fe
+                break
+        except Exception:
+            continue
+    if not fore_img_bytes:
+        texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
     fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
-    sections.append((f"⑥ 预报面雨量图（起报 {fore_time}）", "image", fore_img) if fore_img else ("⑥ 预报面雨量图", "text", "（预报面雨量图获取失败）"))
+    sections.append((f"⑥ 预报面雨量图（起报 {used_fore}）", "image", fore_img) if fore_img else ("⑥ 预报面雨量图", "text", "（预报面雨量图获取失败）"))
 
-    # ⑦ 面雨量预报（分区 → 表格），同样用起报对齐窗口。
-    try:
-        forecasts = _fetch_forecast(fore_time, fb, fe, area_ids, interval_hours)
-    except Exception as exc:
-        forecasts = []
-        texts.append(f"面雨量预报获取失败：{_safe_err(exc)}")
+    # ⑦ 面雨量预报（与 ⑥ 用同一成功时次，保持两板块同步）
+    forecasts = []
+    if used_fore:
+        try:
+            forecasts = _fetch_forecast(used_fore, used_fore, fore_end, area_ids, interval_hours)
+        except Exception as exc:
+            texts.append(f"面雨量预报获取失败：{_safe_err(exc)}")
     fore_rows = []
     try:
         fore_rows = [

@@ -170,6 +170,47 @@ class TestGenerateCore:
         # 降级路径下 text 为空（无失败），验证排序逻辑走的是内部表格构建
         assert r["status"] == "ok"
 
+    def test_fore_cycle_fallback(self, monkeypatch):
+        """起报时次 500 时自动回退到下一个有数据的时次；forecast 用同一成功时次。"""
+        calls: dict = {}
+        cycles = clt._fore_cycle_candidates()
+
+        def fake_fore_img(fc, fb, fe, area_ids, interval):
+            calls.setdefault("fore_times", []).append(fc)
+            if fc == cycles[0]:
+                raise RuntimeError("Internal Server Error")  # 第一个时次未就绪
+            return _IMG_PNG
+
+        def fake_forecast(fc, fb, fe, area_ids, interval):
+            calls["forecast_time"] = fc
+            return [_forecast()]
+
+        monkeypatch.setattr(clt, "_fetch_describe_text", lambda *a, **k: _REAL_TEXT)
+        monkeypatch.setattr(clt, "_fetch_swan3", lambda *a, **k: _IMG_PNG)
+        monkeypatch.setattr(clt, "_fetch_station_rain_img", lambda *a, **k: _IMG_PNG)
+        monkeypatch.setattr(clt, "_fetch_area_rain_real_img", lambda *a, **k: _IMG_PNG)
+        monkeypatch.setattr(clt, "_fetch_station_list", lambda *a, **k: [_station()])
+        monkeypatch.setattr(clt, "_fetch_area_rain_fore_img", fake_fore_img)
+        monkeypatch.setattr(clt, "_fetch_forecast", fake_forecast)
+
+        r = clt.generate_haihe_composite_longimg_core()
+        assert r["status"] == "ok"
+        assert r["base64"], "回退成功后应出图"
+        assert len(calls["fore_times"]) >= 2, "第一个时次失败应回退到下一个"
+        assert calls["forecast_time"] == calls["fore_times"][1], "forecast 应复用成功时次"
+
+    def test_all_fore_cycles_fail_placeholders(self, monkeypatch):
+        """所有起报时次都失败 → 预报板块占位，其余正常，整体仍 ok。"""
+        def boom(*a, **k):
+            raise RuntimeError("500")
+
+        _install_all_ok(monkeypatch)
+        monkeypatch.setattr(clt, "_fetch_area_rain_fore_img", boom)
+        monkeypatch.setattr(clt, "_fetch_forecast", boom)
+        r = clt.generate_haihe_composite_longimg_core()
+        assert r["status"] == "ok"
+        assert r["base64"], "预报失败不应整图失败"
+
     def test_default_window_and_params(self, monkeypatch):
         """默认窗口 + 参数透传（interval 对齐）。"""
         calls: dict = {}
