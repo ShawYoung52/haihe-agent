@@ -2,7 +2,7 @@
 
 业务场景：用户问「XX分区降水图 / 面雨量分布图 / 格点预报降水图」时出图。
 口径（用户确认）：单工具参数化（sceneType/productType 由 planner 按 docstring 路由）；
-图片返回代理 URL；base 默认 http://10.226.107.35:8080，env BASIN_DRAWING_API_BASE 可覆盖；
+图片返回代理 URL；base 默认 http://10.226.107.35:8001，env BASIN_DRAWING_API_BASE 可覆盖；
 时间自动规整到 10 分钟刻度；只有带 children 的一级分区可出图。
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 # ⚠️ 与 chainlitexam/qa_http_api.py 的 IMAGE_URL_ALLOW_HOSTS 默认同值但独立配置：
 # 部署改 BASIN_DRAWING_API_BASE 时必须同步扩展 IMAGE_URL_ALLOW_HOSTS，否则图链会被
 # _scrub 脱敏成 [内网地址]、images 字段也不收录。
-BASIN_DRAWING_API_BASE = os.getenv("BASIN_DRAWING_API_BASE", "http://10.226.107.35:8080")
+BASIN_DRAWING_API_BASE = os.getenv("BASIN_DRAWING_API_BASE", "http://10.226.107.35:8001")
 AREAS_URL = f"{BASIN_DRAWING_API_BASE}/openapi/basin_drawing/areas"
 IMAGE_URL = f"{BASIN_DRAWING_API_BASE}/openapi/basin_drawing/image"
 BASIN_DRAWING_AREAS_CACHE_TTL = int(os.getenv("BASIN_DRAWING_AREAS_CACHE_TTL", "3600"))

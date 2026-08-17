@@ -113,11 +113,11 @@ _SCRUB_PATTERNS = [
     (re.compile(r"postgresql(?:\+\w+)?://[^\s\"']+"), "[数据库连接]"),
 ]
 
-# 图片代理 allowlist：默认只放行 14所出图代理（10.226.107.35:8080）的 URL，使其
+# 图片代理 allowlist：默认只放行 14所出图代理（10.226.107.35:8001）的 URL，使其
 # 能作为 markdown 图链/HTTP images 字段正常展示；其余内网 IP 仍照常脱敏。
 _IMAGE_URL_ALLOW_HOSTS = [
     h.strip()
-    for h in os.getenv("IMAGE_URL_ALLOW_HOSTS", "10.226.107.35:8080").split(",")
+    for h in os.getenv("IMAGE_URL_ALLOW_HOSTS", "10.226.107.35:8001").split(",")
     if h.strip()
 ]
 
@@ -134,7 +134,7 @@ _SAVED_URL_MARK = "《imgproxy》"
 def _is_allowed_image_url(url: str) -> bool:
     """URL 的 authority（host:port，精确匹配）是否在图片代理 allowlist 内。
 
-    精确匹配而非前缀匹配：`10.226.107.35:8080x` 等畸形 authority 不放行。
+    精确匹配而非前缀匹配：`10.226.107.35:8001x` 等畸形 authority 不放行。
     allowlist 在调用时现读（测试会 monkeypatch），不缓存成模块级 set。
     """
     return urlparse(url).netloc in _IMAGE_URL_ALLOW_HOSTS

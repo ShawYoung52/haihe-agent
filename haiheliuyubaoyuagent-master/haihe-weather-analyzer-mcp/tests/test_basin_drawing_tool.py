@@ -1,7 +1,7 @@
 """14所 basin_drawing 出图工具测试（areas 列表 + image 出图）。
 
 口径（用户确认）：单工具参数化（sceneType/productType 由 planner 按 docstring 路由）；
-图片返回代理 URL；base 默认 http://10.226.107.35:8080，env BASIN_DRAWING_API_BASE 可覆盖；
+图片返回代理 URL；base 默认 http://10.226.107.35:8001，env BASIN_DRAWING_API_BASE 可覆盖；
 时间自动规整到 10 分钟刻度；只有带 children 的一级分区可出图。
 """
 
@@ -122,7 +122,7 @@ class TestBasinDrawingAreas:
 
 
 class TestGenerateBasinRainfallImage:
-    def _setup(self, monkeypatch, calls: dict, data="http://10.226.107.35:8080/hhly/img/2026/08/12/DYPQ/ECMF/a.png"):
+    def _setup(self, monkeypatch, calls: dict, data="http://10.226.107.35:8001/hhly/img/2026/08/12/DYPQ/ECMF/a.png"):
         def fake_post(url, json=None, timeout=None):
             calls["n"] += 1
             calls["url"] = url
@@ -143,7 +143,7 @@ class TestGenerateBasinRainfallImage:
             forecast_time="2026-08-03 20:00",
         )
         assert r["status"] == "ok"
-        assert r["image_url"].startswith("http://10.226.107.35:8080/")
+        assert r["image_url"].startswith("http://10.226.107.35:8001/")
         body = calls["body"]
         assert body["sceneType"] == "FORECAST"
         assert body["productType"] == "AREA_RAIN"
@@ -177,7 +177,7 @@ class TestGenerateBasinRainfallImage:
             main_title="站点雨量图", sub_title="",
         )
         assert r["status"] == "ok"
-        assert r["image_url"] == "http://10.226.107.35:8080/hhly/meteor_img_profile/xxx.png"
+        assert r["image_url"] == "http://10.226.107.35:8001/hhly/meteor_img_profile/xxx.png"
 
     def test_forecast_time_defaults_to_latest_cycle(self, monkeypatch):
         """FORECAST 未传 forecast_time → 默认最近 08/20 起报时次。"""

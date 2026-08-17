@@ -1,7 +1,7 @@
 """HTTP images 字段带 14所代理图 URL + _scrub 图片代理 allowlist 测试。
 
 口径（用户确认）：出图结果以代理 URL 展示；答案里 markdown 图链；HTTP images 字段也带 URL。
-安全边界：_scrub 默认只放行图片代理主机（10.226.107.35:8080）的 URL，其余内网 IP 照常脱敏。
+安全边界：_scrub 默认只放行图片代理主机（10.226.107.35:8001）的 URL，其余内网 IP 照常脱敏。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import pytest
 
 import qa_http_api
 
-PROXY = "http://10.226.107.35:8080/hhly/img/2026/08/12/DYPQ/ECMF/a.png"
+PROXY = "http://10.226.107.35:8001/hhly/img/2026/08/12/DYPQ/ECMF/a.png"
 
 
 class _FakeEmitter:
@@ -53,7 +53,7 @@ class TestBuildImagePayloadExternal:
 
     def test_disallowed_host_markdown_url_not_appended(self, monkeypatch, tmp_path):
         """非 allowlist 主机的 markdown 图链不进 images（与 _scrub 脱敏边界一致）。"""
-        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8080"])
+        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8001"])
         images = qa_http_api._build_image_payload(
             _FakeEmitter([]), _FakeSession({}),
             answer="![内网图](http://10.226.107.36:8080/hhly/x.png)",
@@ -74,7 +74,7 @@ class TestBuildImagePayloadExternal:
 class TestScrubImageProxyAllowlist:
     def test_scrub_preserves_allowed_proxy_url(self, monkeypatch):
         """默认 allowlist 放行 14所图片代理 URL；其它内网 IP 照常脱敏。"""
-        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8080"])
+        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8001"])
         out = qa_http_api._scrub(
             f"图 {PROXY} 其它 http://10.1.2.3:9999/x 纯IP 10.9.8.7"
         )
@@ -84,12 +84,12 @@ class TestScrubImageProxyAllowlist:
 
     def test_scrub_still_removes_disallowed_proxy(self, monkeypatch):
         """不在 allowlist 的图片主机照常脱敏。"""
-        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8080"])
+        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8001"])
         out = qa_http_api._scrub("http://10.226.107.36:8080/hhly/x.png")
         assert "10.226.107.36" not in out, "未允许的图片主机应脱敏"
 
     def test_scrub_allowlist_host_boundary(self, monkeypatch):
         """allowlist 是主机边界匹配，:8080x 等畸形前缀不放行。"""
-        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8080"])
-        out = qa_http_api._scrub("http://10.226.107.35:8080x/hhly/a.png")
-        assert "10.226.107.35:8080x" not in out, "主机后带非法字符不应放行"
+        monkeypatch.setattr(qa_http_api, "_IMAGE_URL_ALLOW_HOSTS", ["10.226.107.35:8001"])
+        out = qa_http_api._scrub("http://10.226.107.35:8001x/hhly/a.png")
+        assert "10.226.107.35:8001x" not in out, "主机后带非法字符不应放行"
