@@ -423,20 +423,44 @@ def _dark_fraction(img: Any, thresh: int = 90) -> float:
     return dark / n if n else 0.0
 
 
+def _lightest_green(img: Any, green_low: int = 200, bright_low: int = 150) -> tuple[int, int, int]:
+    """采样图里"最浅的绿"（绿主导 + 高亮浅绿），用作黑块零值区填充色；无则回落浅绿。"""
+    from PIL import Image
+    img = img.convert("RGB")
+    px = img.load()
+    W, H = img.size
+    rs = gs = bs = n = 0
+    for y in range(0, H, 2):
+        for x in range(0, W, 2):
+            r, g, b = px[x, y]
+            if g > 150 and g > r + 20 and g > b + 20 and g > green_low and r > bright_low:
+                rs += r
+                gs += g
+                bs += b
+                n += 1
+    if n:
+        return (rs // n, gs // n, bs // n)
+    return (205, 242, 205)
+
+
 def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
                   text: tuple[int, int, int] = (15, 15, 15),
                   chroma_thresh: int = 40, dark_thresh: int = 90,
-                  mid_thresh: int = 245) -> Any:
+                  mid_thresh: int = 245, blob_open: int = 15,
+                  large_open: int = 15, content_blur: int = 5,
+                  content_thresh: int = 110) -> Any:
     """让地图文字在白底长图上清晰可读，彩色雨区/图例色条原样保留。
 
-    14所 ④⑥ 面雨量图接口样式不稳定：可能返回黑底白字图（isClimateImg 不生效），
-    也可能返回白底浅灰字图（文字在白底上不可见）。本函数分两种模式处理：
+    14所 ④⑥ 面雨量图接口样式不稳定（isClimateImg=True 已按接口文档以 JSON 布尔传入
+    body，但服务端并不总是生效）：可能返回黑底白字图、白底浅灰字图，甚至白底绿区白字
+    图（⑥ 偶发，值/站名印在绿色雨区上不可见）。本函数分两种模式处理：
       * 黑底为主（dark_fraction >= 0.35）：近黑背景铺白、浅色文字/图例刻度转深字；
-      * 白底为主：把"低色度、中等亮度"的浅灰文字/线条转深字，白底（>=mid_thresh）
-        与近黑文字（<dark_thresh，如 ③ 降水实况图的黑字）原样保留。
+      * 白底为主：白底浅灰字/线条（dark_thresh..mid_thresh）转深字；绿区（含浅绿
+        零值区）附近亮字（>=mid_thresh，绿区白字）一并转深字；大型近黑区块（零值
+        填充区）填最浅绿避免"白字黑块"；白底与大块白背景（页面底/图边距）原样保留。
     饱和色（雨区、图例色条、红色标题）一律保留原色。
     """
-    from PIL import Image, ImageChops
+    from PIL import Image, ImageChops, ImageFilter
     img = img.convert("RGB")
     r, g, b = img.split()
     mx = ImageChops.lighter(ImageChops.lighter(r, g), b)   # 每像素 max
@@ -447,19 +471,36 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
         # 黑底图：黑→白底，浅字→深字
         m_bg = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))
         m_text = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= dark_thresh else 0))
+        base_bg, base_text = bg, text
     else:
-        # 白底图：只把浅灰字/线条（dark_thresh..mid_thresh）加深，黑字与白底不动
-        m_bg = Image.new("L", r.size, 0)
-        m_text = ImageChops.multiply(
-            achrom, mx.point(lambda v: 255 if dark_thresh <= v < mid_thresh else 0))
+        # 白底图
+        fill = _lightest_green(img)
+        green = chroma.point(lambda v: 255 if v >= chroma_thresh else 0)      # 饱和色（含浅绿零值区）
+        black = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))
+        # 形态学开运算：只留"大型"近黑区块（零值填充区），细小的黑字/线条被去掉
+        blob = black.filter(ImageFilter.MinFilter(blob_open)).filter(ImageFilter.MaxFilter(blob_open))
+        to_fill = ImageChops.multiply(black, blob.point(lambda v: 255 if v > 0 else 0))
+        # 近内容（绿区 ∪ 已填黑块）膨胀：把落在绿区/黑块上的白字纳入改色
+        content = ImageChops.lighter(green, to_fill)
+        near = content.filter(ImageFilter.BoxBlur(content_blur)).point(
+            lambda v: 255 if v > content_thresh else 0)
+        # 大块白背景（页面底/图边距）不参与改色，防绿区膨胀把白底也染成深色
+        m_white = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= mid_thresh else 0))
+        large_white = m_white.filter(ImageFilter.MinFilter(large_open)).filter(ImageFilter.MaxFilter(large_open))
+        m_gray = ImageChops.multiply(achrom, mx.point(
+            lambda v: 255 if dark_thresh <= v < mid_thresh else 0))
+        m_white_near = ImageChops.subtract(ImageChops.multiply(m_white, near), large_white)
+        m_text = ImageChops.lighter(m_gray, m_white_near)
+        m_bg = to_fill
+        base_bg, base_text = fill, text
     low = ImageChops.lighter(m_bg, m_text)                 # 需改色的低色度像素
-    br, bg_, bb = bg
-    tr, tg_, tb = text
+    br, bg_, bb = base_bg
+    tr, tg_, tb = base_text
 
     def chan(src, base_bg, base_text):
         base = Image.composite(Image.new("L", src.size, base_text),
                                Image.new("L", src.size, base_bg), m_text)
-        return Image.composite(base, src, low)   # 需改色→base（白底/深字），其余→原色
+        return Image.composite(base, src, low)   # 需改色→base（浅绿底/深字），其余→原色
 
     return Image.merge("RGB", (chan(r, br, tr), chan(g, bg_, tg_), chan(b, bb, tb)))
 
