@@ -447,24 +447,18 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
                   text: tuple[int, int, int] = (15, 15, 15),
                   chroma_thresh: int = 40, dark_thresh: int = 90,
                   mid_thresh: int = 245, blob_open: int = 15,
-                  dilate: int = 15) -> Any:
+                  large_open: int = 15, content_blur: int = 5,
+                  content_thresh: int = 110) -> Any:
     """让地图文字在白底长图上清晰可读，彩色雨区/图例色条原样保留。
 
     14所 ④⑥ 面雨量图接口样式不稳定（isClimateImg=True 已按接口文档以 JSON 布尔传入
     body，但服务端并不总是生效）：可能返回黑底白字图、白底浅灰字图，甚至白底绿区白字
-    /图例刻度白字图（白字印在绿区或白底上不可见）。本函数分两种模式处理：
+    图（⑥ 偶发，值/站名印在绿色雨区上不可见）。本函数分两种模式处理：
       * 黑底为主（dark_fraction >= 0.35）：近黑背景铺白、浅色文字/图例刻度转深字；
-      * 白底为主：浅灰字/线条（dark_thresh..mid_thresh）恒转深字；**亮字（>=mid_thresh）
-        是否转深由"是否靠近饱和内容"决定**——紧邻色标条/雨区/彩色内容的亮字（图例刻度
-        白字、绿区白字）转深，离饱和内容远的大块白背景保留；大型近黑区块（零值填充区）
-        填最浅绿避免"白字黑块"。
+      * 白底为主：白底浅灰字/线条（dark_thresh..mid_thresh）转深字；绿区（含浅绿
+        零值区）附近亮字（>=mid_thresh，绿区白字）一并转深字；大型近黑区块（零值
+        填充区）填最浅绿避免"白字黑块"；白底与大块白背景（页面底/图边距）原样保留。
     饱和色（雨区、图例色条、红色标题）一律保留原色。
-
-    判定原理：白字与白背景像素值相同，只能靠**局部对比**区分——图例刻度白字紧贴
-    色标条、绿区白字在雨区内部，都离饱和像素近；页面底/图边距等大块白背景远离一切
-    饱和像素。故用"饱和内容膨胀 dilate 像素"作近邻带，落入近邻带的亮字才转深。
-    （不用形态学开运算保大块白背景——开运算会把紧贴色标条的白字"复活"回白背景，
-    导致刻度白字漏改，这是此前多次返工的根本原因。）
     """
     from PIL import Image, ImageChops, ImageFilter
     img = img.convert("RGB")
@@ -481,20 +475,22 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
     else:
         # 白底图
         fill = _lightest_green(img)
+        green = chroma.point(lambda v: 255 if v >= chroma_thresh else 0)      # 饱和色（含浅绿零值区）
         black = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))
         # 形态学开运算：只留"大型"近黑区块（零值填充区），细小的黑字/线条被去掉
         blob = black.filter(ImageFilter.MinFilter(blob_open)).filter(ImageFilter.MaxFilter(blob_open))
         to_fill = ImageChops.multiply(black, blob.point(lambda v: 255 if v > 0 else 0))
-        # 饱和内容膨胀 dilate/2 像素 → "内容近邻带"（色标条/雨区/彩色标题周围）
-        saturated = chroma.point(lambda v: 255 if v >= chroma_thresh else 0)
-        near = saturated.filter(ImageFilter.MaxFilter(dilate))
-        # 灰字恒转深（白底浅灰字样式）
+        # 近内容（绿区 ∪ 已填黑块）膨胀：把落在绿区/黑块上的白字纳入改色
+        content = ImageChops.lighter(green, to_fill)
+        near = content.filter(ImageFilter.BoxBlur(content_blur)).point(
+            lambda v: 255 if v > content_thresh else 0)
+        # 大块白背景（页面底/图边距）不参与改色，防绿区膨胀把白底也染成深色
+        m_white = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= mid_thresh else 0))
+        large_white = m_white.filter(ImageFilter.MinFilter(large_open)).filter(ImageFilter.MaxFilter(large_open))
         m_gray = ImageChops.multiply(achrom, mx.point(
             lambda v: 255 if dark_thresh <= v < mid_thresh else 0))
-        # 亮字只有落入内容近邻带才转深（图例刻度/绿区白字）；大块白背景不在带内、保留
-        m_white = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= mid_thresh else 0))
-        white_text = ImageChops.multiply(m_white, near)
-        m_text = ImageChops.lighter(m_gray, white_text)
+        m_white_near = ImageChops.subtract(ImageChops.multiply(m_white, near), large_white)
+        m_text = ImageChops.lighter(m_gray, m_white_near)
         m_bg = to_fill
         base_bg, base_text = fill, text
     low = ImageChops.lighter(m_bg, m_text)                 # 需改色的低色度像素

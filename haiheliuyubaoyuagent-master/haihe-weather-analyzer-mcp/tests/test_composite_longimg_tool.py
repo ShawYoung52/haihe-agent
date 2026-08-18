@@ -373,28 +373,29 @@ class TestWhiteMapConversion:
         r, g, b = out.getpixel((15, 30))  # 椭圆内、白字外
         assert g > 150 and r < 100, "绿色雨区应保留原色"
 
-    def _white_legend_text_png(self):
-        """白底 + 色标条 + 紧贴色标条的白字刻度：模拟 ④⑥ 图例刻度白字样式。"""
+    def test_white_bg_no_halo_around_isolated_color(self):
+        """防回归：孤立彩色区块周围的大块白底不得被染出暗晕。
+
+        亮字转深的"内容近邻带"必须配 large_white 形态学守卫——只改紧贴彩色内容的
+        细白字/细白缝，大面积白背景（页面底/图边距）一律保留。若去掉守卫或把近邻带
+        放宽（如 MaxFilter 大核膨胀），色块周围的白底会被染成暗晕（2e4b292 曾引入
+        此回归：色标条/雨区被一圈黑边包围）。本测试用白底中央孤立色块，断言紧邻色块
+        1~7px 的白底像素仍为纯白。
+        """
         from PIL import Image, ImageDraw
-        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        im = Image.new("RGB", (120, 120), (255, 255, 255))
         d = ImageDraw.Draw(im)
-        d.rectangle([5, 50, 75, 55], fill=(0, 120, 255))       # 蓝色色标条
-        d.rectangle([10, 44, 30, 49], fill=(255, 255, 255))    # 紧贴色标条上方的白字
+        d.rectangle([50, 50, 70, 70], fill=(0, 120, 255))  # 中央孤立色块
         buf = io.BytesIO()
         im.save(buf, format="PNG")
-        return buf.getvalue()
-
-    def test_white_bg_legend_white_text_darkened(self):
-        """④⑥ 图例刻度白字（白底白字）：紧贴色标条的白字转深字，白底与色标条保留。"""
-        img = clt._load_image(self._white_legend_text_png())
+        img = clt._load_image(buf.getvalue())
         out = clt._to_white_map(img)
-        assert out.getpixel((2, 2)) == (255, 255, 255), "白底应保留"
         px = out.load()
-        found = False
-        for x in range(10, 30, 2):
-            for y in range(44, 49):
-                if max(px[x, y]) < 120:
-                    found = True
-        assert found, "图例刻度白字应转成深字"
-        r, g, b = out.getpixel((40, 52))  # 色标条内、白字外
-        assert b > 200 and r < 100, "色标条颜色应保留"
+        # 色块右/下/左/上 1~7px 处的白底像素，均不应变暗
+        for (x, y) in [(72, 60), (75, 60), (78, 60),
+                       (60, 72), (60, 75), (60, 78),
+                       (48, 60), (45, 60),
+                       (60, 48), (60, 45)]:
+            assert max(px[x, y]) >= 245, (
+                f"({x},{y}) 紧邻色块的大块白底不应被染暗（暗晕回归），实际 {px[x, y]}")
+
