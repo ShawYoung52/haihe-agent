@@ -302,4 +302,47 @@ class TestWhiteMapConversion:
     def test_white_map_left_untouched(self):
         img = clt._load_image(self._white_map_png())
         out = clt._to_white_map(img)
-        assert out is img, "白底图应原样返回（黑底占比守卫）"
+        assert out.getpixel((2, 2)) == (255, 255, 255), "纯白底图不应被改写"
+
+    def _white_lightgray_text_png(self):
+        """白底 + 浅灰文字条 + 绿色雨区：模拟 ⑥ 预报图"白底浅灰字"样式。"""
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.ellipse([10, 10, 60, 50], fill=(40, 200, 60))     # 绿色雨区
+        d.rectangle([10, 52, 70, 57], fill=(192, 192, 192))  # 浅灰文字条（白底上看不清）
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_white_bg_lightgray_text_darkened(self):
+        """白底浅灰字图：浅灰文字转深字，白底保留（⑥ 预报图样式修复）。"""
+        img = clt._load_image(self._white_lightgray_text_png())
+        out = clt._to_white_map(img)
+        assert out.getpixel((2, 2)) == (255, 255, 255), "白底应保留"
+        px = out.load()
+        found = False
+        for x in range(10, 70, 2):
+            for y in range(52, 57):
+                r, g, b = px[x, y]
+                if max(r, g, b) < 120:
+                    found = True
+        assert found, "浅灰文字应转成深字（白底可读）"
+
+    def test_white_bg_black_text_kept(self):
+        """白底黑字图（③ 降水实况图样式）：黑字不应被抹掉。"""
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.rectangle([10, 20, 70, 26], fill=(0, 0, 0))  # 黑字条
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        img = clt._load_image(buf.getvalue())
+        out = clt._to_white_map(img)
+        px = out.load()
+        found = False
+        for x in range(10, 70, 2):
+            for y in range(20, 26):
+                if max(px[x, y]) < 120:
+                    found = True
+        assert found, "白底图上的黑字应保留"

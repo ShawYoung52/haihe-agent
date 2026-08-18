@@ -425,33 +425,41 @@ def _dark_fraction(img: Any, thresh: int = 90) -> float:
 
 def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
                   text: tuple[int, int, int] = (15, 15, 15),
-                  chroma_thresh: int = 40, dark_thresh: int = 90) -> Any:
-    """黑底图转白底：低色度像素按亮度分黑白（暗→白底，亮→深字），饱和色（雨区/图例）保留。
+                  chroma_thresh: int = 40, dark_thresh: int = 90,
+                  mid_thresh: int = 245) -> Any:
+    """让地图文字在白底长图上清晰可读，彩色雨区/图例色条原样保留。
 
-    14所 ④⑥ 面雨量图接口总是返回黑底图（isClimateImg 不生效），黑底上白/浅灰文字
-    与图例在白底长图里不可读。本函数把近黑背景铺白、把浅色文字/图例刻度转深灰，
-    彩色雨区与图例色条原样保留——效果与白底雷达/降水实况图一致。仅当图确为黑底
-    为主（_dark_fraction >= 0.35）时才转换，白底图原样返回。
+    14所 ④⑥ 面雨量图接口样式不稳定：可能返回黑底白字图（isClimateImg 不生效），
+    也可能返回白底浅灰字图（文字在白底上不可见）。本函数分两种模式处理：
+      * 黑底为主（dark_fraction >= 0.35）：近黑背景铺白、浅色文字/图例刻度转深字；
+      * 白底为主：把"低色度、中等亮度"的浅灰文字/线条转深字，白底（>=mid_thresh）
+        与近黑文字（<dark_thresh，如 ③ 降水实况图的黑字）原样保留。
+    饱和色（雨区、图例色条、红色标题）一律保留原色。
     """
     from PIL import Image, ImageChops
-    if _dark_fraction(img) < 0.35:
-        return img
     img = img.convert("RGB")
     r, g, b = img.split()
     mx = ImageChops.lighter(ImageChops.lighter(r, g), b)   # 每像素 max
     mn = ImageChops.darker(ImageChops.darker(r, g), b)     # 每像素 min
     chroma = ImageChops.subtract(mx, mn)                   # 色度
-    achrom = chroma.point(lambda v: 255 if v < chroma_thresh else 0)                 # 低色度（灰字/黑底）
-    m_bg = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))    # 暗→白底
-    m_text = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= dark_thresh else 0))  # 亮→深字
-    low = ImageChops.lighter(m_bg, m_text)                 # 所有低色度像素
+    achrom = chroma.point(lambda v: 255 if v < chroma_thresh else 0)  # 低色度（文字/底色/线条）
+    if _dark_fraction(img) >= 0.35:
+        # 黑底图：黑→白底，浅字→深字
+        m_bg = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))
+        m_text = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= dark_thresh else 0))
+    else:
+        # 白底图：只把浅灰字/线条（dark_thresh..mid_thresh）加深，黑字与白底不动
+        m_bg = Image.new("L", r.size, 0)
+        m_text = ImageChops.multiply(
+            achrom, mx.point(lambda v: 255 if dark_thresh <= v < mid_thresh else 0))
+    low = ImageChops.lighter(m_bg, m_text)                 # 需改色的低色度像素
     br, bg_, bb = bg
     tr, tg_, tb = text
 
     def chan(src, base_bg, base_text):
         base = Image.composite(Image.new("L", src.size, base_text),
                                Image.new("L", src.size, base_bg), m_text)
-        return Image.composite(base, src, low)   # 低色度→base（白底/深字），饱和色→原色
+        return Image.composite(base, src, low)   # 需改色→base（白底/深字），其余→原色
 
     return Image.merge("RGB", (chan(r, br, tr), chan(g, bg_, tg_), chan(b, bb, tb)))
 
