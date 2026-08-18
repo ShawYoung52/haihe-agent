@@ -240,7 +240,7 @@ def generate_rainfall_describe_longimg_core(
     interval: int = 24,
     range: str = "9",
     type: str = "0",
-    isClimateImg: bool = False,
+    isClimateImg: bool = True,
 ) -> dict[str, Any]:
     """POST 获取降水实况文字，渲染成长图返回 base64 与原始文字。"""
     try:
@@ -346,7 +346,7 @@ def register_rainfall_describe_tool(mcp: FastMCP) -> None:
         interval: int = 24,
         range: str = "9",
         type: str = "0",
-        isClimateImg: bool = False,
+        isClimateImg: bool = True,
     ) -> dict:
         """
         生成海河流域降水实况文字长图（14所 /openapi/rainfall_describe/real）。
@@ -370,7 +370,7 @@ def register_rainfall_describe_tool(mcp: FastMCP) -> None:
                 对齐窗口时长（超 24h 按累计，如 48h 窗口 interval=48）
             range: 分区，默认 "9"，可传 "9" 或 "11"
             type: 站点类型，"0"=国家站，"1"=区域站，默认 "0"
-            isClimateImg: 出图文字颜色是否黑色，默认 False（接口对文本返回无影响）
+            isClimateImg: 出图文字颜色是否黑色，默认 True（接口对文本返回无影响）
         """
         return generate_rainfall_describe_longimg_core(
             beginTime=beginTime,

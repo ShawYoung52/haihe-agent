@@ -3618,7 +3618,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         interval: int = 24,
         range: str = "9",
         type: str = "0",
-        isClimateImg: bool = False,
+        isClimateImg: bool = True,
     ) -> dict:
         """
         获取各子流域分区面雨量分布图（降水实况图）。只用于展示图片，不返回雨量数值。
@@ -3632,7 +3632,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             interval: 间隔(单位:小时)，默认24。超过24h使用累计，如10天间隔为240
             range: 分区，默认"9"，可传"9"或"11"分区
             type: 站点类型，"0"是国家站，"1"是区域站。默认"0"
-            isClimateImg: 出图的文字颜色是否黑色，默认False
+            isClimateImg: 出图的文字颜色是否黑色，默认True
         """
         import datetime as dt
 
@@ -3672,8 +3672,9 @@ def register_haihe_tools(mcp: FastMCP) -> None:
                 "interval": interval,
                 "range": range,
             }
-        except Exception as e:
-            return {"error": f"获取降水实况图失败: {str(e)}"}
+        except Exception:
+            # 不把 str(e) 透给 LLM/用户（可能含内网地址），只回通用文案
+            return {"error": "获取降水实况图失败，请稍后重试。"}
 
     @mcp.tool()
     def get_effective_warning_info(include_raw: bool = False) -> dict:

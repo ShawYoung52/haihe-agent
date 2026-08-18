@@ -43,20 +43,20 @@ def probe(label, url, payload, times=1):
 # 【1】area_rain_real_img 连续 3 次（间歇 500 检测）
 probe("area_rain_real_img ×3（实况窗口）",
       f"{BASE}/openapi/meteor_img/area_rain_real_img?forceCreate=1",
-      {"areaIds": AREA_IDS, "beginTime": B, "endTime": E, "interval": 24, "range": "9", "type": "0", "isClimateImg": False},
+      {"areaIds": AREA_IDS, "beginTime": B, "endTime": E, "interval": 24, "range": "9", "type": "0", "isClimateImg": True},
       times=3)
 
 # 【2】area_rain_fore_img：起报对齐窗口（foreTime==beginTime）
 probe("area_rain_fore_img（foreTime==beginTime 对齐）",
       f"{BASE}/openapi/meteor_img/area_rain_fore_img?forceCreate=1",
       {"areaIds": AREA_IDS, "foreTime": FT, "beginTime": FT, "endTime": FE,
-       "intval": 24, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": False})
+       "intval": 24, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": True})
 
 # 【3】area_rain_fore_img：用昨天的 foreTime（8-16 08:00）试一次（若今天时次未起报）
 probe("area_rain_fore_img（foreTime=昨天08时）",
       f"{BASE}/openapi/meteor_img/area_rain_fore_img?forceCreate=1",
       {"areaIds": AREA_IDS, "foreTime": "2026-08-16 08:00:00", "beginTime": "2026-08-16 08:00:00", "endTime": "2026-08-17 08:00:00",
-       "intval": 24, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": False})
+       "intval": 24, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": True})
 
 # 【4】area_rainfall/forecast：起报对齐窗口
 probe("area_rainfall/forecast（foreTime==beginTime 对齐）",
