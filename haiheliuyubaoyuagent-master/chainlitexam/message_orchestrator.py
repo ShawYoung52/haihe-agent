@@ -1741,6 +1741,7 @@ TOOL_DISPLAY_NAMES = {
     "get_station_rainfall_real_img": "生成降雨实况分布图",
     "generate_rainfall_describe_longimg": "生成降水实况文字长图",
     "generate_haihe_composite_longimg": "生成降水专题组合长图",
+    "get_haihe_product_image_url": "生成网页版降水专题长图",
     "get_city_rainfall_time_range": "查询城市降雨时段",
     "get_river_system_rainfall_forecast": "查询河系降雨预报",
     "query_rolling_forecast": "查询滚动预报",
@@ -2288,6 +2289,35 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         observation_text = "获取降水专题组合长图失败，请稍后重试。"
                     else:
                         observation_text = "已获取降水专题组合长图数据。"
+                elif tool_name == "get_haihe_product_image_url":
+                    data = _unwrap_tool_result(observation)
+                    if isinstance(data, dict) and data.get("status") == "ok":
+                        if data.get("base64"):
+                            # 本机浏览器截图成功 → 网页版长图展示
+                            observation_text = await _render_base64_tool_image(
+                                data,
+                                title="网页版降水专题长图",
+                                name="haihe_product_longimg",
+                                ok_text=(
+                                    "（系统消息：已成功在前端为用户绘制了网页版降水专题长图"
+                                    "（白底地图，与示范图一致）。请继续用自然语言简要说明）"
+                                ),
+                                decode_err_text="已获取网页版长图，但图片数据解码失败。",
+                            )
+                        else:
+                            # 无浏览器 → 返回网页地址，引导内网打开
+                            url = str(data.get("url") or "")
+                            observation_text = (
+                                "（系统消息：已生成网页版降水专题长图地址，"
+                                "本机无浏览器未直接出图。请把下面的内网地址原样告知用户，"
+                                "提示其在内网浏览器打开即可查看白底地图长图，不要改动地址）\n" + url
+                            )
+                    elif isinstance(data, dict) and data.get("status") == "error":
+                        raw_err = str(data.get("message") or "")
+                        print(f"[网页版长图] 后端返回错误（已隐藏）：{raw_err}")
+                        observation_text = "获取网页版降水专题长图失败，请稍后重试。"
+                    else:
+                        observation_text = "已获取网页版降水专题长图地址。"
                 elif tool_name == "query_rolling_forecast":
                     data = _unwrap_tool_result(observation)
                     bundle = build_rolling_forecast_bundle(user_text, data)

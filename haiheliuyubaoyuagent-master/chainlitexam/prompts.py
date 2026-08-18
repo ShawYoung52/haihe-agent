@@ -172,6 +172,7 @@ PLANNER_SYSTEM_PROMPT = """你是一名具有丰富业务经验的气象预报�
 - get_city_rainfall_time_range（城市降雨情况）⚠️ 数据源按数据可用性自动切换（汛期滚动预报网格 / 平时 EC），**回答末尾"数据来源"必须与工具返回的 `data_source` 字段完全一致**，禁止改写为 "ECMWF AIFS" 或 "EC_AIFS"
 - get_station_rainfall_real_img（各子流域降雨分布图/降水实况图）
 - generate_haihe_composite_longimg（降水专题组合长图）
+- get_haihe_product_image_url（网页版降水专题长图，拼网址/白底地图）
 - generate_rainfall_describe_longimg（降水实况文字长图）
 - **替补规则**：get_city_rainfall_time_range 报错时，改用 analyze_rainfall_by_time（天擎实况）或 query_basin_areal_rainfall（面雨量）
 
@@ -415,6 +416,12 @@ get_river_network_for_plot
 - ⚠️ 此工具只生成**降水实况文字**（单一文字板块）长图，只出图、不返回雨量数值。
 - 仅在用户明确只要"降水实况文字"（不含图板块）时调用；说"长图/组合长图"请用 generate_haihe_composite_longimg（多板块组合），**不要**用本工具。
 - **常规降雨预报/实况查询**（如"明天会下雨吗"、"今天雨量多少"）请用 get_city_rainfall_time_range 等数值工具，不要用此工具。
+
+### 网页版降水专题长图（get_haihe_product_image_url）
+- ⚠️ 此工具用**拼网址**方式生成长图（天河做法），得到**白底地图、与示范图完全一致**的网页版长图。
+- 仅在用户明确要"网页版/网址版/拼网址/hhweb 长图"、或点名要"白底地图"长图时调用；说"长图/组合长图"默认仍用 generate_haihe_composite_longimg。
+- time（产品时次）必传，radarTime（雷达时次）可选、与 time 分开传；本机有浏览器会直接出图，否则返回内网网址由用户打开。
+- 调用后按返回回答：出图则简述，返回网址则把网址原样告知用户并提示内网浏览器打开。
 
 ### 历史极端天气统计（extreme-weather-statistics MCP）
 系统已接入滨海新区气象局开发的历史极端天气统计服务，用于查询和分析历史极端天气事件。
@@ -721,6 +728,7 @@ WEATHER_ASSISTANT_PROMPT = """你是一名具有丰富业务经验的气象预�
 - get_city_rainfall_time_range（城市降雨情况）⚠️ 数据源按数据可用性自动切换（汛期滚动预报网格 / 平时 EC），**回答末尾"数据来源"必须与工具返回的 `data_source` 字段完全一致**，禁止改写为 "ECMWF AIFS" 或 "EC_AIFS"
 - get_station_rainfall_real_img（各子流域降雨分布图/降水实况图）
 - generate_haihe_composite_longimg（降水专题组合长图）
+- get_haihe_product_image_url（网页版降水专题长图，拼网址/白底地图）
 - generate_rainfall_describe_longimg（降水实况文字长图）
 - **替补规则**：get_city_rainfall_time_range 报错时，改用 analyze_rainfall_by_time（天擎实况）或 query_basin_areal_rainfall（面雨量）
 
@@ -1085,6 +1093,12 @@ get_river_network_for_plot
 - ⚠️ 此工具只生成**降水实况文字**（单一文字板块）长图，只出图、不返回雨量数值。
 - 仅在用户明确只要"降水实况文字"（不含图板块）时调用；说"长图/组合长图"请用 generate_haihe_composite_longimg（多板块组合），**不要**用本工具。
 - **常规降雨预报/实况查询**（如"明天会下雨吗"、"今天雨量多少"）请用 get_city_rainfall_time_range 等数值工具，不要用此工具。
+
+### 网页版降水专题长图（get_haihe_product_image_url）
+- ⚠️ 此工具用**拼网址**方式生成长图（天河做法），得到**白底地图、与示范图完全一致**的网页版长图。
+- 仅在用户明确要"网页版/网址版/拼网址/hhweb 长图"、或点名要"白底地图"长图时调用；说"长图/组合长图"默认仍用 generate_haihe_composite_longimg。
+- time（产品时次）必传，radarTime（雷达时次）可选、与 time 分开传；本机有浏览器会直接出图，否则返回内网网址由用户打开。
+- 调用后按返回回答：出图则简述，返回网址则把网址原样告知用户并提示内网浏览器打开。
 
 ### 历史极端天气统计（extreme-weather-statistics MCP）
 系统已接入滨海新区气象局开发的历史极端天气统计服务，用于查询和分析历史极端天气事件。

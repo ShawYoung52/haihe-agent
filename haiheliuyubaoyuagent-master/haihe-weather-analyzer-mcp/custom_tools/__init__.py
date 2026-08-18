@@ -9,6 +9,9 @@ from custom_tools.historical_same_period_rainfall_tool import (
 from custom_tools.historical_weather_service import (
     register_historical_weather_tool,
 )
+from custom_tools.hhweb_product_tool import (
+    register_hhweb_product_tool,
+)
 from custom_tools.last_month_areal_rainfall_tool import (
     register_last_month_areal_rainfall_tool,
 )
@@ -37,6 +40,7 @@ __all__ = [
     "register_composite_longimg_tool",
     "register_historical_same_period_rainfall_tool",
     "register_historical_weather_tool",
+    "register_hhweb_product_tool",
     "register_last_month_areal_rainfall_tool",
     "register_last_year_max_daily_rainfall_tool",
     "register_poi_nearest_observation_tool",

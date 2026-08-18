@@ -52,26 +52,25 @@ _SCRUB_PATTERNS = [
 # 常见栅格图片魔数。
 _IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"BM", b"II*\x00", b"MM\x00*")
 
-# 长图版式（严格对齐示范图 download.png）：
-#   外层浅蓝背景(bg 色) + 顶部全幅风景头图(top-bg 上段,叠加白色大标题) +
-#   内嵌白色内容卡片 + 3 大主题板块(居中蓝色标题+两侧装饰线) + 大幅带框地图 +
-#   浅蓝表头表格(点雨量排名表 / 河系雨量矩阵预报表) + 底部发布单位。
+# 长图版式（严格对齐示范图 download.png，模板素材拼装）：
+#   bg.png 浅蓝云纹平铺背景 + 顶部 top-bg 全幅风景头图(叠加 title.png 大标题 +
+#   publish-depart.png 发布单位) + 3 大主题板块**各自一张白色圆角卡片**(板间浅蓝缝)
+#   + 板块标题(居中蓝字+小图标+装饰线) + 大幅带框地图 + 浅蓝表头表格。
 _ASSETS_DIR = os.getenv(
     "LONGIMG_ASSETS_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "longimg"),
 )
 _BOARD_WIDTH = 1125          # 画布宽 = 模板宽
-_BG = (131, 207, 251)        # 外层浅蓝背景（= bg.png 实测色）
+_BG = (131, 207, 251)        # 外层浅蓝背景（= bg.png 实测色，模板缺失时兜底）
 _CARD_MARGIN = 38            # 白色内容卡片左右外边距（示范图实测 ~19px@561 → 38@1125）
 _CARD_PAD = 42               # 卡片内边距
-_CARD_TOP_OVERLAP = 0        # 卡片与头图衔接（0=对接）
+_CARD_RADIUS = 26            # 白色卡片圆角
+_SECTION_GAP = 30            # 板块卡片之间的浅蓝缝隙（示范图 ~14px@561 → 30@1125）
 _HEADER_H = 600              # 顶部风景头图高度（示范图 ~300px@561 → 600@1125）
-_HEADER_UNIT = "发布单位：海河流域气象中心"
-_HEADER_TITLE_1 = "海河流域水文气象"
-_HEADER_TITLE_2 = "公报"
-_UNIT_SIZE = 42
-_TITLE_SIZE = 130            # 大标题字号（7字≈910px，两侧留 ~110px 边距，对齐示范图）
-_SHADOW = (18, 74, 96)       # 头图白色标题的阴影色
+_HEADER_TITLE_W = 880        # title.png 缩放宽度（910 原生，略缩留边距）
+_HEADER_TITLE_Y = 150        # title.png 顶部 y（头图内垂直居中偏上）
+_HEADER_PUB_W = 360          # publish-depart.png 发布单位缩放宽度
+_HEADER_PUB_XY = (44, 36)    # 发布单位左上角坐标
 _SEC_SIZE = 48               # 板块标题字号
 _SEC_BLUE = (35, 118, 208)   # 板块标题蓝（实测示范图）
 _RULE = (150, 196, 236)      # 板块标题两侧装饰线
@@ -84,8 +83,7 @@ _TBL_ROW_H = 58
 _FG = (38, 38, 38)           # 正文深灰
 _IMG_BORDER = (176, 190, 204)  # 地图外框
 _IMG_MAX_H = 980             # 单张地图最大高度
-_BOTTOM_PAD = 56
-_PUB_W = 460                 # 底部发布单位缩放宽度
+_BOTTOM_PAD = 48             # 底部留白
 _FORECAST_HOURS = 72         # 公报口径：预报覆盖未来 72h（⑥图为 3 天累计）
 _FORECAST_DAYS = 3           # ⑦按 24h 拆成 3 张"河系/雨量"预报表
 _RANGE = range               # 工具函数签名有 range 参数会遮蔽内建，这里留别名
@@ -413,25 +411,31 @@ def _draw_centered(draw, cx: int, y: int, text: str, font, fill) -> None:
     draw.text((cx - w / 2, y), text, font=font, fill=fill)
 
 
-def _draw_header(img: Any, draw, fonts) -> None:
-    """顶部全幅风景头图 + 白色大标题（发布单位 + 海河流域水文气象公报）。"""
+def _paste_rgba(base: Any, tpl: Any | None, box: tuple[int, int], width: int) -> None:
+    """把 RGBA 模板按宽度等比缩放后贴到 base 的 box 位置（透明混合）。缺失/失败跳过。"""
+    if tpl is None:
+        return
+    try:
+        w, h = tpl.size
+        th = max(1, int(h * width / w))
+        t = tpl.resize((width, th))
+        base.paste(t, box, t if tpl.mode == "RGBA" else None)
+    except Exception:
+        return
+
+
+def _draw_header(img: Any, draw) -> None:
+    """顶部全幅风景头图 + 模板大标题(title.png) + 发布单位(publish-depart.png)。"""
     band = _header_band()
     if band is not None:
         img.paste(band, (0, 0))
-    else:  # 模板缺失：渐变蓝条兜底
+    else:  # 模板缺失：纯蓝条兜底
         draw.rectangle([0, 0, _BOARD_WIDTH, _HEADER_H], fill=(70, 150, 210))
-    cx = _BOARD_WIDTH // 2
-
-    def _white(cx_, y_, text, font):
-        draw.text((cx_ - draw.textlength(text, font=font) / 2 + 4, y_ + 4), text, font=font, fill=_SHADOW)
-        draw.text((cx_ - draw.textlength(text, font=font) / 2, y_), text, font=font, fill=(255, 255, 255))
-
-    # 发布单位（左上）
-    draw.text((44 + 3, 34 + 3), _HEADER_UNIT, font=fonts["unit"], fill=_SHADOW)
-    draw.text((44, 34), _HEADER_UNIT, font=fonts["unit"], fill=(255, 255, 255))
-    # 大标题（居中两行）
-    _white(cx, 158, _HEADER_TITLE_1, fonts["title"])
-    _white(cx, 340, _HEADER_TITLE_2, fonts["title"])
+    # 发布单位（左上，publish-depart.png 白字蓝影）
+    _paste_rgba(img, _load_template("publish-depart.png"), _HEADER_PUB_XY, _HEADER_PUB_W)
+    # 大标题（居中，title.png 白字蓝影"海河流域水文气象公报"）
+    _paste_rgba(img, _load_template("title.png"),
+                ((_BOARD_WIDTH - _HEADER_TITLE_W) // 2, _HEADER_TITLE_Y), _HEADER_TITLE_W)
 
 
 def _draw_sec_icon(draw, cx: float, cy: float, key: str) -> None:
@@ -638,11 +642,48 @@ def _render_block(img, draw, fonts, x: int, y: int, usable_w: int, kind: str, pa
     return y
 
 
+def _background(height: int) -> Any:
+    """生成整页背景：优先用 bg.png（浅蓝云纹）按宽缩放后竖向裁剪/平铺到 height。"""
+    from PIL import Image
+    bg = _load_template("bg.png")
+    if bg is None:
+        return Image.new("RGB", (_BOARD_WIDTH, height), _BG)
+    try:
+        bg = bg.convert("RGB")
+        bw, bh = bg.size
+        if bw != _BOARD_WIDTH:
+            bh = int(bh * _BOARD_WIDTH / bw)
+            bg = bg.resize((_BOARD_WIDTH, bh))
+        if height <= bh:
+            return bg.crop((0, 0, _BOARD_WIDTH, height))
+        out = Image.new("RGB", (_BOARD_WIDTH, height), _BG)
+        y = 0
+        while y < height:
+            out.paste(bg, (0, y))
+            y += bh
+        return out
+    except Exception:
+        return Image.new("RGB", (_BOARD_WIDTH, height), _BG)
+
+
+_CARD_TOP_PAD = 26           # 卡片内顶部留白
+_CARD_BOTTOM_PAD = 24        # 卡片内底部留白
+_BLOCK_GAP = 14              # 卡片内块间距
+
+
+def _section_card_h(draw, fonts, content_w: int, sec: dict) -> int:
+    h = _CARD_TOP_PAD + _sec_header_h() + 6
+    for kind, payload in sec["blocks"]:
+        h += _measure_block(draw, fonts, content_w, kind, payload) + _BLOCK_GAP
+    return h + _CARD_BOTTOM_PAD
+
+
 def _compose_longimg(sections: list[dict]) -> bytes | None:
     """把 3 大主题板块渲染成一张严格对齐示范图的模板化长图 PNG。
 
-    sections: [{"header": 板块名, "blocks": [(kind, payload), ...]}]，kind ∈
-    text/image/caption/rank/fore。缺 Pillow/缺中文字体返回 None（调用方降级文字）。
+    sections: [{"header": 板块名, "icon": 图标键, "blocks": [(kind, payload), ...]}]，
+    kind ∈ text/image/caption/rank/fore。每个板块一张白色圆角卡片，板间露出浅蓝背景。
+    缺 Pillow/缺中文字体返回 None（调用方降级文字）。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -657,8 +698,6 @@ def _compose_longimg(sections: list[dict]) -> bytes | None:
 
     try:
         fonts = {
-            "unit": _font(_UNIT_SIZE),
-            "title": _font(_TITLE_SIZE),
             "sec": _font(_SEC_SIZE),
             "caption": _font(_CAPTION_SIZE),
             "body": _font(_BODY_SIZE),
@@ -672,45 +711,27 @@ def _compose_longimg(sections: list[dict]) -> bytes | None:
     content_x = card_x + _CARD_PAD
     content_w = card_w - 2 * _CARD_PAD
 
-    # 第一遍：量内容总高
+    # 第一遍：量各板块卡片高度，累加总高
     probe = ImageDraw.Draw(Image.new("RGB", (1, 1), (255, 255, 255)))
-    content_h = 26
-    for sec in sections:
-        content_h += _sec_header_h() + 6
-        for kind, payload in sec["blocks"]:
-            content_h += _measure_block(probe, fonts, content_w, kind, payload) + 14
-    pub_img = _load_template("publish-depart.png")
-    pub_h = int(pub_img.size[1] * _PUB_W / pub_img.size[0]) if pub_img else 0
-    content_h += pub_h + _BOTTOM_PAD + 30
+    card_heights = [_section_card_h(probe, fonts, content_w, sec) for sec in sections]
+    total_h = _HEADER_H + _SECTION_GAP + sum(card_heights) + _SECTION_GAP * len(sections) + _BOTTOM_PAD
 
-    header_h = _HEADER_H
-    card_top = header_h - _CARD_TOP_OVERLAP
-    total_h = card_top + content_h + 40
-
-    img = Image.new("RGB", (_BOARD_WIDTH, total_h), _BG)
+    img = _background(total_h)
     draw = ImageDraw.Draw(img)
 
-    # 顶部风景头图（全幅）
-    _draw_header(img, draw, fonts)
+    # 顶部风景头图（全幅 + 模板标题/发布单位）
+    _draw_header(img, draw)
 
-    # 白色内容卡片（对接头图，圆角微凸）
-    draw.rounded_rectangle(
-        [card_x, card_top, card_x + card_w, card_top + content_h + 24],
-        radius=28, fill=(255, 255, 255),
-    )
-
-    # 第二遍：渲染板块
-    y = card_top + 26
-    for sec in sections:
-        y = _draw_sec_header(draw, y, sec["header"], fonts["sec"], sec.get("icon", "")) + 6
+    # 第二遍：逐板块画白色卡片并渲染
+    y = _HEADER_H + _SECTION_GAP
+    for sec, ch in zip(sections, card_heights):
+        draw.rounded_rectangle([card_x, y, card_x + card_w, y + ch],
+                               radius=_CARD_RADIUS, fill=(255, 255, 255))
+        cy = y + _CARD_TOP_PAD
+        cy = _draw_sec_header(draw, cy, sec["header"], fonts["sec"], sec.get("icon", "")) + 6
         for kind, payload in sec["blocks"]:
-            y = _render_block(img, draw, fonts, content_x, y, content_w, kind, payload) + 14
-
-    # 底部发布单位（卡片内居中）
-    if pub_img:
-        pi = pub_img.resize((_PUB_W, pub_h))
-        img.paste(pi, ((_BOARD_WIDTH - _PUB_W) // 2, y + 6),
-                  pi if pub_img.mode == "RGBA" else None)
+            cy = _render_block(img, draw, fonts, content_x, cy, content_w, kind, payload) + _BLOCK_GAP
+        y += ch + _SECTION_GAP
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")

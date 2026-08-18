@@ -10,6 +10,7 @@ from custom_tools import (
     register_composite_longimg_tool,
     register_historical_same_period_rainfall_tool,
     register_historical_weather_tool,
+    register_hhweb_product_tool,
     register_last_month_areal_rainfall_tool,
     register_last_year_max_daily_rainfall_tool,
     register_poi_nearest_observation_tool,
@@ -50,6 +51,7 @@ class HaiheWeatherAnalyzerMCP:
         register_safe_emergency_response_tool(self.mcp)
         register_basin_drawing_tool(self.mcp)
         register_composite_longimg_tool(self.mcp)
+        register_hhweb_product_tool(self.mcp)
         register_forecast_evaluate_tool(self.mcp)
 
         @self.mcp.tool()
