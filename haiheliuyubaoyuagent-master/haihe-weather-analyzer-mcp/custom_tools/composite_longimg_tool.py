@@ -408,50 +408,6 @@ def _load_image(data: bytes) -> Any | None:
         return None
 
 
-def _dark_fraction(img: Any, thresh: int = 90) -> float:
-    """粗略估计图中"近黑像素"占比（缩小采样），用于判断是否黑底图。"""
-    from PIL import Image
-    small = img.convert("RGB").resize((64, 64))
-    px = small.load()
-    n = dark = 0
-    for y in range(64):
-        for x in range(64):
-            r, g, b = px[x, y]
-            n += 1
-            if max(r, g, b) < thresh:
-                dark += 1
-    return dark / n if n else 0.0
-
-
-def _light_theme(img: Any, black: int = 80, white: int = 210, dark: tuple[int, int, int] = (70, 70, 70)) -> Any:
-    """黑底图转浅色主题：近黑→透明（透出白卡），近白文字→深灰保持可读，彩色回波保留。
-
-    用 ImageChops 在 C 层算每像素 max/min(R,G,B)，避免逐像素 Python 循环。
-    """
-    from PIL import Image, ImageChops
-    rgba = img.convert("RGBA")
-    r, g, b, _ = rgba.split()
-    mx = ImageChops.lighter(ImageChops.lighter(r, g), b)  # 每像素 max
-    mn = ImageChops.darker(ImageChops.darker(r, g), b)    # 每像素 min
-    alpha = mx.point(lambda v: 255 if v >= black else 0)  # 近黑→透明
-    wmask = mn.point(lambda v: 255 if v > white else 0)   # 近白文字→深灰蒙版
-    dr, dg, db = dark
-    nr = Image.composite(Image.new("L", r.size, dr), r, wmask)
-    ng = Image.composite(Image.new("L", r.size, dg), g, wmask)
-    nb = Image.composite(Image.new("L", r.size, db), b, wmask)
-    return Image.merge("RGBA", (nr, ng, nb, alpha))
-
-
-def _load_light_theme_image(data: bytes) -> Any | None:
-    """加载图片；仅当它确实是"黑底为主"时才转浅色主题（防误伤白底图），否则原样 RGB。"""
-    img = _load_image(data)
-    if img is None:
-        return None
-    if _dark_fraction(img) < 0.35:
-        return img
-    return _light_theme(img)
-
-
 def _fit_image(img: Any, usable_w: int, fill_width: bool = False) -> Any:
     """等比缩放子图。默认只缩不放大、高度不超过 _IMG_MAX_H。
 
@@ -914,7 +870,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         area_real = None
         texts.append(f"实况面雨量图获取失败：{_safe_err(exc)}")
-    area_real_img = _load_light_theme_image(area_real) if area_real else None
+    area_real_img = _load_image(area_real) if area_real else None
     real_blocks.append(("image", area_real_img) if area_real_img else ("text", "（实况面雨量图获取失败）"))
 
     # ⑤ 点雨量排名表（序号|站点|省|市|降水量，前 15 站）
@@ -961,7 +917,7 @@ def generate_haihe_composite_longimg_core(
             continue
     if not fore_img_bytes:
         texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
-    fore_img = _load_light_theme_image(fore_img_bytes) if fore_img_bytes else None
+    fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
     fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
     # ⑦ 每日河系雨量预报表（独立容错：⑥图失败也要尽量出表）。
