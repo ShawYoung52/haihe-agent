@@ -408,6 +408,54 @@ def _load_image(data: bytes) -> Any | None:
         return None
 
 
+def _dark_fraction(img: Any, thresh: int = 90) -> float:
+    """粗略估计图中"近黑像素"占比（缩小采样），用于判断是否黑底图。"""
+    from PIL import Image
+    small = img.convert("RGB").resize((64, 64))
+    px = small.load()
+    n = dark = 0
+    for y in range(64):
+        for x in range(64):
+            r, g, b = px[x, y]
+            n += 1
+            if max(r, g, b) < thresh:
+                dark += 1
+    return dark / n if n else 0.0
+
+
+def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
+                  text: tuple[int, int, int] = (15, 15, 15),
+                  chroma_thresh: int = 40, dark_thresh: int = 90) -> Any:
+    """黑底图转白底：低色度像素按亮度分黑白（暗→白底，亮→深字），饱和色（雨区/图例）保留。
+
+    14所 ④⑥ 面雨量图接口总是返回黑底图（isClimateImg 不生效），黑底上白/浅灰文字
+    与图例在白底长图里不可读。本函数把近黑背景铺白、把浅色文字/图例刻度转深灰，
+    彩色雨区与图例色条原样保留——效果与白底雷达/降水实况图一致。仅当图确为黑底
+    为主（_dark_fraction >= 0.35）时才转换，白底图原样返回。
+    """
+    from PIL import Image, ImageChops
+    if _dark_fraction(img) < 0.35:
+        return img
+    img = img.convert("RGB")
+    r, g, b = img.split()
+    mx = ImageChops.lighter(ImageChops.lighter(r, g), b)   # 每像素 max
+    mn = ImageChops.darker(ImageChops.darker(r, g), b)     # 每像素 min
+    chroma = ImageChops.subtract(mx, mn)                   # 色度
+    achrom = chroma.point(lambda v: 255 if v < chroma_thresh else 0)                 # 低色度（灰字/黑底）
+    m_bg = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))    # 暗→白底
+    m_text = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= dark_thresh else 0))  # 亮→深字
+    low = ImageChops.lighter(m_bg, m_text)                 # 所有低色度像素
+    br, bg_, bb = bg
+    tr, tg_, tb = text
+
+    def chan(src, base_bg, base_text):
+        base = Image.composite(Image.new("L", src.size, base_text),
+                               Image.new("L", src.size, base_bg), m_text)
+        return Image.composite(base, src, low)   # 低色度→base（白底/深字），饱和色→原色
+
+    return Image.merge("RGB", (chan(r, br, tr), chan(g, bg_, tg_), chan(b, bb, tb)))
+
+
 def _fit_image(img: Any, usable_w: int, fill_width: bool = False) -> Any:
     """等比缩放子图。默认只缩不放大、高度不超过 _IMG_MAX_H。
 
@@ -870,7 +918,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         area_real = None
         texts.append(f"实况面雨量图获取失败：{_safe_err(exc)}")
-    area_real_img = _load_image(area_real) if area_real else None
+    area_real_img = _to_white_map(_load_image(area_real)) if area_real else None
     real_blocks.append(("image", area_real_img) if area_real_img else ("text", "（实况面雨量图获取失败）"))
 
     # ⑤ 点雨量排名表（序号|站点|省|市|降水量，前 15 站）
@@ -917,7 +965,7 @@ def generate_haihe_composite_longimg_core(
             continue
     if not fore_img_bytes:
         texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
-    fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
+    fore_img = _to_white_map(_load_image(fore_img_bytes)) if fore_img_bytes else None
     fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
     # ⑦ 每日河系雨量预报表（独立容错：⑥图失败也要尽量出表）。

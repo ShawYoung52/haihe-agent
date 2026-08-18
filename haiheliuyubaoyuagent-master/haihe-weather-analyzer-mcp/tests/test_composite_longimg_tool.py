@@ -247,3 +247,59 @@ class TestGenerateCore:
         assert calls["interval"] == 48, "48h 窗口应对齐"
         assert calls["range"] == "9"
         assert calls["type"] == "0"
+
+
+class TestWhiteMapConversion:
+    """④⑥ 黑底图→白底：近黑背景铺白、浅色文字/图例刻度转深字、彩色雨区保留；白底图不被误转换。"""
+
+    def _black_map_png(self):
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (80, 60), (0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.ellipse([10, 10, 60, 50], fill=(40, 200, 60))     # 绿色雨区
+        d.rectangle([10, 52, 70, 57], fill=(224, 224, 224))  # 浅灰文字条
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _white_map_png(self):
+        from PIL import Image
+        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_black_bg_becomes_white(self):
+        img = clt._load_image(self._black_map_png())
+        out = clt._to_white_map(img)
+        assert out is not None and out.mode == "RGB", "转换后应为 RGB（不透明）"
+        assert out.getpixel((2, 2)) == (255, 255, 255), "原黑底应变白"
+
+    def test_light_text_becomes_dark(self):
+        img = clt._load_image(self._black_map_png())
+        out = clt._to_white_map(img)
+        px = out.load()
+        found = False
+        for x in range(10, 70, 2):
+            for y in range(52, 57):
+                r, g, b = px[x, y]
+                if max(r, g, b) < 120:
+                    found = True
+        assert found, "原浅灰文字应转成深字（白底可读）"
+
+    def test_colored_rain_preserved(self):
+        img = clt._load_image(self._black_map_png())
+        out = clt._to_white_map(img)
+        px = out.load()
+        found = False
+        for x in range(10, 60, 2):
+            for y in range(10, 50):
+                r, g, b = px[x, y]
+                if g > 150 and r < 100:  # 绿色雨区
+                    found = True
+        assert found, "彩色雨区应保留原色"
+
+    def test_white_map_left_untouched(self):
+        img = clt._load_image(self._white_map_png())
+        out = clt._to_white_map(img)
+        assert out is img, "白底图应原样返回（黑底占比守卫）"
