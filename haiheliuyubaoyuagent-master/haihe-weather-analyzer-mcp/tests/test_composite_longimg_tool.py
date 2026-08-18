@@ -105,11 +105,21 @@ class _FakeBytesResp:
 class TestComposeLongimg:
     def test_render_composite_png(self):
         """板块齐全时渲染出 PNG（Windows 有中文字体）。"""
+        img = clt._load_image(_IMG_PNG)
         sections = [
-            ("① 降水实况文字", "text", _REAL_TEXT),
-            ("② swan3 组合反射率雷达图", "image", clt._load_image(_IMG_PNG)),
-            ("③ 降水实况图", "image", clt._load_image(_IMG_PNG)),
-            ("⑤ 点雨量列表", "table", (["站点", "区域", "雨量(mm)", "位置"], [["平泉站", "大清河", "36.2", "河北省 平泉市"]])),
+            {"header": "雷达拼图", "icon": "radar", "blocks": [("image", img)]},
+            {"header": "降水实况", "icon": "cloud", "blocks": [
+                ("text", _REAL_TEXT),
+                ("image", img),
+                ("caption", "自动站累计降水量排名"),
+                ("rank", (["序号", "站点", "省", "市", "降水量(毫米)"],
+                          [["1", "平泉站", "河北省", "平泉市", "36.2"]])),
+            ]},
+            {"header": "降水预报", "icon": "cloudsun", "blocks": [
+                ("image", img),
+                ("caption", "08月17日08时 - 08月18日08时，降水量预报表"),
+                ("fore", ("", ["北三河", "大清河", "海河干流"], ["4.1", "2.2", "0.1"])),
+            ]},
         ]
         png = clt._compose_longimg(sections)
         assert png, "应渲染出 PNG"
@@ -117,13 +127,13 @@ class TestComposeLongimg:
 
     def test_render_without_font_returns_none(self, monkeypatch):
         monkeypatch.setattr(clt, "_find_cjk_font", lambda: None)
-        assert clt._compose_longimg([("a", "text", "x")]) is None
+        assert clt._compose_longimg([{"header": "a", "blocks": [("text", "x")]}]) is None
 
     def test_wrap_text_not_exceed_width(self):
         from PIL import Image, ImageDraw, ImageFont
         font = ImageFont.truetype(clt._find_cjk_font(), clt._BODY_SIZE)
         probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-        max_w = clt._BOARD_WIDTH - 2 * clt._MARGIN
+        max_w = clt._BOARD_WIDTH - 2 * (clt._CARD_MARGIN + clt._CARD_PAD)
         for line in clt._wrap_text(probe, font, _REAL_TEXT, max_w):
             assert probe.textlength(line, font=font) <= max_w + 1
 

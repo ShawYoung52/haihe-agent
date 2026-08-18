@@ -52,27 +52,43 @@ _SCRUB_PATTERNS = [
 # 常见栅格图片魔数。
 _IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"BM", b"II*\x00", b"MM\x00*")
 
-# 长图版式（贴近示范图：顶部蓝绿装饰带 + 浅色标题横幅 + 近白内容 + 底部发布单位）
+# 长图版式（严格对齐示范图 download.png）：
+#   外层浅蓝背景(bg 色) + 顶部全幅风景头图(top-bg 上段,叠加白色大标题) +
+#   内嵌白色内容卡片 + 3 大主题板块(居中蓝色标题+两侧装饰线) + 大幅带框地图 +
+#   浅蓝表头表格(点雨量排名表 / 河系雨量矩阵预报表) + 底部发布单位。
 _ASSETS_DIR = os.getenv(
     "LONGIMG_ASSETS_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "longimg"),
 )
 _BOARD_WIDTH = 1125          # 画布宽 = 模板宽
-_MARGIN = 64
-_TOP_STRIP = 320             # 顶部蓝绿装饰带高度（top-bg 上部）
-_TITLE_BANNER_H = 340        # 标题横幅区高度（浅色底，放 title 黑字）
-_TITLE_W = 700               # 标题缩放宽度
-_BOTTOM_PAD = 70             # 发布单位区底部留白
-_SEC_TITLE_SIZE = 36
-_BODY_SIZE = 30
-_LINE_RATIO = 1.6
-_SEC_GAP = 16
-_IMG_MAX_HEIGHT = 700        # 单张子图最大高度（超过则等比缩小）
-_TABLE_ROW_H = 42
-_TABLE_HEAD_BG = (226, 238, 246)
-_BG = (247, 251, 253)        # 近白背景（示范图内容区底色）
-_FG = (30, 30, 30)
-_SEC_FG = (16, 76, 148)      # 板块标题深蓝
+_BG = (131, 207, 251)        # 外层浅蓝背景（= bg.png 实测色）
+_CARD_MARGIN = 38            # 白色内容卡片左右外边距（示范图实测 ~19px@561 → 38@1125）
+_CARD_PAD = 42               # 卡片内边距
+_CARD_TOP_OVERLAP = 0        # 卡片与头图衔接（0=对接）
+_HEADER_H = 600              # 顶部风景头图高度（示范图 ~300px@561 → 600@1125）
+_HEADER_UNIT = "发布单位：海河流域气象中心"
+_HEADER_TITLE_1 = "海河流域水文气象"
+_HEADER_TITLE_2 = "公报"
+_UNIT_SIZE = 42
+_TITLE_SIZE = 130            # 大标题字号（7字≈910px，两侧留 ~110px 边距，对齐示范图）
+_SHADOW = (18, 74, 96)       # 头图白色标题的阴影色
+_SEC_SIZE = 48               # 板块标题字号
+_SEC_BLUE = (35, 118, 208)   # 板块标题蓝（实测示范图）
+_RULE = (150, 196, 236)      # 板块标题两侧装饰线
+_CAPTION_SIZE = 34           # 图/表小标题字号（深灰）
+_BODY_SIZE = 31              # 正文（降水实况文字）
+_TBL_SIZE = 29               # 表格字号
+_TBL_HEAD = (206, 234, 251)  # 表头浅蓝（实测）
+_TBL_LINE = (168, 198, 226)  # 表格线
+_TBL_ROW_H = 58
+_FG = (38, 38, 38)           # 正文深灰
+_IMG_BORDER = (176, 190, 204)  # 地图外框
+_IMG_MAX_H = 980             # 单张地图最大高度
+_BOTTOM_PAD = 56
+_PUB_W = 460                 # 底部发布单位缩放宽度
+_FORECAST_HOURS = 72         # 公报口径：预报覆盖未来 72h（⑥图为 3 天累计）
+_FORECAST_DAYS = 3           # ⑦按 24h 拆成 3 张"河系/雨量"预报表
+_RANGE = range               # 工具函数签名有 range 参数会遮蔽内建，这里留别名
 
 # 模板图懒加载缓存
 _TEMPLATE_CACHE: dict[str, Any] = {}
@@ -370,48 +386,263 @@ def _load_image(data: bytes) -> Any | None:
 
 
 def _fit_image(img: Any, usable_w: int) -> Any:
-    """等比缩放子图到可用宽度内（最大高度 _IMG_MAX_HEIGHT）。"""
+    """等比缩放子图到内容宽度（最大高度 _IMG_MAX_H）。"""
     w, h = img.size
-    scale = min(1.0, usable_w / w if w else 1.0, _IMG_MAX_HEIGHT / h if h else 1.0)
+    scale = min(1.0, usable_w / w if w else 1.0, _IMG_MAX_H / h if h else 1.0)
     if scale < 1.0:
         img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
     return img
 
 
-def _render_table(draw, font, x: int, y: int, usable_w: int, headers: list[str], rows: list[list[str]]) -> int:
-    """绘制简单表格，返回结束 y 坐标。"""
-    n = len(headers) or 1
-    col_w = usable_w / n
-    row_h = _TABLE_ROW_H
+def _header_band() -> Any | None:
+    """裁出顶部风景头图（top-bg 上段，含山水库坝、避开底部水印），缩放到画布宽。"""
+    top_bg = _load_template("top-bg.png")
+    if top_bg is None:
+        return None
+    try:
+        tw, th = top_bg.size
+        src_h = min(th, int(tw * _HEADER_H / _BOARD_WIDTH))
+        band = top_bg.crop((0, 0, tw, src_h)).convert("RGB")
+        return band.resize((_BOARD_WIDTH, _HEADER_H))
+    except Exception:
+        return None
 
-    def _cell(text: str, max_w: float) -> str:
+
+def _draw_centered(draw, cx: int, y: int, text: str, font, fill) -> None:
+    w = draw.textlength(text, font=font)
+    draw.text((cx - w / 2, y), text, font=font, fill=fill)
+
+
+def _draw_header(img: Any, draw, fonts) -> None:
+    """顶部全幅风景头图 + 白色大标题（发布单位 + 海河流域水文气象公报）。"""
+    band = _header_band()
+    if band is not None:
+        img.paste(band, (0, 0))
+    else:  # 模板缺失：渐变蓝条兜底
+        draw.rectangle([0, 0, _BOARD_WIDTH, _HEADER_H], fill=(70, 150, 210))
+    cx = _BOARD_WIDTH // 2
+
+    def _white(cx_, y_, text, font):
+        draw.text((cx_ - draw.textlength(text, font=font) / 2 + 4, y_ + 4), text, font=font, fill=_SHADOW)
+        draw.text((cx_ - draw.textlength(text, font=font) / 2, y_), text, font=font, fill=(255, 255, 255))
+
+    # 发布单位（左上）
+    draw.text((44 + 3, 34 + 3), _HEADER_UNIT, font=fonts["unit"], fill=_SHADOW)
+    draw.text((44, 34), _HEADER_UNIT, font=fonts["unit"], fill=(255, 255, 255))
+    # 大标题（居中两行）
+    _white(cx, 158, _HEADER_TITLE_1, fonts["title"])
+    _white(cx, 340, _HEADER_TITLE_2, fonts["title"])
+
+
+def _draw_sec_icon(draw, cx: float, cy: float, key: str) -> None:
+    """板块标题左侧小图标（radar/cloud/cloudsun），~52px，矢量绘制。"""
+    import math
+    if key == "radar":
+        # 支架 + 抛物面天线 + 馈源
+        draw.polygon([(cx - 14, cy + 24), (cx + 14, cy + 24), (cx + 4, cy + 2), (cx - 4, cy + 2)],
+                     fill=(120, 130, 145))
+        draw.pieslice([cx - 24, cy - 22, cx + 24, cy + 26], start=200, end=340,
+                      fill=(70, 130, 200), outline=(40, 90, 150), width=2)
+        draw.line([cx, cy + 2, cx + 14, cy - 12], fill=(40, 90, 150), width=3)
+        draw.ellipse([cx + 11, cy - 15, cx + 17, cy - 9], fill=(230, 90, 60))
+    elif key in ("cloud", "cloudsun"):
+        if key == "cloudsun":
+            # 太阳（右上，光芒）
+            scx, scy, sr = cx + 16, cy - 14, 12
+            for ang in range(0, 360, 45):
+                dx = math.cos(math.radians(ang)); dy = math.sin(math.radians(ang))
+                draw.line([scx + dx * (sr + 2), scy + dy * (sr + 2), scx + dx * (sr + 8), scy + dy * (sr + 8)],
+                          fill=(240, 170, 40), width=3)
+            draw.ellipse([scx - sr, scy - sr, scx + sr, scy + sr], fill=(250, 190, 60), outline=(230, 150, 30))
+        # 云（三圆 + 平底）
+        cloud = (150, 165, 185) if key == "cloud" else (170, 180, 198)
+        draw.ellipse([cx - 24, cy - 6, cx - 2, cy + 16], fill=cloud)
+        draw.ellipse([cx - 8, cy - 14, cx + 16, cy + 14], fill=cloud)
+        draw.ellipse([cx + 8, cy - 4, cx + 26, cy + 16], fill=cloud)
+        draw.rectangle([cx - 22, cy + 4, cx + 24, cy + 16], fill=cloud)
+        if key == "cloud":
+            # 雨滴
+            for rx in (-14, 0, 14):
+                draw.line([cx + rx, cy + 20, cx + rx - 4, cy + 30], fill=(70, 130, 200), width=3)
+
+
+def _sec_header_h() -> int:
+    return int(_SEC_SIZE * 1.4) + 26
+
+
+def _draw_sec_header(draw, y: int, title: str, font, icon: str = "") -> int:
+    """板块标题：居中蓝色大字 + 左侧小图标 + 两侧装饰线（贴近示范图）。返回结束 y。"""
+    cx = _BOARD_WIDTH // 2
+    cy = y + int(_SEC_SIZE * 0.7)
+    tw = draw.textlength(title, font=font)
+    line_y = cy + _SEC_SIZE // 2
+    # 图标在标题左侧（图标+标题整体仍近似居中，故把标题略右移）
+    shift = 34 if icon else 0
+    tcx = cx + shift
+    if icon:
+        _draw_sec_icon(draw, tcx - tw / 2 - 48, cy + _SEC_SIZE * 0.28, icon)
+    for sign in (-1, 1):
+        x_near = tcx + sign * (tw / 2 + 40)
+        x_far = cx + sign * (_BOARD_WIDTH / 2 - _CARD_MARGIN - _CARD_PAD)
+        draw.line([x_near, line_y, x_far, line_y], fill=_RULE, width=3)
+        bx = tcx + sign * (tw / 2 + 18)
+        draw.line([bx - 6, line_y, bx + 6, line_y], fill=_SEC_BLUE, width=5)
+    _draw_centered(draw, tcx, cy, title, font, _SEC_BLUE)
+    return y + _sec_header_h()
+
+
+def _measure_text(draw, font, text: str, usable_w: int) -> int:
+    lines = _wrap_text(draw, font, str(text or ""), usable_w)
+    return max(len(lines), 1) * int(_BODY_SIZE * 1.6) + 8
+
+
+def _render_text_block(draw, font, x: int, y: int, usable_w: int, text: str) -> int:
+    line_h = int(_BODY_SIZE * 1.6)
+    lines = _wrap_text(draw, font, str(text or ""), usable_w) or ["（暂无内容）"]
+    for ln in lines:
+        draw.text((x, y), ln, font=font, fill=_FG)
+        y += line_h
+    return y + 8
+
+
+def _measure_caption(font) -> int:
+    return int(_CAPTION_SIZE * 1.5) + 12
+
+
+def _render_caption(draw, font, y: int, text: str) -> int:
+    _draw_centered(draw, _BOARD_WIDTH // 2, y + 6, text, font, _FG)
+    return y + _measure_caption(font)
+
+
+def _measure_image(img: Any, usable_w: int) -> int:
+    return _fit_image(img, usable_w).size[1] + 20
+
+
+def _render_image_block(img: Any, draw, x: int, y: int, usable_w: int, sub: Any) -> int:
+    """地图：白底 + 细框 + 居中（14所 图自带红色小标题）。"""
+    sub = _fit_image(sub, usable_w)
+    px = x + (usable_w - sub.size[0]) // 2
+    draw.rectangle([px - 8, y + 2, px + sub.size[0] + 8, y + sub.size[1] + 12],
+                   fill=(255, 255, 255), outline=_IMG_BORDER, width=2)
+    img.paste(sub, (px, y + 7))
+    return y + sub.size[1] + 20
+
+
+_RANK_COLS = (0.12, 0.28, 0.20, 0.24, 0.16)  # 序号|站点|省|市|降水量
+
+
+def _measure_rank(rows: list) -> int:
+    return _TBL_ROW_H * (1 + min(len(rows), 15)) + 10
+
+
+def _render_rank(draw, font, x: int, y: int, usable_w: int, headers: list[str], rows: list[list[str]]) -> int:
+    """点雨量排名表：浅蓝表头 + 白行 + 横线，居中。"""
+    widths = [usable_w * f for f in _RANK_COLS]
+    xs = [x]
+    for w in widths[:-1]:
+        xs.append(xs[-1] + w)
+
+    def _cell(cx, cw, text, bold=False, fg=_FG):
         t = str(text or "")
-        while t and draw.textlength(t, font=font) > max_w - 8:
+        while t and draw.textlength(t, font=font) > cw - 12:
             t = t[:-1]
-        return t + ("…" if len(str(text or "")) > len(t) else "")
+        tw = draw.textlength(t, font=font)
+        draw.text((cx + (cw - tw) / 2, y + (_TBL_ROW_H - font.size) // 2 - 2), t, font=font, fill=fg)
 
     # 表头
-    draw.rectangle([x, y, x + usable_w, y + row_h], fill=_TABLE_HEAD_BG)
+    draw.rectangle([x, y, x + usable_w, y + _TBL_ROW_H], fill=_TBL_HEAD)
+    save_y = y
     for i, h in enumerate(headers):
-        draw.text((x + i * col_w + 4, y + (row_h - font.size) // 2 - 2), str(h), font=font, fill=_FG)
-    y += row_h
-    for row in rows[:15]:  # 表格最多 15 行
-        for i, cell in enumerate(row):
-            draw.text((x + i * col_w + 4, y + (row_h - font.size) // 2 - 2),
-                      _cell(cell, col_w), font=font, fill=_FG)
-        y += row_h
-    # 底线
-    draw.line([x, y, x + usable_w, y], fill=(200, 200, 200))
-    y += 6
+        _cell(xs[i], widths[i], h)
+    y += _TBL_ROW_H
+    for row in rows[:15]:
+        for i, c in enumerate(row):
+            _cell(xs[i], widths[i], c)
+        y += _TBL_ROW_H
+        draw.line([x, y, x + usable_w, y], fill=_TBL_LINE, width=1)
+    draw.rectangle([x, save_y, x + usable_w, y], outline=_TBL_LINE, width=2)
+    return y + 10
+
+
+def _measure_fore(values: list) -> int:
+    groups = max(1, (len(values) + 2) // 3)
+    return _TBL_ROW_H * groups * 2 + 8
+
+
+def _render_fore(draw, font, x: int, y: int, usable_w: int, rivers: list[str], values: list[str]) -> int:
+    """面雨量预报矩阵：河系(浅蓝)/雨量(白) 成对行，每行 3 个分区。"""
+    label_w = usable_w * 0.16
+    col_w = (usable_w - label_w) / 3
+    pairs = list(zip(rivers, values))
+    groups = [pairs[i:i + 3] for i in range(0, len(pairs), 3)] or [[]]
+
+    def _row(y_, label, cells, head):
+        bg = _TBL_HEAD if head else (255, 255, 255)
+        draw.rectangle([x, y_, x + usable_w, y_ + _TBL_ROW_H], fill=bg)
+        tw = draw.textlength(label, font=font)
+        draw.text((x + (label_w - tw) / 2, y_ + (_TBL_ROW_H - font.size) // 2 - 2), label, font=font, fill=_FG)
+        for i in range(3):
+            cell = cells[i] if i < len(cells) else ""
+            t = str(cell)
+            while t and draw.textlength(t, font=font) > col_w - 10:
+                t = t[:-1]
+            tw = draw.textlength(t, font=font)
+            cx = x + label_w + i * col_w
+            draw.text((cx + (col_w - tw) / 2, y_ + (_TBL_ROW_H - font.size) // 2 - 2), t, font=font, fill=_FG)
+        # 竖线
+        for i in range(4):
+            vx = x + label_w + i * col_w
+            draw.line([vx, y_, vx, y_ + _TBL_ROW_H], fill=_TBL_LINE, width=1)
+        draw.line([x, y_, x, y_ + _TBL_ROW_H], fill=_TBL_LINE, width=1)
+        draw.line([x + usable_w, y_, x + usable_w, y_ + _TBL_ROW_H], fill=_TBL_LINE, width=1)
+
+    top = y
+    for g in groups:
+        names = [p[0] for p in g]
+        vals = [p[1] for p in g]
+        _row(y, "河系", names, head=True)
+        y += _TBL_ROW_H
+        draw.line([x, y, x + usable_w, y], fill=_TBL_LINE, width=1)
+        _row(y, "雨量", vals, head=False)
+        y += _TBL_ROW_H
+        draw.line([x, y, x + usable_w, y], fill=_TBL_LINE, width=1)
+    draw.rectangle([x, top, x + usable_w, y], outline=_TBL_LINE, width=2)
+    return y + 8
+
+
+def _measure_block(draw, fonts, usable_w: int, kind: str, payload: Any) -> int:
+    if kind == "text":
+        return _measure_text(draw, fonts["body"], payload, usable_w)
+    if kind == "caption":
+        return _measure_caption(fonts["caption"])
+    if kind == "image":
+        return _measure_image(payload, usable_w)
+    if kind == "rank":
+        return _measure_rank(payload[1])
+    if kind == "fore":
+        return _measure_fore(payload[2])
+    return 0
+
+
+def _render_block(img, draw, fonts, x: int, y: int, usable_w: int, kind: str, payload: Any) -> int:
+    if kind == "text":
+        return _render_text_block(draw, fonts["body"], x, y, usable_w, payload)
+    if kind == "caption":
+        return _render_caption(draw, fonts["caption"], y, payload)
+    if kind == "image":
+        return _render_image_block(img, draw, x, y, usable_w, payload)
+    if kind == "rank":
+        return _render_rank(draw, fonts["tbl"], x, y, usable_w, payload[0], payload[1])
+    if kind == "fore":
+        return _render_fore(draw, fonts["tbl"], x, y, usable_w, payload[1], payload[2])
     return y
 
 
-def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
-    """把板块列表渲染成一张贴近示范图的模板化长图 PNG。缺 Pillow/缺中文字体返回 None。
+def _compose_longimg(sections: list[dict]) -> bytes | None:
+    """把 3 大主题板块渲染成一张严格对齐示范图的模板化长图 PNG。
 
-    版式（对齐示范图 download.png）：顶部 top-bg 上部作蓝绿装饰带（~320px），
-    下方浅色标题横幅放 title.png（海河流域气象服务，黑字），中部近白背景放 7 个
-    板块，底部 publish-depart.png 发布单位。模板缺失时降级为近白背景不报错。
+    sections: [{"header": 板块名, "blocks": [(kind, payload), ...]}]，kind ∈
+    text/image/caption/rank/fore。缺 Pillow/缺中文字体返回 None（调用方降级文字）。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -420,87 +651,66 @@ def _compose_longimg(sections: list[tuple[str, str, Any]]) -> bytes | None:
     font_path = _find_cjk_font()
     if font_path is None:
         return None
+
+    def _font(size):
+        return ImageFont.truetype(font_path, size)
+
     try:
-        sec_font = ImageFont.truetype(font_path, _SEC_TITLE_SIZE)
-        body_font = ImageFont.truetype(font_path, _BODY_SIZE)
+        fonts = {
+            "unit": _font(_UNIT_SIZE),
+            "title": _font(_TITLE_SIZE),
+            "sec": _font(_SEC_SIZE),
+            "caption": _font(_CAPTION_SIZE),
+            "body": _font(_BODY_SIZE),
+            "tbl": _font(_TBL_SIZE),
+        }
     except Exception:
         return None
 
-    usable_w = _BOARD_WIDTH - 2 * _MARGIN
-    line_h = int(_BODY_SIZE * _LINE_RATIO)
-    sec_h = int(_SEC_TITLE_SIZE * _LINE_RATIO)
+    card_x = _CARD_MARGIN
+    card_w = _BOARD_WIDTH - 2 * _CARD_MARGIN
+    content_x = card_x + _CARD_PAD
+    content_w = card_w - 2 * _CARD_PAD
 
-    # 内容高度估算（板块标题 + 内容）
-    probe_img = Image.new("RGB", (1, 1), _BG)
-    probe = ImageDraw.Draw(probe_img)
-    content_h = 24
-    for title, kind, content in sections:
-        content_h += sec_h + 6 + _SEC_GAP
-        if kind == "text":
-            lines = _wrap_text(probe, body_font, str(content or ""), usable_w)
-            content_h += max(len(lines), 1) * line_h
-        elif kind == "image":
-            img = _fit_image(content, usable_w)
-            content_h += img.size[1] + 8
-        elif kind == "table":
-            headers, rows = content
-            content_h += _TABLE_ROW_H * (1 + min(len(rows), 15)) + 6
-
-    # 模板加载（缺失时降级）
-    top_bg = _load_template("top-bg.png")
-    title_img = _load_template("title.png")
+    # 第一遍：量内容总高
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1), (255, 255, 255)))
+    content_h = 26
+    for sec in sections:
+        content_h += _sec_header_h() + 6
+        for kind, payload in sec["blocks"]:
+            content_h += _measure_block(probe, fonts, content_w, kind, payload) + 14
     pub_img = _load_template("publish-depart.png")
+    pub_h = int(pub_img.size[1] * _PUB_W / pub_img.size[0]) if pub_img else 0
+    content_h += pub_h + _BOTTOM_PAD + 30
 
-    top_h = _TOP_STRIP + _TITLE_BANNER_H
-    bottom_h = 170
-    total_h = top_h + content_h + bottom_h
+    header_h = _HEADER_H
+    card_top = header_h - _CARD_TOP_OVERLAP
+    total_h = card_top + content_h + 40
 
-    img = Image.new("RGB", (_BOARD_WIDTH, max(total_h, top_h + 420)), _BG)
+    img = Image.new("RGB", (_BOARD_WIDTH, total_h), _BG)
     draw = ImageDraw.Draw(img)
 
-    # 顶部蓝绿装饰带：top-bg 上部 320px（贴近示范图顶部观感）
-    if top_bg:
-        strip = top_bg.crop((0, 0, top_bg.size[0], min(_TOP_STRIP, top_bg.size[1])))
-        strip = strip.resize((_BOARD_WIDTH, _TOP_STRIP))
-        img.paste(strip, (0, 0))
+    # 顶部风景头图（全幅）
+    _draw_header(img, draw, fonts)
 
-    # 标题横幅：浅色底（画布近白）+ title 黑字居中
-    if title_img:
-        th = int(title_img.size[1] * _TITLE_W / title_img.size[0])
-        ti = title_img.resize((_TITLE_W, th))
-        title_y = _TOP_STRIP + (_TITLE_BANNER_H - th) // 2
-        img.paste(ti, ((_BOARD_WIDTH - _TITLE_W) // 2, title_y), ti if title_img.mode == "RGBA" else None)
+    # 白色内容卡片（对接头图，圆角微凸）
+    draw.rounded_rectangle(
+        [card_x, card_top, card_x + card_w, card_top + content_h + 24],
+        radius=28, fill=(255, 255, 255),
+    )
 
-    # 内容区：近白背景上放板块标题 + 文字/图/表
-    y = top_h + 24
-    for title, kind, content in sections:
-        draw.text((_MARGIN, y), title, font=sec_font, fill=_SEC_FG)
-        y += sec_h + 6
-        if kind == "text":
-            text = str(content or "")
-            lines = _wrap_text(draw, body_font, text, usable_w)
-            for ln in lines:
-                draw.text((_MARGIN, y), ln, font=body_font, fill=_FG)
-                y += line_h
-            if not lines:
-                draw.text((_MARGIN, y), "暂无内容", font=body_font, fill=_FG)
-                y += line_h
-        elif kind == "image":
-            img2 = _fit_image(content, usable_w)
-            paste_x = _MARGIN + (usable_w - img2.size[0]) // 2
-            img.paste(img2, (paste_x, y))
-            y += img2.size[1] + 8
-        elif kind == "table":
-            headers, rows = content
-            y = _render_table(draw, body_font, _MARGIN, y, usable_w, headers, rows)
-        y += _SEC_GAP
+    # 第二遍：渲染板块
+    y = card_top + 26
+    for sec in sections:
+        y = _draw_sec_header(draw, y, sec["header"], fonts["sec"], sec.get("icon", "")) + 6
+        for kind, payload in sec["blocks"]:
+            y = _render_block(img, draw, fonts, content_x, y, content_w, kind, payload) + 14
 
-    # 底部发布单位
+    # 底部发布单位（卡片内居中）
     if pub_img:
-        pw = 520
-        ph = int(pub_img.size[1] * pw / pub_img.size[0])
-        pi = pub_img.resize((pw, ph))
-        img.paste(pi, ((_BOARD_WIDTH - pw) // 2, total_h - ph - _BOTTOM_PAD), pi if pub_img.mode == "RGBA" else None)
+        pi = pub_img.resize((_PUB_W, pub_h))
+        img.paste(pi, ((_BOARD_WIDTH - _PUB_W) // 2, y + 6),
+                  pi if pub_img.mode == "RGBA" else None)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -544,12 +754,21 @@ def generate_haihe_composite_longimg_core(
     else:
         begin, end = _window(interval_hours)
     fore_cycles = _fore_cycle_candidates()
-    fore_time = fore_cycles[0]
     query_time = datetime.now(BEIJING_TIMEZONE).strftime("%Y%m%d%H0000")
 
-    # 各板块独立取数，失败各自占位
-    sections: list[tuple[str, str, Any]] = []
     texts: list[str] = []
+
+    # ==================================================== 雷达拼图（② swan3）
+    try:
+        swan = _fetch_swan3(query_time)
+    except Exception as exc:
+        swan = None
+        texts.append(f"雷达图获取失败：{_safe_err(exc)}")
+    swan_img = _load_image(swan) if swan else None
+    radar_blocks = [("image", swan_img)] if swan_img else [("text", "（雷达图获取失败）")]
+
+    # ==================== 降水实况（①文字 + ③实况图 + ④面雨量实况图 + ⑤点雨量排名）
+    real_blocks: list[tuple[str, Any]] = []
 
     # ① 降水实况文字
     try:
@@ -559,18 +778,7 @@ def generate_haihe_composite_longimg_core(
         texts.append(f"降水实况文字获取失败：{_safe_err(exc)}")
     if describe:
         texts.append(describe)
-        sections.append((f"① 降水实况文字（{begin} ~ {end}）", "text", describe))
-    else:
-        sections.append((f"① 降水实况文字（{begin} ~ {end}）", "text", "（暂无降水实况文字）"))
-
-    # ② swan3 雷达图
-    try:
-        swan = _fetch_swan3(query_time)
-    except Exception as exc:
-        swan = None
-        texts.append(f"雷达图获取失败：{_safe_err(exc)}")
-    swan_img = _load_image(swan) if swan else None
-    sections.append(("② swan3 组合反射率雷达图", "image", swan_img) if swan_img else ("② swan3 组合反射率雷达图", "text", "（雷达图获取失败）"))
+    real_blocks.append(("text", describe or "（暂无降水实况文字）"))
 
     # ③ 降水实况图
     try:
@@ -579,7 +787,7 @@ def generate_haihe_composite_longimg_core(
         station_img_bytes = None
         texts.append(f"降水实况图获取失败：{_safe_err(exc)}")
     station_img = _load_image(station_img_bytes) if station_img_bytes else None
-    sections.append(("③ 降水实况图", "image", station_img) if station_img else ("③ 降水实况图", "text", "（降水实况图获取失败）"))
+    real_blocks.append(("image", station_img) if station_img else ("text", "（降水实况图获取失败）"))
 
     # ④ 实况面雨量图
     try:
@@ -588,72 +796,88 @@ def generate_haihe_composite_longimg_core(
         area_real = None
         texts.append(f"实况面雨量图获取失败：{_safe_err(exc)}")
     area_real_img = _load_image(area_real) if area_real else None
-    sections.append(("④ 实况面雨量图", "image", area_real_img) if area_real_img else ("④ 实况面雨量图", "text", "（实况面雨量图获取失败）"))
+    real_blocks.append(("image", area_real_img) if area_real_img else ("text", "（实况面雨量图获取失败）"))
 
-    # ⑤ 点雨量列表（站点 → 表格）
+    # ⑤ 点雨量排名表（序号|站点|省|市|降水量，前 15 站）
     try:
         stations = _fetch_station_list(begin, end, interval_hours, type_)
     except Exception as exc:
         stations = []
         texts.append(f"点雨量列表获取失败：{_safe_err(exc)}")
-    station_rows = []
+    station_rows: list[list[str]] = []
     try:
-        station_rows = sorted(
-            [
-                [str(s.get("siteName") or s.get("siteCode") or "-"),
-                 str(s.get("areaName") or "-"),
-                 f"{float(s.get('val') or 0):.1f}",
-                 f"{str(s.get('provence') or '')} {str(s.get('cnty') or '')}".strip() or "-"]
-                for s in stations
-                if s.get("val") not in (None, "", "-")
-            ],
-            key=lambda r: float(r[2]), reverse=True,
-        )[:15]
+        valid = [s for s in stations if s.get("val") not in (None, "", "-")]
+        valid.sort(key=lambda s: float(s.get("val") or 0), reverse=True)
+        station_rows = [
+            [str(i),
+             str(s.get("siteName") or s.get("siteCode") or "-"),
+             str(s.get("provence") or "-"),
+             str(s.get("cnty") or "-"),
+             f"{float(s.get('val') or 0):.1f}"]
+            for i, s in enumerate(valid[:15], 1)
+        ]
     except Exception:
         station_rows = []
     if station_rows:
-        sections.append(("⑤ 点雨量列表（前 15 站）", "table", (["站点", "区域", "雨量(mm)", "位置"], station_rows)))
+        real_blocks.append(("caption", "自动站累计降水量排名"))
+        real_blocks.append(("rank", (["序号", "站点", "省", "市", "降水量(毫米)"], station_rows)))
     else:
-        sections.append(("⑤ 点雨量列表", "text", "（暂无点雨量数据）"))
+        real_blocks.append(("text", "（暂无点雨量数据）"))
 
-    # ⑥⑦ 预报板块：起报时次自动回退（14所 某时次数据未就绪时出图接口 500，实测今天08时500/昨天08时200）
+    # ============ 降水预报（⑥面雨量预报图 + ⑦每日河系雨量预报表，公报口径=未来3天）
+    fore_blocks: list[tuple[str, Any]] = []
+
+    # 起报时次自动回退（14所 某时次数据未就绪时出图接口 500，实测今天08时500/昨天08时200）
     used_fore = ""
     fore_img_bytes = None
-    fore_end = ""
     for fc in fore_cycles:
         try:
             fdt = datetime.strptime(fc, "%Y-%m-%d %H:00:00")
-            fe = (fdt + timedelta(hours=interval_hours)).strftime("%Y-%m-%d %H:00:00")
-            img = _fetch_area_rain_fore_img(fc, fc, fe, area_ids, interval_hours)
+            fe = (fdt + timedelta(hours=_FORECAST_HOURS)).strftime("%Y-%m-%d %H:00:00")
+            img = _fetch_area_rain_fore_img(fc, fc, fe, area_ids, _FORECAST_HOURS)
             if img:
-                used_fore, fore_img_bytes, fore_end = fc, img, fe
+                used_fore, fore_img_bytes = fc, img
                 break
         except Exception:
             continue
     if not fore_img_bytes:
         texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
     fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
-    sections.append((f"⑥ 预报面雨量图（起报 {used_fore}）", "image", fore_img) if fore_img else ("⑥ 预报面雨量图", "text", "（预报面雨量图获取失败）"))
+    fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
-    # ⑦ 面雨量预报（与 ⑥ 用同一成功时次，保持两板块同步）
-    forecasts = []
+    # ⑦ 每日河系雨量预报表（与 ⑥ 同一起报时次，按 24h 拆 3 天）
     if used_fore:
-        try:
-            forecasts = _fetch_forecast(used_fore, used_fore, fore_end, area_ids, interval_hours)
-        except Exception as exc:
-            texts.append(f"面雨量预报获取失败：{_safe_err(exc)}")
-    fore_rows = []
-    try:
-        fore_rows = [
-            [str(f.get("areaName") or f.get("areaId") or "-"), f"{float(f.get('sum') or 0):.1f}"]
-            for f in forecasts
-        ]
-    except Exception:
-        fore_rows = []
-    if fore_rows:
-        sections.append(("⑦ 面雨量预报（各分区累计）", "table", (["分区", "预报面雨量(mm)"], fore_rows)))
-    else:
-        sections.append(("⑦ 面雨量预报", "text", "（暂无面雨量预报数据）"))
+        fdt = datetime.strptime(used_fore, "%Y-%m-%d %H:00:00")
+        for day in _RANGE(_FORECAST_DAYS):
+            d0 = fdt + timedelta(hours=24 * day)
+            d1 = d0 + timedelta(hours=24)
+            b, e = d0.strftime("%Y-%m-%d %H:00:00"), d1.strftime("%Y-%m-%d %H:00:00")
+            try:
+                fc_data = _fetch_forecast(used_fore, b, e, area_ids, 24)
+            except Exception as exc:
+                fc_data = []
+                texts.append(f"面雨量预报获取失败：{_safe_err(exc)}")
+            pairs = []
+            try:
+                pairs = [
+                    (str(f.get("areaName") or f.get("areaId") or "-"), f"{float(f.get('sum') or 0):.1f}")
+                    for f in fc_data
+                ]
+            except Exception:
+                pairs = []
+            if not pairs:
+                continue
+            label = f"{d0.month:02d}月{d0.day:02d}日{d0.hour:02d}时 - {d1.month:02d}月{d1.day:02d}日{d1.hour:02d}时，降水量预报表"
+            fore_blocks.append(("caption", label))
+            fore_blocks.append(("fore", (label, [p[0] for p in pairs], [p[1] for p in pairs])))
+    if len(fore_blocks) == 1:  # 只有图、没有任何预报表
+        fore_blocks.append(("text", "（暂无面雨量预报数据）"))
+
+    sections = [
+        {"header": "雷达拼图", "icon": "radar", "blocks": radar_blocks},
+        {"header": "降水实况", "icon": "cloud", "blocks": real_blocks},
+        {"header": "降水预报", "icon": "cloudsun", "blocks": fore_blocks},
+    ]
 
     render_warning = ""
     try:
