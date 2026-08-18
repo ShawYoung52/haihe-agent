@@ -372,3 +372,29 @@ class TestWhiteMapConversion:
         assert found, "绿区上的白字应转成深字（可读）"
         r, g, b = out.getpixel((15, 30))  # 椭圆内、白字外
         assert g > 150 and r < 100, "绿色雨区应保留原色"
+
+    def _white_legend_text_png(self):
+        """白底 + 色标条 + 紧贴色标条的白字刻度：模拟 ④⑥ 图例刻度白字样式。"""
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.rectangle([5, 50, 75, 55], fill=(0, 120, 255))       # 蓝色色标条
+        d.rectangle([10, 44, 30, 49], fill=(255, 255, 255))    # 紧贴色标条上方的白字
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_white_bg_legend_white_text_darkened(self):
+        """④⑥ 图例刻度白字（白底白字）：紧贴色标条的白字转深字，白底与色标条保留。"""
+        img = clt._load_image(self._white_legend_text_png())
+        out = clt._to_white_map(img)
+        assert out.getpixel((2, 2)) == (255, 255, 255), "白底应保留"
+        px = out.load()
+        found = False
+        for x in range(10, 30, 2):
+            for y in range(44, 49):
+                if max(px[x, y]) < 120:
+                    found = True
+        assert found, "图例刻度白字应转成深字"
+        r, g, b = out.getpixel((40, 52))  # 色标条内、白字外
+        assert b > 200 and r < 100, "色标条颜色应保留"
