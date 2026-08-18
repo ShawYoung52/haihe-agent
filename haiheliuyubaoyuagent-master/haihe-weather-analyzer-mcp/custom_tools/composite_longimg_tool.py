@@ -408,6 +408,50 @@ def _load_image(data: bytes) -> Any | None:
         return None
 
 
+def _dark_fraction(img: Any, thresh: int = 90) -> float:
+    """粗略估计图中"近黑像素"占比（缩小采样），用于判断是否黑底图。"""
+    from PIL import Image
+    small = img.convert("RGB").resize((64, 64))
+    px = small.load()
+    n = dark = 0
+    for y in range(64):
+        for x in range(64):
+            r, g, b = px[x, y]
+            n += 1
+            if max(r, g, b) < thresh:
+                dark += 1
+    return dark / n if n else 0.0
+
+
+def _light_theme(img: Any, black: int = 80, white: int = 210, dark: tuple[int, int, int] = (70, 70, 70)) -> Any:
+    """黑底图转浅色主题：近黑→透明（透出白卡），近白文字→深灰保持可读，彩色回波保留。
+
+    用 ImageChops 在 C 层算每像素 max/min(R,G,B)，避免逐像素 Python 循环。
+    """
+    from PIL import Image, ImageChops
+    rgba = img.convert("RGBA")
+    r, g, b, _ = rgba.split()
+    mx = ImageChops.lighter(ImageChops.lighter(r, g), b)  # 每像素 max
+    mn = ImageChops.darker(ImageChops.darker(r, g), b)    # 每像素 min
+    alpha = mx.point(lambda v: 255 if v >= black else 0)  # 近黑→透明
+    wmask = mn.point(lambda v: 255 if v > white else 0)   # 近白文字→深灰蒙版
+    dr, dg, db = dark
+    nr = Image.composite(Image.new("L", r.size, dr), r, wmask)
+    ng = Image.composite(Image.new("L", r.size, dg), g, wmask)
+    nb = Image.composite(Image.new("L", r.size, db), b, wmask)
+    return Image.merge("RGBA", (nr, ng, nb, alpha))
+
+
+def _load_light_theme_image(data: bytes) -> Any | None:
+    """加载图片；仅当它确实是"黑底为主"时才转浅色主题（防误伤白底图），否则原样 RGB。"""
+    img = _load_image(data)
+    if img is None:
+        return None
+    if _dark_fraction(img) < 0.35:
+        return img
+    return _light_theme(img)
+
+
 def _fit_image(img: Any, usable_w: int, fill_width: bool = False) -> Any:
     """等比缩放子图。默认只缩不放大、高度不超过 _IMG_MAX_H。
 
@@ -511,23 +555,30 @@ def _sec_header_h() -> int:
 
 
 def _draw_sec_header(draw, y: int, title: str, font, icon: str = "") -> int:
-    """板块标题：居中蓝色大字 + 左侧小图标 + 两侧装饰线（贴近示范图）。返回结束 y。"""
+    """板块标题：图标+标题作为整体居中，两侧蓝色小粗点+细长装饰线。
+
+    装饰线一律画在"图标+标题"整体之外，避免横穿图标（用户反馈 2026-08-18）。
+    返回结束 y。
+    """
     cx = _BOARD_WIDTH // 2
     cy = y + int(_SEC_SIZE * 0.7)
     tw = draw.textlength(title, font=font)
     line_y = cy + _SEC_SIZE // 2
-    # 图标在标题左侧（图标+标题整体仍近似居中，故把标题略右移）
-    shift = 34 if icon else 0
-    tcx = cx + shift
+    icon_w = 64 if icon else 0          # 图标预留宽
+    gap = 18 if icon else 0             # 图标与标题间距
+    unit_w = icon_w + gap + tw          # 图标+标题整体宽度
+    unit_left = cx - unit_w / 2
     if icon:
-        _draw_sec_icon(draw, tcx - tw / 2 - 48, cy + _SEC_SIZE * 0.28, icon)
-    for sign in (-1, 1):
-        x_near = tcx + sign * (tw / 2 + 40)
-        x_far = cx + sign * (_BOARD_WIDTH / 2 - _CARD_MARGIN - _CARD_PAD)
-        draw.line([x_near, line_y, x_far, line_y], fill=_RULE, width=3)
-        bx = tcx + sign * (tw / 2 + 18)
-        draw.line([bx - 6, line_y, bx + 6, line_y], fill=_SEC_BLUE, width=5)
-    _draw_centered(draw, tcx, cy, title, font, _SEC_BLUE)
+        _draw_sec_icon(draw, unit_left + icon_w / 2, cy + _SEC_SIZE * 0.28, icon)
+    text_cx = unit_left + icon_w + gap + tw / 2
+    far_l = cx - (_BOARD_WIDTH / 2 - _CARD_MARGIN - _CARD_PAD)
+    far_r = cx + (_BOARD_WIDTH / 2 - _CARD_MARGIN - _CARD_PAD)
+    for sign, edge, far in ((-1, unit_left, far_l), (1, unit_left + unit_w, far_r)):
+        # 细长装饰线（整体之外）
+        draw.line([edge + sign * 30, line_y, far, line_y], fill=_RULE, width=3)
+        # 蓝色小粗点（紧贴整体）
+        draw.line([edge + sign * 8, line_y, edge + sign * 20, line_y], fill=_SEC_BLUE, width=5)
+    _draw_centered(draw, text_cx, cy, title, font, _SEC_BLUE)
     return y + _sec_header_h()
 
 
@@ -564,11 +615,14 @@ def _render_image_block(img: Any, draw, x: int, y: int, usable_w: int, sub: Any,
     px = x + (usable_w - sub.size[0]) // 2
     draw.rectangle([px - 8, y + 2, px + sub.size[0] + 8, y + sub.size[1] + 12],
                    fill=(255, 255, 255), outline=_IMG_BORDER, width=2)
-    img.paste(sub, (px, y + 7))
+    if getattr(sub, "mode", "RGB") == "RGBA":  # 浅色主题图（④⑥黑底转透明）用自身 alpha 贴，白底透出
+        img.paste(sub, (px, y + 7), sub)
+    else:
+        img.paste(sub, (px, y + 7))
     return y + sub.size[1] + 20
 
 
-_RANK_COLS = (0.12, 0.28, 0.20, 0.24, 0.16)  # 序号|站点|省|市|降水量
+_RANK_COLS = (0.11, 0.27, 0.19, 0.22, 0.21)  # 序号|站点|省|市|降水量（雨量列加宽，配合缩字号完整显示表头）
 
 
 def _measure_rank(rows: list) -> int:
@@ -584,10 +638,14 @@ def _render_rank(draw, font, x: int, y: int, usable_w: int, headers: list[str], 
 
     def _cell(cx, cw, text, bold=False, fg=_FG):
         t = str(text or "")
-        while t and draw.textlength(t, font=font) > cw - 12:
+        f = font
+        # 先缩字号尽量完整显示（如"降水量(毫米)"），缩到下限仍超宽才截断
+        while t and f.size > 20 and draw.textlength(t, font=f) > cw - 12:
+            f = f.font_variant(size=f.size - 2)
+        while t and draw.textlength(t, font=f) > cw - 12:
             t = t[:-1]
-        tw = draw.textlength(t, font=font)
-        draw.text((cx + (cw - tw) / 2, y + (_TBL_ROW_H - font.size) // 2 - 2), t, font=font, fill=fg)
+        tw = draw.textlength(t, font=f)
+        draw.text((cx + (cw - tw) / 2, y + (_TBL_ROW_H - f.size) // 2 - 2), t, font=f, fill=fg)
 
     # 表头
     draw.rectangle([x, y, x + usable_w, y + _TBL_ROW_H], fill=_TBL_HEAD)
@@ -856,7 +914,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         area_real = None
         texts.append(f"实况面雨量图获取失败：{_safe_err(exc)}")
-    area_real_img = _load_image(area_real) if area_real else None
+    area_real_img = _load_light_theme_image(area_real) if area_real else None
     real_blocks.append(("image", area_real_img) if area_real_img else ("text", "（实况面雨量图获取失败）"))
 
     # ⑤ 点雨量排名表（序号|站点|省|市|降水量，前 15 站）
@@ -903,7 +961,7 @@ def generate_haihe_composite_longimg_core(
             continue
     if not fore_img_bytes:
         texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
-    fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
+    fore_img = _load_light_theme_image(fore_img_bytes) if fore_img_bytes else None
     fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
     # ⑦ 每日河系雨量预报表（独立容错：⑥图失败也要尽量出表）。
