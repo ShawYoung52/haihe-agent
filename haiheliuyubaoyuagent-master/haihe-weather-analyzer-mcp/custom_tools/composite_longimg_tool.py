@@ -83,6 +83,7 @@ _TBL_ROW_H = 58
 _FG = (38, 38, 38)           # 正文深灰
 _IMG_BORDER = (176, 190, 204)  # 地图外框
 _IMG_MAX_H = 980             # 单张地图最大高度
+_IMG_WIDE_MAX_H = 1500       # 宽图（雷达）高度上限：撑满内容宽、允许更高，避免被压窄
 _BOTTOM_PAD = 48             # 底部留白
 _FORECAST_HOURS = 72         # 公报口径：预报覆盖未来 72h（⑥图为 3 天累计）
 _FORECAST_DAYS = 3           # ⑦按 24h 拆成 3 张"河系/雨量"预报表
@@ -284,18 +285,18 @@ def _fetch_swan3(query_time: str) -> bytes | None:
 
 
 def _fetch_station_rain_img(begin: str, end: str, area_ids: list[int], interval: int, range_: str, type_: str) -> bytes | None:
-    """③ 降水实况图。"""
+    """③ 降水实况图（isClimateImg=True 出白底黑字图，图例文字正常）。"""
     return _resolve_image_bytes(_post(f"{BASE}/openapi/meteor_img/stationRainRealImg?forceCreate=1", {
         "areaIds": area_ids, "beginTime": begin, "endTime": end,
-        "interval": interval, "range": range_, "type": type_, "isClimateImg": False,
+        "interval": interval, "range": range_, "type": type_, "isClimateImg": True,
     }))
 
 
 def _fetch_area_rain_real_img(begin: str, end: str, area_ids: list[int], interval: int, range_: str, type_: str) -> bytes | None:
-    """④ 实况面雨量图。"""
+    """④ 实况面雨量图（isClimateImg=True 出白底黑字图，不再是黑底）。"""
     return _resolve_image_bytes(_post(f"{BASE}/openapi/meteor_img/area_rain_real_img?forceCreate=1", {
         "areaIds": area_ids, "beginTime": begin, "endTime": end,
-        "interval": interval, "range": range_, "type": type_, "isClimateImg": False,
+        "interval": interval, "range": range_, "type": type_, "isClimateImg": True,
     }))
 
 
@@ -309,12 +310,36 @@ def _fetch_station_list(begin: str, end: str, interval: int, type_: str) -> list
     return [d for d in (data or []) if isinstance(d, dict)]
 
 
+# ⑥ 预报面雨量图接口路径：14所 文档给了两个（带 /openapi 与不带），逐个尝试取第一个能出图的。
+_FORE_IMG_PATHS = (
+    "/openapi/meteor_img/area_rain_fore_img?forceCreate=1",
+    "/meteor_img/area_rain_fore_img?forceCreate=1",
+)
+
+
 def _fetch_area_rain_fore_img(fore_time: str, begin: str, end: str, area_ids: list[int], interval: int) -> bytes | None:
-    """⑥ 预报面雨量图。"""
-    return _resolve_image_bytes(_post(f"{BASE}/openapi/meteor_img/area_rain_fore_img?forceCreate=1", {
+    """⑥ 预报面雨量图（isClimateImg=True 出白底黑字图；两个候选路径逐个尝试）。
+
+    14所 文档中本接口同时存在 /openapi/meteor_img/... 与 /meteor_img/... 两种路径，
+    不确定部署的是哪一个，故按序尝试：路径不存在/该时次未就绪就换下一个，都失败则
+    抛出最后一个异常（交由上层起报时次回退处理）。
+    """
+    body = {
         "areaIds": area_ids, "foreTime": fore_time, "beginTime": begin, "endTime": end,
-        "intval": interval, "modelTypes": ["ECMF"], "range": "9",
-    }))
+        "intval": interval, "modelTypes": ["ECMF"], "range": "9", "isClimateImg": True,
+    }
+    last_exc: Exception | None = None
+    for path in _FORE_IMG_PATHS:
+        try:
+            img = _resolve_image_bytes(_post(f"{BASE}{path}", body))
+        except Exception as exc:
+            last_exc = exc
+            continue
+        if img:
+            return img
+    if last_exc is not None:
+        raise last_exc
+    return None
 
 
 def _fetch_forecast(fore_time: str, begin: str, end: str, area_ids: list[int], interval: int) -> list[dict]:
@@ -383,12 +408,23 @@ def _load_image(data: bytes) -> Any | None:
         return None
 
 
-def _fit_image(img: Any, usable_w: int) -> Any:
-    """等比缩放子图到内容宽度（最大高度 _IMG_MAX_H）。"""
+def _fit_image(img: Any, usable_w: int, fill_width: bool = False) -> Any:
+    """等比缩放子图。默认只缩不放大、高度不超过 _IMG_MAX_H。
+
+    fill_width=True（雷达等宽图）：等比撑满内容宽（允许放大），仅受更高的
+    _IMG_WIDE_MAX_H 约束，避免 tall 图被高度上限压成窄条。
+    """
     w, h = img.size
-    scale = min(1.0, usable_w / w if w else 1.0, _IMG_MAX_H / h if h else 1.0)
-    if scale < 1.0:
-        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+    if not w or not h:
+        return img
+    if fill_width:
+        scale = usable_w / w
+        if h * scale > _IMG_WIDE_MAX_H:
+            scale = _IMG_WIDE_MAX_H / h
+    else:
+        scale = min(1.0, usable_w / w, _IMG_MAX_H / h)
+    if abs(scale - 1.0) > 1e-3:
+        img = img.resize((max(1, int(round(w * scale))), max(1, int(round(h * scale)))))
     return img
 
 
@@ -518,13 +554,13 @@ def _render_caption(draw, font, y: int, text: str) -> int:
     return y + _measure_caption(font)
 
 
-def _measure_image(img: Any, usable_w: int) -> int:
-    return _fit_image(img, usable_w).size[1] + 20
+def _measure_image(img: Any, usable_w: int, fill_width: bool = False) -> int:
+    return _fit_image(img, usable_w, fill_width).size[1] + 20
 
 
-def _render_image_block(img: Any, draw, x: int, y: int, usable_w: int, sub: Any) -> int:
-    """地图：白底 + 细框 + 居中（14所 图自带红色小标题）。"""
-    sub = _fit_image(sub, usable_w)
+def _render_image_block(img: Any, draw, x: int, y: int, usable_w: int, sub: Any, fill_width: bool = False) -> int:
+    """地图：白底 + 细框 + 居中（14所 图自带红色小标题）。fill_width=True 撑满内容宽。"""
+    sub = _fit_image(sub, usable_w, fill_width)
     px = x + (usable_w - sub.size[0]) // 2
     draw.rectangle([px - 8, y + 2, px + sub.size[0] + 8, y + sub.size[1] + 12],
                    fill=(255, 255, 255), outline=_IMG_BORDER, width=2)
@@ -621,6 +657,8 @@ def _measure_block(draw, fonts, usable_w: int, kind: str, payload: Any) -> int:
         return _measure_caption(fonts["caption"])
     if kind == "image":
         return _measure_image(payload, usable_w)
+    if kind == "image_wide":
+        return _measure_image(payload, usable_w, fill_width=True)
     if kind == "rank":
         return _measure_rank(payload[1])
     if kind == "fore":
@@ -635,6 +673,8 @@ def _render_block(img, draw, fonts, x: int, y: int, usable_w: int, kind: str, pa
         return _render_caption(draw, fonts["caption"], y, payload)
     if kind == "image":
         return _render_image_block(img, draw, x, y, usable_w, payload)
+    if kind == "image_wide":
+        return _render_image_block(img, draw, x, y, usable_w, payload, fill_width=True)
     if kind == "rank":
         return _render_rank(draw, fonts["tbl"], x, y, usable_w, payload[0], payload[1])
     if kind == "fore":
@@ -786,7 +826,7 @@ def generate_haihe_composite_longimg_core(
         swan = None
         texts.append(f"雷达图获取失败：{_safe_err(exc)}")
     swan_img = _load_image(swan) if swan else None
-    radar_blocks = [("image", swan_img)] if swan_img else [("text", "（雷达图获取失败）")]
+    radar_blocks = [("image_wide", swan_img)] if swan_img else [("text", "（雷达图获取失败）")]
 
     # ==================== 降水实况（①文字 + ③实况图 + ④面雨量实况图 + ⑤点雨量排名）
     real_blocks: list[tuple[str, Any]] = []
@@ -866,15 +906,27 @@ def generate_haihe_composite_longimg_core(
     fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
     fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
-    # ⑦ 每日河系雨量预报表（与 ⑥ 同一起报时次，按 24h 拆 3 天）
-    if used_fore:
-        fdt = datetime.strptime(used_fore, "%Y-%m-%d %H:00:00")
+    # ⑦ 每日河系雨量预报表（独立容错：⑥图失败也要尽量出表）。
+    # ⑥成功则沿用其起报时次；⑥失败则自行探测一个有预报数据的起报时次，互不拖累。
+    data_fore = used_fore
+    if not data_fore:
+        for fc in fore_cycles:
+            try:
+                fdt = datetime.strptime(fc, "%Y-%m-%d %H:00:00")
+                d1 = (fdt + timedelta(hours=24)).strftime("%Y-%m-%d %H:00:00")
+                if _fetch_forecast(fc, fc, d1, area_ids, 24):
+                    data_fore = fc
+                    break
+            except Exception:
+                continue
+    if data_fore:
+        fdt = datetime.strptime(data_fore, "%Y-%m-%d %H:00:00")
         for day in _RANGE(_FORECAST_DAYS):
             d0 = fdt + timedelta(hours=24 * day)
             d1 = d0 + timedelta(hours=24)
             b, e = d0.strftime("%Y-%m-%d %H:00:00"), d1.strftime("%Y-%m-%d %H:00:00")
             try:
-                fc_data = _fetch_forecast(used_fore, b, e, area_ids, 24)
+                fc_data = _fetch_forecast(data_fore, b, e, area_ids, 24)
             except Exception as exc:
                 fc_data = []
                 texts.append(f"面雨量预报获取失败：{_safe_err(exc)}")
