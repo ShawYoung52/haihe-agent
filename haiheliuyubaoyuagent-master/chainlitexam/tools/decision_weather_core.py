@@ -1160,12 +1160,15 @@ def _build_poi_reminder_section(facts: dict) -> str:
                     f"{day_label}累计降雨约 {float(facts['total_rain_mm']):.0f} 毫米，请注意防范。" if is_historical
                     else f"未来累计降雨可达约 {float(facts['total_rain_mm']):.0f} 毫米，请注意防范。"
                 )
-            max_wind = _decision_max_wind_level(periods)
-            if not clauses and max_wind is not None and max_wind >= 6:
-                clauses.append("风力较大，请注意大风防范。")
-            min_vis = _decision_min_visibility_km(periods)
-            if not clauses and min_vis is not None and min_vis < 1.0:
-                clauses.append("能见度较低，出行请注意交通安全。")
+            # 外埠点位只回降水格点，风况/能见度是占位值（EDA="" / VISMIN=0.0）、不可靠——
+            # 此类点位不由其推导风/能见度提醒，防"能见度较低"这类假阳性（密云水库实测踩坑）。
+            if not _decision_periods_rain_only(periods):
+                max_wind = _decision_max_wind_level(periods)
+                if not clauses and max_wind is not None and max_wind >= 6:
+                    clauses.append("风力较大，请注意大风防范。")
+                min_vis = _decision_min_visibility_km(periods)
+                if not clauses and min_vis is not None and min_vis < 1.0:
+                    clauses.append("能见度较低，出行请注意交通安全。")
             lines.append(template + (clauses[0] if clauses else ""))
 
         # 水库：追加 14所 接口实际水位（数值来自 facts.water_level_info，不编造）

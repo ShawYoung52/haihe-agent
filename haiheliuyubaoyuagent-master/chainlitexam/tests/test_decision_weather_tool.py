@@ -126,6 +126,36 @@ def test_point_display_name_prefers_keyword_for_fuzzy_prefix_match():
     assert dw_core._decision_point_display_name("", "密云水库", "fuzzy") == "密云水库"
 
 
+def test_rain_only_point_suppresses_visibility_placeholder_reminder():
+    # 外埠点位 VISMIN=0.0 是占位值（非真 0 能见度）→ 不应误报"能见度较低"（生产踩坑）
+    rain_only_periods = [
+        {"period_label": "08月20日-08月21日", "weather": None, "tmax": None, "tmin": None,
+         "EDA": "", "rain_1h": 0.0, "visibility_min_km": 0.0},
+        {"period_label": "08月21日-08月22日", "weather": None, "tmax": None, "tmin": None,
+         "EDA": "", "rain_1h": 0.0, "visibility_min_km": 0.0},
+    ]
+    facts = {
+        "poi": {"name": "密云水库"}, "poi_category": "reservoir",
+        "has_rain_signal": False, "total_rain_mm": 0.0, "periods": rain_only_periods,
+    }
+    reminder = dw_core._build_poi_reminder_section(facts)
+    assert "能见度较低" not in reminder
+
+
+def test_full_text_point_keeps_low_visibility_reminder():
+    # 全要素点位真实低能见度（0.5km）→ 保留"能见度较低"提醒
+    periods = [
+        {"period_label": "08月20日-08月21日", "weather": "雾", "tmax": "28", "tmin": "21",
+         "EDA": "东南风2级", "rain_1h": 0.0, "visibility_min_km": 0.5},
+    ]
+    facts = {
+        "poi": {"name": "天津市区"}, "poi_category": "school",
+        "has_rain_signal": False, "total_rain_mm": 0.0, "periods": periods,
+    }
+    reminder = dw_core._build_poi_reminder_section(facts)
+    assert "能见度较低" in reminder
+
+
 @pytest.mark.asyncio
 async def test_query_decision_weather_for_poi_rejects_non_poi_question():
     answer_chain = None
