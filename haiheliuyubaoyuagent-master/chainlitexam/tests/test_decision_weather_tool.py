@@ -482,8 +482,9 @@ def test_build_poi_reminder_section_hazard_points():
     assert "**地质灾害" not in text
     assert "滑坡隐患点A" not in text
     assert "山洪危险区B" not in text
-    # 天气条件从句来自实际 facts 数值
-    assert "当前预报时段内有降雨信号" in text
+    # 天气条件从句来自实际 facts 数值（“有降雨”不带“信号”二字）
+    assert "当前预报时段内有降雨，请携带雨具" in text
+    assert "降雨信号" not in text
 
 
 def test_build_poi_reminder_section_empty():
@@ -1221,8 +1222,9 @@ class TestPoiReminderExtended:
     def test_port_reminder(self):
         facts = {"poi_category": "port", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
         out = dw_core._build_poi_reminder_section(facts)
-        assert "港口区域请注意大风" in out
-        assert "船舶作业和航行安全" in out
+        # 港口注意事项为确定性多句：风力系泊 + 跟踪预警（无雾/雷阵雨天数时分现象句省略）
+        assert "关注风力变化，适时调整缆绳，做好系泊加固" in out
+        assert "保障港口生产航行安全" in out
 
     def test_reservoir_without_water_info_no_crash(self):
         facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
@@ -1319,3 +1321,102 @@ class TestEcRainFallbackAnswer:
         p = dict(self.EC_PAYLOAD, target_date="not-a-date")
         text = dw_core._build_ec_rain_answer_text(p, "密云水库")
         assert "not-a-date" in text
+
+
+class TestDecisionAnswerQualityBatch:
+    """2026-08-19 问答质量批：日期当天/逐日结论/无明显降雨/剔能见度·降水量/山地·港口注意事项/POI 类别不符显示名。"""
+
+    # #2 表格日期只显示当天
+    def test_period_label_daily_shows_single_day(self):
+        assert dw_core._decision_period_label({"period_label": "08月22日-08月23日"}) == "08月22日"
+
+    def test_period_label_hourly_keeps_time_range(self):
+        label = dw_core._decision_period_label({"period_label": "08月22日14时-08月22日15时"})
+        assert "时" in label and "-" in label
+
+    def test_period_label_daily_from_start_end(self):
+        period = {"start_time": "2026-08-22 08:00", "end_time": "2026-08-23 08:00"}
+        assert dw_core._decision_period_label(period) == "8月22日"
+
+    # #5 无明显降雨
+    def test_polish_core_replaces_no_rain_phrasing(self):
+        assert dw_core._polish_decision_core("预计未来三天不会下雨。") == "预计未来三天无明显降雨。"
+        assert "无明显降雨" in dw_core._polish_decision_core("明天无降雨。")
+
+    # #8 剔除能见度/累计降水量具体数值
+    def test_polish_core_strips_visibility_and_precip(self):
+        core = dw_core._polish_decision_core(
+            "气温在24~31°C之间，能见度最低降至2.6千米。"
+        )
+        assert "能见度" not in core
+        core2 = dw_core._polish_decision_core(
+            "未来三天多雷阵雨，累计降水量约2.6毫米。"
+        )
+        assert "累计降水量" not in core2
+        assert "2.6" not in core2
+
+    # #3 逐日结论保留多句
+    def test_core_only_keeps_multi_sentence_when_multiday(self):
+        answer = "【核心结论】20日多云转阴。21日雷阵雨。22日雷阵雨转阴。气温24~31°C。"
+        core = dw_core._decision_core_only(answer, "未来三天天气", max_sentences=4)
+        assert "20日多云转阴" in core and "22日雷阵雨转阴" in core
+
+    def test_core_only_single_day_truncates_to_first(self):
+        answer = "【核心结论】明天阴转小雨。户外适宜性一般。"
+        core = dw_core._decision_core_only(answer, "明天天气", max_sentences=1)
+        assert core == "明天阴转小雨。"
+
+    # #1 POI 类别不符的模糊命中 → 显示用户所问名
+    def test_display_name_category_mismatch_uses_location(self):
+        out = dw_core._decision_point_display_name(
+            "泰达控股天津泰达电力公司", "天津泰达实验学校", "fuzzy"
+        )
+        assert out == "天津泰达实验学校"
+
+    def test_display_name_same_category_keeps_poi(self):
+        # 同类别（学校）模糊命中仍用官方 POI 名
+        out = dw_core._decision_point_display_name(
+            "天津泰达实验学校（东校区）", "天津泰达实验学校", "fuzzy"
+        )
+        assert out == "天津泰达实验学校"  # 前缀命中，展示所问基名
+
+    def test_display_name_abbreviation_not_regressed(self):
+        # “天大”无类别词 → 不触发类别改写，保留官方名“天津大学”
+        out = dw_core._decision_point_display_name("天津大学", "天大", "fuzzy")
+        assert out == "天津大学"
+
+    # #6 山区注意事项
+    def test_mountain_reminder_rain(self):
+        facts = {"poi_category": "mountain", "has_rain_signal": True,
+                 "periods": [{"weather": "阴转小雨", "rain_1h": 2.0}], "total_rain_mm": 2.0}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "不建议登山、溯溪、野外徒步" in out
+        assert "山洪、落石隐患" in out
+        assert "防滑鞋" in out
+
+    def test_mountain_reminder_no_rain(self):
+        facts = {"poi_category": "mountain", "has_rain_signal": False,
+                 "periods": [{"weather": "晴", "rain_1h": 0.0}], "total_rain_mm": None}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "量力而行" in out
+        assert "山洪" not in out
+
+    # #7 港口注意事项（分现象分天）
+    def test_port_reminder_per_phenomenon(self):
+        periods = [
+            {"weather": "多云转阴有轻雾", "rain_1h": 0.0, "start_time": "2026-08-20 08:00", "end_time": "2026-08-21 08:00"},
+            {"weather": "阴有轻雾", "rain_1h": 0.0, "start_time": "2026-08-21 08:00", "end_time": "2026-08-22 08:00"},
+            {"weather": "雷阵雨", "rain_1h": 2.6, "start_time": "2026-08-22 08:00", "end_time": "2026-08-23 08:00"},
+        ]
+        facts = {"poi_category": "port", "has_rain_signal": True, "periods": periods, "total_rain_mm": 2.6}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "20–21日" in out and "轻雾" in out and "加强瞭望" in out
+        assert "22日" in out and "雷阵雨" in out and "防雨防雷" in out
+        assert "适时调整缆绳" in out
+        assert "码头路面湿滑" in out
+        assert "保障港口生产航行安全" in out
+
+    def test_day_ranges_grouping(self):
+        assert dw_core._decision_day_ranges([20, 21, 23]) == "20–21日、23日"
+        assert dw_core._decision_day_ranges([22]) == "22日"
+        assert dw_core._decision_day_ranges([]) == ""
