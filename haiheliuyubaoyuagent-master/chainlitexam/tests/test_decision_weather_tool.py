@@ -1420,3 +1420,55 @@ class TestDecisionAnswerQualityBatch:
         assert dw_core._decision_day_ranges([20, 21, 23]) == "20–21日、23日"
         assert dw_core._decision_day_ranges([22]) == "22日"
         assert dw_core._decision_day_ranges([]) == ""
+
+
+class TestDecisionTargetDayScoping:
+    """单日问法（下周一/明天/具体日期）把结论/表格/注意事项聚焦到所问那天。"""
+
+    NOW = dw_core.datetime(2026, 8, 19)  # 周三
+
+    def test_target_dates_next_monday(self):
+        out = dw_core._decision_target_dates("下周一天津泰达实验学校附近天气怎么样？", self.NOW)
+        assert out == {dw_core.date(2026, 8, 24)}
+
+    def test_target_dates_tomorrow(self):
+        assert dw_core._decision_target_dates("明天XX学校天气", self.NOW) == {dw_core.date(2026, 8, 20)}
+
+    def test_target_dates_multi_day_returns_none(self):
+        assert dw_core._decision_target_dates("未来三天XX学校天气", self.NOW) is None
+        assert dw_core._decision_target_dates("本周末XX公园适合玩吗", self.NOW) is None
+
+    def test_target_dates_explicit_date(self):
+        assert dw_core._decision_target_dates("8月22日XX学校天气", self.NOW) == {dw_core.date(2026, 8, 22)}
+
+    def _period(self, day, hour_start, hour_end, weather, rain):
+        return {
+            "start_time": f"2026-08-{day:02d} {hour_start:02d}:00",
+            "end_time": f"2026-08-{day if hour_end>hour_start else day+1:02d} {hour_end:02d}:00",
+            "weather": weather, "rain_1h": rain, "tmax": 30, "tmin": 24, "EDA": "南风1-2级",
+        }
+
+    def test_scope_filters_to_monday_and_recomputes_rain(self):
+        periods = [
+            self._period(21, 8, 20, "雷阵雨", 5.0),   # 周五有雨
+            self._period(24, 8, 20, "晴间多云", 0.0),  # 周一白天 晴
+            self._period(24, 20, 8, "晴间多云", 0.0),  # 周一夜间 晴
+        ]
+        facts = {"periods": periods, "has_rain_signal": True, "total_rain_mm": 5.0}
+        scoped = dw_core._decision_scope_facts_to_target_dates(facts, "下周一天气怎么样")
+        assert len(scoped["periods"]) == 2
+        # 周一无雨 → 降雨信号重算为 False、不再误报"有降雨"
+        assert scoped["has_rain_signal"] is False
+        assert scoped["total_rain_mm"] == 0.0  # 与 _compact_decision_forecast_facts 全 0 口径一致
+
+    def test_scope_no_match_keeps_all(self):
+        periods = [self._period(19, 8, 20, "晴", 0.0)]
+        facts = {"periods": periods, "has_rain_signal": False, "total_rain_mm": None}
+        scoped = dw_core._decision_scope_facts_to_target_dates(facts, "下周一天气")
+        assert len(scoped["periods"]) == 1  # 周一不在窗口 → 不过滤
+
+    def test_period_label_day_night(self):
+        day = {"start_time": "2026-08-24 08:00", "end_time": "2026-08-24 20:00"}
+        night = {"start_time": "2026-08-24 20:00", "end_time": "2026-08-25 08:00"}
+        assert dw_core._decision_period_label(day) == "8月24日白天"
+        assert dw_core._decision_period_label(night) == "8月24日夜间"

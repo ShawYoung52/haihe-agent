@@ -530,6 +530,42 @@ def _activity_table(daily: list[dict], user_text: str) -> str:
     return f"{title}\n{_markdown_table(['日期/时段', '天气', '气温(℃)', '风力风向', '活动建议'], rows)}"
 
 
+# 山区活动查询关键词（区域级，非 POI）：蓟州/蓟县/盘山/黄崖关等山地。
+_MOUNTAIN_ACTIVITY_WORDS = ("蓟州", "蓟县", "盘山", "黄崖关", "山区", "山野")
+
+
+def _is_mountain_activity_query(user_text: str) -> bool:
+    return any(word in str(user_text or "") for word in _MOUNTAIN_ACTIVITY_WORDS)
+
+
+def _activity_mountain_reminder(daily: list[dict]) -> str:
+    """区域活动预报的山区注意事项（文案与 decision_weather_core._decision_mountain_reminder_lines
+    保持一致，改动需同步；本模块不能 import decision_weather_core——它会反向 import 本模块）。"""
+    if not daily:
+        return ""
+    has_rain = any(
+        float(item.get("rainfall_max_24h_mm") or 0) > 0.1
+        or "雨" in str(item.get("weather") or "")
+        for item in daily
+    )
+    lines = ["⚠ 注意事项"]
+    if has_rain:
+        lines.append(
+            "受降雨影响，户外游玩适宜性一般，适宜短途室内休闲、农家院休整；"
+            "不建议登山、溯溪、野外徒步等山野户外活动。"
+        )
+        lines.append(
+            "山区降雨易造成步道湿滑，沟谷存在山洪、落石隐患，请勿前往未开发野景点、河道低洼处；"
+            "备好雨衣、防滑鞋，自驾山区路段减速慢行，及时关注短时气象预警，遇强降雨尽快到安全区域避险。"
+        )
+    else:
+        lines.append(
+            "山区地形复杂、昼夜温差较大，登山徒步请量力而行、备好饮水与防晒，"
+            "勿前往未开发野景点与沟谷河道，及时关注短时气象预警。"
+        )
+    return "\n".join(lines)
+
+
 def _rainstorm_sections(analysis: dict) -> str:
     if not isinstance(analysis, dict):
         return ""
@@ -577,6 +613,11 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         code_section = _activity_table(daily, user_text) if daily else ""
     else:
         code_section = _weather_table(daily, user_text) if daily else ""
+    # 山区查询（蓟州/盘山等，活动或一般天气类）：附山地注意事项（活动建议 + 山洪/落石风险提示）。
+    if category in ("activity", "weather") and _is_mountain_activity_query(user_text):
+        reminder = _activity_mountain_reminder(daily)
+        if reminder:
+            code_section = f"{code_section}\n\n{reminder}" if code_section else reminder
     return {
         "category": category,
         "code_section": code_section,

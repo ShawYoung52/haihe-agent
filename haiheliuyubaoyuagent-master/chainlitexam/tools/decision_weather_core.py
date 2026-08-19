@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Awaitable, Callable
 
@@ -802,6 +802,21 @@ def _decision_table_cell(value: Any, default: str = "—") -> str:
 
 
 def _decision_period_label(period: dict) -> str:
+    # 优先用干净的 start/end 时间：日级（≥20h）只显示当天；半天时段给"白天/夜间"，
+    # 比"08月24日08时-08月24日20时"更清爽；其余逐小时时段保留时间范围。
+    start = _parse_decision_dt(period.get("start_time"))
+    end = _parse_decision_dt(period.get("end_time"))
+    if start and end:
+        if (end - start) >= timedelta(hours=20):
+            return f"{start.month}月{start.day}日"
+        if start.hour == 8 and end.hour == 20:
+            return f"{start.month}月{start.day}日白天"
+        if start.hour == 20 and end.hour == 8:
+            return f"{start.month}月{start.day}日夜间"
+        return (
+            f"{start.month}月{start.day}日{start.hour}时"
+            f"-{end.month}月{end.day}日{end.hour}时"
+        )
     label = str(period.get("period_label") or "").strip()
     if label:
         # 逐日表日期只显示当天（"08月22日-08月23日"→"08月22日"），不显示"某某号到某某号"；
@@ -809,16 +824,6 @@ def _decision_period_label(period: dict) -> str:
         if "时" not in label and "-" in label:
             return label.split("-", 1)[0].strip()
         return label
-    start = _parse_decision_dt(period.get("start_time"))
-    end = _parse_decision_dt(period.get("end_time"))
-    if start and end:
-        # 日级时段（≥20h）只显示起始当天；逐小时时段保留时间范围。
-        if (end - start) >= timedelta(hours=20):
-            return f"{start.month}月{start.day}日"
-        return (
-            f"{start.month}月{start.day}日{start.hour}时"
-            f"-{end.month}月{end.day}日{end.hour}时"
-        )
     return (
         f"{_decision_table_cell(period.get('start_time'))}"
         f"-{_decision_table_cell(period.get('end_time'))}"
@@ -861,6 +866,91 @@ def _decision_rain_cell(value: Any) -> str:
         return f"{float(value):.1f}"
     except (TypeError, ValueError):
         return _decision_table_cell(value)
+
+
+_DECISION_CN_WEEKDAY = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+
+
+def _decision_now_bjt() -> datetime:
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
+def _decision_target_dates(user_text: str, now: datetime) -> set | None:
+    """解析用户所问的"具体某（几）日"，供把答案聚焦到该日（明天/下周一/8月22日等）。
+
+    返回 date 集合；非"特定日"问法（未来三天/本周末/天气怎么样等）返回 None，表示
+    不过滤、展示全部时段。只认带"月"的明确日期，不解析裸"N号"（防"3号教学楼"误判）。
+    """
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    if not text:
+        return None
+    today = now.date()
+    monday = today - timedelta(days=today.weekday())
+    # 相对日
+    if "大后天" in text:
+        return {today + timedelta(days=3)}
+    if "后天" in text:
+        return {today + timedelta(days=2)}
+    if "明天" in text or "明日" in text:
+        return {today + timedelta(days=1)}
+    if any(w in text for w in ("今天", "今日", "今晚", "现在")):
+        return {today}
+    # 下周X / 下星期X → 下一自然周的星期X
+    match = re.search(r"下(?:周|星期)([一二三四五六日天])", text)
+    if match:
+        return {monday + timedelta(days=7 + _DECISION_CN_WEEKDAY[match.group(1)])}
+    # 周X/星期X/本周X/这周X（无"下"）→ 最近的一个星期X（已过取下周）
+    match = re.search(r"(?:本周|这周|周|星期)([一二三四五六日天])", text)
+    if match:
+        candidate = monday + timedelta(days=_DECISION_CN_WEEKDAY[match.group(1)])
+        if candidate < today:
+            candidate += timedelta(days=7)
+        return {candidate}
+    # 明确日期 M月D日/号（写全年份严格按该年，无年份按当前日历）
+    match = re.search(r"(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)", text)
+    if match:
+        year = int(match.group(1)) if match.group(1) else today.year
+        try:
+            return {date(year, int(match.group(2)), int(match.group(3)))}
+        except ValueError:
+            return None
+    return None
+
+
+def _decision_scope_facts_to_target_dates(facts: dict, user_text: str) -> dict:
+    """把预报 facts 聚焦到用户所问的具体日：过滤 periods 并重算降雨信号/累计雨量。
+
+    单日问法（下周一/明天/8月22日）只展示该日时段，且降雨信号/注意事项按该日判定——
+    避免"下周一晴间多云"却因整周有雷阵雨而误报"有降雨/弹隐患表"。非单日问法或过滤后
+    无匹配时段时返回原 facts。
+    """
+    periods = [p for p in (facts.get("periods") or []) if isinstance(p, dict)]
+    if not periods:
+        return facts
+    target = _decision_target_dates(user_text, _decision_now_bjt())
+    if not target:
+        return facts
+    kept = [
+        p for p in periods
+        if (_parse_decision_dt(p.get("start_time")) is not None
+            and _parse_decision_dt(p.get("start_time")).date() in target)
+    ]
+    if not kept:
+        return facts
+    rain_values: list[float] = []
+    for period in kept:
+        value = period.get("rain_1h")
+        try:
+            value = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            value = None
+        if value is not None:
+            rain_values.append(value)
+    scoped = dict(facts)
+    scoped["periods"] = kept
+    scoped["has_rain_signal"] = any(value > 0.1 for value in rain_values)
+    scoped["total_rain_mm"] = round(sum(rain_values), 2) if rain_values else None
+    return scoped
 
 
 def _build_decision_weather_table(user_text: str, facts: dict) -> str:
@@ -1373,6 +1463,9 @@ def _build_poi_reminder_section(facts: dict) -> str:
 
 async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_chain: Any, callbacks: dict) -> str:
     """由模型生成一句结论，再由代码生成点位天气表、注意事项和数据来源。"""
+    # 单日问法（下周一/明天/8月22日）：把结论、表格、注意事项都聚焦到所问的那一天。
+    if not _decision_is_historical_facts(facts):
+        facts = _decision_scope_facts_to_target_dates(facts, user_text)
     is_historical = _decision_is_historical_facts(facts)
     historical_note = ""
     if is_historical:
