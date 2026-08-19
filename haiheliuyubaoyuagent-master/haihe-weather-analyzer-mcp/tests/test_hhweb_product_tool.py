@@ -80,6 +80,57 @@ class TestCore:
         assert r["radarTime"] == "2025-07-27 15:30:00"
 
 
+class _FakeLocator:
+    def __init__(self, page):
+        self._page = page
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, timeout=None):
+        self._page._sink["clicked"] = True
+
+
+class _FakeDownload:
+    def __init__(self, data):
+        self._data = data
+
+    def path(self):
+        import os
+        import tempfile
+        fd, p = tempfile.mkstemp(suffix=".png")
+        with os.fdopen(fd, "wb") as f:
+            f.write(self._data)
+        return p
+
+
+class _FakeDownloadCM:
+    def __init__(self, page):
+        self._page = page
+
+    def __enter__(self):
+        if self._page._sink.get("download_fails"):
+            raise RuntimeError("download timeout")
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    @property
+    def value(self):
+        return _FakeDownload(self._page._sink["download_bytes"])
+
+
+class _FakeElement:
+    def __init__(self, sink):
+        self._sink = sink
+
+    def screenshot(self, type=None):
+        self._sink["element_shot"] = True
+        return b"\x89PNG\r\n\x1a\nELEM"
+
+
 class _FakePage:
     def __init__(self, sink):
         self._sink = sink
@@ -87,8 +138,21 @@ class _FakePage:
     def goto(self, url, wait_until=None, timeout=None):
         self._sink["goto"] = {"url": url, "wait_until": wait_until, "timeout": timeout}
 
+    def wait_for_selector(self, sel, timeout=None):
+        self._sink["waited_selector"] = sel
+
     def wait_for_timeout(self, ms):
         self._sink["wait_ms"] = ms
+
+    def locator(self, sel):
+        return _FakeLocator(self)
+
+    def expect_download(self, timeout=None):
+        return _FakeDownloadCM(self)
+
+    def query_selector(self, sel):
+        self._sink["qs"] = sel
+        return _FakeElement(self._sink) if self._sink.get("has_target") else None
 
     def screenshot(self, full_page=False, type=None):
         self._sink["screenshot"] = {"full_page": full_page, "type": type}
@@ -99,8 +163,9 @@ class _FakeBrowser:
     def __init__(self, sink):
         self._sink = sink
 
-    def new_page(self, viewport=None):
+    def new_page(self, viewport=None, device_scale_factor=1):
         self._sink["viewport"] = viewport
+        self._sink["dsf"] = device_scale_factor
         return _FakePage(self._sink)
 
     def close(self):
@@ -159,13 +224,32 @@ class TestScreenshotDiagnostics:
 
     def test_uses_load_not_networkidle_and_full_page(self, monkeypatch):
         """hhweb 是带轮询的 Vue 页，networkidle 可能永不触发（每次白等 60s 超时）。"""
-        sink = {}
+        sink = {"download_fails": True}   # 下载按钮不可用 → 元素兜底也无 → 整页
         _install_fake_playwright(monkeypatch, sink)
         out = hpt._try_screenshot("http://x/")
         assert out and out[:8] == b"\x89PNG\r\n\x1a\n"
         assert sink["goto"]["wait_until"] == "load", "应用 load 而非 networkidle"
         assert sink["screenshot"]["full_page"] is True
         assert sink["closed"] is True, "浏览器应被关闭"
+
+    def test_download_button_preferred(self, monkeypatch):
+        """页面「下载」按钮可用时优先拿官方导出图，不走截图。"""
+        sink = {"download_bytes": b"\x89PNG\r\n\x1a\nDOWNLOAD"}
+        _install_fake_playwright(monkeypatch, sink)
+        out = hpt._try_screenshot("http://x/")
+        assert out == b"\x89PNG\r\n\x1a\nDOWNLOAD", "应返回下载按钮导出的图"
+        assert sink["clicked"] is True, "应点击「下载」按钮"
+        assert "screenshot" not in sink and "element_shot" not in sink, "不应再截图"
+        assert sink["closed"] is True
+
+    def test_element_fallback_when_download_fails(self, monkeypatch):
+        """下载失败但产品容器在 → 截 #image-download-target 元素。"""
+        sink = {"download_fails": True, "has_target": True}
+        _install_fake_playwright(monkeypatch, sink)
+        out = hpt._try_screenshot("http://x/")
+        assert out == b"\x89PNG\r\n\x1a\nELEM", "应返回元素截图"
+        assert sink["qs"] == "#image-download-target"
+        assert "screenshot" not in sink, "元素兜底成功不应再整页截图"
 
     def test_core_exposes_screenshot_error(self, monkeypatch):
         def fake_shot(url):

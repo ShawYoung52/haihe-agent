@@ -55,11 +55,18 @@ def build_product_url(time_str: str, radar_time: str = "", types: str = DEFAULT_
 
 
 def _try_screenshot(url: str) -> bytes | None:
-    """用 Playwright + Chromium 全页截图出长图；缺浏览器/失败返回 None（不报错）。
+    """从 hhweb product-image 页拿长图 PNG；缺浏览器/失败返回 None（不报错）。
 
-    失败时把**脱敏**原因写入模块级 `_LAST_SCREENSHOT_REASON`（不含 URL/内网 IP），
-    供上层降级文案告诉用户到底缺什么。注意用 wait_until="load" 而非 networkidle：
-    hhweb 是带轮询的 Vue 页，networkidle 可能永不触发而每次白等 60s 超时。
+    取图优先级（2026-08-19 按真实页面 DOM 诊断结果定）：
+      1. 点页面自带的「下载」按钮拿官方导出文件（全分辨率、无页面杂边——页面预览
+         是 CSS 缩小的，整页截图分辨率低且带侧栏，下载按钮才是页面设计的产品出口）；
+      2. 兜底截产品容器 `#image-download-target` 元素本体（element.screenshot 不受
+         外层裁剪限制，能拿到完整高度）；
+      3. 再兜底整页 full_page 截图。
+
+    失败时把**脱敏**原因写入模块级 `_LAST_SCREENSHOT_REASON`（不含 URL/内网 IP）。
+    注意用 wait_until="load" 而非 networkidle：hhweb 是带轮询的 Vue 页，networkidle
+    可能永不触发而每次白等 60s 超时。
     """
     global _LAST_SCREENSHOT_REASON
     _LAST_SCREENSHOT_REASON = ""
@@ -76,9 +83,28 @@ def _try_screenshot(url: str) -> bytes | None:
                 _LAST_SCREENSHOT_REASON = "playwright 已安装但 Chromium 浏览器缺失（需执行 playwright install chromium）"
                 return None
             try:
-                page = browser.new_page(viewport=_VIEWPORT)
+                page = browser.new_page(viewport=_VIEWPORT, device_scale_factor=2)
                 page.goto(url, wait_until="load", timeout=_SCREENSHOT_TIMEOUT_MS)
-                page.wait_for_timeout(_RENDER_WAIT_MS)  # 等图表/图片渲染
+                try:
+                    # rain-forcast-part 是最后一个板块，它出现说明三块产品都渲染了
+                    page.wait_for_selector(".rain-forcast-part", timeout=30000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(_RENDER_WAIT_MS)  # 再等图表/图片加载
+                # 1) 优先：页面自带「下载」按钮，拿官方导出图
+                try:
+                    with page.expect_download(timeout=15000) as dl_info:
+                        page.locator("text=下载").first.click(timeout=5000)
+                    dl_path = dl_info.value.path()
+                    with open(dl_path, "rb") as f:
+                        return f.read()
+                except Exception:
+                    pass
+                # 2) 兜底：截产品容器元素（含被外层裁剪的完整高度）
+                el = page.query_selector("#image-download-target")
+                if el is not None:
+                    return el.screenshot(type="png")
+                # 3) 再兜底：整页
                 return page.screenshot(full_page=True, type="png")
             except Exception:
                 _LAST_SCREENSHOT_REASON = "hhweb 页面加载/渲染失败（页面不可达或渲染超时）"
