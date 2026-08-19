@@ -448,16 +448,18 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
                   chroma_thresh: int = 40, dark_thresh: int = 90,
                   mid_thresh: int = 245, blob_open: int = 15,
                   large_open: int = 15, content_blur: int = 5,
-                  content_thresh: int = 110) -> Any:
+                  content_thresh: int = 110, text_min_area: int = 25,
+                  fill_min_core: int = 120, erode_iter: int = 2) -> Any:
     """让地图文字在白底长图上清晰可读，彩色雨区/图例色条原样保留。
 
     14所 ④⑥ 面雨量图接口样式不稳定（isClimateImg=True 已按接口文档以 JSON 布尔传入
     body，但服务端并不总是生效）：可能返回黑底白字图、白底浅灰字图，甚至白底绿区白字
     图（⑥ 偶发，值/站名印在绿色雨区上不可见）。本函数分两种模式处理：
       * 黑底为主（dark_fraction >= 0.35）：近黑背景铺白、浅色文字/图例刻度转深字；
-      * 白底为主：白底浅灰字/线条（dark_thresh..mid_thresh）转深字；绿区（含浅绿
-        零值区）附近亮字（>=mid_thresh，绿区白字）一并转深字；大型近黑区块（零值
-        填充区）填最浅绿避免"白字黑块"；白底与大块白背景（页面底/图边距）原样保留。
+      * 白底为主：把低色度像素按连通域腐蚀核心分成"稀疏笔画（文字/分区名/刻度/线条）
+        与实心块（0 值/低值白色填充区、色标、页面白底，哪怕内部印了黑字被打成洞）"，
+        前者加深为深字，后者保持原色——既能修复"白底白字看不见"，又不会把 0 值区/淡绿
+        低值点误加深成黑块黑斑（旧的 near 带逻辑 2e4b292/c1133f5 都栽在这里）。
     饱和色（雨区、图例色条、红色标题）一律保留原色。
     """
     from PIL import Image, ImageChops, ImageFilter
@@ -473,24 +475,39 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
         m_text = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= dark_thresh else 0))
         base_bg, base_text = bg, text
     else:
-        # 白底图
+        # 白底图：只把"稀疏笔画"（文字/分区名/图例刻度/线条）加深，实心块（0 值/低值
+        # 白色或淡色填充区、色标、页面白底，哪怕内部印了黑字被打成洞）一律保持原色。
+        # 按亮度拆成 灰(90..245)/白(>=245) 两个掩码分别做连通域分类——若混在一起，
+        # 白底会与压在它上面的灰字连成同一个连通域，整块被误判为实心填充而不加深。
         fill = _lightest_green(img)
-        green = chroma.point(lambda v: 255 if v >= chroma_thresh else 0)      # 饱和色（含浅绿零值区）
         black = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))
-        # 形态学开运算：只留"大型"近黑区块（零值填充区），细小的黑字/线条被去掉
+        # 形态学开运算：只留"大型"近黑区块（个别黑底零值填充区），细小的黑字/线条被去掉
         blob = black.filter(ImageFilter.MinFilter(blob_open)).filter(ImageFilter.MaxFilter(blob_open))
         to_fill = ImageChops.multiply(black, blob.point(lambda v: 255 if v > 0 else 0))
-        # 近内容（绿区 ∪ 已填黑块）膨胀：把落在绿区/黑块上的白字纳入改色
-        content = ImageChops.lighter(green, to_fill)
-        near = content.filter(ImageFilter.BoxBlur(content_blur)).point(
-            lambda v: 255 if v > content_thresh else 0)
-        # 大块白背景（页面底/图边距）不参与改色，防绿区膨胀把白底也染成深色
-        m_white = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= mid_thresh else 0))
-        large_white = m_white.filter(ImageFilter.MinFilter(large_open)).filter(ImageFilter.MaxFilter(large_open))
-        m_gray = ImageChops.multiply(achrom, mx.point(
+        gray = ImageChops.multiply(achrom, mx.point(
             lambda v: 255 if dark_thresh <= v < mid_thresh else 0))
-        m_white_near = ImageChops.subtract(ImageChops.multiply(m_white, near), large_white)
-        m_text = ImageChops.lighter(m_gray, m_white_near)
+        white = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= mid_thresh else 0))
+        m_text = _achrom_text_mask(gray, text_min_area=text_min_area,
+                                   fill_min_core=fill_min_core, erode_iter=erode_iter)
+        m_text_white = _achrom_text_mask(white, text_min_area=text_min_area,
+                                         fill_min_core=fill_min_core, erode_iter=erode_iter)
+        if m_text is not None and m_text_white is not None:
+            m_text = ImageChops.lighter(m_text, m_text_white)
+        elif m_text_white is not None:
+            m_text = m_text_white
+        if m_text is None:
+            # 无 numpy/scipy 时的回退：按亮度/近邻近似（旧的 near 带逻辑）。
+            # 仅此回退路径保留 m_gray/near/large_white 的旧语义。
+            green = chroma.point(lambda v: 255 if v >= chroma_thresh else 0)
+            content = ImageChops.lighter(green, to_fill)
+            near = content.filter(ImageFilter.BoxBlur(content_blur)).point(
+                lambda v: 255 if v > content_thresh else 0)
+            m_white = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= mid_thresh else 0))
+            large_white = m_white.filter(ImageFilter.MinFilter(large_open)).filter(ImageFilter.MaxFilter(large_open))
+            m_gray = ImageChops.multiply(achrom, mx.point(
+                lambda v: 255 if dark_thresh <= v < mid_thresh else 0))
+            m_white_near = ImageChops.subtract(ImageChops.multiply(m_white, near), large_white)
+            m_text = ImageChops.lighter(m_gray, m_white_near)
         m_bg = to_fill
         base_bg, base_text = fill, text
     low = ImageChops.lighter(m_bg, m_text)                 # 需改色的低色度像素
@@ -503,6 +520,48 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
         return Image.composite(base, src, low)   # 需改色→base（浅绿底/深字），其余→原色
 
     return Image.merge("RGB", (chan(r, br, tr), chan(g, bg_, tg_), chan(b, bb, tb)))
+
+
+def _achrom_text_mask(mask: Any, text_min_area: int = 25,
+                      fill_min_core: int = 120, erode_iter: int = 2) -> Any | None:
+    """对给定低色度掩膜（灰 90..245 或 白 >=245 的连通域）分出"需加深的文字"。
+
+    判据：文字是细笔画，腐蚀 erode_iter 次后核心几乎消失；实心填充（0 值/低值白色区、
+    色标、页面白底，哪怕内部印了黑字被打成洞）仍有大块实心核心。返回需加深像素的
+    L 掩膜；无 numpy/scipy 时返回 None（调用方回退旧的 near 带逻辑）。
+
+    注意：灰/白必须分掩膜各自调用——合在一起时白底会与压在它上面的灰字连成同一
+    连通域，整块被误判为实心填充而不加深。
+
+    实测（2026-08-19 真实 ③④⑥ 图）：文字连通域面积 80~283、腐蚀 2 次后核心
+    0~58；白底 0 值填充区（15504/21416/6826/6393/10167 等）腐蚀后核心
+    4420~18873、页面白底核心占 88%~95%。core>=120 即可干净分开。
+    """
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import Image
+    except Exception:
+        return None
+    m = np.asarray(mask) > 0
+    lab, n = ndimage.label(m)
+    if n == 0:
+        return None
+    struct = np.ones((3, 3), dtype=bool)
+    text = np.zeros_like(m)
+    for i, sl in enumerate(ndimage.find_objects(lab), start=1):
+        if sl is None:
+            continue
+        comp = lab[sl] == i
+        area = int(comp.sum())
+        if area < text_min_area:
+            continue  # 微小噪声/细点：不动，避免造出黑点
+        core = comp.copy()
+        for _ in range(erode_iter):
+            core = ndimage.binary_erosion(core, struct)
+        if int(core.sum()) < fill_min_core:
+            text[sl][comp] = True  # 稀疏笔画 → 文字
+    return Image.fromarray((text * 255).astype("uint8"), "L")
 
 
 def _radar_black_to_white(img: Any, dark_thresh: int = 48, min_area: int = 3000) -> Any:

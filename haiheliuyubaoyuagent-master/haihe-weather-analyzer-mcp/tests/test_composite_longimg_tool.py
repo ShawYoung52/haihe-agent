@@ -307,29 +307,82 @@ class TestWhiteMapConversion:
         assert out.getpixel((2, 2)) == (255, 255, 255), "纯白底图不应被改写"
 
     def _white_lightgray_text_png(self):
-        """白底 + 浅灰文字条 + 绿色雨区：模拟 ⑥ 预报图"白底浅灰字"样式。"""
+        """白底 + 浅灰细笔画文字 + 绿色雨区：模拟 ⑥ 预报图"白底浅灰字"样式。"""
         from PIL import Image, ImageDraw
         im = Image.new("RGB", (80, 60), (255, 255, 255))
         d = ImageDraw.Draw(im)
         d.ellipse([10, 10, 60, 50], fill=(40, 200, 60))     # 绿色雨区
-        d.rectangle([10, 52, 70, 57], fill=(192, 192, 192))  # 浅灰文字条（白底上看不清）
+        # 浅灰文字是细笔画（~5px 笔划，面积约 30），不是 10px 实心条——实心条是填充区，应保持原色
+        for i, x0 in enumerate([10, 22, 34, 46, 58]):
+            d.rectangle([x0, 53, x0 + 4, 58], fill=(192, 192, 192))
         buf = io.BytesIO()
         im.save(buf, format="PNG")
         return buf.getvalue()
 
     def test_white_bg_lightgray_text_darkened(self):
-        """白底浅灰字图：浅灰文字转深字，白底保留（⑥ 预报图样式修复）。"""
+        """白底浅灰字图：浅灰细笔画文字转深字，白底保留（⑥ 预报图样式修复）。"""
         img = clt._load_image(self._white_lightgray_text_png())
         out = clt._to_white_map(img)
         assert out.getpixel((2, 2)) == (255, 255, 255), "白底应保留"
         px = out.load()
         found = False
         for x in range(10, 70, 2):
-            for y in range(52, 57):
+            for y in range(52, 58):
                 r, g, b = px[x, y]
                 if max(r, g, b) < 120:
                     found = True
         assert found, "浅灰文字应转成深字（白底可读）"
+
+    def test_white_bg_solid_pale_fill_kept(self):
+        """实心浅色块（0 值/低值填充、淡绿点）必须保持原色，不得加深成黑块黑斑。
+
+        旧的 near 带/m_gray 逻辑会把实心浅灰/淡绿填充区误加深成黑（c1133f5 把 ④
+        海河干流 0 值区弄成黑块、③ 淡绿低值点弄成黑斑）。新逻辑按连通域腐蚀核心
+        区分：稀疏笔画→深字；实心块→保持原色。
+        """
+        pytest.importorskip("numpy")
+        pytest.importorskip("scipy")
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.rectangle([15, 15, 45, 35], fill=(192, 192, 192))    # 实心浅灰填充
+        d.ellipse([55, 42, 75, 58], fill=(205, 242, 205))     # 淡绿低值点
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        out = clt._to_white_map(im)
+        px = out.load()
+        r, g, b = px[30, 25]           # 实心浅灰块中心
+        assert (r, g, b) == (192, 192, 192), f"实心浅灰填充应保持原色，实际 {(r, g, b)}"
+        r, g, b = px[65, 50]           # 淡绿点中心
+        assert (r, g, b) == (205, 242, 205), f"淡绿低值点应保持原色，实际 {(r, g, b)}"
+
+    def test_white_bg_thick_white_label_darkened(self):
+        """绿区上的粗白字标签（④⑥ 分区名/数值）应加深为黑，而不是只处理 2px 细线。
+
+        旧 near 带只有 ~2px，粗字笔画中心够不到绿区→保持白字看不见（用户投诉
+        "分区名字和降雨字体不是黑色的"）。新逻辑按笔画结构把粗白字整体加深。
+        """
+        pytest.importorskip("numpy")
+        pytest.importorskip("scipy")
+        from PIL import Image, ImageDraw, ImageFont
+        im = Image.new("RGB", (120, 80), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.polygon([(5, 5), (115, 5), (115, 75), (5, 75)], fill=(138, 244, 149))
+        try:
+            font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 36)
+        except Exception:
+            font = ImageFont.load_default()
+        d.text((15, 20), "AB", fill=(255, 255, 255), font=font)
+        out = clt._to_white_map(im)
+        px = out.load()
+        found = False
+        for x in range(10, 100, 2):
+            for y in range(15, 65, 2):
+                r, g, b = px[x, y]
+                if max(r, g, b) < 60 and g < 120:
+                    found = True
+        assert found, "绿区上粗白字标签应加深为深字（分区名/数值可读）"
+        assert out.getpixel((60, 70)) == (138, 244, 149), "绿色雨区应保留原色"
 
     def test_white_bg_black_text_kept(self):
         """白底黑字图（③ 降水实况图样式）：黑字不应被抹掉。"""
