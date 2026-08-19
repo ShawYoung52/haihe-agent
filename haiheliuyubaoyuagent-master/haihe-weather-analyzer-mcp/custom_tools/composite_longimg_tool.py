@@ -452,6 +452,11 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
                   fill_min_core: int = 120, erode_iter: int = 2) -> Any:
     """让地图文字在白底长图上清晰可读，彩色雨区/图例色条原样保留。
 
+    注意（2026-08-19 用户决定）：本函数**不再接入 ③④⑥ 板块渲染**——用户明确
+    "③④⑥ 完全不用后处理，用 14所 原图"（历次后处理都引入新毛病）。函数与测试
+    保留备用，若未来恢复后处理，用本版（连通域腐蚀核心分类）而非 c1133f5/2e4b292
+    的 near 带逻辑。
+
     14所 ④⑥ 面雨量图接口样式不稳定（isClimateImg=True 已按接口文档以 JSON 布尔传入
     body，但服务端并不总是生效）：可能返回黑底白字图、白底浅灰字图，甚至白底绿区白字
     图（⑥ 偶发，值/站名印在绿色雨区上不可见）。本函数分两种模式处理：
@@ -1054,7 +1059,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         station_img_bytes = None
         texts.append(f"降水实况图获取失败：{_safe_err(exc)}")
-    station_img = _to_white_map(_load_image(station_img_bytes)) if station_img_bytes else None
+    station_img = _load_image(station_img_bytes) if station_img_bytes else None
     real_blocks.append(("image", station_img) if station_img else ("text", "（降水实况图获取失败）"))
 
     # ④ 实况面雨量图
@@ -1063,7 +1068,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         area_real = None
         texts.append(f"实况面雨量图获取失败：{_safe_err(exc)}")
-    area_real_img = _to_white_map(_load_image(area_real)) if area_real else None
+    area_real_img = _load_image(area_real) if area_real else None
     real_blocks.append(("image", area_real_img) if area_real_img else ("text", "（实况面雨量图获取失败）"))
 
     # ⑤ 点雨量排名表（序号|站点|省|市|降水量，前 15 站）
@@ -1110,7 +1115,7 @@ def generate_haihe_composite_longimg_core(
             continue
     if not fore_img_bytes:
         texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
-    fore_img = _to_white_map(_load_image(fore_img_bytes)) if fore_img_bytes else None
+    fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
     fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
     # ⑦ 每日河系雨量预报表（独立容错：⑥图失败也要尽量出表）。

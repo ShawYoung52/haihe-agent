@@ -490,9 +490,13 @@ class TestRadarBlackToWhite:
 
 
 class TestBoardNormalizationWiring:
-    """板块归一化接线：② 雷达过 _radar_black_to_white；③④⑥ 过 _to_white_map。"""
+    """板块归一化接线：② 雷达过 _radar_black_to_white；③④⑥ 用 14所 原图（不再后处理）。
 
-    def test_radar_and_three_maps_normalized(self, monkeypatch):
+    用户 2026-08-19 决定：③④⑥ 完全不用后处理（`_to_white_map` 历次版本都引入新
+    毛病），直接用服务器原图；仅 ② 雷达保留黑底转白。
+    """
+
+    def test_radar_normalized_maps_raw(self, monkeypatch):
         calls = {"radar": 0, "white": 0}
         real_radar = clt._radar_black_to_white
         real_white = clt._to_white_map
@@ -508,7 +512,8 @@ class TestBoardNormalizationWiring:
         monkeypatch.setattr(clt, "_radar_black_to_white", spy_radar)
         monkeypatch.setattr(clt, "_to_white_map", spy_white)
         _install_all_ok(monkeypatch)
-        clt.generate_haihe_composite_longimg_core()
+        r = clt.generate_haihe_composite_longimg_core()
+        assert r["status"] == "ok"
         assert calls["radar"] == 1, "② 雷达图应过 _radar_black_to_white 一次"
-        assert calls["white"] == 3, "③ 降水实况图/④ 实况面雨量/⑥ 预报面雨量应各过 _to_white_map 一次"
+        assert calls["white"] == 0, "③④⑥ 用 14所 原图，不应再调 _to_white_map"
 
