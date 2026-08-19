@@ -122,6 +122,73 @@ def _display_region(region: str) -> str:
     return REGION_DISPLAY_NAMES.get(region, region)
 
 
+# 区域灾害风险查询半径（公里，≤50）。区域天气回答（蓟州/宝坻等）附带【区域】
+# 灾害风险表，按区域代表坐标查周边隐患点（地质灾害/山洪/中小河流），数据复用
+# custom_tools/poi_hazard_reminder_tool 的三张静态表。风险表是增强——查询失败
+# 静默降级（不阻断天气回答），生产默认 25km 覆盖区县级范围。
+REGION_HAZARD_RADIUS_KM = float(os.getenv("REGION_HAZARD_RADIUS_KM", "25"))
+if not (0 < REGION_HAZARD_RADIUS_KM <= 50):
+    REGION_HAZARD_RADIUS_KM = 25.0
+
+# 懒加载的 _query_poi_hazard_reminders_core（避免模块顶层触发 tools.py 的重依赖链）。
+_region_hazard_queryer = None
+
+
+def _load_region_hazard_queryer() -> Any:
+    """按文件路径懒加载 poi_hazard_reminder_tool 的查询核心。
+
+    绕开 custom_tools/__init__.py 的重依赖链（networkx/rasterio 等）：生产运行
+    时 server.py 已先 import tools.py，模块内 `from tools import config` 命中缓存
+    模块；测试环境则需 mock 掉本函数，避免触发 tools.py 顶层 RainfallAnalyzer。
+    """
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "poi_hazard_reminder_tool",
+        Path(__file__).resolve().parent / "custom_tools" / "poi_hazard_reminder_tool.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._query_poi_hazard_reminders_core
+
+
+def _query_region_hazards(lon: float, lat: float) -> dict | None:
+    """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
+
+    只保留有数据的类型（status=="ok" 且 count>0）；无数据/接口失败/异常均返回
+    None（静默降级，风险表是增强）。categories 只带 key/label/kind/count，
+    不带 records 明细（区域级只报种类与数量，避免 payload 膨胀）。
+    """
+    global _region_hazard_queryer
+    try:
+        if _region_hazard_queryer is None:
+            _region_hazard_queryer = _load_region_hazard_queryer()
+        payload = _region_hazard_queryer(float(lon), float(lat), REGION_HAZARD_RADIUS_KM)
+    except Exception as exc:
+        print(f"[region_hazards] query failed: {exc}", flush=True)
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return None
+    categories = payload.get("categories") or []
+    merged = [
+        {
+            "key": c.get("key"),
+            "label": c.get("label"),
+            "kind": c.get("kind"),
+            "count": int(c.get("count") or 0),
+        }
+        for c in categories
+        if isinstance(c, dict) and c.get("count")
+    ]
+    if not merged:
+        return None
+    return {
+        "total_found": int(payload.get("total_found") or 0),
+        "radius_km": REGION_HAZARD_RADIUS_KM,
+        "categories": merged,
+    }
+
+
 def _parse_date(value: str | date | datetime) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -1378,6 +1445,22 @@ def query_rolling_forecast_core(
         ]
     if calendar_window:
         result.update(analyze_rolling_forecast_periods(periods))
+    # 区域模式附带灾害风险表数据：按区域代表坐标查地质灾害/山洪/中小河流隐患点，
+    # 供前端渲染【区域】灾害风险表。点位模式与异常/历史/越界提前 return 分支不附着。
+    if not point_mode and region_names:
+        region_hazards = []
+        for name, lon_t, lat_t in zip(region_names, lons, lats):
+            hazards = _query_region_hazards(lon_t, lat_t)
+            if hazards:
+                region_hazards.append(
+                    {
+                        "region": name,
+                        "region_display": _display_region(name),
+                        **hazards,
+                    }
+                )
+        if region_hazards:
+            result["region_hazards"] = region_hazards
     if os.getenv("DEBUG_ROLLING_FORECAST", "").strip().lower() in {"1", "true", "yes", "on"}:
         print("[query_rolling_forecast] full result:\n" + json.dumps(result, ensure_ascii=False, default=str, indent=2),
               flush=True)

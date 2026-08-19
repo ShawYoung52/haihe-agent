@@ -46,3 +46,102 @@ class TestMountainActivityReminder:
             "明天去盘山游玩合适吗", {"daily_summary": _daily("晴", 0.0)}
         )
         assert "【注意事项】" in bundle["code_section"]
+
+
+def _hazards_payload():
+    return {
+        "daily_summary": _daily("阴转小雨", 5.0),
+        "data_source": "天津市气象台滚动预报",
+        "region_hazards": [
+            {
+                "region": "蓟州",
+                "region_display": "蓟州区",
+                "total_found": 3,
+                "radius_km": 25.0,
+                "categories": [
+                    {"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 2},
+                    {"key": "sh", "label": "山洪", "kind": "山洪", "count": 1},
+                ],
+            }
+        ],
+    }
+
+
+class TestRegionHazardTable:
+    def test_region_hazard_table_renders(self):
+        """区域查询的天气回答附带【区域】灾害风险表（类型×数量×研判×建议）。"""
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", _hazards_payload())
+        section = bundle["code_section"]
+        assert "【蓟州区灾害风险】" in section
+        assert "灾害类型" in section
+        assert "隐患点数量" in section
+        assert "风险研判" in section
+        assert "防范建议" in section
+        assert "| 地质灾害 | 2 处 |" in section
+        assert "| 山洪 | 1 处 |" in section
+        assert "滑坡、崩塌、泥石流" in section
+        assert "山洪灾害危险区" in section
+
+    def test_region_hazard_table_plus_weather_table(self):
+        """天气表在前、灾害风险表在后，两者并存。"""
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", _hazards_payload())
+        section = bundle["code_section"]
+        assert "8月20日" in section
+        assert section.index("8月20日") < section.index("【蓟州区灾害风险】")
+
+    def test_region_hazard_table_skips_zero_count(self):
+        """count=0 的类型不渲染空行。"""
+        payload = _hazards_payload()
+        payload["region_hazards"][0]["categories"] = [
+            {"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 0},
+            {"key": "zxhl", "label": "中小河流洪水", "kind": "河流", "count": 3},
+        ]
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "地质灾害" not in section
+        assert "| 中小河流洪水 | 3 处 |" in section
+        assert "中小河流洪水风险区" in section
+
+    def test_region_hazard_table_no_data_skips_region(self):
+        """区域无隐患数据（categories 空）时整表跳过。"""
+        payload = _hazards_payload()
+        payload["region_hazards"][0]["categories"] = []
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        assert "灾害风险" not in bundle["code_section"]
+
+    def test_region_hazard_table_absent_payload(self):
+        """payload 无 region_hazards 字段（点位模式/降级失败）不出现风险表。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "蓟州天气怎么样", {"daily_summary": _daily("多云", 0.0)}
+        )
+        assert "灾害风险" not in bundle["code_section"]
+
+    def test_region_hazard_table_multi_region(self):
+        """多区域查询渲染多张表，各自标题。"""
+        payload = _hazards_payload()
+        payload["region_hazards"].append(
+            {
+                "region": "宝坻",
+                "region_display": "宝坻区",
+                "total_found": 1,
+                "radius_km": 25.0,
+                "categories": [{"key": "zxhl", "label": "中小河流洪水", "kind": "河流", "count": 1}],
+            }
+        )
+        bundle = rfr.build_rolling_forecast_bundle("蓟州宝坻天气", payload)
+        section = bundle["code_section"]
+        assert "【蓟州区灾害风险】" in section
+        assert "【宝坻区灾害风险】" in section
+
+    def test_region_hazard_table_fallback_label_and_risk(self):
+        """未知 key 用兜底标签与研判，不抛异常。"""
+        payload = _hazards_payload()
+        payload["region_hazards"][0]["categories"] = [
+            {"key": "unknown", "label": "其他灾害", "kind": "其他", "count": 2},
+            {"key": "dzzh", "label": "", "kind": "", "count": 1},
+        ]
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "| 其他灾害 | 2 处 | 存在风险隐患 |" in section
+        # label 为空时回退 key
+        assert "| dzzh | 1 处 |" in section

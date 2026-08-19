@@ -566,6 +566,50 @@ def _activity_mountain_reminder(daily: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# 区域灾害风险研判矩阵：隐患类型 key → (风险研判, 防范建议)。纯规则、零编造，
+# 只基于隐患点类型给通用研判（数据来自 MCP 端按区域坐标查的三张静态隐患表）。
+# 口径与 decision_weather_core 的 POI 风险研判同族，但本模块不能 import
+# decision_weather_core——它会反向 import 本模块（循环依赖）。
+_REGION_HAZARD_RISK = {
+    "dzzh": ("滑坡、崩塌、泥石流等地质灾害易发", "山区道路、切坡建房、沟谷低洼处注意防范，降雨期间减少进山活动"),
+    "sh": ("山洪灾害危险区", "沟谷、河道低洼区遇强降雨易发山洪，避免在河道、沟谷露营停留"),
+    "zxhl": ("中小河流洪水风险区", "沿河低洼地段关注水位上涨与行洪安全，遇预警及时转移避险"),
+}
+
+
+def _region_hazard_table(region_hazards: list[dict]) -> str:
+    """把 payload 的 region_hazards 渲染成【区域】灾害风险表（类型×数量×研判×建议）。
+
+    每区域一张表；区域无数据/全部类别 count<=0 时跳过。纯代码确定性生成，
+    不依赖 LLM，也不编造具体点位（区域级只报种类与数量）。
+    """
+    if not region_hazards:
+        return ""
+    blocks: list[str] = []
+    for entry in region_hazards:
+        if not isinstance(entry, dict):
+            continue
+        rows: list[list[str]] = []
+        for category in entry.get("categories") or []:
+            if not isinstance(category, dict):
+                continue
+            key = category.get("key")
+            count = int(category.get("count") or 0)
+            if count <= 0:
+                continue
+            label = category.get("label") or key or "未知类型"
+            risk, advice = _REGION_HAZARD_RISK.get(key, ("存在风险隐患", "注意防范相关灾害风险"))
+            rows.append([label, f"{count} 处", risk, advice])
+        if not rows:
+            continue
+        display = entry.get("region_display") or entry.get("region") or "该区域"
+        blocks.append(
+            f"【{display}灾害风险】\n"
+            + _markdown_table(["灾害类型", "隐患点数量", "风险研判", "防范建议"], rows)
+        )
+    return "\n\n".join(blocks)
+
+
 def _rainstorm_sections(analysis: dict) -> str:
     if not isinstance(analysis, dict):
         return ""
@@ -618,6 +662,13 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         reminder = _activity_mountain_reminder(daily)
         if reminder:
             code_section = f"{code_section}\n\n{reminder}" if code_section else reminder
+    # 区域灾害风险表（区域查询：蓟州/宝坻等，除天气外附带该区域灾害风险种类与数量）。
+    # 数据来自 payload.region_hazards（MCP 端区域模式按代表坐标查 3 张静态隐患表）。
+    region_hazards = payload.get("region_hazards")
+    if isinstance(region_hazards, list):
+        risk_section = _region_hazard_table(region_hazards)
+        if risk_section:
+            code_section = f"{code_section}\n\n{risk_section}" if code_section else risk_section
     return {
         "category": category,
         "code_section": code_section,
