@@ -59,8 +59,9 @@ def test_none_when_no_file(monkeypatch):
 
 
 def test_skips_file_with_no_point_value(monkeypatch):
+    # 服务端探针确认有效时次仅 02/08/14/20：08 起候选先命中但该点无数值 → 落到 14 起候选
     _patch(monkeypatch,
-           files={("2026090108", 24): "/ec/a.tif", ("2026090100", 24): "/ec/b.tif"},
+           files={("2026090108", 24): "/ec/a.tif", ("2026090114", 24): "/ec/b.tif"},
            samples={"/ec/a.tif": {}, "/ec/b.tif": {"POI": 3.0}})
     r = hmt.sample_ec_point_daily_rain(116.8, 40.4, date(2026, 9, 1))
     assert r["file"] == "/ec/b.tif" and r["rain_mm"] == 3.0

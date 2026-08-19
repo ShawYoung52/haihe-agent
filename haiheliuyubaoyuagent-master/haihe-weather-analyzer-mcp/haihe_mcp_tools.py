@@ -1747,16 +1747,17 @@ def ec_forecast_precip_files_by_horizon(
 def _ec_daily_window_candidates(target_date) -> List[Tuple[datetime, int]]:
     """target_date 当日 EC 累计降水产品的候选 (窗口起点BJT, 累计小时)，24h 优先。
 
-    EC 有效时次常见 02/08/14/20 BJT（18 UTC 起报 +8h 平移），也可能是 00/06/12/18；
-    故对 24h/12h/6h 各给一组当日起点候选，由 file-finder 逐个点名，首个命中即用。
+    有效时次仅 02/08/14/20 BJT（任意 6h 起报 +8h 平移的必然结果，服务端探针
+    probe_ec_rain_layout.py 已确认；00/06/12/18 无产品）。24h 优先（08 起最贴
+    自然日），其后 12h、6h，由 file-finder 逐个点名，首个命中即用。
     """
     base = datetime(target_date.year, target_date.month, target_date.day, tzinfo=TIANJIN_TIMEZONE)
     cands: List[Tuple[datetime, int]] = []
-    for h in (8, 0, 14, 20, 2, 6, 12, 18):
+    for h in (8, 14, 20, 2):
         cands.append((base + timedelta(hours=h), 24))
-    for h in (8, 20, 0, 12):
+    for h in (8, 20, 14, 2):
         cands.append((base + timedelta(hours=h), 12))
-    for h in (8, 2, 14, 20, 0, 6, 12, 18):
+    for h in (8, 14, 20, 2):
         cands.append((base + timedelta(hours=h), 6))
     return cands
 
