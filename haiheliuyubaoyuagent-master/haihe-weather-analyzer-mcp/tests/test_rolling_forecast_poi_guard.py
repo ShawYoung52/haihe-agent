@@ -4,6 +4,7 @@
 谓词逻辑直接 import rolling_forecast_service 测；工具接线用"读源码 marker"静态检查
 （与 test_rolling_forecast_basin_guard.py 同套路，避免 FastMCP 上下文）。
 """
+import re
 from pathlib import Path
 
 import rolling_forecast_service as rfs
@@ -56,3 +57,31 @@ class TestQueryRollingForecastPoiGuardWiring:
     def test_helper_imported(self):
         src = HMT.read_text(encoding="utf-8")
         assert "is_unresolved_poi_forecast_query" in src
+
+
+class TestPoiGuardDecisionWeatherKeywordSync:
+    """POI 守卫词表 ↔ 决策天气前置过滤/规则抽槽 必须同口径。
+
+    守卫把带点位词的问题路由给 query_decision_weather_for_poi，下游若收不住
+    （_decision_weather_prefilter 拒、或规则抽槽抽不出位置名）就空手而返
+    ——密云水库生产回归正是如此。静态读 chainlitexam 源码比对，防词表漂移。
+    """
+
+    DWC = Path(__file__).resolve().parents[2] / "chainlitexam" / "tools" / "decision_weather_core.py"
+
+    @staticmethod
+    def _list_strings(block_name: str) -> list:
+        src = TestPoiGuardDecisionWeatherKeywordSync.DWC.read_text(encoding="utf-8")
+        m = re.search(rf"{re.escape(block_name)}\s*=\s*\[(.*?)\]", src, re.S)
+        assert m, f"未找到 {block_name}"
+        return re.findall(r'"([^"]*)"', m.group(1))
+
+    def test_every_guard_keyword_covered_by_prefilter_suffixes(self):
+        suffixes = self._list_strings("institution_suffixes")
+        missing = [k for k in rfs.POI_PLACE_KEYWORDS if not any(s in k for s in suffixes)]
+        assert not missing, f"POI 守卫关键词在决策天气前置过滤 institution_suffixes 中缺覆盖: {missing}"
+
+    def test_every_guard_keyword_extractable_by_rule_slots(self):
+        suffixes = self._list_strings("_DECISION_WEATHER_SUFFIXES")
+        missing = [k for k in rfs.POI_PLACE_KEYWORDS if not any(s in k for s in suffixes)]
+        assert not missing, f"POI 守卫关键词在规则抽槽 _DECISION_WEATHER_SUFFIXES 中缺覆盖: {missing}"

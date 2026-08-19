@@ -53,6 +53,24 @@ def test_prefilter_allows_location_with_time_and_rejects_time_only():
     assert dw._decision_weather_prefilter("未来24小时会下雨吗") is False
 
 
+def test_prefilter_accepts_poi_guard_routed_keywords():
+    # POI 守卫（rolling_forecast_service.POI_PLACE_KEYWORDS）把带点位词的问题路由到决策天气，
+    # 前置过滤必须同口径放行——密云水库生产回归：守卫接了但 prefilter 拒了，空手而返
+    assert dw._decision_weather_prefilter("未来三天密云水库有降水吗？") is True
+    assert dw._decision_weather_prefilter("密云水库有降水吗") is True
+    assert dw._decision_weather_prefilter("官厅水库周边会下雨吗") is True
+    assert dw._decision_weather_prefilter("湿地公园附近会下雨吗") is True
+    assert dw._decision_weather_prefilter("博物馆周边气温多少") is True
+    assert dw._decision_weather_prefilter("开发区天气怎么样") is True
+
+
+def test_rule_based_slots_extract_reservoir_location():
+    slots = dw_core._extract_decision_slots_rule_based("未来三天密云水库有降水吗？")
+    assert slots and slots["is_decision_weather"] is True
+    assert slots["location_name"] == "密云水库"
+    assert slots["question_type"] == "rain_next_hours"
+
+
 @pytest.mark.asyncio
 async def test_query_decision_weather_for_poi_rejects_non_poi_question():
     answer_chain = None

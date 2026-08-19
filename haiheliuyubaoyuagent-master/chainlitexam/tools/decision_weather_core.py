@@ -144,6 +144,12 @@ def _decision_weather_prefilter(user_text: str) -> bool:
         "医院", "场馆", "中心", "公园", "酒店", "大厦",
         "广场", "机场", "车站", "站", "码头", "景区", "名胜区", "园区", "小区", "村", "镇",
         "街道", "乡", "中",
+        # 与 rolling_forecast_service.POI_PLACE_KEYWORDS 同口径：POI 守卫把这些点位词
+        # 的问题路由到本工具，前置过滤必须同样放行——密云水库生产回归（守卫接了、
+        # prefilter 拒了，空手而返）。同步关系由 MCP 侧静态测试
+        # TestPoiGuardDecisionWeatherKeywordSync 锁定。
+        "水库", "拦河坝", "港口", "港区", "湿地", "景点", "旅游区",
+        "体育馆", "体育场", "博物馆", "展览馆", "开发区", "工业园", "度假区", "古镇",
     ]
     has_indicator = any(k in t for k in location_indicators)
     has_institution = any(s in t for s in institution_suffixes)
@@ -156,6 +162,12 @@ def _decision_weather_prefilter(user_text: str) -> bool:
 _DECISION_WEATHER_SUFFIXES = [
     "会展中心", "中心", "大学", "学院", "中学", "小学", "初中", "高中", "学校", "幼儿园",
     "医院", "公园", "酒店", "大厦", "广场", "机场", "车站", "码头", "景区", "园区", "小区",
+    "火车站", "高铁站", "汽车站", "客运站",
+    # 与 rolling_forecast_service.POI_PLACE_KEYWORDS 同口径（水库/湿地/博物馆等），
+    # 规则抽槽才能抽出这类点位名；同步关系由 MCP 侧静态测试
+    # TestPoiGuardDecisionWeatherKeywordSync 锁定。
+    "水库", "拦河坝", "港口", "港区", "湿地", "景点", "旅游区",
+    "体育馆", "体育场", "博物馆", "展览馆", "开发区", "工业园", "度假区", "古镇",
 ]
 _DECISION_RAIN_WORDS = ["下雨", "有雨", "降雨", "降水", "暴雨", "雷阵雨", "雨"]
 
