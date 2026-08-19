@@ -20,7 +20,11 @@ from fastmcp import FastMCP
 
 from constants import DEFAULT_BASIN_CODES, DEFAULT_DATA_CODE, DEFAULT_OBS_ELEMENTS, DEFAULT_THRESHOLDS_MM, DEFAULT_MIN_PRE_DATA_CODE, DEFAULT_MIN_PRE_ELEMENTS
 from current_weather_observation_service import query_current_weather_observation_core
-from rolling_forecast_service import is_basin_weather_query, query_rolling_forecast_core
+from rolling_forecast_service import (
+    is_basin_weather_query,
+    is_unresolved_poi_forecast_query,
+    query_rolling_forecast_core,
+)
 
 try:
     from exception.CustomException import BusinessException
@@ -3098,6 +3102,14 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             raise BusinessException(
                 "本工具仅覆盖天津及区级区域，不适用于海河流域/河系天气问题；"
                 "请改用 get_river_system_rainfall_forecast 查询九大分区河系级降雨预报。"
+            )
+        # 具体点位（水库/学校/机场等）但区域表查不到 → 不静默退回天津市区代表点，
+        # 引导 planner 改用 query_decision_weather_for_poi（内部先 search_poi 定位经纬度再按点位查）。
+        # 点位模式（调用方已给 lon/lat，如决策天气 POI）不拦截。
+        if (lon is None or lat is None) and is_unresolved_poi_forecast_query(user_query, regions):
+            raise BusinessException(
+                "该地点为具体点位，本工具仅按天津市区及区级代表点查询、无法按名称定位；"
+                "请改用 query_decision_weather_for_poi（先 search_poi 定位经纬度、再按点位查询）。"
             )
         return query_rolling_forecast_core(
             user_query=user_query,

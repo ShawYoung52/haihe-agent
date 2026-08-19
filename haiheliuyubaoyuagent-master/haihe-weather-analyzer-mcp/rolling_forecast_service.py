@@ -501,6 +501,38 @@ def is_basin_weather_query(user_query: str) -> bool:
     return any(name in text for name in _BASIN_RIVER_NAMES)
 
 
+# 具体点位指示词：出现这些词、但区域表（天津11区县）匹配不到时，说明问的是"具体点位"，
+# 区域工具不应静默退回天津市区代表点，应转决策天气 POI 路径（先 search_poi 定位经纬度）。
+POI_PLACE_KEYWORDS = (
+    "水库", "拦河坝", "学校", "大学", "中学", "小学", "幼儿园", "学院",
+    "医院", "机场", "火车站", "高铁站", "汽车站", "客运站", "车站",
+    "港口", "港区", "码头", "公园", "湿地", "景区", "景点", "旅游区",
+    "广场", "大厦", "体育馆", "体育场", "博物馆", "展览馆",
+    "开发区", "工业园", "园区", "度假区", "古镇",
+)
+
+
+def has_matched_rolling_region(text: str) -> bool:
+    """文本是否命中任一已知滚动预报区域（天津 11 区县及其别名）。"""
+    text = str(text or "")
+    if any(alias in text for alias in ROLLING_FORECAST_REGION_ALIASES):
+        return True
+    return any(region in text for region in ROLLING_FORECAST_COORDS)
+
+
+def is_unresolved_poi_forecast_query(user_query: str, regions: str = "") -> bool:
+    """问句含具体点位指示词、但区域表匹配不到 → 点位未解析（区域工具不应静默默认天津市区）。
+
+    仅作区域工具的兜底守卫：命中时引导 planner 改用 query_decision_weather_for_poi。
+    无点位词（"今天天气"/"我市"/"未来三天"）返回 False，保持默认天津市区行为不变。
+    已知区域命中（即使同句含点位词，如"滨海新区大学城"）返回 False，区域路径优先。
+    """
+    text = f"{user_query or ''} {regions or ''}"
+    if has_matched_rolling_region(text):
+        return False
+    return any(keyword in text for keyword in POI_PLACE_KEYWORDS)
+
+
 def parse_rolling_forecast_regions(region_text: str | None) -> list[str]:
     text = (region_text or "").strip()
     matched: list[str] = []
@@ -544,6 +576,14 @@ def format_rolling_forecast_coord(value: float | str) -> str:
         return f"{float(value):.2f}"
     except (TypeError, ValueError):
         return str(value).strip()
+
+
+def _format_period_dt_label(dt: datetime) -> str:
+    """逐日时段边界落在整点 00 时不显示"00时"（08月20日），非零时（逐小时）保留小时。"""
+    base = dt.strftime("%m月%d日")
+    if dt.hour == 0 and dt.minute == 0:
+        return base
+    return f"{base}{dt.strftime('%H时')}"
 
 
 def build_rolling_forecast_periods(
@@ -592,7 +632,7 @@ def build_rolling_forecast_periods(
                 "lat": location.get("lat"),
                 "start_time": start_dt.strftime("%Y-%m-%d %H:%M"),
                 "end_time": end_dt.strftime("%Y-%m-%d %H:%M"),
-                "period_label": f"{start_dt.strftime('%m月%d日%H时')}-{end_dt.strftime('%m月%d日%H时')}",
+                "period_label": f"{_format_period_dt_label(start_dt)}-{_format_period_dt_label(end_dt)}",
             }
             for element, series in series_by_element.items():
                 row[element] = _clean_value(series[index] if index < len(series) else None)
