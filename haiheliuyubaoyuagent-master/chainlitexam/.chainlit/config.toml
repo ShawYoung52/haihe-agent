@@ -136,7 +136,8 @@ cot = "full"
 
 # Specify a JavaScript file that can be used to customize the user interface.
 # The JavaScript file can be served from the public directory.
-custom_js = "/public/test.js"
+# img-zoom.js = 聊天图片滚轮缩放看图器（2026-08-19）；新文件名可绕过浏览器对旧 test.js 的缓存
+custom_js = "/public/img-zoom.js"
 
 # The style of alert boxes. Can be "classic" or "modern".
 alert_style = "classic"
