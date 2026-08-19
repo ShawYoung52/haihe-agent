@@ -34,7 +34,11 @@ HHWEB_PRODUCT_BASE = os.getenv("HHWEB_PRODUCT_BASE", "http://10.226.107.35:8070"
 DEFAULT_TYPES = "radar,rain,rain-forcast"
 
 _SCREENSHOT_TIMEOUT_MS = 60000
+_RENDER_WAIT_MS = 5000   # load 事件后再等图表/图片渲染（networkidle 在轮询型 Vue 页可能永不触发）
 _VIEWPORT = {"width": 1125, "height": 1600}
+
+# 最近一次截图失败的脱敏原因（不含 URL/IP），供上层降级文案展示
+_LAST_SCREENSHOT_REASON = ""
 
 
 def _fmt(t: datetime) -> str:
@@ -51,22 +55,39 @@ def build_product_url(time_str: str, radar_time: str = "", types: str = DEFAULT_
 
 
 def _try_screenshot(url: str) -> bytes | None:
-    """用 Playwright + Chromium 全页截图出长图；缺浏览器/失败返回 None（不报错）。"""
+    """用 Playwright + Chromium 全页截图出长图；缺浏览器/失败返回 None（不报错）。
+
+    失败时把**脱敏**原因写入模块级 `_LAST_SCREENSHOT_REASON`（不含 URL/内网 IP），
+    供上层降级文案告诉用户到底缺什么。注意用 wait_until="load" 而非 networkidle：
+    hhweb 是带轮询的 Vue 页，networkidle 可能永不触发而每次白等 60s 超时。
+    """
+    global _LAST_SCREENSHOT_REASON
+    _LAST_SCREENSHOT_REASON = ""
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
+        _LAST_SCREENSHOT_REASON = "服务器未安装 playwright"
         return None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Exception:
+                _LAST_SCREENSHOT_REASON = "playwright 已安装但 Chromium 浏览器缺失（需执行 playwright install chromium）"
+                return None
             try:
                 page = browser.new_page(viewport=_VIEWPORT)
-                page.goto(url, wait_until="networkidle", timeout=_SCREENSHOT_TIMEOUT_MS)
-                page.wait_for_timeout(3000)  # 等图表/图片渲染
+                page.goto(url, wait_until="load", timeout=_SCREENSHOT_TIMEOUT_MS)
+                page.wait_for_timeout(_RENDER_WAIT_MS)  # 等图表/图片渲染
                 return page.screenshot(full_page=True, type="png")
+            except Exception:
+                _LAST_SCREENSHOT_REASON = "hhweb 页面加载/渲染失败（页面不可达或渲染超时）"
+                return None
             finally:
                 browser.close()
     except Exception:
+        if not _LAST_SCREENSHOT_REASON:
+            _LAST_SCREENSHOT_REASON = "截图失败（playwright 运行时错误）"
         return None
 
 
@@ -80,15 +101,19 @@ def get_haihe_product_longimg_core(
     time_str = time.strip() or _fmt(datetime.now(BEIJING_TIMEZONE))
     url = build_product_url(time_str, radarTime, types)
 
+    global _LAST_SCREENSHOT_REASON
+    _LAST_SCREENSHOT_REASON = ""
     png = _try_screenshot(url) if screenshot else None
+    screenshot_error = _LAST_SCREENSHOT_REASON
     b64 = base64.b64encode(png).decode("ascii") if png else ""
 
     if b64:
         text = "已用 hhweb 网页版生成长图（白底地图、与示范图一致）。"
     else:
+        reason = screenshot_error or "本机未检测到可用浏览器"
         text = (
             "网页版长图地址（内网打开即可查看，含白底地图）：\n" + url
-            + "\n（本机未检测到可用浏览器，未能直接截图；在内网浏览器打开上面的网址即得长图。）"
+            + f"\n（未能直接截图：{reason}；在内网浏览器打开上面的网址即得长图。）"
         )
     return {
         "status": "ok",
@@ -98,6 +123,7 @@ def get_haihe_product_longimg_core(
         "time": time_str,
         "radarTime": radarTime.strip(),
         "types": types or DEFAULT_TYPES,
+        "screenshot_error": screenshot_error,
         "message": "已构造 hhweb 拼网址长图。" if b64 else "已构造 hhweb 拼网址长图网址。",
     }
 

@@ -1077,11 +1077,14 @@ def generate_haihe_composite_longimg_core(
         time=time_str, radarTime=time_str, screenshot=True,
     )
     b64 = result.get("base64") or ""
+    warn = "" if b64 else (
+        f"未能直接截图（{result.get('screenshot_error') or '本机无可用浏览器'}），已降级返回 hhweb 长图网址"
+    )
     return {
         "status": result.get("status", "ok"),
         "base64": b64,
         "text": result.get("text") or "（长图见 hhweb 网址）",
-        "render_warning": "" if b64 else "本机无可用浏览器，已降级返回 hhweb 长图网址",
+        "render_warning": warn,
         "beginTime": beginTime,
         "endTime": endTime,
         "range": str(range or "9"),
