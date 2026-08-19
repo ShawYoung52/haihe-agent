@@ -1027,6 +1027,32 @@ def _compose_longimg(sections: list[dict]) -> bytes | None:
 
 # ---------------------------------------------------------------- 主函数
 
+def _load_hhweb_product_tool() -> Any:
+    """按文件路径加载同目录 hhweb_product_tool（绕开 custom_tools/__init__.py 重依赖，
+    与测试 importlib 加载方式同口径）。"""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "hhweb_product_tool",
+        Path(__file__).resolve().parent / "hhweb_product_tool.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _hhweb_time(end_time: str) -> str:
+    """hhweb time 口径（用户确认"改调用时间即可"）：显式 endTime 向下取整点，否则当前北京时整点。"""
+    s = (end_time or "").strip()
+    if s:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:00:00")
+            except ValueError:
+                continue
+    return datetime.now(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:00:00")
+
+
 def generate_haihe_composite_longimg_core(
     beginTime: str = "",
     endTime: str = "",
@@ -1035,7 +1061,50 @@ def generate_haihe_composite_longimg_core(
     range: str = "9",
     type: str = "0",
 ) -> dict[str, Any]:
-    """调用 14所 各子接口，拼装组合长图，返回 base64 与各板块文本。"""
+    """生成组合长图：**hhweb 拼网址 + 本机浏览器截图**（2026-08-19 用户决定改天河做法）。
+
+    背景：PIL 逐板块拼接的样式反复出问题（④⑥ 服务端 isClimateImg 不稳定、偶发黑底原图，
+    ③ 副标题/图例白字印白底）。用户决定改用 hhweb product-image 网页版长图（服务端页面
+    自己渲染，与示范图完全一致：白底地图、模板标题），只需按当前时次拼网址（time 与
+    radarTime 同传当前北京时整点），本机有浏览器则截图出长图，否则降级返回网址。
+
+    原 PIL 7 板块拼接实现完整保留在 `_generate_haihe_composite_longimg_core_pil`
+    （当前未被调用、不删除）；回滚只需把下方 return 换成调用它。
+    """
+    time_str = _hhweb_time(endTime)
+    hhweb = _load_hhweb_product_tool()
+    result = hhweb.get_haihe_product_longimg_core(
+        time=time_str, radarTime=time_str, screenshot=True,
+    )
+    b64 = result.get("base64") or ""
+    return {
+        "status": result.get("status", "ok"),
+        "base64": b64,
+        "text": result.get("text") or "（长图见 hhweb 网址）",
+        "render_warning": "" if b64 else "本机无可用浏览器，已降级返回 hhweb 长图网址",
+        "beginTime": beginTime,
+        "endTime": endTime,
+        "range": str(range or "9"),
+        "type": str(type or "0"),
+        "url": result.get("url", ""),
+        "message": result.get("message", "已生成 hhweb 拼网址长图。"),
+    }
+
+
+def _generate_haihe_composite_longimg_core_pil(
+    beginTime: str = "",
+    endTime: str = "",
+    areaIds: list | None = None,
+    interval: int = 24,
+    range: str = "9",
+    type: str = "0",
+) -> dict[str, Any]:
+    """【保留不删，当前未接线】原 PIL 7 板块逐接口拼装实现（2026-08-19 前的主路径）。
+
+    用户 2026-08-19 决定改用 hhweb 拼网址截图（见 generate_haihe_composite_longimg_core）。
+    本函数完整保留原实现用于回滚/对照——回滚只需把 generate_haihe_composite_longimg_core
+    的 return 换成调用本函数。注意：④⑥ 需 `_black_bg_to_white` 处理服务端偶发黑底原图。
+    """
     try:
         interval_hours = int(interval) if interval not in (None, "") else 24
     except (TypeError, ValueError):
@@ -1237,12 +1306,12 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
         type: str = "0",
     ) -> dict:
         """
-        生成海河流域 14所 降水专题**组合长图**。
+        生成海河流域 14所 降水专题**组合长图**（hhweb 拼网址网页版，天河做法）。
 
-        把降水实况文字、swan3 组合反射率雷达图、降水实况图、实况面雨量图、
-        点雨量列表、预报面雨量图、面雨量预报从上到下拼成一张长图（PNG），
-        base64 渲染后由前端自动展示。只出图、不返回数值，不能用于回答
-        "下了多少雨 / 天气怎么样 / 面雨量多少" 等数值查询。
+        拼 hhweb product-image 网址（雷达 + 降水实况 + 降水预报，与示范图完全一致：
+        白底地图、模板标题），本机有浏览器时直接截图出长图（PNG，base64 由前端自动
+        展示），无浏览器时降级返回网址供内网浏览器打开。只出图、不返回数值，不能
+        用于回答 "下了多少雨 / 天气怎么样 / 面雨量多少" 等数值查询。
 
         触发：用户说"长图 / 组合长图 / 降水专题长图 / 出今天的长图 / 出一张长图"
         等，未指明具体图类型时默认走本工具（本智能体的"长图"即降水专题组合长图）。
@@ -1251,12 +1320,12 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
         面雨量空间分布图；本工具是多板块组合长图。
 
         Args:
-            beginTime: 开始时间 "YYYY-MM-DD HH:mm:ss"（北京时），不传取当前前推 interval 小时
-            endTime: 结束时间，不传取当前整点
-            areaIds: 区域 id 列表，默认海河9大分区
-            interval: 间隔(小时)，默认 24
-            range: 分区，默认 "9"，可传 "9" 或 "11"
-            type: 站点类型，"0"=国家站，"1"=区域站，默认 "0"
+            beginTime: 开始时间 "YYYY-MM-DD HH:mm:ss"（北京时），网页版仅用于兼容旧参数，可不传
+            endTime: 结束时间，用作 hhweb 的产品时次（向下取整点）；不传取当前北京时整点
+            areaIds: 区域 id 列表，网页版忽略，默认海河9大分区
+            interval: 间隔(小时)，网页版忽略，默认 24
+            range: 分区，网页版忽略，默认 "9"
+            type: 站点类型，网页版忽略，默认 "0"
         """
         return generate_haihe_composite_longimg_core(
             beginTime=beginTime,

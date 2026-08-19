@@ -144,7 +144,7 @@ class TestGenerateCore:
     def test_all_boards_ok(self, monkeypatch):
         """全板块成功 → status ok + base64 + text。"""
         _install_all_ok(monkeypatch)
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         assert r["status"] == "ok"
         assert r["base64"], "全板块成功应返回组合长图 base64"
         assert r["text"]
@@ -158,7 +158,7 @@ class TestGenerateCore:
         monkeypatch.setattr(clt, "_fetch_swan3", boom)
         monkeypatch.setattr(clt, "_fetch_area_rain_real_img", boom)
         monkeypatch.setattr(clt, "_fetch_station_list", boom)
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         assert r["status"] == "ok"
         assert r["base64"], "部分板块失败不应整图失败"
         assert "10.226.107.35" not in r["text"], "失败文本应脱敏"
@@ -167,7 +167,7 @@ class TestGenerateCore:
         """渲染失败（缺字体）→ base64 空 + 各板块文字保留。"""
         _install_all_ok(monkeypatch)
         monkeypatch.setattr(clt, "_compose_longimg", lambda sections: None)
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         assert r["status"] == "ok"
         assert r["base64"] == ""
         assert r["text"]
@@ -178,7 +178,7 @@ class TestGenerateCore:
         stations = [_station(name=f"站{i}", val=str(10 + i)) for i in range(20)]
         _install_all_ok(monkeypatch, stations=stations)
         monkeypatch.setattr(clt, "_compose_longimg", lambda sections: None)
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         # 降级路径下 text 为空（无失败），验证排序逻辑走的是内部表格构建
         assert r["status"] == "ok"
 
@@ -205,7 +205,7 @@ class TestGenerateCore:
         monkeypatch.setattr(clt, "_fetch_area_rain_fore_img", fake_fore_img)
         monkeypatch.setattr(clt, "_fetch_forecast", fake_forecast)
 
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         assert r["status"] == "ok"
         assert r["base64"], "回退成功后应出图"
         assert len(calls["fore_times"]) >= 2, "第一个时次失败应回退到下一个"
@@ -219,7 +219,7 @@ class TestGenerateCore:
         _install_all_ok(monkeypatch)
         monkeypatch.setattr(clt, "_fetch_area_rain_fore_img", boom)
         monkeypatch.setattr(clt, "_fetch_forecast", boom)
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         assert r["status"] == "ok"
         assert r["base64"], "预报失败不应整图失败"
 
@@ -240,7 +240,7 @@ class TestGenerateCore:
         monkeypatch.setattr(clt, "_fetch_area_rain_fore_img", lambda *a, **k: _IMG_PNG)
         monkeypatch.setattr(clt, "_fetch_forecast", lambda *a, **k: [_forecast()])
 
-        r = clt.generate_haihe_composite_longimg_core(
+        r = clt._generate_haihe_composite_longimg_core_pil(
             beginTime="2026-08-03 00:00:00", endTime="2026-08-05 00:00:00",
         )
         assert r["status"] == "ok"
@@ -576,9 +576,69 @@ class TestBoardNormalizationWiring:
         monkeypatch.setattr(clt, "_to_white_map", spy_white)
         monkeypatch.setattr(clt, "_black_bg_to_white", spy_b2w)
         _install_all_ok(monkeypatch)
-        r = clt.generate_haihe_composite_longimg_core()
+        r = clt._generate_haihe_composite_longimg_core_pil()
         assert r["status"] == "ok"
         assert calls["radar"] == 1, "② 雷达图应过 _radar_black_to_white 一次"
         assert calls["black2white"] == 2, "④⑥ 应各过 _black_bg_to_white 一次（仅黑底才转白）"
         assert calls["white"] == 0, "③④⑥ 不应再调 _to_white_map 白底分支"
+
+
+class TestHhwebLongimgCore:
+    """主入口 hhweb 拼网址路径（2026-08-19 用户决定改天河做法）。
+
+    generate_haihe_composite_longimg_core 不再走 PIL 拼接，改为拼 hhweb product-image
+    网址 + 截图（time 与 radarTime 同传）；原 PIL 实现保留在 _generate_haihe_composite_longimg_core_pil。
+    """
+
+    class _FakeHhweb:
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        def get_haihe_product_longimg_core(self, **kw):
+            self.calls.append(kw)
+            return self.result
+
+    def _install_fake_hhweb(self, monkeypatch, result):
+        fake = self._FakeHhweb(result)
+        monkeypatch.setattr(clt, "_load_hhweb_product_tool", lambda: fake)
+        return fake
+
+    def test_screenshot_ok_returns_base64_and_url(self, monkeypatch):
+        fake = self._install_fake_hhweb(monkeypatch, {
+            "status": "ok", "base64": _IMG_B64, "text": "已用 hhweb 网页版生成长图。",
+            "url": "http://x/hhweb/#/product-image/...", "message": "ok",
+        })
+        r = clt.generate_haihe_composite_longimg_core()
+        assert r["status"] == "ok"
+        assert r["base64"] == _IMG_B64, "截图成功应透传 base64"
+        assert r["url"], "应带回 hhweb 网址"
+        assert r["render_warning"] == "", "截图成功不应有降级警告"
+        kw = fake.calls[0]
+        assert kw["time"] and kw["radarTime"] == kw["time"], "time 与 radarTime 应同传"
+        import re as _re
+        assert _re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:00:00", kw["time"]), "time 应为整点格式"
+
+    def test_no_browser_degrades_to_url(self, monkeypatch):
+        self._install_fake_hhweb(monkeypatch, {
+            "status": "ok", "base64": "", "text": "网页版长图地址：http://x",
+            "url": "http://x/hhweb/#/product-image/...", "message": "已构造网址",
+        })
+        r = clt.generate_haihe_composite_longimg_core()
+        assert r["status"] == "ok"
+        assert r["base64"] == "", "无浏览器时 base64 为空"
+        assert r["render_warning"], "应带降级警告"
+        assert r["url"] and r["text"], "应返回网址与说明文字"
+
+    def test_explicit_endtime_floored_to_hour(self, monkeypatch):
+        fake = self._install_fake_hhweb(monkeypatch, {
+            "status": "ok", "base64": _IMG_B64, "text": "", "url": "u", "message": "ok",
+        })
+        clt.generate_haihe_composite_longimg_core(endTime="2026-08-19 13:45:00")
+        assert fake.calls[0]["time"] == "2026-08-19 13:00:00", "显式 endTime 应向下取整点"
+
+    def test_hhweb_time_default_is_current_hour(self):
+        import re as _re
+        t = clt._hhweb_time("")
+        assert _re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:00:00", t), "默认应取当前北京时整点"
 
