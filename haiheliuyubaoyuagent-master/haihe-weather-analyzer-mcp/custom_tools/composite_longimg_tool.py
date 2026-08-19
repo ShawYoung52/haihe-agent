@@ -569,6 +569,41 @@ def _achrom_text_mask(mask: Any, text_min_area: int = 25,
     return Image.fromarray((text * 255).astype("uint8"), "L")
 
 
+def _black_bg_to_white(img: Any, dark_frac_thresh: float = 0.35, chroma_thresh: int = 40,
+                       dark_thresh: int = 90, bg: tuple[int, int, int] = (255, 255, 255),
+                       text: tuple[int, int, int] = (15, 15, 15)) -> Any:
+    """④⑥ 面雨量图"仅黑底才转白"最小处理（用户 2026-08-19 确认采用）。
+
+    14所 ④⑥ 接口 isClimateImg=True 并不总是生效：偶尔返回黑底白字图（白底时正常）。
+    本函数只处理黑底情形——整图近黑占比 >= dark_frac_thresh 时，黑底铺白、浅色文字/
+    刻度/分区名加深为深字，彩色雨区/图例色条原样保留；**已是白底（或任何非偏黑）
+    的图一个像素都不动，原样返回**——不会进入 _to_white_map 的白底分支，也就不会
+    引入当初黑块/黑斑的旧毛病。仅接线 ④⑥；③（isClimateImg 可靠生效）与雷达不经
+    本函数。逻辑等价于 _to_white_map 的黑底分支（dark_fraction >= 0.35 支路）。
+    """
+    from PIL import Image, ImageChops
+    img = img.convert("RGB")
+    if _dark_fraction(img, dark_thresh) < dark_frac_thresh:
+        return img                                   # 非黑底：一个像素都不动
+    r, g, b = img.split()
+    mx = ImageChops.lighter(ImageChops.lighter(r, g), b)   # 每像素 max
+    mn = ImageChops.darker(ImageChops.darker(r, g), b)     # 每像素 min
+    chroma = ImageChops.subtract(mx, mn)                   # 色度
+    achrom = chroma.point(lambda v: 255 if v < chroma_thresh else 0)  # 低色度（底色/文字）
+    m_bg = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v < dark_thresh else 0))
+    m_text = ImageChops.multiply(achrom, mx.point(lambda v: 255 if v >= dark_thresh else 0))
+    low = ImageChops.lighter(m_bg, m_text)                 # 需改色的低色度像素
+    br, bg_, bb = bg
+    tr, tg_, tb = text
+
+    def chan(src, base_bg, base_text):
+        base = Image.composite(Image.new("L", src.size, base_text),
+                               Image.new("L", src.size, base_bg), m_text)
+        return Image.composite(base, src, low)   # 需改色→base（白底/深字），其余→原色
+
+    return Image.merge("RGB", (chan(r, br, tr), chan(g, bg_, tg_), chan(b, bb, tb)))
+
+
 def _radar_black_to_white(img: Any, dark_thresh: int = 48, min_area: int = 3000) -> Any:
     """把 swan3 雷达图的无回波大黑块转成白底，保留黑色标题/分区标签/坐标轴/色标。
 
@@ -1068,7 +1103,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         area_real = None
         texts.append(f"实况面雨量图获取失败：{_safe_err(exc)}")
-    area_real_img = _load_image(area_real) if area_real else None
+    area_real_img = _black_bg_to_white(_load_image(area_real)) if area_real else None
     real_blocks.append(("image", area_real_img) if area_real_img else ("text", "（实况面雨量图获取失败）"))
 
     # ⑤ 点雨量排名表（序号|站点|省|市|降水量，前 15 站）
@@ -1115,7 +1150,7 @@ def generate_haihe_composite_longimg_core(
             continue
     if not fore_img_bytes:
         texts.append("预报面雨量图获取失败：最近起报时次均未就绪")
-    fore_img = _load_image(fore_img_bytes) if fore_img_bytes else None
+    fore_img = _black_bg_to_white(_load_image(fore_img_bytes)) if fore_img_bytes else None
     fore_blocks.append(("image", fore_img) if fore_img else ("text", "（预报面雨量图获取失败）"))
 
     # ⑦ 每日河系雨量预报表（独立容错：⑥图失败也要尽量出表）。

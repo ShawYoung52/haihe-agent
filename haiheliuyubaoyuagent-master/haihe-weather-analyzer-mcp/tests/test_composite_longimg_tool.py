@@ -455,6 +455,63 @@ class TestWhiteMapConversion:
                 f"({x},{y}) 紧邻色块的大块白底不应被染暗（暗晕回归），实际 {px[x, y]}")
 
 
+class TestBlackBgToWhite:
+    """④⑥ 面雨量图"仅黑底才转白"最小处理（用户 2026-08-19 确认采用）。
+
+    只处理服务端 isClimateImg 不生效时返回的黑底图：黑底铺白、浅色文字/刻度加深、
+    彩色雨区保留；**已是白底（或任何非偏黑）的图一个像素都不动**——绝不进入
+    _to_white_map 的白底分支（该分支历次版本引入黑块/黑斑，已停用）。
+    """
+
+    def _black_map_png(self):
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (80, 60), (0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.ellipse([10, 10, 60, 50], fill=(40, 200, 60))     # 绿色雨区
+        d.rectangle([10, 52, 70, 57], fill=(224, 224, 224))  # 浅灰文字条
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_black_bg_becomes_white(self):
+        img = clt._load_image(self._black_map_png())
+        out = clt._black_bg_to_white(img)
+        assert out is not None and out.mode == "RGB", "转换后应为 RGB（不透明）"
+        assert out.getpixel((2, 2)) == (255, 255, 255), "黑底应变白"
+
+    def test_light_text_becomes_dark(self):
+        img = clt._load_image(self._black_map_png())
+        out = clt._black_bg_to_white(img)
+        px = out.load()
+        found = any(max(px[x, y]) < 120
+                    for x in range(10, 70, 2) for y in range(52, 57))
+        assert found, "浅灰文字应转成深字（白底可读）"
+
+    def test_colored_rain_preserved(self):
+        img = clt._load_image(self._black_map_png())
+        out = clt._black_bg_to_white(img)
+        px = out.load()
+        found = any(px[x, y][1] > 150 and px[x, y][0] < 100
+                    for x in range(10, 60, 2) for y in range(10, 50))
+        assert found, "彩色雨区应保留原色"
+
+    def test_white_bg_untouched(self):
+        """白底图必须原样通过——这是"不会重蹈白底分支覆辙"的核心保证。"""
+        from PIL import Image
+        im = Image.new("RGB", (80, 60), (255, 255, 255))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        img = clt._load_image(buf.getvalue())
+        out = clt._black_bg_to_white(img)
+        assert out.tobytes() == img.tobytes(), "白底图应一个像素都不动"
+
+    def test_colorful_nondark_untouched(self):
+        """彩色非偏黑图（如 mock 红色图）也原样通过，不被误转。"""
+        img = clt._load_image(_make_png((200, 60, 60)))
+        out = clt._black_bg_to_white(img)
+        assert out.tobytes() == img.tobytes(), "非偏黑图应原样通过"
+
+
 class TestRadarBlackToWhite:
     """② swan3 雷达图：无回波大黑块转白底，细黑字(标题/标签)与彩色回波保留。"""
 
@@ -490,16 +547,18 @@ class TestRadarBlackToWhite:
 
 
 class TestBoardNormalizationWiring:
-    """板块归一化接线：② 雷达过 _radar_black_to_white；③④⑥ 用 14所 原图（不再后处理）。
+    """板块归一化接线：② 雷达过 _radar_black_to_white；④⑥ 过 _black_bg_to_white（仅黑底才转白）；③ 用 14所 原图。
 
-    用户 2026-08-19 决定：③④⑥ 完全不用后处理（`_to_white_map` 历次版本都引入新
-    毛病），直接用服务器原图；仅 ② 雷达保留黑底转白。
+    用户 2026-08-19 决定：③④⑥ 不做 _to_white_map 白底分支后处理；后续又确认 ④⑥
+    服务端偶尔返回黑底原图时，用 `_black_bg_to_white`（仅整图偏黑≥35% 才转白，白底
+    图一个像素都不动）做最小处理。③ isClimateImg 可靠生效，保持原图直用。
     """
 
-    def test_radar_normalized_maps_raw(self, monkeypatch):
-        calls = {"radar": 0, "white": 0}
+    def test_radar_and_blackbg_only_wiring(self, monkeypatch):
+        calls = {"radar": 0, "white": 0, "black2white": 0}
         real_radar = clt._radar_black_to_white
         real_white = clt._to_white_map
+        real_b2w = clt._black_bg_to_white
 
         def spy_radar(img, *a, **k):
             calls["radar"] += 1
@@ -509,11 +568,17 @@ class TestBoardNormalizationWiring:
             calls["white"] += 1
             return real_white(img, *a, **k)
 
+        def spy_b2w(img, *a, **k):
+            calls["black2white"] += 1
+            return real_b2w(img, *a, **k)
+
         monkeypatch.setattr(clt, "_radar_black_to_white", spy_radar)
         monkeypatch.setattr(clt, "_to_white_map", spy_white)
+        monkeypatch.setattr(clt, "_black_bg_to_white", spy_b2w)
         _install_all_ok(monkeypatch)
         r = clt.generate_haihe_composite_longimg_core()
         assert r["status"] == "ok"
         assert calls["radar"] == 1, "② 雷达图应过 _radar_black_to_white 一次"
-        assert calls["white"] == 0, "③④⑥ 用 14所 原图，不应再调 _to_white_map"
+        assert calls["black2white"] == 2, "④⑥ 应各过 _black_bg_to_white 一次（仅黑底才转白）"
+        assert calls["white"] == 0, "③④⑥ 不应再调 _to_white_map 白底分支"
 
