@@ -1112,6 +1112,62 @@ def _build_calendar_error_payload(
     }
 
 
+def _resolve_ec_target_date(user_query: str, forecast_start_date: str, now: datetime) -> date | None:
+    """EC 回退需要的目标日历日：优先 forecast_start_date，否则从 user_query 显式日期解析。"""
+    if forecast_start_date:
+        try:
+            return _parse_date(forecast_start_date)
+        except Exception:
+            pass
+    dates = _extract_explicit_query_dates(user_query, now)
+    return dates[0] if dates else None
+
+
+def _build_ec_rain_fallback_payload(
+    sampled: dict, target: date, point_name: str, matched_region: str,
+    lon: float | None, lat: float | None, now: datetime,
+) -> dict:
+    """EC 降水回退的结构化载荷：只含降雨，气温/风/能见度超时效不提供（零编造）。"""
+    label = (point_name or matched_region or "指定点位").strip()
+    return {
+        "status": "ec_rain_fallback",
+        "query_mode": "calendar_ec_rain_point",
+        "data_source": "ECMWF AIFS",
+        "target_date": target.isoformat(),
+        "rain_mm": sampled["rain_mm"],
+        "window_start": sampled["window_start"].strftime("%Y-%m-%d %H:%M"),
+        "window_hours": sampled["window_hours"],
+        "point_name": label,
+        "query_point": _build_point_mode_query_point(True, lon, lat, point_name, matched_region),
+        "query_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "message": "该日期超出滚动预报未来 10 天时效，已改用 ECMWF AIFS 累计降水产品，仅提供降雨参考。",
+    }
+
+
+def _try_ec_rain_fallback(
+    user_query: str, forecast_start_date: str,
+    lon: float | None, lat: float | None,
+    point_name: str, matched_region: str, now: datetime,
+) -> dict | None:
+    """out_of_range + 点位模式时尝试 EC 降水回退；目标日无法解析或 EC 无数据返回 None。"""
+    target = _resolve_ec_target_date(user_query, forecast_start_date, now)
+    if target is None:
+        return None
+    try:
+        from haihe_mcp_tools import sample_ec_point_daily_rain  # 惰性 import 防循环
+    except Exception:
+        return None
+    try:
+        sampled = sample_ec_point_daily_rain(lon, lat, target)
+    except Exception:
+        return None
+    if sampled is None:
+        return None
+    return _build_ec_rain_fallback_payload(
+        sampled, target, point_name, matched_region, lon, lat, now
+    )
+
+
 def _cached_rolling_forecast_request(params: dict) -> dict:
     """带 TTL 缓存的滚动预报接口查询。
 
@@ -1222,6 +1278,12 @@ def query_rolling_forecast_core(
             historical_window, point_mode, region_names, lon, lat, point_name, matched_region, now
         )
     if calendar_error is not None:
+        if point_mode:
+            ec = _try_ec_rain_fallback(
+                user_query, forecast_start_date, lon, lat, point_name, matched_region, now
+            )
+            if ec is not None:
+                return ec
         return _build_calendar_error_payload(
             calendar_error, point_mode, region_names, lon, lat, point_name, matched_region, now
         )

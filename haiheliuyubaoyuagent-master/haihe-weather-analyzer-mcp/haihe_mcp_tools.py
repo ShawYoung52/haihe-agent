@@ -1744,6 +1744,54 @@ def ec_forecast_precip_files_by_horizon(
     return {f"{h}h": _find_ec_precip_file(ec_output_path, parsed_start, h) for h in hours}
 
 
+def _ec_daily_window_candidates(target_date) -> List[Tuple[datetime, int]]:
+    """target_date 当日 EC 累计降水产品的候选 (窗口起点BJT, 累计小时)，24h 优先。
+
+    EC 有效时次常见 02/08/14/20 BJT（18 UTC 起报 +8h 平移），也可能是 00/06/12/18；
+    故对 24h/12h/6h 各给一组当日起点候选，由 file-finder 逐个点名，首个命中即用。
+    """
+    base = datetime(target_date.year, target_date.month, target_date.day, tzinfo=TIANJIN_TIMEZONE)
+    cands: List[Tuple[datetime, int]] = []
+    for h in (8, 0, 14, 20, 2, 6, 12, 18):
+        cands.append((base + timedelta(hours=h), 24))
+    for h in (8, 20, 0, 12):
+        cands.append((base + timedelta(hours=h), 12))
+    for h in (8, 2, 14, 20, 0, 6, 12, 18):
+        cands.append((base + timedelta(hours=h), 6))
+    return cands
+
+
+def sample_ec_point_daily_rain(
+    lon: float,
+    lat: float,
+    target_date,
+    ec_output_path: str = DEFAULT_EC_OUTPUT_PATH,
+) -> Optional[Dict[str, Any]]:
+    """在 EC AIFS 累计降水栅格上采样 target_date 当日点雨量（mm）；找不到任何可用产品返回 None。
+
+    口径：候选窗口 24h 优先（_ec_daily_window_candidates），逐个点名 _find_ec_precip_file，
+    首个在点位采到非空值的产品即返回。文件缺失/采样异常/点位出界均跳过继续，绝不抛给调用方。
+    """
+    records = [{"Station_Id_C": "POI", "Lat": lat, "Lon": lon}]
+    for start_dt, hours in _ec_daily_window_candidates(target_date):
+        path = _find_ec_precip_file(ec_output_path, start_dt, hours)
+        if not path:
+            continue
+        try:
+            sampled = _sample_station_forecast_rain_mm(records, path)
+        except Exception:
+            continue
+        val = sampled.get("POI")
+        if val is not None:
+            return {
+                "rain_mm": float(val),
+                "window_start": start_dt,
+                "window_hours": hours,
+                "file": path,
+            }
+    return None
+
+
 def collect_ec_forecast_precip_files(
     start_time: str,
     ec_output_path: str = DEFAULT_EC_OUTPUT_PATH,
