@@ -470,7 +470,7 @@ def test_build_poi_reminder_section_hazard_points():
         },
     }
     text = dw_core._build_poi_reminder_section(facts)
-    assert "⚠ 注意事项" in text
+    assert "【注意事项】" in text
     # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议
     assert "风险研判" in text
     assert "| 地质灾害 | 1 处 |" in text
@@ -524,7 +524,7 @@ def test_build_poi_reminder_section_rain_risk_matrix():
         "periods": [],
         "hazard_points": base_hazard,
     })
-    assert "⚠ 注意事项" in dry
+    assert "【注意事项】" in dry
     assert "山区" in dry
     assert "风险低" not in dry
     assert "可正常出行" not in dry
@@ -647,9 +647,9 @@ async def test_decision_weather_answer_reminder_position():
 
     callbacks = {"ainvoke_chain": _fake_ainvoke_chain}
     result = await dw_core._generate_decision_weather_answer("天津大学未来24小时天气怎么样", facts, None, callbacks)
-    assert "⚠ 注意事项" in result
+    assert "【注意事项】" in result
     # 提醒位于数据来源之前
-    assert result.find("⚠ 注意事项") < result.find("数据来源：")
+    assert result.find("【注意事项】") < result.find("数据来源：")
     assert result.rstrip().endswith("数据来源：天津市气象台滚动预报。")
 
 
@@ -780,7 +780,7 @@ async def test_generate_decision_historical_answer_ok_title_and_no_reminder():
     )
     assert "【核心结论】" in text
     assert "【天津大学历史实况】" in text
-    assert "⚠ 注意事项" not in text  # 未传 poi_category/hazard_points 时不追加；有隐患上下文时见 *_with_hazard_reminder 用例
+    assert "【注意事项】" not in text  # 未传 poi_category/hazard_points 时不追加；有隐患上下文时见 *_with_hazard_reminder 用例
     assert "数据来源：自动站历史实况。" in text
     assert text.rstrip().endswith("数据来源：自动站历史实况。")
 
@@ -824,7 +824,7 @@ async def test_decision_historical_answer_prompt_wording():
     assert "实况/实际/当日" in captured["prompt"]
     assert "不得使用“预计/将/未来”" in captured["prompt"]
     assert "【天津大学历史实况】" in text
-    assert "⚠ 注意事项" not in text
+    assert "【注意事项】" not in text
 
 
 class FakePastForecastTool:
@@ -1003,7 +1003,7 @@ def test_build_poi_reminder_section_historical_wording():
         "hazard_points": None,
     }
     text = dw_core._build_poi_reminder_section(facts)
-    assert "⚠ 注意事项" in text
+    assert "【注意事项】" in text
     assert "当日实际有降雨" in text
     assert "当前预报时段内" not in text
     assert "预计" not in text
@@ -1047,7 +1047,7 @@ def test_build_poi_reminder_section_historical_hazard_table():
         },
     }
     text = dw_core._build_poi_reminder_section(facts)
-    assert "⚠ 注意事项" in text
+    assert "【注意事项】" in text
     assert "当日实际降雨约 30 毫米（大雨），周边灾害风险研判如下：" in text
     assert "| 地质灾害 | 2 处 |" in text
     assert "| 山洪 | 1 处 |" in text
@@ -1092,7 +1092,7 @@ async def test_generate_decision_historical_answer_with_hazard_reminder():
     )
     assert "【核心结论】" in text
     assert "【天津大学历史实况】" in text
-    assert "⚠ 注意事项" in text
+    assert "【注意事项】" in text
     assert "风险研判" in text
     assert "当日实际" in text
     assert "预计" not in text
@@ -1113,7 +1113,7 @@ async def test_query_decision_weather_for_poi_historical_routes_with_hazard():
 
     assert isinstance(result, str)
     assert "【天津大学历史实况】" in result
-    assert "⚠ 注意事项" in result
+    assert "【注意事项】" in result
     assert "风险研判" in result
     assert "当日实际" in result
     # 隐患工具收到点位坐标
@@ -1164,7 +1164,7 @@ async def test_fast_path_routes_to_historical_with_hazard(monkeypatch):
     service = dw_fp.DecisionWeatherQAService(answer_chain, list(fake_tools.values()), callbacks, runtime)
     handled = await service.try_handle("8月10号天津大学天气怎么样", [])
     assert handled is True
-    assert "⚠ 注意事项" in emitted["text"]
+    assert "【注意事项】" in emitted["text"]
     assert "风险研判" in emitted["text"]
     assert "当日实际" in emitted["text"]
     assert hazard_tool.last_args is not None
@@ -1202,9 +1202,9 @@ class TestPoiReminderExtended:
     def test_reservoir_water_level_reminder(self):
         facts = {
             "poi_category": "reservoir",
-            "has_rain_signal": False,
+            "has_rain_signal": True,
             "periods": [],
-            "total_rain_mm": None,
+            "total_rain_mm": 1.0,
             "water_level_info": {
                 "reservoir_name": "密云水库",
                 "water_level_m": "133.5",
@@ -1227,10 +1227,35 @@ class TestPoiReminderExtended:
         assert "保障港口生产航行安全" in out
 
     def test_reservoir_without_water_info_no_crash(self):
+        # 无降雨 + 无水位数据 → 水库模板不触发（防"无明显降雨"与"水位上涨"矛盾），
+        # 无编造内容，整段为空。
         facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
         out = dw_core._build_poi_reminder_section(facts)
-        assert "水库区域" in out
+        assert out == ""
+        assert "水库区域" not in out
         assert "库上水位" not in out, "无水位数据时不应编造水位"
+
+    def test_reservoir_no_rain_with_water_info_shows_only_levels(self):
+        # 无降雨但有水位数据：只给实际水位（不编造、不与"无明显降雨"结论矛盾），不要降雨模板。
+        facts = {
+            "poi_category": "reservoir",
+            "has_rain_signal": False,
+            "periods": [],
+            "total_rain_mm": None,
+            "water_level_info": {
+                "reservoir_name": "密云水库",
+                "water_level_m": "133.5",
+                "flood_limit_m": "152.0",
+                "storage": "12.3",
+                "outflow_m3s": "45.0",
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "【注意事项】" in out
+        assert "1. 目前密云水库库上水位约 133.5 米（汛限水位 152.0 米）" in out
+        assert "2. 蓄水量约 12.3 百万立方米" in out
+        assert "3. 出库流量约 45.0 立方米/秒" in out
+        assert "降雨引起的水位上涨" not in out, "无降雨时不应警告水位上涨"
 
 
 class TestFetchWaterLevel:
@@ -1472,3 +1497,105 @@ class TestDecisionTargetDayScoping:
         night = {"start_time": "2026-08-24 20:00", "end_time": "2026-08-25 08:00"}
         assert dw_core._decision_period_label(day) == "8月24日白天"
         assert dw_core._decision_period_label(night) == "8月24日夜间"
+
+
+class TestUniformPerdayCollapse:
+    """多日天气相同/均无雨时，核心结论不逐日重复（防死板）。"""
+
+    def test_uniform_no_rain_collapsed(self):
+        answer = "【核心结论】未来三天密云水库无明显降雨。8月20日密云水库无明显降雨，21日无明显降雨，22日无明显降雨。"
+        core = dw_core._decision_core_only(answer, "未来三天密云水库有降水吗", max_sentences=4)
+        assert core == "未来三天密云水库无明显降雨。"
+        assert core.count("无明显降雨") == 1
+
+    def test_varied_days_kept(self):
+        answer = "【核心结论】未来三天多阵性降水。20日多云转阴，21日雷阵雨，22日雷阵雨转阴。"
+        core = dw_core._decision_core_only(answer, "未来三天天气", max_sentences=4)
+        assert "21日雷阵雨" in core and "22日雷阵雨转阴" in core
+
+    def test_uniform_detector(self):
+        assert dw_core._uniform_perday_descriptor("20日晴，21日晴，22日晴") == "晴"
+        assert dw_core._uniform_perday_descriptor("20日多云转阴，21日雷阵雨") is None
+
+
+class TestReminderNumbering:
+    """注意事项用【注意事项】标题 + 1. 2. 3. 编号。"""
+
+    def test_reservoir_items_numbered(self):
+        facts = {
+            "poi_category": "reservoir", "has_rain_signal": True,
+            "periods": [{"weather": "小雨", "rain_1h": 1.0, "EDA": "南风1-2级"}],
+            "total_rain_mm": 1.0,
+            "water_level_info": {
+                "reservoir_name": "密云水库白河坝上", "water_level_m": 150.23,
+                "flood_limit_m": 154.0, "storage": 2762.3, "outflow_m3s": 44.7,
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert out.startswith("【注意事项】")
+        assert "1. 水库区域请注意降雨引起的水位上涨" in out
+        assert "2. 目前密云水库白河坝上库上水位约 150.23 米（汛限水位 154.0 米）" in out
+        assert "3. 蓄水量约 2762.3 百万立方米" in out
+        assert "4. 出库流量约 44.7 立方米/秒" in out
+
+    def test_port_items_numbered(self):
+        periods = [
+            {"weather": "多云转阴有轻雾", "rain_1h": 0.0, "start_time": "2026-08-20 08:00", "end_time": "2026-08-21 08:00"},
+            {"weather": "雷阵雨", "rain_1h": 2.6, "start_time": "2026-08-21 08:00", "end_time": "2026-08-22 08:00"},
+        ]
+        facts = {"poi_category": "port", "has_rain_signal": True, "periods": periods, "total_rain_mm": 2.6}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert out.startswith("【注意事项】")
+        # 轻雾 / 雷阵雨 / 系泊 / 码头湿滑 / 跟踪预警 各占一条编号
+        numbered = [line for line in out.splitlines() if line[:2] in ("1.", "2.", "3.", "4.", "5.")]
+        assert numbered[0].startswith("1. ") and "加强瞭望" in numbered[0]
+        assert any(line.startswith("2. ") for line in numbered)
+        assert any("适时调整缆绳" in line for line in numbered)
+
+    def test_mountain_rain_numbered(self):
+        facts = {"poi_category": "mountain", "has_rain_signal": True,
+                 "periods": [{"weather": "阴转小雨", "rain_1h": 2.0}], "total_rain_mm": 2.0}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert out.startswith("【注意事项】")
+        assert "1. 受降雨影响" in out and "2. 山区降雨易造成步道湿滑" in out
+
+
+class TestUnwrapToolResultHeuristic:
+    """普通 Markdown 字符串不再误报 JSON 解析失败；真正的 JSON 字符串仍正常解析。"""
+
+    def test_markdown_string_returned_as_is(self, capsys):
+        from utils.tool_result import _unwrap_tool_result
+        text = "【核心结论】未来三天密云水库无明显降雨。"
+        out = _unwrap_tool_result(text)
+        assert out == text
+        captured = capsys.readouterr()
+        assert "JSON 解析失败" not in captured.out
+
+    def test_json_string_still_parsed(self):
+        from utils.tool_result import _unwrap_tool_result
+        out = _unwrap_tool_result('{"status": "ok"}')
+        assert out == {"status": "ok"}
+
+    def test_malformed_json_still_warns(self, capsys):
+        from utils.tool_result import _unwrap_tool_result
+        out = _unwrap_tool_result('{"status": "ok"')
+        assert out == '{"status": "ok"'
+        assert "JSON 解析失败" in capsys.readouterr().out
+
+
+class TestReservoirNoRainReminder:
+    """水库无降雨时不警告"降雨引起的水位上涨"（避免与结论矛盾），水位数值仍展示。"""
+
+    def test_no_rain_reservoir_skips_rain_warning(self):
+        facts = {
+            "poi_category": "reservoir", "has_rain_signal": False,
+            "periods": [{"weather": "晴", "rain_1h": 0.0, "EDA": "南风1-2级"}],
+            "total_rain_mm": 0.0,
+            "water_level_info": {
+                "reservoir_name": "密云水库", "water_level_m": 150.23,
+                "flood_limit_m": 154.0,
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "降雨引起的水位上涨" not in out  # 无雨不再警告雨致上涨
+        assert "1. 目前密云水库库上水位约 150.23 米（汛限水位 154.0 米）" in out  # 水位照常

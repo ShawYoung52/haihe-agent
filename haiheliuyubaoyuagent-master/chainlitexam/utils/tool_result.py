@@ -26,11 +26,15 @@ def _unwrap_tool_result(raw_result: Any) -> Any:
         data = data[0]["text"]
 
     if isinstance(data, str):
-        try:
-            return json.loads(data)
-        except Exception as _parse_err:
-            print(f"[tool_result] JSON 解析失败，按原字符串返回：{_parse_err}")
-            return data
+        stripped = data.lstrip()
+        # 只有"看起来像 JSON"的字符串才尝试解析（以 { 或 [ 开头）。普通文本（如决策天气的
+        # Markdown 答案）直接按原字符串返回，不再误报"JSON 解析失败"刷日志。
+        if stripped[:1] in ("{", "["):
+            try:
+                return json.loads(data)
+            except Exception as _parse_err:
+                print(f"[tool_result] JSON 解析失败，按原字符串返回：{_parse_err}")
+        return data
 
     return data
 

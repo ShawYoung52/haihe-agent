@@ -22,7 +22,7 @@ class TestMountainActivityReminder:
             "明天适合去蓟州游玩吗", {"daily_summary": _daily("阴转小雨", 5.0)}
         )
         section = bundle["code_section"]
-        assert "⚠ 注意事项" in section
+        assert "【注意事项】" in section
         assert "不建议登山、溯溪、野外徒步" in section
         assert "山洪、落石隐患" in section
         assert "防滑鞋" in section
@@ -45,4 +45,4 @@ class TestMountainActivityReminder:
         bundle = rfr.build_rolling_forecast_bundle(
             "明天去盘山游玩合适吗", {"daily_summary": _daily("晴", 0.0)}
         )
-        assert "⚠ 注意事项" in bundle["code_section"]
+        assert "【注意事项】" in bundle["code_section"]

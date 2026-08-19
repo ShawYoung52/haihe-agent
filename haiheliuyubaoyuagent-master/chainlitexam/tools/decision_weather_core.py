@@ -1015,6 +1015,48 @@ def _build_decision_weather_table(user_text: str, facts: dict) -> str:
     return "\n".join(lines)
 
 
+def _uniform_perday_descriptor(sentence: str) -> str | None:
+    """判断一句是否为"逐日重复同一天气"的冗余枚举（如"20日无明显降雨，21日无明显降雨，22日无明显降雨"）。
+
+    每个分句须形如 "（M月）D日<描述>"，且所有描述的最长公共后缀 ≥2 字
+    （容忍首句多带地点前缀，如"8月20日密云水库无明显降雨" vs "21日无明显降雨"）。
+    每天天气不同（多云转阴/雷阵雨/…无公共后缀）时返回 None，不判冗余。
+    """
+    clauses = [c.strip() for c in re.split(r"[，,；;]", sentence.strip().rstrip("。")) if c.strip()]
+    if len(clauses) < 2:
+        return None
+    descriptors: list[str] = []
+    for clause in clauses:
+        match = re.match(r"^(?:\d{1,2}月)?\d{1,2}日\s*(.+)$", clause)
+        if not match:
+            return None
+        descriptors.append(match.group(1).strip())
+    # 逐字完全相同 → 必冗余（如"20日晴，21日晴，22日晴"）
+    if len(set(descriptors)) == 1:
+        return descriptors[0]
+    # 否则看最长公共后缀 ≥2 字（容忍首句多带地点前缀）；单字公共后缀（如"多云/少云"共有的"云"）
+    # 不判冗余，防把不同天气误并。
+    suffix = descriptors[0]
+    for desc in descriptors[1:]:
+        while suffix and not desc.endswith(suffix):
+            suffix = suffix[1:]
+        if not suffix:
+            return None
+    return suffix if len(suffix) >= 2 else None
+
+
+def _drop_uniform_perday_sentences(sentences: list[str]) -> list[str]:
+    """保留首句（总述）；剔除后续"逐日重复同一天气"的冗余枚举句。"""
+    if len(sentences) <= 1:
+        return sentences
+    kept = [sentences[0]]
+    for sentence in sentences[1:]:
+        if _uniform_perday_descriptor(sentence) is not None:
+            continue
+        kept.append(sentence)
+    return kept
+
+
 def _polish_decision_core(core: str) -> str:
     """核心结论措辞/细节净化（仅预报路径）：统一专业表述、剔除 unsolicited 细节。
 
@@ -1056,9 +1098,12 @@ def _decision_core_only(answer: Any, user_text: str = "", max_sentences: int = 1
         and not line.strip().startswith(("数据来源：", "数据来源:"))
     ]
     normalized = re.sub(r"\s+", " ", " ".join(kept_lines)).strip()
-    sentences = re.findall(r"[^。！？!?]+[。！？!?](?:[”’」』])?", normalized)
+    sentences = [s.strip() for s in re.findall(r"[^。！？!?]+[。！？!?](?:[”’」』])?", normalized)]
     if sentences:
-        core = "".join(sentences[: max(1, max_sentences)]).strip()
+        sentences = sentences[: max(1, max_sentences)]
+        # 多日天气相同/均无雨时，剔除"逐日重复同一天气"的冗余枚举句（防死板逐日重复）。
+        sentences = _drop_uniform_perday_sentences(sentences)
+        core = "".join(sentences).strip()
     else:
         core = normalized
     return _polish_decision_core(sanitize_forecast_core_summary(core, user_text))
@@ -1351,7 +1396,7 @@ def _decision_mountain_reminder_lines(facts: dict) -> list[str]:
 
 
 def _build_poi_reminder_section(facts: dict) -> str:
-    """根据点位类别 + 周边隐患点确定性生成“⚠️ 注意事项”段落。
+    """根据点位类别 + 周边隐患点确定性生成“【注意事项】”段落（条目 1. 2. 3. 编号）。
 
     无可展示内容（既无类别模板、也无降雨期隐患点）时返回空串。
     隐患点只在预报有降雨时提醒（有降雨才存在诱发风险），且只给类型+数量汇总表，
@@ -1374,14 +1419,15 @@ def _build_poi_reminder_section(facts: dict) -> str:
     is_historical = _decision_is_historical_facts(facts)
     day_label = _decision_historical_day_label(facts) if is_historical else ""
 
-    lines: list[str] = ["⚠ 注意事项"]
+    items: list[str] = []   # 编号文本条目（1. 2. 3. ...）
+    tables: list[str] = []  # 独立表格（不编号）
     if category:
         periods = [p for p in (facts.get("periods") or []) if isinstance(p, dict)]
         # 港口/山区走确定性分现象/分风险的多句注意事项（参照用户确认范例），不用单行模板。
         if category == "port":
-            lines.extend(_decision_port_reminder_lines(periods, is_historical))
+            items.extend(_decision_port_reminder_lines(periods, is_historical))
         elif category == "mountain":
-            lines.extend(_decision_mountain_reminder_lines(facts))
+            items.extend(_decision_mountain_reminder_lines(facts))
         else:
             template = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
             if template:
@@ -1405,7 +1451,9 @@ def _build_poi_reminder_section(facts: dict) -> str:
                     min_vis = _decision_min_visibility_km(periods)
                     if not clauses and min_vis is not None and min_vis < 1.0:
                         clauses.append("能见度较低，出行请注意交通安全。")
-                lines.append(template + (clauses[0] if clauses else ""))
+                # 水库模板专指"降雨引起的水位上涨"——无降雨时不警告（否则与"无明显降雨"结论矛盾）。
+                if not (category == "reservoir" and not clauses):
+                    items.append(template + (clauses[0] if clauses else ""))
 
         # 水库：追加 14所 接口实际水位（数值来自 facts.water_level_info，不编造）
         if category == "reservoir":
@@ -1416,11 +1464,11 @@ def _build_poi_reminder_section(facts: dict) -> str:
                 wl_line = f"目前{water_info.get('reservoir_name') or '水库'}库上水位约 {wl} 米"
                 if fl is not None:
                     wl_line += f"（汛限水位 {fl} 米）"
-                lines.append(wl_line)
+                items.append(wl_line)
                 if water_info.get("storage") is not None:
-                    lines.append(f"蓄水量约 {water_info['storage']} 百万立方米")
+                    items.append(f"蓄水量约 {water_info['storage']} 百万立方米")
                 if water_info.get("outflow_m3s") is not None:
-                    lines.append(f"出库流量约 {water_info['outflow_m3s']} 立方米/秒")
+                    items.append(f"出库流量约 {water_info['outflow_m3s']} 立方米/秒")
 
     if show_hazard:
         categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []
@@ -1438,27 +1486,30 @@ def _build_poi_reminder_section(facts: dict) -> str:
             # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
             intensity_label = _RAIN_INTENSITY_LEVELS.get(intensity, "无明显降雨")
             if mm is not None and mm > 0:
-                lines.append(
+                items.append(
                     f"{day_label}实际降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：" if is_historical
                     else f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下："
                 )
             else:
-                lines.append(
+                items.append(
                     f"{day_label}实际为{intensity_label}，周边灾害风险研判如下：" if is_historical
                     else f"预计未来为{intensity_label}，周边灾害风险研判如下："
                 )
-            lines.append("")
-            lines.append("| 隐患类型 | 数量 | 风险研判 | 防范建议 |")
-            lines.append("| --- | --- | --- | --- |")
+            table_rows = ["| 隐患类型 | 数量 | 风险研判 | 防范建议 |", "| --- | --- | --- | --- |"]
             for key in ("dzzh", "sh", "zxhl"):
                 if key not in hazard_counts:
                     continue
                 label, count = hazard_counts[key]
                 risk, advice = _HAZARD_RAIN_RISK[key][intensity]
-                lines.append(f"| {label} | {count} 处 | {risk} | {advice} |")
-            lines.append("")
+                table_rows.append(f"| {label} | {count} 处 | {risk} | {advice} |")
+            tables.append("\n".join(table_rows))
 
-    return "\n".join(line.rstrip() for line in lines).strip()
+    if not items and not tables:
+        return ""
+    parts = ["【注意事项】"]
+    parts.extend(f"{index}. {item}" for index, item in enumerate(items, 1))
+    parts.extend(tables)
+    return "\n\n".join(part.rstrip() for part in parts if str(part).strip()).strip()
 
 
 async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_chain: Any, callbacks: dict) -> str:
@@ -1490,9 +1541,10 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "请仅依据下面 JSON 中的业务天气事实回答用户问题。不要编造未返回的天气、雨量、温度、风力或能见度。\n"
         "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
         + historical_note
-        + "只输出【核心结论】及其正文。逐日（多日）预报时按天分述天气，每天一句"
+        + "只输出【核心结论】及其正文。逐日（多日）预报且每天天气不同时，按天分述，每天一句"
         "（如“20日多云转阴，21日雷阵雨，22日雷阵雨转阴”），不要把多天的天气合并成“前期…后期…”一句；"
-        "单日预报正文一句即可。只围绕用户明确询问的"
+        "若多日天气相同或均为无降雨，一句话概括即可，不要逐日重复相同内容。单日预报正文一句即可。"
+        "只围绕用户明确询问的"
         "降雨、天气、气温、风力、能见度或活动适宜性直接作答，不主动扩展无关风险、背景或建议。\n"
         "表示没有降雨时统一用“无明显降雨”，不要用“预计不会下雨/不会下雨/无降雨/无降水”。\n"
         "不要在结论中提及能见度具体数值（如“能见度最低降至X千米”）或累计降水量具体数值"
