@@ -1,4 +1,4 @@
-(() => {
+(function () {
   const PREFIX = "[GIS_FRONTEND]";
 
   function safeParse(jsonStr) {
@@ -13,12 +13,12 @@
     const socket = window.socket;
     if (!socket || socket.__gisPatched) return false;
 
-    const originalOnevent = socket.onevent?.bind(socket);
+    const originalOnevent = socket.onevent ? socket.onevent.bind(socket) : null;
     if (!originalOnevent) return false;
 
     socket.onevent = function (packet) {
       try {
-        const args = packet?.data || [];
+        const args = packet ? packet.data || [] : [];
         const event = args[0];
         const payload = args[1];
 
@@ -27,95 +27,99 @@
           event === "gis_linkage" ||
           event === "gis_linkage_broadcast"
         ) {
-          const msg = payload?.message;
-          console.log(`${PREFIX} event=${event} payload=`, payload);
-          console.log(`${PREFIX} typeof payload.message =`, typeof msg);
+          const msg = payload ? payload.message : undefined;
+          console.log(PREFIX + " event=" + event + " payload=", payload);
+          console.log(PREFIX + " typeof payload.message =", typeof msg);
 
           if (typeof msg === "string") {
             const parsed = safeParse(msg);
-            console.log(`${PREFIX} parsed json =`, parsed ?? msg);
+            console.log(PREFIX + " parsed json =", parsed !== null ? parsed : msg);
 
             // 转发给 iframe 外层页面（父页面可以直接 window.addEventListener('message') 接收）
             try {
-              window.parent?.postMessage(
-                {
-                  type: "gis_linkage",
-                  source: "chainlit",
-                  event,
-                  payload: parsed ?? msg,
-                  raw: msg,
-                },
-                "*"
-              );
+              if (window.parent) {
+                window.parent.postMessage(
+                  {
+                    type: "gis_linkage",
+                    source: "chainlit",
+                    event: event,
+                    payload: parsed !== null ? parsed : msg,
+                    raw: msg,
+                  },
+                  "*"
+                );
+              }
             } catch (e) {
-              console.warn(`${PREFIX} postMessage failed`, e);
+              console.warn(PREFIX + " postMessage failed", e);
             }
           }
         }
       } catch (e) {
-        console.warn(`${PREFIX} inspect socket event failed`, e);
+        console.warn(PREFIX + " inspect socket event failed", e);
       }
 
       return originalOnevent(packet);
     };
 
     socket.__gisPatched = true;
-    console.log(`${PREFIX} socket hook installed`);
+    console.log(PREFIX + " socket hook installed");
     return true;
   }
 
   function forwardToParent(event, msg) {
     const parsed = typeof msg === "string" ? safeParse(msg) : null;
-    console.log(`${PREFIX} event=${event}`);
-    console.log(`${PREFIX} typeof message =`, typeof msg);
-    console.log(`${PREFIX} parsed json =`, parsed ?? msg);
+    console.log(PREFIX + " event=" + event);
+    console.log(PREFIX + " typeof message =", typeof msg);
+    console.log(PREFIX + " parsed json =", parsed !== null ? parsed : msg);
     try {
-      window.parent?.postMessage(
-        {
-          type: "gis_linkage",
-          source: "chainlit",
-          event,
-          payload: parsed ?? msg,
-          raw: msg,
-        },
-        "*"
-      );
+      if (window.parent) {
+        window.parent.postMessage(
+          {
+            type: "gis_linkage",
+            source: "chainlit",
+            event: event,
+            payload: parsed !== null ? parsed : msg,
+            raw: msg,
+          },
+          "*"
+        );
+      }
     } catch (e) {
-      console.warn(`${PREFIX} postMessage failed`, e);
+      console.warn(PREFIX + " postMessage failed", e);
     }
   }
 
   // 仅复用 Chainlit 页面内部 socket（不创建匿名 socket，避免 400/认证报错）
   let tries = 0;
-  const timer = setInterval(() => {
+  const timer = setInterval(function () {
     tries += 1;
     if (patchSocketEmit() || tries > 120) {
       clearInterval(timer);
       if (tries > 120) {
-        console.warn(`${PREFIX} page socket not found, hook skipped`);
+        console.warn(PREFIX + " page socket not found, hook skipped");
       }
     }
   }, 500);
 })();
 
 // =====================================================================
-// 图片滚轮缩放看图器（2026-08-19 用户要求：点开长图后可用滚轮放大/缩小）
-// 纯前端注入：点聊天里的大图 → 全屏看图层；滚轮缩放（以鼠标为缩放中心）、
-// 按住拖拽平移、双击复位（再次双击放大 2.5x）、Esc/✕/点击背景关闭。
-// 对话内图片原本展示不变，仅在点开后提供缩放平移。
-// 只对较大的内容图启用（头像/图标按尺寸过滤），不依赖 Chainlit 内部类名。
+// 图片滚轮缩放看图器 v2（2026-08-19，兼容加固版）
+// 兼容性：无可选链/无 ?. 新语法；指针事件不可用时自动退化为鼠标事件；
+// 图片加载成功才显示遮罩，加载失败自动用新标签页打开原图（绝不黑屏）。
+// 页面加载后短暂显示绿色"看图器已启用"角标，便于肉眼确认 JS 已生效。
 // =====================================================================
-(() => {
-  const PREFIX = "[IMG_ZOOM]";
-  const MIN_NATURAL = 90; // 长宽都小于该像素的图（头像/小图标）不启用
-  const MAX_ZOOM = 8;
+(function () {
+  var PREFIX = "[IMG_ZOOM]";
+  var MIN_NATURAL = 90; // 实际渲染尺寸小于该像素的图（头像/图标）不启用
+  var MAX_ZOOM = 8;
+  var HAS_POINTER = typeof window.PointerEvent !== "undefined";
 
-  let v = null; // 看图器 DOM + 状态（懒创建，首次点图时才有）
+  var v = null; // 看图器 DOM + 状态（懒创建，首次点图时才有）
 
   function ensureViewer() {
     if (v) return v;
 
-    const overlay = document.createElement("div");
+    var overlay = document.createElement("div");
     overlay.className = "img-zoom-viewer";
     overlay.setAttribute("role", "dialog");
     overlay.style.cssText = [
@@ -126,7 +130,7 @@
       "cursor:grab;",
     ].join("");
 
-    const img = document.createElement("img");
+    var img = document.createElement("img");
     img.alt = "";
     img.draggable = false;
     img.style.cssText = [
@@ -136,7 +140,7 @@
       "background:#fff;", // 长图多为白底，避免图片透明边缘露黑
     ].join("");
 
-    const btn = document.createElement("button");
+    var btn = document.createElement("button");
     btn.textContent = "✕";
     btn.title = "关闭 (Esc)";
     btn.setAttribute("aria-label", "关闭看图器");
@@ -153,19 +157,27 @@
 
     // 状态：z=缩放倍数(1..MAX_ZOOM)，tx/ty=平移 px；图片以原始像素布局，再整体
     // transform: translate(tx,ty) scale(fit*z)，其中 fit=1x 时适合屏幕的系数。
-    const st = { z: 1, tx: 0, ty: 0 };
-    let fit = 1, baseW = 0, baseH = 0, drag = null, open = false, dragged = false;
+    var st = { z: 1, tx: 0, ty: 0 };
+    var fit = 1,
+      baseW = 0,
+      baseH = 0,
+      drag = null,
+      open = false,
+      dragged = false,
+      loadTimer = null;
 
-    const apply = () => {
-      img.style.transform = `translate(${st.tx}px, ${st.ty}px) scale(${fit * st.z})`;
+    function apply() {
+      img.style.transform = "translate(" + st.tx + "px, " + st.ty + "px) scale(" + (fit * st.z) + ")";
       overlay.style.cursor = drag ? "grabbing" : "grab";
-    };
-    const clampZ = (x) => Math.max(1, Math.min(MAX_ZOOM, x));
-    const center = () => {
+    }
+    function clampZ(x) {
+      return Math.max(1, Math.min(MAX_ZOOM, x));
+    }
+    function center() {
       st.tx = (overlay.clientWidth - baseW * fit * st.z) / 2;
       st.ty = (overlay.clientHeight - baseH * fit * st.z) / 2;
-    };
-    const layout = () => {
+    }
+    function layout() {
       baseW = img.naturalWidth || 1;
       baseH = img.naturalHeight || 1;
       fit = Math.min(overlay.clientWidth / baseW, overlay.clientHeight / baseH);
@@ -173,23 +185,35 @@
       img.style.height = baseH + "px";
       center();
       apply();
-    };
-    const close = () => {
+    }
+    function close() {
       if (!open) return;
       open = false;
       drag = null;
       dragged = false;
+      if (loadTimer) {
+        clearTimeout(loadTimer);
+        loadTimer = null;
+      }
       overlay.style.display = "none";
-      document.body.style.overflow = v?._savedOverflow ?? "";
+      document.body.style.overflow = (v && v._savedOverflow) || "";
       document.removeEventListener("keydown", onKey, true);
-    };
+    }
     function onKey(e) {
       if (e.key === "Escape") {
-        e.preventDefault();
+        if (e.preventDefault) e.preventDefault();
         close();
       }
     }
-    const openWith = (src) => {
+    function fallbackOpen(src) {
+      // 图片加载失败/超时：改用新标签页打开原图，保证用户永远能看到图
+      try {
+        window.open(src, "_blank");
+      } catch (e) {
+        console.warn(PREFIX + " window.open fallback failed", e);
+      }
+    }
+    function openWith(src) {
       v._savedOverflow = document.body.style.overflow;
       open = true;
       drag = null;
@@ -197,53 +221,110 @@
       document.body.style.overflow = "hidden";
       document.addEventListener("keydown", onKey, true);
       overlay.style.display = "flex";
+
+      img.onload = function () {
+        if (loadTimer) {
+          clearTimeout(loadTimer);
+          loadTimer = null;
+        }
+        layout();
+      };
+      img.onerror = function () {
+        if (loadTimer) {
+          clearTimeout(loadTimer);
+          loadTimer = null;
+        }
+        close();
+        fallbackOpen(src);
+      };
       img.src = src;
-      img.onload = layout;
-      if (img.complete && img.naturalWidth) layout();
-    };
+      if (img.complete && img.naturalWidth) {
+        if (loadTimer) {
+          clearTimeout(loadTimer);
+          loadTimer = null;
+        }
+        layout();
+      } else {
+        // 8 秒仍未加载完成（既没 load 也没 error）→ 兜底打开原图，避免卡在黑屏
+        loadTimer = setTimeout(function () {
+          if (!open) return;
+          if (!img.complete || !img.naturalWidth) {
+            close();
+            fallbackOpen(src);
+          }
+        }, 8000);
+      }
+    }
 
-    overlay.addEventListener(
-      "wheel",
-      (e) => {
-        if (!open) return;
+    function onWheel(e) {
+      if (!open) return;
+      var deltaY = typeof e.deltaY !== "undefined" ? e.deltaY : e.wheelDelta;
+      var up = deltaY < 0;
+      if (e.preventDefault) {
         e.preventDefault();
-        const zNew = clampZ(st.z * (e.deltaY < 0 ? 1.18 : 1 / 1.18));
-        if (zNew === st.z) return;
-        // 保持鼠标下方的图像点不动
-        const px = (e.clientX - st.tx) / (fit * st.z);
-        const py = (e.clientY - st.ty) / (fit * st.z);
-        st.z = zNew;
-        st.tx = e.clientX - px * fit * st.z;
-        st.ty = e.clientY - py * fit * st.z;
-        apply();
-      },
-      { passive: false }
-    );
+      } else {
+        e.returnValue = false;
+      }
+      var zNew = clampZ(st.z * (up ? 1.18 : 1 / 1.18));
+      if (zNew === st.z) return;
+      var cx = e.clientX,
+        cy = e.clientY;
+      var px = (cx - st.tx) / (fit * st.z);
+      var py = (cy - st.ty) / (fit * st.z);
+      st.z = zNew;
+      st.tx = cx - px * fit * st.z;
+      st.ty = cy - py * fit * st.z;
+      apply();
+    }
 
-    overlay.addEventListener("pointerdown", (e) => {
+    function onDown(e) {
       if (!open) return;
       drag = { px: e.clientX, py: e.clientY, ox: st.tx, oy: st.ty };
       dragged = false;
-      overlay.setPointerCapture(e.pointerId);
-    });
-    overlay.addEventListener("pointermove", (e) => {
-      if (open && drag) {
-        st.tx = drag.ox + (e.clientX - drag.px);
-        st.ty = drag.oy + (e.clientY - drag.py);
-        if (Math.abs(e.clientX - drag.px) + Math.abs(e.clientY - drag.py) > 3) dragged = true;
-        apply();
+      if (overlay.setPointerCapture && typeof e.pointerId !== "undefined") {
+        try {
+          overlay.setPointerCapture(e.pointerId);
+        } catch (err) {
+          /* 老浏览器无此能力，忽略 */
+        }
       }
-    });
-    const endDrag = () => {
+    }
+    function onMove(e) {
+      if (!open || !drag) return;
+      st.tx = drag.ox + (e.clientX - drag.px);
+      st.ty = drag.oy + (e.clientY - drag.py);
+      if (Math.abs(e.clientX - drag.px) + Math.abs(e.clientY - drag.py) > 3) dragged = true;
+      apply();
+    }
+    function endDrag() {
       if (drag) {
         drag = null;
         apply();
       }
-    };
-    overlay.addEventListener("pointerup", endDrag);
-    overlay.addEventListener("pointercancel", endDrag);
+    }
 
-    overlay.addEventListener("dblclick", (e) => {
+    // 滚轮：现代浏览器用 wheel，老浏览器/IE 用 mousewheel
+    if ("onwheel" in document) {
+      overlay.addEventListener("wheel", onWheel, { passive: false });
+    } else if ("onmousewheel" in document) {
+      overlay.addEventListener("mousewheel", onWheel);
+    } else if (document.addEventListener) {
+      overlay.addEventListener("DOMMouseScroll", onWheel);
+    }
+
+    // 拖拽：优先指针事件，老浏览器退化鼠标事件
+    if (HAS_POINTER) {
+      overlay.addEventListener("pointerdown", onDown);
+      overlay.addEventListener("pointermove", onMove);
+      overlay.addEventListener("pointerup", endDrag);
+      overlay.addEventListener("pointercancel", endDrag);
+    } else {
+      overlay.addEventListener("mousedown", onDown);
+      overlay.addEventListener("mousemove", onMove);
+      overlay.addEventListener("mouseup", endDrag);
+    }
+
+    overlay.addEventListener("dblclick", function (e) {
       if (!open) return;
       if (st.z > 1.01) {
         st.z = 1;
@@ -251,8 +332,8 @@
         apply();
       } else {
         st.z = clampZ(2.5);
-        const px = (e.clientX - st.tx) / (fit * st.z);
-        const py = (e.clientY - st.ty) / (fit * st.z);
+        var px = (e.clientX - st.tx) / (fit * st.z);
+        var py = (e.clientY - st.ty) / (fit * st.z);
         st.tx = e.clientX - px * fit * st.z;
         st.ty = e.clientY - py * fit * st.z;
         apply();
@@ -260,23 +341,23 @@
     });
 
     // 点击背景（图片矩形以外的遮罩）关闭；拖拽结束产生的 click 要吞掉，不能误关。
-    // 注意不能用 e.target 判断：setPointerCapture 会把 click 重定向到 overlay，
+    // 不能用 e.target 判断：setPointerCapture/指针事件会把 click 重定向到 overlay，
     // 必须按坐标反算点击点是否落在图片矩形内。
-    overlay.addEventListener("click", (e) => {
+    overlay.addEventListener("click", function (e) {
       if (dragged) {
         dragged = false;
         return;
       }
-      const ix = (e.clientX - st.tx) / (fit * st.z);
-      const iy = (e.clientY - st.ty) / (fit * st.z);
+      var ix = (e.clientX - st.tx) / (fit * st.z);
+      var iy = (e.clientY - st.ty) / (fit * st.z);
       if (ix < 0 || iy < 0 || ix > baseW || iy > baseH) close();
     });
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
+    btn.addEventListener("click", function (e) {
+      if (e.stopPropagation) e.stopPropagation();
       close();
     });
 
-    v = { overlay, img, btn, openWith };
+    v = { overlay: overlay, img: img, btn: btn, openWith: openWith };
     return v;
   }
 
@@ -297,34 +378,58 @@
     }
     if (/\.svg(\?|#|$)/i.test(img.src)) return; // 图标不启用
 
-    const arm = () => {
+    function arm() {
       if (img.dataset.imgZoom === "1") return;
       if (!img.naturalWidth || !img.naturalHeight) return;
-      // 按【实际渲染尺寸】判断：头像/图标等 asset 的自然尺寸可能很大（如 928x928），
+      // 按【实际渲染尺寸】判断：头像等 asset 的自然尺寸可能很大（如 928x928），
       // 但实际只显示 20px——自然尺寸过滤会误挂。渲染尺寸为 0（未布局）时退回自然尺寸。
-      const r = img.getBoundingClientRect();
-      const disp = Math.max(r.width, r.height);
-      const natural = Math.max(img.naturalWidth, img.naturalHeight);
+      var r = img.getBoundingClientRect();
+      var disp = Math.max(r.width, r.height);
+      var natural = Math.max(img.naturalWidth, img.naturalHeight);
       if (disp > 0 ? disp < MIN_NATURAL : natural < MIN_NATURAL) return;
       img.dataset.imgZoom = "1";
       img.style.cursor = "zoom-in";
       img.addEventListener(
         "click",
-        (e) => {
-          e.preventDefault();
-          e.stopPropagation(); // 截获，避免 Chainlit 默认看图器也打开
+        function (e) {
+          if (e.preventDefault) e.preventDefault();
+          if (e.stopPropagation) e.stopPropagation(); // 截获，避免 Chainlit 默认看图器也打开
           openViewer(img.currentSrc || img.src);
         },
         true
       );
-    };
+    }
     img.addEventListener("load", arm);
     if (img.complete && img.naturalWidth) arm();
   }
 
-  const scan = () => document.querySelectorAll("img").forEach(maybePatch);
+  function scan() {
+    var imgs = document.querySelectorAll("img");
+    for (var i = 0; i < imgs.length; i++) maybePatch(imgs[i]);
+  }
   scan();
-  const obs = new MutationObserver(scan);
+  var obs = new MutationObserver(scan);
   obs.observe(document.body, { childList: true, subtree: true });
-  console.log(`${PREFIX} 滚轮缩放看图器已启用`);
+  console.log(PREFIX + " 滚轮缩放看图器已启用");
+
+  // 自检角标：页面加载后短暂显示，肉眼确认 JS 已生效
+  try {
+    var badge = document.createElement("div");
+    badge.textContent = "看图器已启用";
+    badge.style.cssText = [
+      "position:fixed;bottom:56px;right:12px;z-index:999998;",
+      "background:#1a7f37;color:#fff;padding:4px 10px;border-radius:12px;",
+      "font:12px/1.4 sans-serif;opacity:0;transition:opacity .6s;",
+      "pointer-events:none;",
+    ].join("");
+    document.body.appendChild(badge);
+    setTimeout(function () {
+      badge.style.opacity = "1";
+    }, 600);
+    setTimeout(function () {
+      badge.style.opacity = "0";
+    }, 6000);
+  } catch (e) {
+    /* 角标失败不影响功能 */
+  }
 })();
