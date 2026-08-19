@@ -343,6 +343,28 @@ def _decision_pick_first_poi(poi_payload: dict, keyword: str = "") -> dict | Non
     return None
 
 
+def _decision_point_display_name(poi_name: Any, location_name: Any, match_type: Any = None) -> str:
+    """决策天气点位展示名（双入口共用，保持 parity）。
+
+    精确命中 → 用 POI 官方名（更规范，可能含校区/分院等后缀）。
+    模糊命中且 POI 名是「用户所问基名 + 机构后缀」（如 密云水库→密云水库医院/酒店/中学）
+    时，自然地物本体不在 POI 库、命中的是同名前缀的周边机构——展示用户所问的基名更
+    贴切，避免「密云水库」被显示成「密云水库医院」。其余模糊命中（名与所问差异大，
+    如昵称命中）仍用 POI 名。
+    """
+    poi_text = str(poi_name or "").strip()
+    location_text = str(location_name or "").strip()
+    if (
+        str(match_type or "") == "fuzzy"
+        and location_text
+        and poi_text
+        and poi_text != location_text
+        and poi_text.startswith(location_text)
+    ):
+        return location_text
+    return poi_text or location_text
+
+
 # POI 地理类型分类：用于点位天气回答时追加“注意事项”。
 # 优先级 school → airport → station → port → reservoir → scenic → mountain，先命中者返回。
 # 关键词匹配保守优先：mountain 只认复合词，排除“石家庄/唐山/燕山”等单字“山”地名；
@@ -795,6 +817,36 @@ def _decision_temperature_text(period: dict) -> str:
     return _decision_temperature_text_value(tmax if tmax is not None else tmin) or "—"
 
 
+def _decision_periods_rain_only(periods: list[dict]) -> bool:
+    """预报时段仅有降水、无天气/气温/风（外埠点位滚动预报只回降水格点 TP1H）。
+
+    滚动预报的天气现象/气温/风况文字要素只对天津代表站生成；海河网格内的外埠点
+    （如北京密云水库）只能拿到降水。此时应渲染降水表，而不是全空的天气/气温/风表
+    ——否则用户看到一整张 "—" 表误以为"没数据"。
+    """
+    if not periods:
+        return False
+    has_rain = any(p.get("rain_1h") is not None for p in periods)
+    has_text = any(
+        (str(p.get("weather") or "").strip() != "")
+        or (p.get("tmax") is not None)
+        or (p.get("tmin") is not None)
+        or (str(p.get("EDA") or "").strip() != "")
+        for p in periods
+    )
+    return has_rain and not has_text
+
+
+def _decision_rain_cell(value: Any) -> str:
+    """降水量单元格：保留 1 位小数，缺失仍 "—"。"""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return _decision_table_cell(value)
+
+
 def _build_decision_weather_table(user_text: str, facts: dict) -> str:
     """根据滚动预报事实确定性生成点位天气表，风况原样使用接口 EDA。"""
     periods = [item for item in (facts.get("periods") or []) if isinstance(item, dict)]
@@ -802,6 +854,26 @@ def _build_decision_weather_table(user_text: str, facts: dict) -> str:
         return ""
 
     location = _decision_table_cell((facts.get("poi") or {}).get("name"), "该位置")
+
+    # 外埠点位（如北京密云水库）滚动预报只回降水格点、无天气/气温/风 → 渲染降水表，
+    # 直接回答"有降水吗"类问题，而不是出一张全 "—" 的天气/气温/风表。
+    if not _decision_is_historical_facts(facts) and _decision_periods_rain_only(periods):
+        headers = ["日期/时段", "降水量(毫米)"]
+        lines = [
+            f"【{location}逐日降水预报】",
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in headers) + " |",
+        ]
+        rows = [
+            [_decision_period_label(period), _decision_rain_cell(period.get("rain_1h"))]
+            for period in periods
+        ]
+        lines.extend(
+            "| " + " | ".join(_decision_table_cell(value) for value in row) + " |"
+            for row in rows
+        )
+        return "\n".join(lines)
+
     hourly_rain = facts.get("hourly_rain") if isinstance(facts.get("hourly_rain"), dict) else {}
     mode = str(hourly_rain.get("mode") or "")
     if _decision_is_historical_facts(facts):

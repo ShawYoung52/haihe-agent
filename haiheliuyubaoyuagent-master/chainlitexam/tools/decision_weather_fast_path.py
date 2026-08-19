@@ -18,6 +18,7 @@ from tools.decision_weather_core import (
     _decision_fetch_water_level,
     _decision_historical_window_args,
     _decision_pick_first_poi,
+    _decision_point_display_name,
     _decision_weather_prefilter,
     _extract_decision_weather_slots,
     _generate_decision_historical_answer_from_raw,
@@ -92,7 +93,7 @@ class DecisionWeatherQAService:
         poi_lon = float(poi["longitude"])
         poi_lat = float(poi["latitude"])
         nearest = _nearest_decision_station(poi_lon, poi_lat)
-        point_name = str(poi.get("name") or location_name)
+        point_name = _decision_point_display_name(poi.get("name"), location_name, poi_payload.get("match_type"))
         poi_address = str(poi.get("address") or "")
         print(
             "[DecisionWeather] POI定位: "

@@ -71,6 +71,61 @@ def test_rule_based_slots_extract_reservoir_location():
     assert slots["question_type"] == "rain_next_hours"
 
 
+def test_periods_rain_only_detects_precip_only_point():
+    # 外埠点位（密云水库）滚动预报只回降水 TP1H，天气/气温/风为空
+    rain_only = [
+        {"weather": None, "tmax": None, "tmin": None, "EDA": "", "rain_1h": 0.0},
+        {"weather": None, "tmax": None, "tmin": None, "EDA": "", "rain_1h": 0.5},
+    ]
+    assert dw_core._decision_periods_rain_only(rain_only) is True
+    # 有天气/气温/风 → 非 rain-only
+    with_text = [{"weather": "多云", "tmax": "30", "tmin": "22", "EDA": "东南风3级", "rain_1h": 0.0}]
+    assert dw_core._decision_periods_rain_only(with_text) is False
+    # 连降水也没有 → 不算 rain-only（属无数据）
+    assert dw_core._decision_periods_rain_only([{"weather": None, "rain_1h": None}]) is False
+    assert dw_core._decision_periods_rain_only([]) is False
+
+
+def test_rain_only_point_renders_rain_table_not_empty_weather_table():
+    # 生产回归：密云水库逐日表 天气/气温/风 全 "—" 被当成"没数据"
+    facts = {
+        "poi": {"name": "密云水库"},
+        "periods": [
+            {"period_label": "08月20日-08月21日", "weather": None, "tmax": None, "tmin": None, "EDA": "", "rain_1h": 0.0},
+            {"period_label": "08月21日-08月22日", "weather": None, "tmax": None, "tmin": None, "EDA": "", "rain_1h": 0.0},
+            {"period_label": "08月22日-08月23日", "weather": None, "tmax": None, "tmin": None, "EDA": "", "rain_1h": 0.5},
+        ],
+    }
+    table = dw_core._build_decision_weather_table("未来三天密云水库有降水吗", facts)
+    assert "逐日降水预报" in table
+    assert "降水量(毫米)" in table
+    assert "0.5" in table
+    assert "密云水库" in table
+    assert "天气现象" not in table
+
+
+def test_full_text_point_still_renders_weather_table():
+    facts = {
+        "poi": {"name": "天津市区"},
+        "periods": [
+            {"period_label": "08月20日-08月21日", "weather": "多云", "tmax": "31", "tmin": "24", "EDA": "东南风3级", "rain_1h": 0.0},
+        ],
+    }
+    table = dw_core._build_decision_weather_table("未来三天天气", facts)
+    assert "天气现象" in table and "多云" in table and "东南风3级" in table
+
+
+def test_point_display_name_prefers_keyword_for_fuzzy_prefix_match():
+    # 模糊命中"基名+机构后缀"（水库本体不在库、命中水库旁医院）→ 展示用户所问基名
+    assert dw_core._decision_point_display_name("密云水库医院", "密云水库", "fuzzy") == "密云水库"
+    # 精确命中 → 用 POI 官方名（更规范）
+    assert dw_core._decision_point_display_name("天津大学(卫津路校区)", "天津大学", "exact") == "天津大学(卫津路校区)"
+    # 模糊命中但名与所问差异大（昵称命中）→ 仍用 POI 名
+    assert dw_core._decision_point_display_name("天津大学", "天大", "fuzzy") == "天津大学"
+    # 无 POI 名回退位置名
+    assert dw_core._decision_point_display_name("", "密云水库", "fuzzy") == "密云水库"
+
+
 @pytest.mark.asyncio
 async def test_query_decision_weather_for_poi_rejects_non_poi_question():
     answer_chain = None
