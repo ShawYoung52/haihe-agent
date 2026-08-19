@@ -505,6 +505,43 @@ def _to_white_map(img: Any, bg: tuple[int, int, int] = (255, 255, 255),
     return Image.merge("RGB", (chan(r, br, tr), chan(g, bg_, tg_), chan(b, bb, tb)))
 
 
+def _radar_black_to_white(img: Any, dark_thresh: int = 48, min_area: int = 3000) -> Any:
+    """把 swan3 雷达图的无回波大黑块转成白底，保留黑色标题/分区标签/坐标轴/色标。
+
+    swan3 雷达图的无回波区是纯黑 (0,0,0) 的大块连通区域；而标题、分区标签（如
+    "静海区"）、坐标轴刻度也是黑色但笔画细。两者同为黑色、色值无法区分，只能靠
+    **连通域面积**：对近黑掩膜做连通域标记，面积 >= min_area 的大黑块填白，
+    细黑字（连通域小）原样保留；彩色回波（非近黑）一律不动。
+
+    注意：不能用纯阈值（会把纯黑标题一并填白），也不能用 PIL 形态学开/闭运算
+    （MaxFilter/MinFilter 是方核，会在回波边缘产生块状锯齿，实测两种都不可行）。
+    连通域标记用 numpy + scipy.ndimage（项目核心文件已依赖，生产环境自带）；
+    任一不可用则原样返回（雷达保持黑底，不崩溃、不误判为错误）。
+    """
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import Image
+    except Exception:
+        return img
+    a = np.asarray(img.convert("RGB"))
+    black = a.max(axis=2) < dark_thresh
+    if not black.any():
+        return img
+    lab, n = ndimage.label(black)
+    if n == 0:
+        return img
+    sizes = np.bincount(lab.ravel())
+    large = sizes >= min_area
+    large[0] = False            # 0 号是非黑背景
+    whiten = large[lab]
+    if not whiten.any():
+        return img
+    out = a.copy()
+    out[whiten] = (255, 255, 255)
+    return Image.fromarray(out, "RGB")
+
+
 def _fit_image(img: Any, usable_w: int, fill_width: bool = False) -> Any:
     """等比缩放子图。默认只缩不放大、高度不超过 _IMG_MAX_H。
 
@@ -936,7 +973,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         swan = None
         texts.append(f"雷达图获取失败：{_safe_err(exc)}")
-    swan_img = _load_image(swan) if swan else None
+    swan_img = _radar_black_to_white(_load_image(swan)) if swan else None
     radar_blocks = [("image_wide", swan_img)] if swan_img else [("text", "（雷达图获取失败）")]
 
     # ==================== 降水实况（①文字 + ③实况图 + ④面雨量实况图 + ⑤点雨量排名）
@@ -958,7 +995,7 @@ def generate_haihe_composite_longimg_core(
     except Exception as exc:
         station_img_bytes = None
         texts.append(f"降水实况图获取失败：{_safe_err(exc)}")
-    station_img = _load_image(station_img_bytes) if station_img_bytes else None
+    station_img = _to_white_map(_load_image(station_img_bytes)) if station_img_bytes else None
     real_blocks.append(("image", station_img) if station_img else ("text", "（降水实况图获取失败）"))
 
     # ④ 实况面雨量图

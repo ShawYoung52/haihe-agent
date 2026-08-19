@@ -13,6 +13,8 @@ import io
 import sys
 from pathlib import Path
 
+import pytest
+
 MCP_DIR = Path(__file__).resolve().parents[1]
 if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
@@ -398,4 +400,62 @@ class TestWhiteMapConversion:
                        (60, 48), (60, 45)]:
             assert max(px[x, y]) >= 245, (
                 f"({x},{y}) 紧邻色块的大块白底不应被染暗（暗晕回归），实际 {px[x, y]}")
+
+
+class TestRadarBlackToWhite:
+    """② swan3 雷达图：无回波大黑块转白底，细黑字(标题/标签)与彩色回波保留。"""
+
+    def _radar_like_png(self):
+        """白底 + 大黑块(无回波区) + 细黑条(文字笔画) + 黑块内的彩色回波块。"""
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (140, 120), (255, 255, 255))
+        d = ImageDraw.Draw(im)
+        d.rectangle([10, 10, 100, 100], fill=(0, 0, 0))      # 大黑块（无回波区，面积>>min_area）
+        d.rectangle([115, 10, 125, 14], fill=(0, 0, 0))      # 细黑条（文字笔画，面积小）
+        d.rectangle([30, 30, 50, 50], fill=(0, 200, 60))     # 彩色回波
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_large_black_becomes_white_text_kept(self):
+        pytest.importorskip("numpy")
+        pytest.importorskip("scipy")
+        img = clt._load_image(self._radar_like_png())
+        out = clt._radar_black_to_white(img)
+        px = out.load()
+        assert px[70, 70] == (255, 255, 255), "大黑块（无回波区）应转白"
+        assert max(px[120, 12]) < 60, "细黑字/笔画应保留黑色不被填白"
+        r, g, b = px[40, 40]
+        assert g > 150 and r < 100, "彩色回波应保留原色"
+
+    def test_graceful_return_valid_image(self):
+        """无论是否有 numpy/scipy，都应返回合法 RGB 图、不崩溃（无依赖时原样返回）。"""
+        from PIL import Image
+        im = Image.new("RGB", (20, 20), (0, 0, 0))
+        out = clt._radar_black_to_white(im)
+        assert out.mode == "RGB" and out.size == (20, 20)
+
+
+class TestBoardNormalizationWiring:
+    """板块归一化接线：② 雷达过 _radar_black_to_white；③④⑥ 过 _to_white_map。"""
+
+    def test_radar_and_three_maps_normalized(self, monkeypatch):
+        calls = {"radar": 0, "white": 0}
+        real_radar = clt._radar_black_to_white
+        real_white = clt._to_white_map
+
+        def spy_radar(img, *a, **k):
+            calls["radar"] += 1
+            return real_radar(img, *a, **k)
+
+        def spy_white(img, *a, **k):
+            calls["white"] += 1
+            return real_white(img, *a, **k)
+
+        monkeypatch.setattr(clt, "_radar_black_to_white", spy_radar)
+        monkeypatch.setattr(clt, "_to_white_map", spy_white)
+        _install_all_ok(monkeypatch)
+        clt.generate_haihe_composite_longimg_core()
+        assert calls["radar"] == 1, "② 雷达图应过 _radar_black_to_white 一次"
+        assert calls["white"] == 3, "③ 降水实况图/④ 实况面雨量/⑥ 预报面雨量应各过 _to_white_map 一次"
 
