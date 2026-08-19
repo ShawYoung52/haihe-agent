@@ -1395,6 +1395,60 @@ def _decision_mountain_reminder_lines(facts: dict) -> list[str]:
     ]
 
 
+def _decision_reservoir_risk_lines(facts: dict) -> list[str]:
+    """水库洪水/山洪风险研判（确定性：余量 = 汛限水位 − 当前水位，再叠加降雨预报，零编造）。
+
+    水库注意事项不走通用单行模板，改走本研判——按「水位距汛限的余量」分档
+    （已达汛限 / 距汛限 <2 米偏紧 / 余量充足），再叠加是否有降雨给出明确的
+    洪水、山洪、泄洪调度风险结论。水位/汛限数值来自接口；余量是二者算术差，
+    属对真实数据的确定性推导，不是编造。历史实况走“当日实际”措辞。
+    """
+    water_info = facts.get("water_level_info")
+    has_rain = bool(facts.get("has_rain_signal"))
+    is_historical = _decision_is_historical_facts(facts)
+
+    margin: float | None = None
+    if isinstance(water_info, dict):
+        try:
+            wl = float(water_info.get("water_level_m"))
+            fl = float(water_info.get("flood_limit_m"))
+        except (TypeError, ValueError):
+            wl = fl = None
+        if wl is not None and fl is not None and fl > 0:
+            margin = fl - wl
+
+    rain_clause = "当日实际有降雨" if is_historical else "预报未来有降雨"
+    no_rain_clause = "当日无明显降雨" if is_historical else "未来无明显降雨"
+
+    if margin is not None and margin <= 0:
+        # 已达/超过汛限水位
+        if has_rain:
+            return [f"目前水位已达/超过汛限水位，库容压力大；{rain_clause}将进一步推升水位，"
+                    "发生库区洪水与下游山洪的风险较高，请高度警惕泄洪调度，关注下游河道安全。"]
+        return [f"目前水位已达/超过汛限水位，库容压力大；即便{no_rain_clause}，"
+                "仍应防范高水位下的泄洪调度风险，关注下游河道安全。"]
+    if margin is not None and margin < 2.0:
+        # 距汛限不足 2 米，余量偏紧
+        if has_rain:
+            return [f"目前水位距汛限水位仅约 {margin:.1f} 米，蓄水余量偏紧；{rain_clause}"
+                    "易突破汛限，需重点防范库区洪水及下游山洪风险，关注泄洪调度。"]
+        return [f"目前水位距汛限水位约 {margin:.1f} 米，蓄水余量偏紧；{no_rain_clause}，"
+                "短期预计平稳，但需关注上游来水与泄洪调度。"]
+    if margin is not None:
+        # 余量充足
+        if has_rain:
+            return [f"目前水位低于汛限水位约 {margin:.1f} 米，蓄水余量较充足；但{rain_clause}"
+                    "仍需关注库区水位上涨、泄洪调度及下游河道、山洪风险。"]
+        return [f"目前水位低于汛限水位约 {margin:.1f} 米，蓄水余量较充足；{no_rain_clause}，"
+                "短期库区水位预计平稳，关注上游来水与泄洪调度即可。"]
+    # 无水位/汛限数据：只按降雨给一般研判
+    if has_rain:
+        return [f"{rain_clause}，需关注库区水位上涨与上游来水，"
+                "警惕泄洪调度引发的下游河道涨水及山洪风险。"]
+    return [f"{no_rain_clause}，短期库区水位预计平稳；雨季仍需关注上游来水与泄洪调度，"
+            "下游河道警惕突发涨水与山洪风险。"]
+
+
 def _build_poi_reminder_section(facts: dict) -> str:
     """根据点位类别 + 周边隐患点确定性生成“【注意事项】”段落（条目 1. 2. 3. 编号）。
 
@@ -1428,6 +1482,9 @@ def _build_poi_reminder_section(facts: dict) -> str:
             items.extend(_decision_port_reminder_lines(periods, is_historical))
         elif category == "mountain":
             items.extend(_decision_mountain_reminder_lines(facts))
+        elif category == "reservoir":
+            # 水库不走通用单行模板，改走专门的水情 + 洪水/山洪风险研判（见下方水库分支）
+            pass
         else:
             template = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
             if template:
@@ -1451,11 +1508,10 @@ def _build_poi_reminder_section(facts: dict) -> str:
                     min_vis = _decision_min_visibility_km(periods)
                     if not clauses and min_vis is not None and min_vis < 1.0:
                         clauses.append("能见度较低，出行请注意交通安全。")
-                # 水库模板专指"降雨引起的水位上涨"——无降雨时不警告（否则与"无明显降雨"结论矛盾）。
-                if not (category == "reservoir" and not clauses):
-                    items.append(template + (clauses[0] if clauses else ""))
+                items.append(template + (clauses[0] if clauses else ""))
 
-        # 水库：追加 14所 接口实际水位（数值来自 facts.water_level_info，不编造）
+        # 水库：追加 14所 接口实际水位 + 洪水/山洪风险研判
+        # （水位/蓄水/出库数值来自 facts.water_level_info，余量与风险结论确定性推导，不编造）
         if category == "reservoir":
             water_info = facts.get("water_level_info")
             if isinstance(water_info, dict) and water_info.get("water_level_m") is not None:
@@ -1469,6 +1525,7 @@ def _build_poi_reminder_section(facts: dict) -> str:
                     items.append(f"蓄水量约 {water_info['storage']} 百万立方米")
                 if water_info.get("outflow_m3s") is not None:
                     items.append(f"出库流量约 {water_info['outflow_m3s']} 立方米/秒")
+            items.extend(_decision_reservoir_risk_lines(facts))
 
     if show_hazard:
         categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []

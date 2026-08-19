@@ -1200,6 +1200,7 @@ class TestPoiCategoryExtended:
 
 class TestPoiReminderExtended:
     def test_reservoir_water_level_reminder(self):
+        # 水库：实际水位 + 洪水/山洪风险研判（按水位距汛限余量分档），不走通用单行模板
         facts = {
             "poi_category": "reservoir",
             "has_rain_signal": True,
@@ -1214,10 +1215,12 @@ class TestPoiReminderExtended:
             },
         }
         out = dw_core._build_poi_reminder_section(facts)
-        assert "水库区域" in out, "应输出水库模板"
-        assert "密云水库" in out
-        assert "库上水位约 133.5 米" in out
-        assert "汛限水位 152.0 米" in out
+        assert "1. 目前密云水库库上水位约 133.5 米（汛限水位 152.0 米）" in out
+        assert "蓄水量约 12.3 百万立方米" in out
+        assert "出库流量约 45.0 立方米/秒" in out
+        # 余量 = 152.0 - 133.5 = 18.5 米 → 余量充足 + 有降雨 → 山洪风险研判
+        assert "低于汛限水位约 18.5 米" in out
+        assert "山洪风险" in out
 
     def test_port_reminder(self):
         facts = {"poi_category": "port", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
@@ -1227,16 +1230,16 @@ class TestPoiReminderExtended:
         assert "保障港口生产航行安全" in out
 
     def test_reservoir_without_water_info_no_crash(self):
-        # 无降雨 + 无水位数据 → 水库模板不触发（防"无明显降雨"与"水位上涨"矛盾），
-        # 无编造内容，整段为空。
+        # 无水位数据：不编造水位，只按降雨给一般洪水/山洪研判
         facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
         out = dw_core._build_poi_reminder_section(facts)
-        assert out == ""
-        assert "水库区域" not in out
+        assert "【注意事项】" in out
         assert "库上水位" not in out, "无水位数据时不应编造水位"
+        assert "未来无明显降雨，短期库区水位预计平稳" in out
+        assert "山洪风险" in out
 
-    def test_reservoir_no_rain_with_water_info_shows_only_levels(self):
-        # 无降雨但有水位数据：只给实际水位（不编造、不与"无明显降雨"结论矛盾），不要降雨模板。
+    def test_reservoir_no_rain_with_water_info_gives_risk_judgment(self):
+        # 无降雨但有水位数据：水位照常 + 余量分档研判（无雨时不给"水位上涨"警告，防与结论矛盾）
         facts = {
             "poi_category": "reservoir",
             "has_rain_signal": False,
@@ -1255,7 +1258,10 @@ class TestPoiReminderExtended:
         assert "1. 目前密云水库库上水位约 133.5 米（汛限水位 152.0 米）" in out
         assert "2. 蓄水量约 12.3 百万立方米" in out
         assert "3. 出库流量约 45.0 立方米/秒" in out
-        assert "降雨引起的水位上涨" not in out, "无降雨时不应警告水位上涨"
+        # 余量 18.5 米 + 无雨 → 平稳研判，不警告水位上涨
+        assert "低于汛限水位约 18.5 米" in out
+        assert "短期库区水位预计平稳" in out
+        assert "水位上涨" not in out, "无降雨时不应警告水位上涨"
 
 
 class TestFetchWaterLevel:
@@ -1533,10 +1539,13 @@ class TestReminderNumbering:
         }
         out = dw_core._build_poi_reminder_section(facts)
         assert out.startswith("【注意事项】")
-        assert "1. 水库区域请注意降雨引起的水位上涨" in out
-        assert "2. 目前密云水库白河坝上库上水位约 150.23 米（汛限水位 154.0 米）" in out
-        assert "3. 蓄水量约 2762.3 百万立方米" in out
-        assert "4. 出库流量约 44.7 立方米/秒" in out
+        assert "1. 目前密云水库白河坝上库上水位约 150.23 米（汛限水位 154.0 米）" in out
+        assert "2. 蓄水量约 2762.3 百万立方米" in out
+        assert "3. 出库流量约 44.7 立方米/秒" in out
+        # 4. 风险研判：余量 3.8 米（充足档）+ 有降雨 → 山洪风险
+        assert "低于汛限水位约 3.8 米" in out
+        assert "山洪风险" in out
+        assert "水库区域" not in out, "水库不走通用单行模板"
 
     def test_port_items_numbered(self):
         periods = [
@@ -1599,3 +1608,84 @@ class TestReservoirNoRainReminder:
         out = dw_core._build_poi_reminder_section(facts)
         assert "降雨引起的水位上涨" not in out  # 无雨不再警告雨致上涨
         assert "1. 目前密云水库库上水位约 150.23 米（汛限水位 154.0 米）" in out  # 水位照常
+        # 余量 = 154.0 - 150.23 = 3.77 米（充足档）+ 无雨 → 平稳研判
+        assert "低于汛限水位约 3.8 米" in out
+        assert "短期库区水位预计平稳" in out
+
+
+class TestReservoirRiskTiers:
+    """水库洪水/山洪风险研判按「水位距汛限余量」分档 + 降雨叠加，确定性、零编造。"""
+
+    def _reminder(self, water_level, flood_limit, has_rain):
+        facts = {
+            "poi_category": "reservoir",
+            "has_rain_signal": has_rain,
+            "periods": [],
+            "total_rain_mm": 1.0 if has_rain else None,
+            "water_level_info": {
+                "reservoir_name": "某水库", "water_level_m": str(water_level),
+                "flood_limit_m": str(flood_limit),
+            },
+        }
+        return dw_core._build_poi_reminder_section(facts)
+
+    def test_at_or_above_flood_limit_with_rain_high_risk(self):
+        out = self._reminder(154.5, 154.0, has_rain=True)
+        assert "已达/超过汛限水位" in out
+        assert "洪水与下游山洪的风险较高" in out
+
+    def test_at_or_above_flood_limit_no_rain_still_warns_discharge(self):
+        out = self._reminder(154.5, 154.0, has_rain=False)
+        assert "已达/超过汛限水位" in out
+        assert "泄洪调度" in out
+        assert "水位上涨" not in out
+
+    def test_near_limit_rain_warns_breakthrough(self):
+        out = self._reminder(153.0, 154.0, has_rain=True)  # 距汛限 1.0 米
+        assert "距汛限水位仅约 1.0 米" in out
+        assert "易突破汛限" in out
+        assert "库区洪水及下游山洪风险" in out
+
+    def test_near_limit_no_rain_calm(self):
+        out = self._reminder(153.0, 154.0, has_rain=False)
+        assert "距汛限水位约 1.0 米" in out
+        assert "短期预计平稳" in out
+
+    def test_ample_margin_rain_still_mentions_shanhong(self):
+        out = self._reminder(133.5, 152.0, has_rain=True)  # 余量 18.5 米
+        assert "低于汛限水位约 18.5 米" in out
+        assert "蓄水余量较充足" in out
+        assert "山洪风险" in out
+
+    def test_ample_margin_no_rain_peaceful(self):
+        out = self._reminder(133.5, 152.0, has_rain=False)
+        assert "蓄水余量较充足" in out
+        assert "短期库区水位预计平稳" in out
+        assert "水位上涨" not in out
+
+    def test_no_water_data_rain_general_warning(self):
+        facts = {"poi_category": "reservoir", "has_rain_signal": True, "periods": [], "total_rain_mm": 1.0}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "预报未来有降雨" in out
+        assert "山洪风险" in out
+        assert "库上水位" not in out
+
+    def test_no_water_data_no_rain_general_caution(self):
+        facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "未来无明显降雨，短期库区水位预计平稳" in out
+        assert "突发涨水与山洪风险" in out
+
+    def test_historical_rain_wording(self):
+        # 历史实况：风险研判用"当日实际"措辞，不用"预报/未来"
+        facts = {
+            "poi_category": "reservoir", "query_mode": "historical_obs_request",
+            "has_rain_signal": True, "periods": [], "total_rain_mm": 1.0,
+            "water_level_info": {
+                "reservoir_name": "某水库", "water_level_m": "150.0", "flood_limit_m": "152.0",
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "当日实际有降雨" in out
+        assert "预报" not in out and "未来" not in out
+        assert "低于汛限水位约 2.0 米" in out
