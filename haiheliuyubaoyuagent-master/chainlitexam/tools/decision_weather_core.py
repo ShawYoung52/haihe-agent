@@ -569,6 +569,38 @@ def _is_past_date_forecast_payload(forecast_payload: Any) -> bool:
     )
 
 
+def _is_ec_rain_fallback_payload(forecast_payload: Any) -> bool:
+    """滚动预报超 240h 点位日期命中 EC 降水回退标记。"""
+    return isinstance(forecast_payload, dict) and forecast_payload.get("status") == "ec_rain_fallback"
+
+
+def _build_ec_rain_answer_text(payload: dict, point_name: str) -> str:
+    """EC 降水回退的确定性回答：只讲降雨，气温/风/能见度明说超出时效不提供，零编造。"""
+    target = str(payload.get("target_date") or "")
+    try:
+        dt = datetime.strptime(target[:10], "%Y-%m-%d")
+        label = f"{dt.month}月{dt.day}日"
+    except (TypeError, ValueError):
+        label = target or "该日期"
+    name = (point_name or "该地点").strip()
+    rain = payload.get("rain_mm")
+    window_hours = payload.get("window_hours") or 24
+    try:
+        rain_val = float(rain)
+    except (TypeError, ValueError):
+        rain_val = 0.0
+    rain_line = (
+        f"预计有降雨，{window_hours} 小时累计约 {rain_val:.1f} 毫米"
+        if rain_val > 0 else "预计无明显降雨"
+    )
+    return (
+        f"【{name}{label}降水参考】\n"
+        f"{label}已超出滚动预报未来 10 天时效，据 ECMWF AIFS 累计降水产品：{rain_line}。\n"
+        f"气温、风力、能见度等要素超出时效，暂无法提供。\n"
+        f"数据来源：ECMWF AIFS（仅降雨）。"
+    )
+
+
 def _decision_is_historical_facts(facts: dict) -> bool:
     """根据 facts 判断是否历史实况（query_mode 以 historical 开头）。"""
     return str(facts.get("query_mode") or "").startswith("historical")

@@ -12,6 +12,7 @@ import chainlit as cl
 from langchain_core.messages import AIMessage, HumanMessage
 
 from tools.decision_weather_core import (
+    _build_ec_rain_answer_text,
     _compact_decision_forecast_facts,
     _decision_fetch_hazard_context,
     _decision_fetch_water_level,
@@ -21,6 +22,7 @@ from tools.decision_weather_core import (
     _extract_decision_weather_slots,
     _generate_decision_historical_answer_from_raw,
     _generate_decision_weather_answer,
+    _is_ec_rain_fallback_payload,
     _is_past_date_forecast_payload,
     _nearest_decision_station,
     _normalize_decision_weather_slots,
@@ -159,6 +161,15 @@ class DecisionWeatherQAService:
                 print(f"[DecisionWeather] 历史实况查询失败：{exc}")
                 await self._emit("历史实况查询遇到异常，请稍后重试或换用未来日期查询。", user_text, messages)
                 return True
+
+        # 超滚动预报 240h 的点位日期：MCP 已用 EC 降水回退 → 只讲降雨的确定性回答
+        if _is_ec_rain_fallback_payload(forecast_payload):
+            ec_text = _build_ec_rain_answer_text(forecast_payload, point_name)
+            final_text = self.runtime.sanitize_display_text(
+                self.callbacks["append_followup_if_needed"](ec_text, user_text)
+            )
+            await self._emit(final_text, user_text, messages, add_summary=True)
+            return True
 
         facts = _compact_decision_forecast_facts(
             forecast_payload if isinstance(forecast_payload, dict) else {}

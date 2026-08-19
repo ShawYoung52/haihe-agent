@@ -1177,3 +1177,42 @@ class TestFetchWaterLevel:
                 return {"data_type": "reservoir", "count": 0, "records": [], "source": "x"}
         assert await dw_core._decision_fetch_water_level("密云水库", _Tool(), lambda t, a: t.ainvoke(a)) is None
 
+
+
+class TestEcRainFallbackAnswer:
+    """超 240h 点位日期的 EC 降水回退回答（Task 6）：只讲降雨、零编造其他要素。"""
+
+    EC_PAYLOAD = {
+        "status": "ec_rain_fallback",
+        "target_date": "2026-09-01",
+        "rain_mm": 5.0,
+        "window_hours": 24,
+        "data_source": "ECMWF AIFS",
+    }
+
+    def test_is_ec_rain_fallback_payload(self):
+        assert dw_core._is_ec_rain_fallback_payload(self.EC_PAYLOAD) is True
+        assert dw_core._is_ec_rain_fallback_payload({"status": "ok"}) is False
+        assert dw_core._is_ec_rain_fallback_payload({"status": "past_date"}) is False
+        assert dw_core._is_ec_rain_fallback_payload(None) is False
+
+    def test_ec_answer_rain_positive_no_fabrication(self):
+        text = dw_core._build_ec_rain_answer_text(self.EC_PAYLOAD, "密云水库")
+        assert "9月1日" in text and "5.0" in text
+        assert "ECMWF AIFS" in text
+        assert "气温" in text and "暂无法提供" in text
+        assert "预计有降雨" in text
+        # 绝不出现气温/风力区间（零编造）
+        assert "~" not in text
+        assert "级" not in text
+
+    def test_ec_answer_zero_rain(self):
+        p = dict(self.EC_PAYLOAD, rain_mm=0.0)
+        text = dw_core._build_ec_rain_answer_text(p, "密云水库")
+        assert "无明显降雨" in text
+        assert "~" not in text
+
+    def test_ec_answer_bad_target_date_falls_back(self):
+        p = dict(self.EC_PAYLOAD, target_date="not-a-date")
+        text = dw_core._build_ec_rain_answer_text(p, "密云水库")
+        assert "not-a-date" in text
