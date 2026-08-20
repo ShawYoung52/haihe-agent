@@ -330,27 +330,6 @@
     var obs = new MutationObserver(scan);
     obs.observe(document.body, { childList: true, subtree: true });
     console.log(PREFIX + " 滚轮缩放看图器已启用");
-
-    // 自检角标：页面加载后短暂显示，肉眼确认 JS 已生效
-    try {
-      var badge = document.createElement("div");
-      badge.textContent = "看图器已启用";
-      badge.style.cssText = [
-        "position:fixed;bottom:56px;right:12px;z-index:999998;",
-        "background:#1a7f37;color:#fff;padding:4px 10px;border-radius:12px;",
-        "font:12px/1.4 sans-serif;opacity:0;transition:opacity .6s;",
-        "pointer-events:none;",
-      ].join("");
-      document.body.appendChild(badge);
-      setTimeout(function () {
-        badge.style.opacity = "1";
-      }, 600);
-      setTimeout(function () {
-        badge.style.opacity = "0";
-      }, 6000);
-    } catch (e) {
-      /* 角标失败不影响功能 */
-    }
   }
 
   // 本文件被 index.html 的 <head> 里同步 <script> 引用（AgentWeb 注入位置），

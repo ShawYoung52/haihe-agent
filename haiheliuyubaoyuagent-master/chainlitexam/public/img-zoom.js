@@ -106,7 +106,7 @@
 // 图片滚轮缩放看图器 v2（2026-08-19，兼容加固版）
 // 兼容性：无可选链/无 ?. 新语法；指针事件不可用时自动退化为鼠标事件；
 // 图片加载成功才显示遮罩，加载失败自动用新标签页打开原图（绝不黑屏）。
-// 页面加载后短暂显示绿色"看图器已启用"角标，便于肉眼确认 JS 已生效。
+// 页面加载后 console 输出"看图器已启用"，便于在浏览器控制台确认 JS 已生效（无视觉角标）。
 // =====================================================================
 (function () {
   var PREFIX = "[IMG_ZOOM]";
@@ -418,25 +418,4 @@
   var obs = new MutationObserver(scan);
   obs.observe(document.body, { childList: true, subtree: true });
   console.log(PREFIX + " 滚轮缩放看图器已启用");
-
-  // 自检角标：页面加载后短暂显示，肉眼确认 JS 已生效
-  try {
-    var badge = document.createElement("div");
-    badge.textContent = "看图器已启用";
-    badge.style.cssText = [
-      "position:fixed;bottom:56px;right:12px;z-index:999998;",
-      "background:#1a7f37;color:#fff;padding:4px 10px;border-radius:12px;",
-      "font:12px/1.4 sans-serif;opacity:0;transition:opacity .6s;",
-      "pointer-events:none;",
-    ].join("");
-    document.body.appendChild(badge);
-    setTimeout(function () {
-      badge.style.opacity = "1";
-    }, 600);
-    setTimeout(function () {
-      badge.style.opacity = "0";
-    }, 6000);
-  } catch (e) {
-    /* 角标失败不影响功能 */
-  }
 })();
