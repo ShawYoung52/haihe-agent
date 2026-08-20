@@ -331,6 +331,86 @@ def verify_arrival_time_consistency(result: dict) -> bool:
     return issues == 0
 
 
+def verify_impact_topology_consistency(river_geojson: dict) -> bool:
+    """验证 7：影响时间拓扑一致性（upstream_ids/downstream_id/affected/impact_sources）。
+
+    规则（用户确认，对齐 GPT 递推模型；时间语义映射现有字段）：
+      - 每条 feature 都有 4 个新字段；affected 恒 True（输出即受影响）
+      - direct feature：impact_sources == ["DIRECT"]
+      - downstream feature：impact_sources 非空且 ⊆ upstream_ids；
+        t0_source_time == 某上游 feature 的 estimated_arrival_time（最早到达）
+      - 闭环：本边 downstream_id 指向的下游 feature，其 t0_source_time == 本边 estimated_arrival_time
+      - upstream_ids / downstream_id 引用的 edge_key 必须存在于 features 集合
+    """
+    _sep("验证 7：影响时间拓扑一致性")
+    features = river_geojson.get("features", [])
+    issues = 0
+    if not features:
+        print("  ✓ 无 features（无触发站点），拓扑验证跳过")
+        return True
+
+    by_key = {}
+    for feat in features:
+        props = feat.get("properties", {})
+        key = str(props.get("edge_key") or "")
+        by_key[key] = props
+
+    for feat in features:
+        props = feat.get("properties", {})
+        name = props.get("river_name", "")
+        key = str(props.get("edge_key") or "")
+        # 1) 新字段存在
+        for field in ("upstream_ids", "downstream_id", "affected", "impact_sources"):
+            if field not in props:
+                print(f"  ✗ {name}({key}): 缺字段 {field}")
+                issues += 1
+        # 2) affected 恒 True
+        if props.get("affected") is not True:
+            print(f"  ✗ {name}({key}): affected 应为 True，实际 {props.get('affected')}")
+            issues += 1
+        # 3) 引用的 edge_key 必须存在
+        for ukey in props.get("upstream_ids") or []:
+            if ukey not in by_key:
+                print(f"  ✗ {name}({key}): upstream_ids 引用不存在 {ukey}")
+                issues += 1
+        did = props.get("downstream_id")
+        if did is not None and did not in by_key:
+            print(f"  ✗ {name}({key}): downstream_id 引用不存在 {did}")
+            issues += 1
+        # 4) impact_sources 语义
+        itype = props.get("impact_type")
+        sources = props.get("impact_sources") or []
+        if itype == "direct_buffer":
+            if sources != ["DIRECT"]:
+                print(f"  ✗ {name}({key}): direct impact_sources 应为 [DIRECT]，实际 {sources}")
+                issues += 1
+        elif itype == "downstream_50km":
+            if not sources:
+                print(f"  ✗ {name}({key}): downstream impact_sources 为空")
+                issues += 1
+            elif not set(sources) <= set(props.get("upstream_ids") or []):
+                print(f"  ✗ {name}({key}): impact_sources 不在 upstream_ids 内: {sources}")
+                issues += 1
+            # 5) t0 == 某上游的 arrival（最早到达本边起点）
+            t0 = props.get("t0_source_time")
+            if t0 is not None:
+                up_arrivals = [by_key[uk].get("estimated_arrival_time") for uk in (props.get("upstream_ids") or []) if uk in by_key]
+                if t0 not in up_arrivals:
+                    print(f"  ✗ {name}({key}): t0={t0} 不等于任何上游 arrival {up_arrivals}")
+                    issues += 1
+        # 6) 闭环：下游 feature 的 t0 == 本边 arrival
+        if did is not None and did in by_key:
+            down_t0 = by_key[did].get("t0_source_time")
+            my_arrival = props.get("estimated_arrival_time")
+            if down_t0 is not None and my_arrival is not None and down_t0 != my_arrival:
+                print(f"  ✗ {name}({key}): 下游 {did}.t0={down_t0} != 本边 arrival={my_arrival}（闭环断裂）")
+                issues += 1
+
+    if issues == 0:
+        print(f"  ✓ 影响时间拓扑一致性验证通过（{len(features)} 条 features）")
+    return issues == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="暴雨影响河流 GeoJSON 传播时间内网验证")
     parser.add_argument("--csv", required=True, help="5 分钟降水 CSV 路径")
@@ -398,6 +478,7 @@ def main():
         ("GeoJSON properties", verify_geojson_properties(river_geojson)),
         ("传播时间一致性", verify_propagation_consistency(result)),
         ("预计到达时间一致性", verify_arrival_time_consistency(result)),
+        ("影响时间拓扑一致性", verify_impact_topology_consistency(river_geojson)),
     ]
 
     _sep("结果汇总")
