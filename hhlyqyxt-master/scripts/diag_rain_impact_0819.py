@@ -88,24 +88,32 @@ def main() -> int:
 
     # ---------- 3. build + 匹配统计 ----------
     section("3. build_rainstorm_impact_thematic_map 匹配统计")
-    stations = [
-        rig._station_record(row)
-        for _, row in df.iterrows()
-        if row["rain_24h"] >= THRESHOLD
-    ]
-    result = rig.build_rainstorm_impact_thematic_map(
-        stations,
-        pg_conf=_pg_conf(),
-        graph_path=GRAPH,
-        rainfall_threshold_mm=THRESHOLD,
-    )
-    print("affected_rivers:", result.get("affected_rivers"))
-    print("downstream_start_stats:", json.dumps(
-        result.get("downstream_start_stats", {}), ensure_ascii=False))
-    print("river_summary:", json.dumps(
-        result.get("river_summary", {}), ensure_ascii=False))
-    print("river_propagation:", json.dumps(
-        result.get("river_propagation", {}), ensure_ascii=False, indent=2))
+    try:
+        # rain_24h 是聚合结果列，必须经 aggregate_5min_station_pre_to_24h（与
+        # test_rain_impact_internal 同款），不能直接读原始 CSV 行。
+        agg_df = rig.aggregate_5min_station_pre_to_24h(CSV)
+        stations = [
+            rig._station_record(row)
+            for _, row in agg_df.iterrows()
+            if row["rain_24h"] >= THRESHOLD
+        ]
+        result = rig.build_rainstorm_impact_thematic_map(
+            stations,
+            pg_conf=_pg_conf(),
+            graph_path=GRAPH,
+            rainfall_threshold_mm=THRESHOLD,
+        )
+        print("affected_rivers:", result.get("affected_rivers"))
+        print("downstream_start_stats:", json.dumps(
+            result.get("downstream_start_stats", {}), ensure_ascii=False))
+        print("river_summary:", json.dumps(
+            result.get("river_summary", {}), ensure_ascii=False))
+        print("river_propagation:", json.dumps(
+            result.get("river_propagation", {}), ensure_ascii=False, indent=2))
+    except Exception as exc:  # noqa: BLE001 - 诊断脚本每段独立容错
+        import traceback
+        print(f"  build 失败（不影响其它诊断段）: {exc}")
+        traceback.print_exc()
 
     # ---------- 4. 已有 verify JSON ----------
     section("4. /tmp/rain_impact_verify.json 内容")
