@@ -115,6 +115,36 @@ def main() -> int:
         print(f"  build 失败（不影响其它诊断段）: {exc}")
         traceback.print_exc()
 
+    # ---------- 5. 数据库直查：盐山 54627 附近最近河段 ----------
+    section("5. 数据库 haihe_river_directed_full_v6 直查（盐山 54627 附近）")
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        conn = psycopg2.connect(**_pg_conf())
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT count(*) AS n FROM haihe_river_directed_full_v6")
+                print("表总行数:", cur.fetchone()["n"])
+                cur.execute(
+                    """
+                    SELECT objectid, src_name, from_x, from_y, to_x, to_y,
+                           round(ST_Distance(geom::geography,
+                                ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) / 1000.0, 2) AS dist_km
+                    FROM haihe_river_directed_full_v6
+                    ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+                    LIMIT 10
+                    """,
+                    (117.2347, 38.0411, 117.2347, 38.0411),
+                )
+                print("距盐山(117.2347,38.0411)最近的 10 条河段（dist_km）:")
+                for r in cur.fetchall():
+                    print(f"  objectid={r['objectid']} src={r['src_name']} "
+                          f"dist={r['dist_km']}km  ({r['from_x']},{r['from_y']})~({r['to_x']},{r['to_y']})")
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - 诊断脚本每段独立容错
+        print(f"  数据库直查失败（可能 psycopg2 未装或连接失败）: {exc}")
+
     # ---------- 4. 已有 verify JSON ----------
     section("4. /tmp/rain_impact_verify.json 内容")
     try:
