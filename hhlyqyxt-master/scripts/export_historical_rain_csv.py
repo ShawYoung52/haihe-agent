@@ -119,6 +119,37 @@ def fetch_hhly_minute(timerange: str) -> pd.DataFrame:
     return _fetch_hhly_rainfall_for_emergency(timerange)
 
 
+def fetch_hhly_minute_with_retry(
+    timerange: str,
+    *,
+    retries: int = 3,
+    base_wait_s: float = 3.0,
+) -> pd.DataFrame:
+    """拉取 HHLY 分钟降水，MUSIC 瞬时故障（-7001 数据库连接断开等）重试。
+
+    与 intranet_verify_emergency.py 的"3 次重试防 MUSIC 瞬断"同思路：
+    服务端长时间空闲/网络抖动常返回 -7001 之类瞬时错误，重试即恢复。
+    """
+    import time as _time
+    from utils.MusicTool import MusicApiError
+
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fetch_hhly_minute(timerange)
+        except Exception as exc:  # noqa: BLE001 - 重试框架内收口
+            last_exc = exc
+            if attempt >= retries:
+                break
+            wait = base_wait_s * attempt
+            logger.warning("MUSIC 拉取失败（第 %d/%d 次）：%s，%.0fs 后重试",
+                           attempt, retries, exc, wait)
+            _time.sleep(wait)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("MUSIC 拉取失败（重试次数无效）")
+
+
 def slice_window(df: pd.DataFrame, start_bjt: datetime, end_bjt: datetime) -> pd.DataFrame:
     """裁剪到 [start_bjt, end_bjt) 半开区间（BJT）。"""
     return df[(df["Datetime"] >= start_bjt) & (df["Datetime"] < end_bjt)].copy()
@@ -154,7 +185,7 @@ def main() -> int:
                 start_bjt.strftime("%Y-%m-%d %H:%M"),
                 end_bjt.strftime("%Y-%m-%d %H:%M"))
 
-    raw = fetch_hhly_minute(timerange)
+    raw = fetch_hhly_minute_with_retry(timerange)
     logger.info("HHLY 分钟原始记录数：%d", len(raw))
     if raw.empty:
         logger.warning("该时段无 HHLY 数据，导出空表")
