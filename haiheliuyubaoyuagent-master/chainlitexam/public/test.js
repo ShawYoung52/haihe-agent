@@ -126,7 +126,7 @@
       "position:fixed;top:0;left:0;right:0;bottom:0;width:100vw;height:100vh;",
       "z-index:999999;",
       "background:rgba(8,8,10,.92);",
-      "display:none;align-items:center;justify-content:center;",
+      "display:none;overflow:hidden;", // 不用 flex 居中：img 盒子须从 overlay 原点(0,0)开始，transform 数学才自洽
       "touch-action:none;user-select:none;-webkit-user-select:none;",
       "cursor:grab;",
     ].join("");
@@ -135,6 +135,7 @@
     img.alt = "";
     img.draggable = false;
     img.style.cssText = [
+      "display:block;",
       "transform-origin:0 0;",
       "will-change:transform;",
       "box-shadow:0 0 48px rgba(0,0,0,.65);",
@@ -184,10 +185,7 @@
       fit = Math.min(overlay.clientWidth / baseW, overlay.clientHeight / baseH);
       img.style.width = baseW + "px";
       img.style.height = baseH + "px";
-      // 超窄长图（如 660x4610）fit 后宽度过小几乎不可见——初始至少显示 MIN_VIEW_W 像素宽
-      var MIN_VIEW_W = 260;
-      var need = MIN_VIEW_W / (baseW * fit);
-      if (need > 1) st.z = Math.min(MAX_ZOOM, need);
+      // 整图 fit 完整适配：长图一打开就完整显示在屏幕中间，滚轮/双击放大看细节
       center();
       apply();
     }
@@ -223,9 +221,13 @@
       open = true;
       drag = null;
       dragged = false;
+      // 每次打开都重置缩放/平移：整图 fit 完整居中（自适配），滚轮放大看细节
+      st.z = 1;
+      st.tx = 0;
+      st.ty = 0;
       document.body.style.overflow = "hidden";
       document.addEventListener("keydown", onKey, true);
-      overlay.style.display = "flex";
+      overlay.style.display = "block";
 
       img.onload = function () {
         if (loadTimer) {
