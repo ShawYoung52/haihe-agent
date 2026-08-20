@@ -125,11 +125,22 @@ def main() -> int:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT count(*) AS n FROM haihe_river_directed_full_v6")
                 print("表总行数:", cur.fetchone()["n"])
+                # 表坐标范围：判断 258 条河段是否覆盖盐山（生产完整 v6 远多于此，疑似测试子集）
+                cur.execute(
+                    "SELECT min(from_x) AS min_lon, max(from_x) AS max_lon,"
+                    "       min(from_y) AS min_lat, max(from_y) AS max_lat"
+                    " FROM haihe_river_directed_full_v6"
+                )
+                r = cur.fetchone()
+                print(f"表河段坐标范围 lon: {r['min_lon']:.4f} ~ {r['max_lon']:.4f}, "
+                      f"lat: {r['min_lat']:.4f} ~ {r['max_lat']:.4f}")
+                # 最近 10 条河段（round(double,int) 在 PG 不存在，需 ::numeric）
                 cur.execute(
                     """
                     SELECT objectid, src_name, from_x, from_y, to_x, to_y,
-                           round(ST_Distance(geom::geography,
-                                ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) / 1000.0, 2) AS dist_km
+                           round((ST_Distance(geom::geography,
+                                ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography)
+                                / 1000.0)::numeric, 2) AS dist_km
                     FROM haihe_river_directed_full_v6
                     ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
                     LIMIT 10
@@ -137,9 +148,9 @@ def main() -> int:
                     (117.2347, 38.0411, 117.2347, 38.0411),
                 )
                 print("距盐山(117.2347,38.0411)最近的 10 条河段（dist_km）:")
-                for r in cur.fetchall():
-                    print(f"  objectid={r['objectid']} src={r['src_name']} "
-                          f"dist={r['dist_km']}km  ({r['from_x']},{r['from_y']})~({r['to_x']},{r['to_y']})")
+                for row in cur.fetchall():
+                    print(f"  objectid={row['objectid']} src={row['src_name']} "
+                          f"dist={row['dist_km']}km  ({row['from_x']},{row['from_y']})~({row['to_x']},{row['to_y']})")
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - 诊断脚本每段独立容错
