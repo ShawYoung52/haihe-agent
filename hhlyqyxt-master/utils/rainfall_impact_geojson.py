@@ -710,8 +710,10 @@ def _classify_graph_edges(
         # 记录水走完直接段到达该节点出口的时刻（含直接段旅程），
         # 多条直接段汇合到同一节点时取最早的到达时刻。
         if trigger_rain_end_time is not None and velocity_kmh > 0:
-            edge_length = edge_info.get("length_km") or 0.0
-            travel_hours = float(edge_length) / velocity_kmh
+            # 与 _resolve_edge_features 直接 feature 同长度源（full_v6 len_km 优先，
+            # 缺失/NaN 回退 pkl 边长），保证下游链起点时刻 == 直接 feature 自身到达时刻。
+            edge_length = _feature_length_km(row, edge_info, "direct_buffer")
+            travel_hours = edge_length / velocity_kmh
             arrival = trigger_rain_end_time + timedelta(hours=travel_hours)
             existing = start_nodes_arrival.get(v)
             if existing is None or arrival < existing:
@@ -1082,7 +1084,9 @@ def _feature_length_km(row: dict | None, edge: dict, impact_type: str) -> float:
     """下游裁剪段报告 keep_km；直接段优先用 full_v6 len_km，缺失/NaN 时退化为 pkl 边长。
 
     滦河系 34 条 DB 记录 len_km=NaN（CLAUDE.md 记录），必须 fallback，
-    否则 per-edge 传播时间为 NaN，与 summary（summary 用 edge['length_km']=pkl）不一致。
+    否则 per-edge 传播时间为 NaN。此函数同时是 _classify_graph_edges 的
+    start_nodes_arrival 与 _build_river_propagation 直接段分量的长度源，
+    summary 与 GeoJSON 直接 feature 同源，不再存在 pkl/DB 长度不一致。
     """
     if impact_type == "downstream_50km":
         return round(float(edge.get("keep_km") or 0.0), 3)
@@ -1458,8 +1462,16 @@ def _build_river_propagation(
 ) -> dict:
     """按河流聚合暴雨影响传播时间估算。
 
-    口径：下游边取 Dijkstra 累计 end_distance_km 最大值（暴雨入口视为 0km）；
-    仅有直接边、无下游边的河流取直接边中最长 length_km（影响就地发生）。
+    口径：河流级传播行程 = 暴雨入河点（直接段）→ 下游最远点。
+    - 有下游边的河流：传播距离 = 该河最长直接段（full_v6 len_km 优先，与 GeoJSON 直接 feature
+      同源）+ Dijkstra 累计 end_distance_km 最大值（从直接段出口节点起算）。回归说明：
+      5018ed7 起 per-feature 到达时间已含直接段行程，summary 若不叠加会系统性偏小，
+      并与 estimated_arrival_time 自相矛盾（如 1.4h vs 实际 4.2h）。
+    - 仅直接受影响、无下游边的河流：取直接边中最长长度（影响就地发生）。
+    - 提供 features 时，有下游边的河再用 per-edge 到达时刻精化：传播时间 = （最远 feature
+      到达时刻 - 该河直接段最早 t0）× 流速，使 summary 与地图逐段 estimated_arrival_time
+      完全自洽（生产入口恒传 features，精化为实际主路径；纯直接河不精化，防多段不同雨止
+      时刻把两次降雨的时间差误算成传播时间）。
     河名经 _pick_river_name 解析，与 GeoJSON/affected_rivers 的命名口径一致：
     下游边由 _save_downstream_edge 构造、不带 full_v6 "row"，需经 full_v6 lookup
     解析 row（与 _resolve_edge_features 同款），避免滦河单字等命名偏差。
@@ -1484,21 +1496,36 @@ def _build_river_propagation(
             spatial_lookup,
         )
 
-    for edges, field, acc in (
-        ((direct_edges or {}).values(), "length_km", direct_len),
-        (downstream_edges or [], "end_distance_km", downstream_dist),
-    ):
-        for edge in edges:
-            name = _pick_river_name(_resolve_row(edge), edge, mapping)
-            value = _safe_float(edge.get(field))
-            if name == "未知" or value is None or value <= 0:
-                continue
-            acc[name] = max(acc.get(name, 0.0), value)
+    # 直接边长度与 _resolve_edge_features 的直接 feature 同源（full_v6 len_km 优先），
+    # 保证 summary 的直接段分量与 per-edge propagation_distance_km 一致。
+    for edge in (direct_edges or {}).values():
+        row = _resolve_row(edge)
+        name = _pick_river_name(row, edge, mapping)
+        if name == "未知":
+            continue
+        length = _feature_length_km(row, edge, "direct_buffer")
+        if not (length > 0):
+            continue
+        direct_len[name] = max(direct_len.get(name, 0.0), length)
+
+    # 下游距离 = Dijkstra 累计 end_distance_km 最大值（从直接段出口节点起算）。
+    for edge in downstream_edges or []:
+        name = _pick_river_name(_resolve_row(edge), edge, mapping)
+        value = _safe_float(edge.get("end_distance_km"))
+        if name == "未知" or value is None or value <= 0:
+            continue
+        downstream_dist[name] = max(downstream_dist.get(name, 0.0), value)
 
     rivers = []
     for name in sorted(set(direct_len) | set(downstream_dist)):
         has_downstream = name in downstream_dist
-        distance_km = downstream_dist[name] if has_downstream else direct_len[name]
+        if has_downstream:
+            # 总传播行程 = 暴雨入河点（直接段）→ 下游最远点。
+            # 回归：per-feature arrival 已含直接段行程（5018ed7），summary 也必须叠加，
+            # 否则约 1.4h 实际 4.2h 之类的系统性偏小、与 estimated_arrival_time 自相矛盾。
+            distance_km = direct_len.get(name, 0.0) + downstream_dist[name]
+        else:
+            distance_km = direct_len[name]
         raw_hours = distance_km / velocity_kmh
         rivers.append({
             "river_name": name,
@@ -1507,23 +1534,28 @@ def _build_river_propagation(
             "arrival_estimate_readable": _propagation_readable(raw_hours),
             "has_downstream": has_downstream,
         })
-    rivers.sort(key=lambda r: r["propagation_time_hours"], reverse=True)
-
-    # 如果提供了 features（GeoJSON features 列表），从每条 feature 的 estimated_arrival_time
-    # 按 river_name 分组收集，计算每条河的最早/最晚到达时间。
+    # 注意：features 精化会改写 propagation_time_hours，统一在精化完成后排序（见下）。
     if features:
         from dateutil import parser as dateparser
         river_arrivals: dict[str, list[datetime]] = {}
+        river_entry_t0: dict[str, list[datetime]] = {}
         for feat in features:
             props = feat.get("properties", {})
             name = props.get("river_name", "")
             arrival_str = props.get("estimated_arrival_time")
             if name and arrival_str:
                 try:
-                    dt = dateparser.parse(arrival_str)
-                    river_arrivals.setdefault(name, []).append(dt)
+                    river_arrivals.setdefault(name, []).append(dateparser.parse(arrival_str))
                 except Exception:
                     pass
+            # 直接段的 t0_source_time 即暴雨入河点雨止时刻，取最早者作为该河传播起算参考。
+            if name and props.get("impact_type") == "direct_buffer":
+                t0_str = props.get("t0_source_time")
+                if t0_str:
+                    try:
+                        river_entry_t0.setdefault(name, []).append(dateparser.parse(t0_str))
+                    except Exception:
+                        pass
         for r in rivers:
             name = r["river_name"]
             arrivals = river_arrivals.get(name, [])
@@ -1533,7 +1565,22 @@ def _build_river_propagation(
             else:
                 r["earliest_arrival_time"] = None
                 r["latest_arrival_time"] = None
+            # 精化仅对「有下游边」的河生效：传播时间 = 最远到达 - 直接段最早 T0，
+            # 保证 summary 与地图上逐段 estimated_arrival_time 自洽（下游链本身已含直接段行程）。
+            # 纯直接河保持「最长直接段」口径——多条直接段各自不同雨止时刻时，
+            # max(arrivals)-min(t0) 会把两次独立降雨的时间差误算成传播时间（历史口径：就地影响）。
+            if not r["has_downstream"]:
+                continue
+            entries = river_entry_t0.get(name, [])
+            if arrivals and entries:
+                raw_hours = (max(arrivals) - min(entries)).total_seconds() / 3600.0
+                if raw_hours > 0:
+                    r["propagation_distance_km"] = round(raw_hours * velocity_kmh, 3)
+                    r["propagation_time_hours"] = round(raw_hours, 1)
+                    r["arrival_estimate_readable"] = _propagation_readable(raw_hours)
 
+    # 精化完成后统一排序：传播时间最长的河排最前（QA 简报取 rivers[0] 作头条）。
+    rivers.sort(key=lambda r: r["propagation_time_hours"], reverse=True)
     return {"flow_velocity_mps": float(flow_velocity_mps), "rivers": rivers}
 
 

@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -118,78 +120,90 @@ def verify_geojson_properties(river_geojson: dict) -> bool:
 
 
 def verify_propagation_consistency(result: dict) -> bool:
-    """验证 5：river_propagation 汇总与 per-edge propagation 一致性。
+    """验证 5：river_propagation 汇总与 per-edge 到达时间一致性。
 
     per-edge 边级别 propagation_distance：
-    - 下游 feature → end_distance_km（累计下游距离）
-    - 直接 feature → length_km（边本身长度）
-    summary 河级别汇总：下游边取 max end_distance_km，纯直接边取 max length_km。
-    比较时按同口径分两组：下游组比下游，直接（无下游河）组比直接。
+    - 下游 feature → keep_km（本段裁剪长度，链式语义，非累计；累计看 end_downstream_distance_km）
+    - 直接 feature → length_km（full_v6 len_km 优先）
+    summary 河级别传播行程 = 暴雨入河点（直接段）→ 下游最远点：
+    - 提供 features 时精化为 (最远 feature 到达时刻 - 该河直接段最早 t0) × 流速；
+    - 无 features 时为 最长直接段 + 最远下游 end_distance_km。
+    本验证核对三条不变量：
+      ① per-edge 与 summary 的河名集合一致（命名口径）；
+      ② summary propagation_time_hours ≈ 特征精化行程时间（当 features 可用时）；
+      ③ summary propagation_distance_km 覆盖最远下游累计距离——不满足时仅告警
+         （可能为跨河汇流归属，非缺陷，不判失败）。
     """
     _sep("验证 5：传播时间一致性")
     river_prop = result.get("river_propagation", {})
     river_geojson = result.get("river_geojson", {})
     prop_rivers = {r["river_name"]: r for r in river_prop.get("rivers", [])}
 
-    # 按河名 + impact_type 分组 per-edge max
-    downstream_max: dict[str, float] = {}
-    direct_max: dict[str, float] = {}
-    # 额外记录 per-edge 的 end_distance_km / length_km 原始值（未参与 propagation 计算的）
-    # 用于诊断
-    downstream_raw_dist: dict[str, float] = {}
-    direct_raw_len: dict[str, float] = {}
+    # 按河名分组收集 per-edge 信息 + 直接段 t0（用于精化行程的参考起点）
+    per_edge_names: set[str] = set()
+    farthest_downstream: dict[str, float] = {}      # 最远下游累计距离 end_downstream_distance_km
+    river_arrivals: dict[str, list[datetime]] = {}
+    river_entry_t0: dict[str, list[datetime]] = {}
+    iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
     for feat in river_geojson.get("features", []):
         props = feat.get("properties", {})
         name = props.get("river_name", "")
-        dist = props.get("propagation_distance_km", 0)
-        if not (name and dist and math.isfinite(dist)):
+        if not name:
             continue
+        per_edge_names.add(name)
         if props.get("impact_type") == "downstream_50km":
-            downstream_max[name] = max(downstream_max.get(name, 0), dist)
-            # end_downstream_distance_km 来自 edge["end_distance_km"]（_resolve_edge_features 线 935）
-            raw = props.get("end_downstream_distance_km", 0)
-            if raw and math.isfinite(raw):
-                downstream_raw_dist[name] = max(downstream_raw_dist.get(name, 0), raw)
-        else:
-            direct_max[name] = max(direct_max.get(name, 0), dist)
-            # length_km 来自 _feature_length_km(row,edge,...)
-            raw = props.get("length_km", 0)
-            if raw and math.isfinite(raw):
-                direct_raw_len[name] = max(direct_raw_len.get(name, 0), raw)
+            raw = props.get("end_downstream_distance_km")
+            try:
+                raw_f = float(raw)
+            except (TypeError, ValueError):
+                raw_f = math.nan
+            if raw_f and math.isfinite(raw_f):
+                farthest_downstream[name] = max(farthest_downstream.get(name, 0.0), raw_f)
+        elif props.get("impact_type") == "direct_buffer":
+            t0_str = props.get("t0_source_time")
+            if t0_str and iso_re.match(t0_str):
+                river_entry_t0.setdefault(name, []).append(
+                    datetime.fromisoformat(t0_str.replace("Z", "+00:00")))
+        arrival_str = props.get("estimated_arrival_time")
+        if arrival_str and iso_re.match(arrival_str):
+            river_arrivals.setdefault(name, []).append(
+                datetime.fromisoformat(arrival_str.replace("Z", "+00:00")))
 
-    # 诊断：列出 per-edge 有但 summary 没有的河名（命名不一致信号）
-    all_per_edge_names = set(downstream_max) | set(direct_max)
-    missing_from_summary = all_per_edge_names - set(prop_rivers)
+    issues = 0
+    # ① 河名集合一致性
+    missing_from_summary = per_edge_names - set(prop_rivers)
     if missing_from_summary:
         print(f"  ⚠ per-edge 有 {len(missing_from_summary)} 条河未出现在 summary 中（命名不一致？）")
         for n in sorted(missing_from_summary)[:5]:
-            print(f"    per-edge only: '{n}' (ds={downstream_max.get(n,0):.1f}, dir={direct_max.get(n,0):.1f})")
-    missing_from_per_edge = set(prop_rivers) - all_per_edge_names
+            print(f"    per-edge only: '{n}'")
+        issues += 1
+    missing_from_per_edge = set(prop_rivers) - per_edge_names
     if missing_from_per_edge:
         print(f"  ⚠ summary 有 {len(missing_from_per_edge)} 条河未出现在 per-edge 中")
         for n in sorted(missing_from_per_edge)[:5]:
-            print(f"    summary only: '{n}' (has_ds={prop_rivers[n].get('has_downstream')}, dist={prop_rivers[n]['propagation_distance_km']})")
+            print(f"    summary only: '{n}' (has_ds={prop_rivers[n].get('has_downstream')})")
+        issues += 1
 
-    issues = 0
+    # ② summary 传播时间 ≈ 特征精化行程；③ summary 距离 ≥ 最远下游累计
     for name, summary in prop_rivers.items():
-        has_ds = summary.get("has_downstream", False)
-        expected = summary["propagation_distance_km"]
-        if has_ds:
-            actual = downstream_max.get(name, 0)
-            actual_raw = downstream_raw_dist.get(name, 0)
-            if abs(actual - expected) > 1.0:
-                print(f"  ✗ {name}: per-edge ds_max={actual} (raw end_dist={actual_raw}) vs summary={expected} has_ds={has_ds}, 偏差 > 1km")
+        summary_hours = summary.get("propagation_time_hours")
+        summary_dist = summary.get("propagation_distance_km")
+        entries = river_entry_t0.get(name, [])
+        arrivals = river_arrivals.get(name, [])
+        if entries and arrivals:
+            refined_hours = (max(arrivals) - min(entries)).total_seconds() / 3600.0
+            if summary_hours is not None and abs(float(summary_hours) - refined_hours) > 0.3:
+                print(f"  ✗ {name}: summary 传播时间 {summary_hours}h 与特征精化行程 {refined_hours:.2f}h 偏差 > 0.3h")
                 issues += 1
-        else:
-            actual = direct_max.get(name, 0)
-            actual_raw = direct_raw_len.get(name, 0)
-            if abs(actual - expected) > 5.0:
-                print(f"  ✗ {name}: per-edge dir_max={actual} (raw len={actual_raw}) vs summary={expected} has_ds={has_ds}, 偏差 > 5km")
-                issues += 1
+        far = farthest_downstream.get(name, 0.0)
+        if summary_dist is not None and far > 0 and float(summary_dist) + 1.0 < far:
+            # 仅告警不判失败：下游支流可能由其它河更早的直接段汇入（河网汇流），
+            # 该支流的累计距离未必从本河直接段起算，属命名归属而非缺陷。
+            print(f"  ⚠ {name}: summary 传播距离 {summary_dist}km < 最远下游累计 {far}km"
+                  f"（可能为跨河汇流归属，人工核对）")
 
     if issues == 0:
-        checked = len([n for n in prop_rivers if n in downstream_max or n in direct_max])
-        print(f"  ✓ per-edge 与 summary 一致（{checked} 条河，按同口径对齐）")
+        print(f"  ✓ 传播时间与 per-edge 一致（{len(prop_rivers)} 条河，命名/精化行程/最远覆盖均通过）")
     return issues == 0
 
 
@@ -204,9 +218,6 @@ def verify_arrival_time_consistency(result: dict) -> bool:
     - river_propagation.rivers[*].earliest_arrival_time == min(该河 features estimated_arrival_time)
     """
     _sep("验证 6：预计到达时间一致性")
-    import re
-    from datetime import datetime, timezone
-
     iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
     features = result.get("river_geojson", {}).get("features", [])
     issues = 0

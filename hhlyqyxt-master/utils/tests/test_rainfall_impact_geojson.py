@@ -752,9 +752,10 @@ def test_build_river_propagation_uses_max_downstream_end_distance():
     assert len(result["rivers"]) == 1
     river = result["rivers"][0]
     assert river["river_name"] == "滦河"
-    assert river["propagation_distance_km"] == 36.0
-    assert river["propagation_time_hours"] == 5.0  # 36 / 7.2
-    assert river["arrival_estimate_readable"] == "约5.0小时"
+    # 总行程 = 最长直接段 3.0 + 最远下游 36.0 = 39.0
+    assert river["propagation_distance_km"] == 39.0
+    assert river["propagation_time_hours"] == 5.4  # 39 / 7.2 = 5.4167 → round 5.4
+    assert river["arrival_estimate_readable"] == "约5.4小时"
     assert river["has_downstream"] is True
 
 
@@ -790,12 +791,156 @@ def test_validate_params_rejects_non_positive_flow_velocity():
 
 
 def test_build_river_propagation_downstream_takes_priority_over_direct():
-    """同一条河同时有直接边与下游边时，距离口径取下游累计距离（即使直接边更长）。"""
+    """同一条河同时有直接边与下游边时，距离口径 = 直接段 + 下游累计（总传播行程）。"""
     direct = {"a": _direct_edge("滦河", 10.0)}
     downstream = [_downstream_edge("滦河", 5.0)]
     river = rig._build_river_propagation(direct, downstream, 2.0)["rivers"][0]
-    assert river["propagation_distance_km"] == 5.0
+    assert river["propagation_distance_km"] == 15.0  # 10 直接 + 5 下游
     assert river["has_downstream"] is True
+
+
+def test_build_river_propagation_direct_plus_downstream_counts_total_travel():
+    """有下游边的河流，传播距离/时间必须含直接段行程（水从暴雨入河点先走直接段再入下游）。
+
+    回归：5018ed7 让 per-feature arrival 含直接段行程，但 _build_river_propagation 仍只取
+    downstream end_distance（暴雨入口视为 0km），导致 summary 传播距离/时间系统性偏小、
+    与 per-edge estimated_arrival_time 自相矛盾（约1.4h vs 实际4.2h）。
+    """
+    direct = {"a": _direct_edge("滦河", 10.0)}
+    downstream = [_downstream_edge("滦河", 36.0), _downstream_edge("滦河", 12.0)]
+    river = rig._build_river_propagation(direct, downstream, 2.0)["rivers"][0]
+    # 总行程 = 最长直接段 10km + 最远下游 36km = 46km；46 / 7.2 ≈ 6.4h
+    assert river["propagation_distance_km"] == 46.0
+    assert river["propagation_time_hours"] == pytest.approx(46.0 / 7.2, abs=0.1)
+    assert river["arrival_estimate_readable"] == "约6.4小时"
+    assert river["has_downstream"] is True
+
+
+def test_start_nodes_arrival_uses_same_len_source_as_direct_feature():
+    """start_nodes_arrival 的长度源必须与直接 feature 的 propagation 一致（full_v6 len_km 优先）。
+
+    直接段 full_v6 len_km=12、pkl 边长=10 时，下游链起点时刻必须等于直接 feature 的
+    estimated_arrival_time（trigger + 12/7.2），否则同一河段边界上 per-edge 到达时间与
+    summary 起算时刻错位（约 10 分钟级偏差）。
+    """
+    from datetime import timedelta
+    edges = [
+        ("0.0,0", "1.0,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 10.0}),
+        ("1.0,0", "2.0,0", 0, {"objectid": "101", "src_name": "东河", "length_km": 10.0}),
+    ]
+    rows = [
+        _candidate_row(
+            "100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=12.0,
+            trigger_stations=[{"station_id": "S1"}], trigger_station_count=1,
+        ),
+        _candidate_row("101", (1.0, 0.0), (2.0, 0.0), min_dist=30.0),
+    ]
+    stations = [{
+        "station_id": "S1", "lon": 0.0, "lat": 0.0, "rain_24h": 60.0,
+        "rain_end_time": "2026-07-27 08:00:00",
+    }]
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    direct_edges, start_nodes, _, start_arrival = rig._classify_graph_edges(
+        rows, graph, stations, 20.0, 10.0, flow_velocity_mps=2.0)
+    assert "1.0,0" in start_arrival and start_arrival["1.0,0"] is not None
+    velocity_kmh = 2.0 * 3.6
+    # naive "2026-07-27 08:00:00" 视为 Asia/Shanghai → UTC 00:00
+    trigger_utc = rig._normalize_end_time("2026-07-27 08:00:00")
+    expected = trigger_utc + timedelta(hours=12.0 / velocity_kmh)
+    assert abs((start_arrival["1.0,0"] - expected).total_seconds()) < 2, (
+        f"start_nodes_arrival 应使用 full_v6 len_km=12（trigger+12/7.2≈01:40 UTC），"
+        f"实际={start_arrival['1.0,0']}（若≈01:23 说明仍用 pkl 边长 10）"
+    )
+    # 下游边 t0_source_time 必须等于 start 节点到达时刻（同一河段边界）
+    downstream = rig._collect_downstream_edges(
+        {n: (0.0, start_arrival.get(n)) for n in start_nodes}, graph, set(direct_edges), 50.0,
+        flow_velocity_mps=2.0)
+    edge_101 = next(e for e in downstream if e["objectid"] == "101")
+    assert abs((edge_101["t0_source_time"] - expected).total_seconds()) < 2
+
+
+def test_river_propagation_feature_refinement_matches_per_edge_arrival():
+    """提供 features 时，summary 传播时间精化为 per-edge 到达时刻（直接+下游）的真实行程。
+
+    回归：5018ed7 让 per-edge arrival 含直接段行程（含多层直接段叠加），
+    但 summary 曾只取 downstream end_distance，导致 summary 与地图逐段到达时间自相矛盾。
+    """
+    from utils.rainfall_impact_geojson import _build_river_propagation
+    # 河 甲：直接段 t0=00:00，最远下游 04:10 到达（30km @ 7.2km/h），提供真实 per-edge 时刻
+    features = [
+        {"properties": {"river_name": "甲河", "impact_type": "direct_buffer",
+                        "t0_source_time": "2026-07-27T00:00:00Z",
+                        "estimated_arrival_time": "2026-07-27T01:24:00Z"}},
+        {"properties": {"river_name": "甲河", "impact_type": "downstream_50km",
+                        "t0_source_time": "2026-07-27T02:46:40Z",
+                        "estimated_arrival_time": "2026-07-27T04:10:40Z"}},
+    ]
+    direct = {"a": {"edge_key": "a", "river_name": "甲河", "length_km": 10.0,
+                    "row": {"src_name": "甲河", "len_km": 10.0}}}
+    downstream = [{
+        "edge_key": "d1", "river_name": "甲河", "end_distance_km": 10.0,
+        "from_x": 0.0, "from_y": 0.0, "to_x": 1.0, "to_y": 0.0,
+    }]
+    result = _build_river_propagation(direct, downstream, 2.0, features=features)
+    river = result["rivers"][0]
+    assert river["river_name"] == "甲河"
+    # 传播时间精化为 04:10 - 00:00 = 4.17h，距离 = 4.17h * 7.2 ≈ 30.0km
+    assert river["propagation_time_hours"] == pytest.approx(4.2, abs=0.05)
+    assert river["propagation_distance_km"] == pytest.approx(30.0, abs=0.5)
+    assert river["earliest_arrival_time"] == "2026-07-27T01:24:00Z"
+    assert river["latest_arrival_time"] == "2026-07-27T04:10:40Z"
+
+
+def test_river_propagation_direct_only_keeps_longest_direct_not_time_spread():
+    """纯直接河不启用 features 精化：多条直接段雨止时刻不同时，不得把两次降雨的
+    时间差算成传播时间，仍取最长直接段（影响就地发生的历史口径）。
+
+    回归：精化原对全部河生效，两条 t0 相差 2h 的直接段会被算成 3.4h 传播（虚假）。
+    """
+    from utils.rainfall_impact_geojson import _build_river_propagation
+    features = [
+        {"properties": {"river_name": "甲河", "impact_type": "direct_buffer",
+                        "t0_source_time": "2026-07-27T00:00:00Z",
+                        "estimated_arrival_time": "2026-07-27T01:24:00Z"}},
+        {"properties": {"river_name": "甲河", "impact_type": "direct_buffer",
+                        "t0_source_time": "2026-07-27T02:00:00Z",
+                        "estimated_arrival_time": "2026-07-27T03:24:00Z"}},
+    ]
+    direct = {"a": {"edge_key": "a", "river_name": "甲河", "length_km": 10.0,
+                    "row": {"src_name": "甲河", "len_km": 10.0}}}
+    result = _build_river_propagation(direct, [], 2.0, features=features)
+    river = result["rivers"][0]
+    assert river["has_downstream"] is False
+    assert river["propagation_time_hours"] == 1.4  # 10km / 7.2，非 (03:24-00:00)=3.4h
+    assert river["propagation_distance_km"] == 10.0
+
+
+def test_river_propagation_sorted_after_refinement():
+    """features 精化改写 propagation_time_hours 后必须重新排序：rivers[0] 恒为最严重河。
+
+    回归：排序在精化之前，精化把乙河从 1.4h 抬到 5.0h 后 rivers[0] 仍可能是甲河。
+    """
+    from utils.rainfall_impact_geojson import _build_river_propagation
+    features = [
+        {"properties": {"river_name": "甲河", "impact_type": "direct_buffer",
+                        "t0_source_time": "2026-07-27T00:00:00Z",
+                        "estimated_arrival_time": "2026-07-27T01:24:00Z"}},
+        {"properties": {"river_name": "乙河", "impact_type": "downstream_50km",
+                        "t0_source_time": "2026-07-27T00:00:00Z",
+                        "estimated_arrival_time": "2026-07-27T05:00:00Z"}},
+    ]
+    direct = {"a": {"edge_key": "a", "river_name": "甲河", "length_km": 10.0,
+                    "row": {"src_name": "甲河", "len_km": 10.0}}}
+    downstream = [{
+        "edge_key": "d1", "river_name": "乙河", "end_distance_km": 10.0,
+        "from_x": 0.0, "from_y": 0.0, "to_x": 1.0, "to_y": 0.0,
+    }]
+    result = _build_river_propagation(direct, downstream, 2.0, features=features)
+    names = [r["river_name"] for r in result["rivers"]]
+    # 甲河精化后 1.4h；乙河精化后 5.0h → 乙河必须排最前（原 bug：甲河在前）
+    assert names[0] == "乙河"
+    assert names[-1] == "甲河"
 
 
 def test_build_river_propagation_hour_boundary_readable():
