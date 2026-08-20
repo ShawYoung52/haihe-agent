@@ -336,6 +336,9 @@ def main():
     parser.add_argument("--csv", required=True, help="5 分钟降水 CSV 路径")
     parser.add_argument("--output", default="/tmp/rain_impact_verify.json", help="验证结果 JSON 输出路径")
     parser.add_argument("--threshold", type=float, default=50.0)
+    parser.add_argument("--station-buffer-km", type=float, default=20.0,
+                        help="站点缓冲区 km（默认 20；盐山等站最近河段 21.2km 超默认，"
+                             "需 30 才能匹配到漳卫新河，与 test_rain_impact_internal 默认 30 一致）")
     parser.add_argument("--db-host", default="10.226.107.130")
     parser.add_argument("--db-port", default="5432")
     parser.add_argument("--db-name", default="postgres")
@@ -372,6 +375,7 @@ def main():
     result = rig.build_rainstorm_impact_thematic_map(
         stations, pg_conf=pg_conf, graph_path=args.graph_path,
         rainfall_threshold_mm=args.threshold,
+        station_buffer_km=args.station_buffer_km,
     )
 
     # Step 3: 保存（附带传播时间）
