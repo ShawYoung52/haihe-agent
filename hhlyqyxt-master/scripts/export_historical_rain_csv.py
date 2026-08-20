@@ -30,6 +30,14 @@ from pathlib import Path
 
 import pandas as pd
 
+# 脚本位于 scripts/ 下，Python sys.path[0] 是 scripts/ 本身；
+# 需把项目根（本脚本的父目录）加进 sys.path，才能 import ScheduledTask/utils 等包。
+_CURRENT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _CURRENT_DIR.parent
+for _item in (_CURRENT_DIR, _PROJECT_ROOT):
+    if str(_item) not in sys.path:
+        sys.path.insert(0, str(_item))
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
