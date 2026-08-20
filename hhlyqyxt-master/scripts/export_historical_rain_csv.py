@@ -119,6 +119,52 @@ def fetch_hhly_minute(timerange: str) -> pd.DataFrame:
     return _fetch_hhly_rainfall_for_emergency(timerange)
 
 
+def split_window(start_bjt: datetime, end_bjt: datetime, segment_hours: int) -> list[tuple[datetime, datetime]]:
+    """把 [start, end) 切成多段（每段 segment_hours 小时），返回 [(seg_start, seg_end), ...]。"""
+    if segment_hours <= 0:
+        return [(start_bjt, end_bjt)]
+    segs: list[tuple[datetime, datetime]] = []
+    cur = start_bjt
+    while cur < end_bjt:
+        nxt = min(cur + timedelta(hours=segment_hours), end_bjt)
+        segs.append((cur, nxt))
+        cur = nxt
+    return segs
+
+
+def fetch_hhly_minute_by_segments(
+    start_bjt: datetime,
+    end_bjt: datetime,
+    segment_hours: int = 4,
+    *,
+    retries: int = 3,
+) -> pd.DataFrame:
+    """分段拉取 HHLY 分钟降水：大窗口拆成多段，逐段调 MUSIC 再合并去重。
+
+    背景：一次性拉 24h 全流域分钟数据（约 20~30 万行）会让 MUSIC 服务端数据库
+    连接超时断开（E50022/-7001）；拆成 4h 等小段后每段 1~5 万行，服务端可正常返回。
+    段与段之间用 build_timerange 的 5min 缓冲重叠，合并时按 站+时刻 去重。
+    """
+    segs = split_window(start_bjt, end_bjt, segment_hours)
+    frames: list[pd.DataFrame] = []
+    for idx, (seg_start, seg_end) in enumerate(segs, 1):
+        tr = build_timerange(seg_start, seg_end)
+        logger.info("拉取分段 %d/%d: [%s, %s)  UTC=%s",
+                    idx, len(segs),
+                    seg_start.strftime("%Y-%m-%d %H:%M"),
+                    seg_end.strftime("%Y-%m-%d %H:%M"),
+                    tr)
+        frames.append(fetch_hhly_minute_with_retry(tr, retries=retries))
+    non_empty = [f for f in frames if f is not None and not f.empty]
+    if not non_empty:
+        return pd.DataFrame()
+    merged = pd.concat(non_empty, ignore_index=True)
+    # 段间 5min 缓冲会重复；按 站+时刻 去重（保留先拉到的）
+    if {"Station_Id_C", "Datetime"}.issubset(merged.columns):
+        merged = merged.drop_duplicates(subset=["Station_Id_C", "Datetime"], keep="first")
+    return merged
+
+
 def fetch_hhly_minute_with_retry(
     timerange: str,
     *,
@@ -162,6 +208,9 @@ def main() -> int:
     parser.add_argument("--end", help="窗口结束（BJT，如 2026-08-20 08:00）")
     parser.add_argument("--day-start-hour", type=int, default=8,
                         help="--date 模式下窗口起始小时（默认 8=气象日界；0=自然日）")
+    parser.add_argument("--segment-hours", type=int, default=4,
+                        help="分段拉取时长（小时）。大窗口一次拉会触发 MUSIC -7001 连接断开，"
+                             "拆成小段规避；0=不分段")
     parser.add_argument("--output", required=True, help="输出 CSV 路径")
     args = parser.parse_args()
 
@@ -185,7 +234,7 @@ def main() -> int:
                 start_bjt.strftime("%Y-%m-%d %H:%M"),
                 end_bjt.strftime("%Y-%m-%d %H:%M"))
 
-    raw = fetch_hhly_minute_with_retry(timerange)
+    raw = fetch_hhly_minute_by_segments(start_bjt, end_bjt, args.segment_hours)
     logger.info("HHLY 分钟原始记录数：%d", len(raw))
     if raw.empty:
         logger.warning("该时段无 HHLY 数据，导出空表")
