@@ -24,7 +24,8 @@
     overlay.className = "img-zoom-viewer";
     overlay.setAttribute("role", "dialog");
     overlay.style.cssText = [
-      "position:fixed;inset:0;z-index:999999;",
+      "position:fixed;top:0;left:0;right:0;bottom:0;width:100vw;height:100vh;",
+      "z-index:999999;",
       "background:rgba(8,8,10,.92);",
       "display:none;align-items:center;justify-content:center;",
       "touch-action:none;user-select:none;-webkit-user-select:none;",
@@ -84,6 +85,10 @@
       fit = Math.min(overlay.clientWidth / baseW, overlay.clientHeight / baseH);
       img.style.width = baseW + "px";
       img.style.height = baseH + "px";
+      // 超窄长图（如 660x4610）fit 后宽度过小几乎不可见——初始至少显示 MIN_VIEW_W 像素宽
+      var MIN_VIEW_W = 260;
+      var need = MIN_VIEW_W / (baseW * fit);
+      if (need > 1) st.z = Math.min(MAX_ZOOM, need);
       center();
       apply();
     }
