@@ -32,6 +32,9 @@ GRAPH = ("/home/ev/haiheliuyubaoyuagent/yx-test/haiheliuyubaoyuagent-master/"
          "haihe-weather-analyzer-mcp/test-data/river_directed_v6.pkl")
 DB_PASSWORD = "postgres"
 THRESHOLD = 50.0
+# 盐山(54627)最近入库河段（漳卫新河）21.21km，超过默认 20km 站点缓冲区 → 0 匹配。
+# 调 30 与 test_rain_impact_internal 默认一致，才能匹配出影响河流与传播时间。
+STATION_BUFFER_KM = 30.0
 
 
 def _pg_conf() -> dict:
@@ -102,7 +105,9 @@ def main() -> int:
             pg_conf=_pg_conf(),
             graph_path=GRAPH,
             rainfall_threshold_mm=THRESHOLD,
+            station_buffer_km=STATION_BUFFER_KM,
         )
+        print(f"(站点缓冲区 {STATION_BUFFER_KM}km)")
         print("affected_rivers:", result.get("affected_rivers"))
         print("downstream_start_stats:", json.dumps(
             result.get("downstream_start_stats", {}), ensure_ascii=False))
