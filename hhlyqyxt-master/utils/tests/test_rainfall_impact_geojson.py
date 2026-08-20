@@ -1517,3 +1517,175 @@ def test_backward_compat_missing_rain_end_time():
     # 老调用不应该有 arrival 字段
     assert "earliest_arrival_time" not in r
     assert "latest_arrival_time" not in r
+
+
+# ---------------------------------------------------------------------------
+# 影响时间拓扑：upstream_ids / downstream_id / affected / impact_sources
+# 规则（用户确认，对齐 GPT 递推模型）：
+#   impact_start_time = t0_source_time（直接边=触发雨止；下游边=上游最早到达本边起点）
+#   arrival_time      = estimated_arrival_time = impact_start_time + travel_time
+#   汇流取最早到达（best_arrival 已 min），来源 = 所有到达时刻 == 最早的受影响上游边
+# ---------------------------------------------------------------------------
+
+
+def _run_full_geojson(edges, rows, stations, *, velocity=2.0, downstream_km=50.0):
+    """端到端：classify → collect_downstream → build_geojson，返回 geojson dict。"""
+    graph_path = _make_graph_path(edges)
+    graph = rig.get_graph(graph_path)
+    direct_edges, start_nodes, _st, start_arrival = rig._classify_graph_edges(
+        rows, graph, stations, 20.0, 10.0, flow_velocity_mps=velocity)
+    downstream = rig._collect_downstream_edges(
+        {n: (0.0, start_arrival.get(n)) for n in start_nodes}, graph, set(direct_edges),
+        downstream_km, flow_velocity_mps=velocity)
+    return rig._build_river_geojson(
+        direct_edges, downstream, rows, graph_path=graph_path, flow_velocity_mps=velocity)
+
+
+def _station(sid, lon, lat, rain_end):
+    from datetime import datetime, timezone
+    return {"station_id": sid, "lon": lon, "lat": lat, "rain_24h": 60.0,
+            "rain_end_time": datetime.fromisoformat(rain_end).replace(tzinfo=timezone.utc)}
+
+
+def test_impact_topology_chain_a_to_b_to_c():
+    """链式 A→B→C：B.upstream_ids=[A], B.downstream_id=C, 全部 affected=True。
+    B.t0_source_time = A.estimated_arrival_time（A 到达 = B 开始受影响）。"""
+    from datetime import timezone, datetime
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "101", "src_name": "东河", "length_km": 7.2}),
+        ("2,0", "3,0", 0, {"objectid": "102", "src_name": "东河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("101", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+        _candidate_row("102", (2.0, 0.0), (3.0, 0.0), min_dist=40.0, len_km=7.2),
+    ]
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00")]
+    geojson = _run_full_geojson(edges, rows, stations)
+    by_oid = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    assert set(by_oid) == {"100", "101", "102"}
+    ek100, ek101, ek102 = (by_oid["100"]["edge_key"], by_oid["101"]["edge_key"], by_oid["102"]["edge_key"])
+    # 拓扑
+    assert by_oid["100"]["affected"] is True
+    assert by_oid["101"]["affected"] is True
+    assert by_oid["102"]["affected"] is True
+    assert by_oid["100"]["downstream_id"] == ek101
+    assert by_oid["101"]["upstream_ids"] == [ek100]
+    assert by_oid["101"]["downstream_id"] == ek102
+    assert by_oid["102"]["upstream_ids"] == [ek101]
+    # 时间递推：B.t0 = A.arrival；C.t0 = B.arrival
+    assert by_oid["101"]["t0_source_time"] == by_oid["100"]["estimated_arrival_time"]
+    assert by_oid["102"]["t0_source_time"] == by_oid["101"]["estimated_arrival_time"]
+    # 来源：B 来自 A（direct），C 来自 B
+    assert by_oid["100"]["impact_sources"] == ["DIRECT"]
+    assert by_oid["101"]["impact_sources"] == [ek100]
+    assert by_oid["102"]["impact_sources"] == [ek101]
+    # 无上游（direct 起点）与无下游（最下游末端）
+    assert by_oid["100"]["upstream_ids"] == []
+    assert by_oid["102"]["downstream_id"] is None
+
+
+def test_impact_topology_confluence_min_and_sources():
+    """汇流 A、B → C：C.t0 = min(A.arrival, B.arrival)；来源只列最早者。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("0,1", "1,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (0.0, 1.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    # A 雨止 08:00（到汇合点 09:00），B 雨止 10:00（到 11:00）→ C 受影响 = 09:00，来源仅 A
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+                _station("S2", 0.0, 1.0, "2026-08-20T10:00:00")]
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    c = props["300"]
+    a = props["100"]
+    expected = a["estimated_arrival_time"]  # A 到汇合点 = C 开始受影响
+    assert c["t0_source_time"] == expected
+    assert c["impact_sources"] == [a["edge_key"]]
+    assert c["downstream_id"] is None
+
+
+def test_impact_topology_confluence_tie_sources():
+    """A、B 同时最早到达 C → C.impact_sources = [A, B]（并列来源全列）。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("0,1", "1,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 3.6}),
+        ("1,0", "2,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (0.0, 1.0), (1.0, 0.0), min_dist=5.0, len_km=3.6,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    # A: 08:00 + 7.2/7.2 = 09:00；B: 08:30 + 3.6/7.2 = 09:00 → 并列最早
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+                _station("S2", 0.0, 1.0, "2026-08-20T08:30:00")]
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    c = props["300"]
+    assert sorted(c["impact_sources"]) == sorted([props["100"]["edge_key"], props["200"]["edge_key"]])
+
+
+def test_impact_topology_confluence_b_arrives_first():
+    """汇流中 B 比 A 先到 → C.impact_sources 只列 B（来源跟随最早到达）。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("0,1", "1,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (0.0, 1.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    # B 先到（08:00+1h=09:00），A 后到（10:00+1h=11:00）→ C 受影响 = 09:00，来源仅 B
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T10:00:00"),
+                _station("S2", 0.0, 1.0, "2026-08-20T08:00:00")]
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    c, b = props["300"], props["200"]
+    assert c["t0_source_time"] == b["estimated_arrival_time"]
+    assert c["impact_sources"] == [b["edge_key"]]
+
+
+def test_impact_topology_cross_day_and_shuffled_order():
+    """跨天传播 + GeoJSON 顺序打乱后，拓扑/时间字段仍一致（不依赖 feature 顺序）。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "东河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "101", "src_name": "东河", "length_km": 7.2}),
+        ("2,0", "3,0", 0, {"objectid": "102", "src_name": "东河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("101", (1.0, 0.0), (2.0, 0.0), min_dist=30.0),
+        _candidate_row("102", (2.0, 0.0), (3.0, 0.0), min_dist=40.0),
+    ]
+    # 雨止接近午夜 → 传播跨天（08-20 23:00 起，+3h 到 08-21 02:00）
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T23:00:00")]
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    assert props["102"]["estimated_arrival_time"] >= "2026-08-21T00:00:00Z"
+    assert props["102"]["estimated_arrival_time"] > props["102"]["t0_source_time"]
+    # 打乱顺序后字段仍一致
+    shuffled = rig._build_river_geojson.__self__ if False else None
+    feats = list(geojson["features"])
+    feats.reverse()
+    shuffled_geojson = {"type": "FeatureCollection", "features": feats}
+    sprops = {p["objectid"]: p for f in shuffled_geojson["features"] for p in [f["properties"]]}
+    assert sprops["101"]["upstream_ids"] == props["101"]["upstream_ids"]
+    assert sprops["101"]["impact_sources"] == props["101"]["impact_sources"]
+    assert sprops["101"]["t0_source_time"] == props["101"]["t0_source_time"]

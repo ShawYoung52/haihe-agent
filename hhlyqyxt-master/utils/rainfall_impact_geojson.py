@@ -967,7 +967,67 @@ def _build_river_geojson(
             f["properties"].get("min_downstream_distance_km", 0.0),
         )
     )
+    _attach_impact_topology(features)
     return {"type": "FeatureCollection", "features": features}
+
+
+def _parse_edge_nodes(edge_key: str) -> tuple[str, str]:
+    """从 edge_key 解析边端点节点 id（_edge_key 格式 u|v|key|objectid|name）。
+
+    仅作拓扑建图用；解析失败（如手工构造的极简 edge_key）返回 ("", "")。
+    """
+    parts = str(edge_key or "").split("|")
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return "", ""
+
+
+def _attach_impact_topology(features: list[dict]) -> None:
+    """为每条 feature 附加影响时间拓扑字段（纯增量，不改现有字段名）。
+
+    规则（用户确认，对齐 GPT 递推模型；时间语义映射现有字段）：
+      - affected：输出即受影响（direct_buffer/downstream_50km 都是被影响到的），恒 True
+      - upstream_ids：流入本边起点的受影响上游边（edge_key 列表）
+      - downstream_id：从本边终点流出的受影响下游边（edge_key；多条取首个，无则 None）
+      - impact_sources：直接边 ["DIRECT"]；下游边 = 所有 estimated_arrival_time
+        等于本边 t0_source_time（= 最早到达本边起点时刻）的受影响上游边
+        （汇流并列最早时全部列出）
+    """
+    by_from: dict[str, list[str]] = {}
+    by_to: dict[str, list[str]] = {}
+    for feat in features:
+        props = feat.get("properties") or {}
+        key = str(props.get("edge_key") or "")
+        u, v = _parse_edge_nodes(key)
+        if not u or not v:
+            continue
+        by_from.setdefault(u, []).append(key)
+        by_to.setdefault(v, []).append(key)
+
+    props_by_key = {
+        str((f.get("properties") or {}).get("edge_key") or ""): f.get("properties") or {}
+        for f in features
+    }
+    for feat in features:
+        props = feat.get("properties") or {}
+        key = str(props.get("edge_key") or "")
+        u, v = _parse_edge_nodes(key)
+        upstream_ids = [k for k in by_to.get(u, []) if k != key] if (u and v) else []
+        downstream_ids = [k for k in by_from.get(v, []) if k != key] if (u and v) else []
+        props["upstream_ids"] = sorted(upstream_ids)
+        props["downstream_id"] = downstream_ids[0] if downstream_ids else None
+        props["affected"] = True
+        if props.get("impact_type") == "direct_buffer":
+            props["impact_sources"] = ["DIRECT"]
+        else:
+            sources = []
+            t0 = props.get("t0_source_time")
+            if t0 is not None:
+                for k in upstream_ids:
+                    other = props_by_key.get(k)
+                    if other is not None and other.get("estimated_arrival_time") == t0:
+                        sources.append(k)
+            props["impact_sources"] = sorted(sources)
 
 
 def _resolve_edge_features(
@@ -1026,13 +1086,18 @@ def _resolve_edge_features(
             prop_distance = _feature_length_km(row, edge, impact_type)
         if velocity_kmh > 0 and math.isfinite(prop_distance):
             prop_time = round(prop_distance / velocity_kmh, 1)
+            # 到达时刻用未舍入的精确传播时间：保证 arrival = t0 + 真实传播，
+            # 与下游链式传播的 t0_source_time（best_arrival 精确值）在同一边界上完全衔接，
+            # 否则 prop_time 舍入到 0.1h 会让 A.arrival ≠ B.t0（影响时间闭环 ±3min 断裂）。
+            exact_hours = prop_distance / velocity_kmh
         else:
             prop_distance = 0.0
             prop_time = 0.0
+            exact_hours = 0.0
 
         # 预计到达时间
-        if t0 is not None and math.isfinite(prop_time) and prop_time >= 0:
-            arrival = t0 + timedelta(hours=prop_time)
+        if t0 is not None and math.isfinite(exact_hours) and exact_hours >= 0:
+            arrival = t0 + timedelta(hours=exact_hours)
             t0_iso = _iso_utc(t0)
             arrival_iso = _iso_utc(arrival)
         else:
