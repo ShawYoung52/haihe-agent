@@ -5,7 +5,7 @@
 1. **看图器修复**：前端同事 2026-08-21 重新构建 AgentWeb 后，`index.html` 改为引用 `./public/img-zoom-agentweb.js`（public/ 子目录约定），旧文件在 webapp 根级 → 404，看图器静默失效。**纯路径问题，JS 内容本身完好，无需改 JS**。
 2. **风险接口 → 灾害点匹配**：`/hhfw/riskWarnNew/findDataListByConfig`（返回经度/纬度/风险等级）在 **MCP 后端工具内**按 haversine 就近匹配三张静态隐患表（地灾/山洪/中小河流），命中附 `hazard_id` 等；并产出各区县隐患点总数 + 逐区县×逐等级风险统计 + 逐级防范建议。**纯后端改动，与前端无关**。
 3. **司南分层回答**：地理灾害问答最后一段改为按等级分层（先各区县隐患点总数与本次各级数量，再逐级防范建议），不再是"泛泛防范建议"。
-4. **区域天气风险等级（领导验收 #8）**：问「明天蓟州的天气怎么样」等**区域天气**时，除隐患点数量外，在灾害风险表里增加**「本次风险等级」列**（按风险接口 `level` 一~四级统计该区域各灾种各级数量，如「一级 2 处、三级 5 处」；接口可达但无风险显示「本次无风险」；接口降级不加列、不影响隐患点表）。**风险等级来源与司南分层回答同一接口同一口径**。
+4. **区域天气风险等级（领导验收 #8）**：问「明天蓟州的天气怎么样」等**区域天气**时，除隐患点数量外，在灾害风险表里增加**「本次风险等级」列**（按风险接口 `level` 一~四级统计该区域各灾种各级数量，如「一级 2 处、三级 5 处」；接口可达但无风险显示「本次无风险」；接口不可达（如 14所 500）显示「接口暂不可用」——**不再静默隐藏列**，回答自身即可分辨"接口没调好"还是"旧代码未部署"；不影响隐患点表）。**风险等级来源与司南分层回答同一接口同一口径**。
 5. **暴雨知识问答误追加"当前无生效暴雨预警信号"（验收 #5）**：问「暴雨预警四个等级是什么」等**知识性**问法（等级体系/定义/发布标准/阈值/区别）时，不再被误判为"预警事实/生效状态"查询：`_is_warning_fact_query` 扩充知识排除词（四个等级/几个等级/哪几级/等级划分等），planner/answer 双 prompt 的"无生效预警"最高优先级规则显式排除知识性问法（不得输出或追加该句），知识回答照常出表格。
 6. **预警 report-time 跟随切换系统时间（验收 #3）**：问「当前有哪些预警」等，`_fetch_warning_info`/`_fetch_today_warning_summary`/`_fetch_national_warning_info` 的 `query_time`/`query_hour_text`（"截至XX时"）与今日汇总的 "today" 分类原来用 `datetime.now()`，不受系统时间影响。已翻转为 `time_source.now()`，并给三个预警缓存键加**时次桶**（覆盖时间跨小时立即 miss，避免 120s TTL 内串出旧标签）。**注意**：预警接口无 as-of 参数——清单记录本身仍是实时生效数据，过去日期覆盖时只有"截至XX时"标签与"今日"分类按覆盖日期，记录列表来自实时接口。
 7. **"今日雨情"默认触发降水专题组合长图（验收 #4）**：问「今日雨情/今天雨情/今天的雨情」（今日/今天+雨情，指今天的降水情况）且未指明图类型时，双轨 prompt 的"降水专题组合长图"触发规则新增该问法 → planner 调 `generate_haihe_composite_longimg` 出今天的组合长图；点名要"降水实况文字/数据/分布图"或"海河流域的雨情"（天擎站点分析）时不在此列。
@@ -32,7 +32,7 @@
 |---|---|---|
 | `chainlitexam/prompts.py` | 同路径 | 规则 #12（双份）改为必须按等级分层作答 + 逐字采用 `level_advice`；**「无生效预警」最高优先级规则显式排除知识性问法**（验收 #5，双 prompt 措辞）；**「今日雨情/今天雨情」默认触发降水专题组合长图**（验收 #4，双 prompt 触发词） |
 | `chainlitexam/fast_paths/risk_warning_fast_paths.py` | 同路径 | `_format` 渲染逐级统计/隐患点总数/逐级防范建议（无风险时自动回退笼统建议） |
-| `chainlitexam/tools/rolling_forecast_response.py` | 同路径 | **区域天气#8**：`_region_hazard_table` 增「本次风险等级」列（`_format_risk_level_counts` 按严重度排序；`risk_levels_available` 为真才加列） |
+| `chainlitexam/tools/rolling_forecast_response.py` | 同路径 | **区域天气#8**：`_region_hazard_table` 增「本次风险等级」列（`_format_risk_level_counts` 按严重度排序；**键存在即加列**——接口可达显示各级数量/「本次无风险」，接口不可达显示「接口暂不可用」，不再静默隐藏列） |
 | `chainlitexam/tools/warning_workflow.py` | 同路径 | **验收 #5**：`_is_warning_fact_query` 扩充知识排除词（四个等级/几个等级/哪几级/等级划分等），知识问法不再误接「当前无生效XX预警信号」 |
 | `chainlitexam/tests/test_risk_warning_fast_paths.py` | 同路径（可选） | 4 条测试 |
 | `chainlitexam/tests/test_rolling_forecast_response.py` | 同路径（可选） | 25 条测试（含等级列渲染 9 条） |
@@ -100,7 +100,7 @@
    curl -X POST http://localhost:8003/api/v1/qa/ask -H 'Content-Type: application/json' \
      -d '{"question":"明天蓟州的天气怎么样？"}'
    ```
-   期望：回答的【蓟州区灾害风险】表含**「本次风险等级」列**，如 `| 地质灾害 | 2 处 | 一级 1 处、三级 1 处 |`（按严重度排序）；接口降级时列不出现、隐患点数量表照常。**确认 `risk_warning_tool.py` 的 `REGION_RISK_LEVELS_CACHE_TTL`（默认 120s）生效**（两次连续发问第二次不打接口）。
+   期望：回答的【蓟州区灾害风险】表含**「本次风险等级」列**，如 `| 地质灾害 | 2 处 | 一级 1 处、三级 1 处 |`（按严重度排序）；接口不可达（如 14所 findDataListByConfig 回 500）时列显示「接口暂不可用」、隐患点数量表照常。**确认 `risk_warning_tool.py` 的 `REGION_RISK_LEVELS_CACHE_TTL`（默认 120s）生效**（两次连续发问第二次不打接口）。
 6. **暴雨知识问答（验收 #5，经 8003）**：
    ```bash
    curl -X POST http://localhost:8003/api/v1/qa/ask -H 'Content-Type: application/json' \

@@ -237,7 +237,11 @@ class TestFormatRiskLevelCounts:
 
 
 class TestRegionHazardTableRiskLevels:
-    """区域天气#8：risk_levels_available 时渲染"本次风险等级"列，降级不加列。"""
+    """区域天气#8：新 MCP 必带 risk_levels_available 键 → "本次风险等级"列始终出现。
+
+    接口可达有数据按严重度列出、可达无风险"本次无风险"、接口不可达(None)"接口暂不可用"
+    （不再静默隐藏列，回答自身可分辨"接口没调好"还是"旧代码未部署"）；旧 payload 无该键才不加列。
+    """
 
     def _with_levels(self, risk_levels, available=True):
         payload = _hazards_payload()
@@ -267,17 +271,21 @@ class TestRegionHazardTableRiskLevels:
         assert "本次风险等级" in section
         assert "| 地质灾害 | 2 处 | 本次无风险 |" in section
 
-    def test_levels_column_omitted_when_unavailable(self):
-        """接口降级（available=False / risk_levels=None）→ 不加列，表照常。"""
+    def test_levels_column_shows_unavailable_when_interface_down(self):
+        """接口不可达（available=False / risk_levels=None）→ 列显示"接口暂不可用"，表照常。
+
+        2026-08-21 生产日志佐证：14所 findDataListByConfig 对三灾种全回 HTTP 500，
+        query_region_risk_levels 返回 None；此处锁定降级不再静默隐藏列。
+        """
         payload = self._with_levels(None, available=False)
         bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
         section = bundle["code_section"]
-        assert "本次风险等级" not in section
-        assert "| 地质灾害 | 2 处 |" in section
-        assert "| 山洪 | 1 处 |" in section
+        assert "本次风险等级" in section
+        assert "| 地质灾害 | 2 处 | 接口暂不可用 |" in section
+        assert "| 山洪 | 1 处 | 接口暂不可用 |" in section
 
     def test_levels_column_omitted_when_missing(self):
-        """旧 payload 无 risk_levels 字段（升级前）→ 不加列。"""
+        """旧 payload 无 risk_levels_available 键（升级前 MCP）→ 不加列（兼容）。"""
         bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", _hazards_payload())
         assert "本次风险等级" not in bundle["code_section"]
 

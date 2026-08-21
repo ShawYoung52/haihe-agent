@@ -604,8 +604,11 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
 
     每区域一张表；区域无数据/全部类别 count<=0 时跳过。纯代码确定性生成，
     不依赖 LLM，也不编造具体点位（区域级只报种类与数量）。
-    区域天气#8：entry 带 risk_levels（风险接口当前各灾种等级，一~四级）且
-    risk_levels_available 为真时，追加"本次风险等级"列；接口降级（None）不加列。
+    区域天气#8：entry 带 risk_levels_available 字段（新 MCP 必有，键存在即
+    判定接入）时，追加"本次风险等级"列——接口可达有数据按严重度列出各级数量、
+    可达但无风险显示"本次无风险"；接口不可达（risk_levels=None）显示"接口暂不可用"
+    （不再静默隐藏列，回答自身即可分辨"接口没调好"还是"旧代码未部署"）。
+    旧 payload 无该字段 → 不加列（兼容升级前 MCP）。
     """
     if not region_hazards:
         return ""
@@ -614,7 +617,7 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
         if not isinstance(entry, dict):
             continue
         risk_levels = entry.get("risk_levels")
-        show_levels = bool(entry.get("risk_levels_available")) and isinstance(risk_levels, dict)
+        show_levels = "risk_levels_available" in entry
         rows: list[list[str]] = []
         for category in entry.get("categories") or []:
             if not isinstance(category, dict):
@@ -627,8 +630,11 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
             risk, advice = _REGION_HAZARD_RISK.get(key, ("存在风险隐患", "注意防范相关灾害风险"))
             row = [label, f"{count} 处"]
             if show_levels:
-                level_info = risk_levels.get(key) or {}
-                row.append(_format_risk_level_counts(level_info.get("levels") or {}))
+                if isinstance(risk_levels, dict):
+                    level_info = risk_levels.get(key) or {}
+                    row.append(_format_risk_level_counts(level_info.get("levels") or {}))
+                else:
+                    row.append("接口暂不可用")
             row.extend([risk, advice])
             rows.append(row)
         if not rows:
