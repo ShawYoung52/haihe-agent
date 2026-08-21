@@ -154,3 +154,23 @@ def test_new_answer_prompt_has_no_no_effective_warning_rule():
     assert "科普解释类问题" in p
     assert "分级标准" in p
     assert "预警等级" in p
+
+
+def test_longimg_trigger_covers_today_rain():
+    """2026-08-21 验收 #4：问"今日雨情"应触发降水专题组合长图。
+
+    双轨 prompt 的"降水专题组合长图"触发规则必须含"今日雨情/今天雨情"等今日+雨情
+    问法并指明默认走本工具；否则 planner 不会为该问法调 generate_haihe_composite_longimg。
+    """
+    import prompts
+    for p in (prompts.PLANNER_SYSTEM_PROMPT, prompts.WEATHER_ASSISTANT_PROMPT):
+        header = "### 降水专题组合长图"
+        start = p.find(header)
+        assert start != -1, "组合长图规则段应存在"
+        nxt = p.find("\n### ", start + len(header))
+        section = p[start:nxt if nxt != -1 else start + 3000]
+        assert "generate_haihe_composite_longimg" in section
+        assert "今日雨情" in section
+        assert "默认走本工具" in section
+        # 明确"海河流域的雨情"不在此列（保持天擎站点分析路由）
+        assert "海河流域的雨情" in section

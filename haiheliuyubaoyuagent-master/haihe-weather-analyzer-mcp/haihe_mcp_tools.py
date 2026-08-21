@@ -368,14 +368,25 @@ def _build_today_warning_summary(history_raw_data: list[dict], effective_raw_dat
     }
 
 
+def _warning_time_bucket(now: datetime | None = None) -> str:
+    """预警缓存键的时次桶（sim-time 覆盖或真实时间，按小时隔离，跨时次必 miss）。
+
+    预警接口无 as-of 参数（返回实时生效/历史预警），query_time/query_hour_text 标签
+    跟随 time_source.now()——切换系统时间后"截至XX时"与"今日发布"按覆盖日期回答；
+    桶使覆盖时间一变缓存键即 miss 重新取数，避免 120s TTL 内串出旧标签。
+    """
+    return (now if now is not None else time_source.now()).strftime("%Y%m%d%H")
+
+
 def _fetch_warning_info(path: str, warning_status: str, include_raw: bool = False) -> dict:
     """请求预警接口"""
+    now = time_source.now()
+    time_bucket = _warning_time_bucket(now)
     if not include_raw:
         with _warning_info_cache_lock:
-            hit = _warning_info_cache.get(warning_status)
+            hit = _warning_info_cache.get((warning_status, time_bucket))
             if hit and (time.time() - hit[0]) < WARNING_INFO_CACHE_TTL:
                 return hit[1]
-    now = datetime.now()
     query_time = now.strftime("%Y-%m-%d %H:%M:%S")
     query_hour_text = now.strftime("%H时")
     url = _warning_api_url(path)
@@ -423,17 +434,17 @@ def _fetch_warning_info(path: str, warning_status: str, include_raw: bool = Fals
         result["raw_response"] = payload
     else:
         with _warning_info_cache_lock:
-            _warning_info_cache[warning_status] = (time.time(), result)
+            _warning_info_cache[(warning_status, time_bucket)] = (time.time(), result)
     return result
 
 
 def _fetch_today_warning_summary() -> dict:
-    cache_key = "today_summary"
+    now = time_source.now()
+    cache_key = ("today_summary", _warning_time_bucket(now))
     with _today_warning_summary_cache_lock:
         hit = _today_warning_summary_cache.get(cache_key)
         if hit and (time.time() - hit[0]) < TODAY_WARNING_SUMMARY_CACHE_TTL:
             return hit[1]
-    now = datetime.now()
     history = _fetch_warning_info(WARNING_HISTORY_PATH, "history", include_raw=True)
     effective = _fetch_warning_info(WARNING_EFFECTIVE_PATH, "effective", include_raw=True)
     if history.get("error"):
@@ -502,12 +513,12 @@ def _national_warning_matches_keywords(item: dict, keywords: list[str]) -> bool:
 
 def _fetch_national_warning_info(keywords: str | None = None, max_items: int | None = None) -> dict:
     """请求中央气象台预警接口，返回筛选后的轻量化预警记录。"""
-    cache_key = f"{keywords}|{max_items}"
+    now = time_source.now()
+    cache_key = f"{keywords}|{max_items}|{_warning_time_bucket(now)}"
     with _national_warning_cache_lock:
         hit = _national_warning_cache.get(cache_key)
         if hit and (time.time() - hit[0]) < NATIONAL_WARNING_CACHE_TTL:
             return hit[1]
-    now = datetime.now()
     query_time = now.strftime("%Y-%m-%d %H:%M:%S")
     query_hour_text = now.strftime("%H时")
     try:
