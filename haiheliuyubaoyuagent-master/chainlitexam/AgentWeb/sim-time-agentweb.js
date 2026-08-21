@@ -5,10 +5,11 @@
 //   - 点"恢复" → 还原真实时间；
 //   - 顶部状态行常显"模拟中/真实时间"，防忘记恢复。
 // 后端：调 8003 的 /api/v1/admin/system-time（与 /qa/ask 同机同端口不同服务）。
+// 挂载位置（2026-08-21 用户要求）：优先锚在页面"说明"元素旁边；找不到则回退右下角悬浮。
 // 兼容性：无可选链/无箭头函数/用 XMLHttpRequest，兼容内网旧浏览器。
-// 部署：本文件放 webapps/AgentWeb/public/sim-time-agentweb.js（前端构建约定 public/ 子目录，
-//       index.html 加一行 <script src="./public/sim-time-agentweb.js"></script>，
-//       与看图器 img-zoom-agentweb.js 同位置；2026-08-21 起统一放 public/）。无需重启 Tomcat。
+// 部署：本文件放 webapps/AgentWeb/sim-time-agentweb.js（webapp 根级，与 img-zoom-agentweb.js 同位置，
+//       index.html 加一行 <script src="./sim-time-agentweb.js"></script>；2026-08-21 用户确认放根级，
+//       无需 public/ 子目录）。无需重启 Tomcat。
 // =====================================================================
 (function () {
   var PREFIX = "[SIM_TIME_AW]";
@@ -24,7 +25,7 @@
     var panel = document.createElement("div");
     panel.id = "simTimePanel";
     panel.style.cssText = [
-      "position:fixed;right:14px;bottom:14px;z-index:99998;",
+      "position:fixed;right:14px;bottom:14px;z-index:99998;", // 默认：右下角悬浮（被 placePanel 覆盖）
       "width:250px;font-size:12px;line-height:1.5;color:#333;",
       "background:#fff;border:1px solid #c8d2e0;border-radius:8px;",
       "box-shadow:0 4px 20px rgba(0,0,0,.18);font-family:sans-serif;",
@@ -99,6 +100,49 @@
     return panel;
   }
 
+  // 找页面里含"说明"的最紧凑可见元素作锚点（标题/标签类，文本短）；
+  // textContent 长度过滤排除整页容器，取含"说明"的最短文本元素。
+  function findShuomingAnchor() {
+    var best = null;
+    var bestLen = 9999;
+    var nodes = document.querySelectorAll("h1,h2,h3,h4,h5,h6,a,button,div,span,p,li,label,b,strong");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var t = (el.textContent || "").replace(/\s+/g, "");
+      if (t.indexOf("说明") < 0 || t.length > 40) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue; // 不可见跳过
+      if (t.length < bestLen) { bestLen = t.length; best = el; }
+    }
+    return best;
+  }
+
+  // 面板直挂 document.body（在 Vue root 之外，不被 Vue 重渲染清掉），
+  // 按锚点元素的 getBoundingClientRect 用绝对定位放到其右侧；返回是否锚定成功。
+  function placePanel() {
+    var panel = document.getElementById("simTimePanel");
+    if (!panel) return false;
+    var anchor = findShuomingAnchor();
+    if (anchor && anchor.parentNode) {
+      var r = anchor.getBoundingClientRect();
+      if (r.width >= 1 && r.height >= 1) {
+        panel.style.position = "absolute";
+        panel.style.left = (window.pageXOffset + r.left + r.width + 10) + "px";
+        panel.style.top = (window.pageYOffset + r.top) + "px";
+        panel.style.right = "auto";
+        panel.style.bottom = "auto";
+        return true;
+      }
+    }
+    // 回退：右下角悬浮
+    panel.style.position = "fixed";
+    panel.style.right = "14px";
+    panel.style.bottom = "14px";
+    panel.style.left = "auto";
+    panel.style.top = "auto";
+    return false;
+  }
+
   function setStatus(text, color) {
     var el = document.getElementById("simTimeStatus");
     if (!el) return;
@@ -161,6 +205,20 @@
 
   function init() {
     buildPanel();
+    // Vue 渲染是异步的：先尝试锚到"说明"旁，找不到则延时重试（页面渐进加载），最后回退悬浮角。
+    var tries = 0;
+    function attempt() {
+      var ok = placePanel();
+      tries++;
+      if (!ok && tries < 12) { setTimeout(attempt, 800); return; }
+      if (ok) {
+        window.addEventListener("resize", placePanel);
+        console.log(PREFIX + " 面板已锚定到'说明'元素旁");
+      } else {
+        console.log(PREFIX + " 未找到'说明'元素，面板按右下角悬浮显示");
+      }
+    }
+    attempt();
     refreshStatus();
     console.log(PREFIX + " 系统时间切换面板已启用");
   }

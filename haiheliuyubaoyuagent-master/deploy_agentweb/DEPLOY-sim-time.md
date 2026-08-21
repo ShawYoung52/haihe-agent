@@ -15,7 +15,7 @@
 |---|---|
 | `chainlitexam/utils/time_source.py` | `.../chainlitexam/utils/time_source.py` |
 | `haihe-weather-analyzer-mcp/time_source.py` | `.../haihe-weather-analyzer-mcp/time_source.py` |
-| `deploy_agentweb/sim-time-agentweb.js` | `.../webapps/AgentWeb/public/sim-time-agentweb.js`（见第三节，前端构建约定 public/ 子目录） |
+| `chainlitexam/AgentWeb/sim-time-agentweb.js` | `.../webapps/AgentWeb/sim-time-agentweb.js`（webapp 根级，2026-08-21 用户确认放根级，无需 public/ 子目录） |
 
 ### chainlitexam（8003 进程）— 改动的文件
 - `chain_gzt.py`：`【当前日期】`前缀 today_str/weekday → `time_source.now()`；`_orchestrator_runtime_cache_key` 日键 → `time_source.override_date_str()`；新增 3 个 REST 端点 + `_after_system_time_changed()`（清 `qa_http_api._response_cache` + bump orchestrator runtime generation）。
@@ -42,11 +42,13 @@
 2. **重启两个服务**（都必须重启，否则 time_source + 锚点改动不生效）：
    - `systemctl restart haihe-chainlit`（8003）
    - MCP `server.py` 进程（SSE 3333，重启后等就绪）
-3. **AgentWeb 前端**：
-   - 先建 `webapps/AgentWeb/public/` 子目录（前端构建约定：index.html 引用 `./public/*.js`，2026-08-21 同事重新构建后根级位置 404）；
-   - 拷 `sim-time-agentweb.js` → `webapps/AgentWeb/public/`（看图器 `img-zoom-agentweb.js` 同样放 `public/`，别再放根级）；
-   - `index.html` 在 `<head>` 里加一行 `<script src="./public/sim-time-agentweb.js"></script>`（同看图器注入方式）；
+3. **AgentWeb 前端**（2026-08-21 用户确认：文件放 webapp **根级**，不建 public/ 子目录）：
+   - 拷 `sim-time-agentweb.js` → `webapps/AgentWeb/`（看图器 `img-zoom-agentweb.js` 同样放根级）；
+   - `index.html` 在 `<head>` 里引用两个根级脚本（同看图器注入方式）：
+     `<script src="./img-zoom-agentweb.js"></script>` + `<script src="./sim-time-agentweb.js"></script>`；
    - **无需重启 Tomcat**（静态资源即拷即用，必要时清浏览器缓存）。
+   - **面板挂载**：脚本运行时会自动找页面"说明"元素并把面板锚在其旁；找不到则回退右下角悬浮。
+   - **注意**：若前端同事重新构建又把 index.html 改回 `./public/*.js` 引用，404 会复现——把引用改回根级即可。
 
 ---
 

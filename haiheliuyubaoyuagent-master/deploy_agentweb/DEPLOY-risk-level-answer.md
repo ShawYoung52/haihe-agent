@@ -26,24 +26,23 @@
 | `chainlitexam/fast_paths/risk_warning_fast_paths.py` | 同路径 | `_format` 渲染逐级统计/隐患点总数/逐级防范建议（无风险时自动回退笼统建议） |
 | `chainlitexam/tests/test_risk_warning_fast_paths.py` | 同路径（可选） | 4 条测试 |
 
-### AgentWeb 前端（看图器修复，与上批次 sim-time 面板同位置）
+### AgentWeb 前端（看图器修复 + sim-time 面板；2026-08-21 用户确认放 **webapp 根级**，不建 public/）
 | 源（本仓库） | 目标（服务器） | 说明 |
 |---|---|---|
-| `deploy_agentweb/img-zoom-agentweb.js` | `.../webapps/AgentWeb/public/img-zoom-agentweb.js` | 看图器。**必须放 `public/` 子目录**（前端构建约定），别再放 webapp 根级 |
-| `deploy_agentweb/sim-time-agentweb.js` | `.../webapps/AgentWeb/public/sim-time-agentweb.js` | 时间切换面板，同位置统一维护 |
-
-> `index.html` 已由前端构建产物自带 `<script src="./public/img-zoom-agentweb.js"></script>`，无需再注入（若服务器上 index.html 未带该行，手动在 `<!-- JS INJECTION PLACEHOLDER -->` 处补）。
+| `chainlitexam/AgentWeb/img-zoom-agentweb.js` | `.../webapps/AgentWeb/img-zoom-agentweb.js` | 看图器。webapp 根级 |
+| `chainlitexam/AgentWeb/sim-time-agentweb.js` | `.../webapps/AgentWeb/sim-time-agentweb.js` | 时间切换面板。webapp 根级；面板运行时锚在页面"说明"元素旁（找不到回退右下角悬浮） |
+| `chainlitexam/AgentWeb/index.html` | `.../webapps/AgentWeb/index.html` | `<head>` 引用两个根级脚本：`./img-zoom-agentweb.js` + `./sim-time-agentweb.js`（2026-08-21 修复：同事构建产物引用 `./public/...` 但文件在根级 → 404，改回根级引用） |
 
 ---
 
 ## 二、部署步骤
 
 1. **拷贝文件**：按第一节清单拷到服务器两个包目录 + AgentWeb public/。
-2. **AgentWeb 看图器**：
-   - 先建 `webapps/AgentWeb/public/` 子目录（若不存在）；
-   - 把 `img-zoom-agentweb.js`、`sim-time-agentweb.js` 都放进 `public/`；
-   - 验证：浏览器打开 AgentWeb，Network 里 `GET /public/img-zoom-agentweb.js` 必须 **200**（404 = 没放对位置）；点聊天里的图片应弹出滚轮缩放看图器。
-   - **无需重启 Tomcat**（静态资源即拷即用，必要时清浏览器缓存）。前端同事**后续重新构建不会清掉 public/ 下的文件**（本次实测根级旧文件在重构后仍存活，public/ 同理），放心。
+2. **AgentWeb 前端**（看图器 + sim-time 面板，webapp **根级**）：
+   - 把 `img-zoom-agentweb.js`、`sim-time-agentweb.js`、`index.html` 拷到 `webapps/AgentWeb/`（根级）；
+   - 验证：浏览器打开 AgentWeb，Network 里 `GET /img-zoom-agentweb.js` 和 `/sim-time-agentweb.js` 必须 **200**（404 = 没放对位置）；点聊天里的图片应弹出滚轮缩放看图器；页面"说明"旁应出现「🕒 系统时间」面板（锚定不到时回退右下角悬浮）。
+   - **无需重启 Tomcat**（静态资源即拷即用，必要时清浏览器缓存）。
+   - **注意**：若前端同事重新构建把 index.html 改回 `./public/*.js` 引用，404 会复现——把引用改回根级（`./img-zoom-agentweb.js`/`./sim-time-agentweb.js`）即可。
 3. **重启两个后端服务**（都必须重启，风险匹配改动才生效）：
    - `systemctl restart haihe-chainlit`（8003）
    - MCP `server.py` 进程（SSE 3333，重启后等就绪）
@@ -70,7 +69,7 @@
 
 ## 四、验证
 
-1. **看图器**：AgentWeb 页面 → Network 确认 `/public/img-zoom-agentweb.js` 200 → 点一张聊天图片 → 滚轮缩放/拖拽/双击复位/背景点击关闭。
+1. **看图器 + 时间面板**：AgentWeb 页面 → Network 确认 `/img-zoom-agentweb.js` 与 `/sim-time-agentweb.js` 均 200 → 点一张聊天图片 → 滚轮缩放/拖拽/双击复位/背景点击关闭；页面"说明"旁应出现「🕒 系统时间」面板（输入时间→设置=锚定全局"现在"，恢复=还原真实时间）。
 2. **风险工具直测**（服务器上，确认真实等级分布与 id 匹配）：
    ```bash
    cd haihe-weather-analyzer-mcp
@@ -98,6 +97,6 @@
 
 ## 六、回滚
 
-- **看图器**：把 `webapps/AgentWeb/public/img-zoom-agentweb.js` 移回根级（或删掉 `public/` 下文件）→ 看图器回旧行为（取决于 index.html 引用位置，若 index.html 仍引用 `./public/...` 则删文件=禁用看图器，属预期）。
+- **看图器/时间面板**：删掉 `webapps/AgentWeb/` 根级的 `img-zoom-agentweb.js`/`sim-time-agentweb.js`，并从 index.html 移除对应 `<script src>` 行 → 回无查看器/无面板状态。
 - **风险匹配/分层回答**：用改动前的整文件覆盖回两个包（`risk_warning_tool.py` / `prompts.py` / `risk_warning_fast_paths.py`）+ 重启两服务。
 - 若 `level_advice` 文案被业务否决：只改 `risk_warning_tool.py` 的 `_LEVEL_ADVICE` 字典重启 MCP 即可，prompts/fast_path 无需动。
