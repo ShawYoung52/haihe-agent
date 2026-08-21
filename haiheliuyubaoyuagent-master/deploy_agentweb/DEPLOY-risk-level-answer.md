@@ -5,6 +5,8 @@
 1. **看图器修复**：前端同事 2026-08-21 重新构建 AgentWeb 后，`index.html` 改为引用 `./public/img-zoom-agentweb.js`（public/ 子目录约定），旧文件在 webapp 根级 → 404，看图器静默失效。**纯路径问题，JS 内容本身完好，无需改 JS**。
 2. **风险接口 → 灾害点匹配**：`/hhfw/riskWarnNew/findDataListByConfig`（返回经度/纬度/风险等级）在 **MCP 后端工具内**按 haversine 就近匹配三张静态隐患表（地灾/山洪/中小河流），命中附 `hazard_id` 等；并产出各区县隐患点总数 + 逐区县×逐等级风险统计 + 逐级防范建议。**纯后端改动，与前端无关**。
 3. **司南分层回答**：地理灾害问答最后一段改为按等级分层（先各区县隐患点总数与本次各级数量，再逐级防范建议），不再是"泛泛防范建议"。
+4. **区域天气风险等级（领导验收 #8）**：问「明天蓟州的天气怎么样」等**区域天气**时，除隐患点数量外，在灾害风险表里增加**「本次风险等级」列**（按风险接口 `level` 一~四级统计该区域各灾种各级数量，如「一级 2 处、三级 5 处」；接口可达但无风险显示「本次无风险」；接口降级不加列、不影响隐患点表）。**风险等级来源与司南分层回答同一接口同一口径**。
+5. **暴雨知识问答误追加"当前无生效暴雨预警信号"（验收 #5）**：问「暴雨预警四个等级是什么」等**知识性**问法（等级体系/定义/发布标准/阈值/区别）时，不再被误判为"预警事实/生效状态"查询：`_is_warning_fact_query` 扩充知识排除词（四个等级/几个等级/哪几级/等级划分等），planner/answer 双 prompt 的"无生效预警"最高优先级规则显式排除知识性问法（不得输出或追加该句），知识回答照常出表格。
 
 ---
 
@@ -15,16 +17,22 @@
 ### MCP 进程（haihe-weather-analyzer-mcp）
 | 源（本仓库） | 目标（服务器） | 说明 |
 |---|---|---|
-| `haihe-weather-analyzer-mcp/custom_tools/risk_warning_tool.py` | 同路径 | 灾害点匹配 + 分层统计 + 逐级防范建议核心改动 |
+| `haihe-weather-analyzer-mcp/custom_tools/risk_warning_tool.py` | 同路径 | 灾害点匹配 + 分层统计 + 逐级防范建议核心改动；**新增 `query_region_risk_levels`**（区域天气#8：按代表点半径查各灾种当前等级分布，TTL 缓存 120s，接口全挂不缓存） |
+| `haihe-weather-analyzer-mcp/rolling_forecast_service.py` | 同路径 | **区域天气#8**：`_query_region_hazards` 叠加 `risk_levels`/`risk_levels_available`（懒加载 `query_region_risk_levels`，异常静默降级） |
 | `haihe-weather-analyzer-mcp/custom_tools/diagnose_risk_api.py` | 同路径 | 服务器侧诊断脚本：打印 findDataListByConfig 真实 body 锁定字段名（见第四节验证 2） |
-| `haihe-weather-analyzer-mcp/tests/test_risk_warning_hazard_match.py` | 同路径（可选） | 15 条测试，部署后可在服务器跑确认 |
+| `haihe-weather-analyzer-mcp/tests/test_risk_warning_hazard_match.py` | 同路径（可选） | 35 条测试（含 `TestRegionRiskLevels` 5 条），部署后可在服务器跑确认 |
+| `haihe-weather-analyzer-mcp/tests/test_rolling_forecast_region_hazards.py` | 同路径（可选） | 15 条测试（含 `TestQueryRegionHazardsRiskLevels` 5 条），部署后可在服务器跑确认 |
 
 ### chainlitexam 进程（8003）
 | 源（本仓库） | 目标（服务器） | 说明 |
 |---|---|---|
-| `chainlitexam/prompts.py` | 同路径 | 规则 #12（双份）改为必须按等级分层作答 + 逐字采用 `level_advice` |
+| `chainlitexam/prompts.py` | 同路径 | 规则 #12（双份）改为必须按等级分层作答 + 逐字采用 `level_advice`；**「无生效预警」最高优先级规则显式排除知识性问法**（验收 #5，双 prompt 措辞） |
 | `chainlitexam/fast_paths/risk_warning_fast_paths.py` | 同路径 | `_format` 渲染逐级统计/隐患点总数/逐级防范建议（无风险时自动回退笼统建议） |
+| `chainlitexam/tools/rolling_forecast_response.py` | 同路径 | **区域天气#8**：`_region_hazard_table` 增「本次风险等级」列（`_format_risk_level_counts` 按严重度排序；`risk_levels_available` 为真才加列） |
+| `chainlitexam/tools/warning_workflow.py` | 同路径 | **验收 #5**：`_is_warning_fact_query` 扩充知识排除词（四个等级/几个等级/哪几级/等级划分等），知识问法不再误接「当前无生效XX预警信号」 |
 | `chainlitexam/tests/test_risk_warning_fast_paths.py` | 同路径（可选） | 4 条测试 |
+| `chainlitexam/tests/test_rolling_forecast_response.py` | 同路径（可选） | 25 条测试（含等级列渲染 9 条） |
+| `chainlitexam/tests/test_warning_workflow.py`、`test_prompts.py` | 同路径（可选） | 知识问法排除 + prompt 措辞静态校验 |
 
 ### AgentWeb 前端（看图器修复 + sim-time 面板；2026-08-21 用户确认放 **webapp 根级**，不建 public/）
 | 源（本仓库） | 目标（服务器） | 说明 |
@@ -83,6 +91,18 @@
    ```
    期望回答形态：先「冀州区共 X 个地灾隐患点，本次一级 A 处、二级 B 处、三级 C 处、四级 D 处」，再逐级给出防范建议（**一级>二级>三级>四级，一级最重**）。不再只给泛泛防范建议。
 4. **无风险场景**：若某时段无风险记录，回答应为「当前未发现明显地质灾害风险」+ 隐患点总数背景，**不刷四级防范文案**。
+5. **区域天气风险等级（验收 #8，经 8003）**：
+   ```bash
+   curl -X POST http://localhost:8003/api/v1/qa/ask -H 'Content-Type: application/json' \
+     -d '{"question":"明天蓟州的天气怎么样？"}'
+   ```
+   期望：回答的【蓟州区灾害风险】表含**「本次风险等级」列**，如 `| 地质灾害 | 2 处 | 一级 1 处、三级 1 处 |`（按严重度排序）；接口降级时列不出现、隐患点数量表照常。**确认 `risk_warning_tool.py` 的 `REGION_RISK_LEVELS_CACHE_TTL`（默认 120s）生效**（两次连续发问第二次不打接口）。
+6. **暴雨知识问答（验收 #5，经 8003）**：
+   ```bash
+   curl -X POST http://localhost:8003/api/v1/qa/ask -H 'Content-Type: application/json' \
+     -d '{"question":"暴雨预警四个等级是什么？"}'
+   ```
+   期望：正常给出四等级科普表格（`📌 **答案**` + 表格），**结尾不得出现「当前无生效暴雨预警信号」**；对照组「现在有暴雨预警吗」仍应按有无生效预警正常回答（有则列清单、无则只回「当前无生效暴雨预警信号」）。
 
 ---
 

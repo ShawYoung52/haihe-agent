@@ -129,3 +129,46 @@ def test_rule_based_warning_route_district_suffix_not_national():
     assert route is not None
     assert "get_effective_warning_info" in route["tool_names"]
     assert "get_national_warning_info" not in route["tool_names"]
+
+
+class TestIsWarningFactQueryKnowledgeExclusion:
+    """2026-08-21 修复：知识性预警问法不算"预警事实/生效状态"查询。
+
+    否则"暴雨预警四个等级是什么"会被误接成"当前无生效暴雨预警信号"。
+    """
+
+    def test_knowledge_level_system_questions_excluded(self):
+        for q in (
+            "暴雨预警四个等级是什么",
+            "暴雨预警分几级",
+            "暴雨预警有哪几级",
+            "暴雨预警有哪些等级",
+            "暴雨预警的等级划分",
+        ):
+            assert wf._is_warning_fact_query(q) is False, q
+
+    def test_knowledge_definition_standard_questions_excluded(self):
+        for q in (
+            "暴雨预警的发布标准是什么",
+            "暴雨预警和红色预警的区别",
+            "暴雨预警的预警标准",
+            "暴雨预警的定义",
+        ):
+            assert wf._is_warning_fact_query(q) is False, q
+
+    def test_status_questions_still_warning_fact(self):
+        for q in (
+            "现在有暴雨预警吗",
+            "暴雨预警解除了吗",
+            "今天新发预警",
+            "当前有哪些预警",
+            "暴雨预警涉及哪些区",
+        ):
+            assert wf._is_warning_fact_query(q) is True, q
+
+    def test_forecast_value_questions_still_excluded(self):
+        # 非高温的预报数值问法不属预警事实查询（"雨量"等命中 forecast_values）
+        assert wf._is_warning_fact_query("暴雨预警期间雨量有多大") is False
+        # 高温数值问法由 _is_high_temperature_warning_value_query 显式命中（走预警接口），
+        # 仍算预警事实查询——与既有行为一致，勿改
+        assert wf._is_warning_fact_query("高温预警期间最高会到多少度") is True

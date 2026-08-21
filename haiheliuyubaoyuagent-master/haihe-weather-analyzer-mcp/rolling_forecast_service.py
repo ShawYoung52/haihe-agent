@@ -154,6 +154,38 @@ def _load_region_hazard_queryer() -> Any:
     return mod._query_poi_hazard_reminders_core
 
 
+# 懒加载的 risk_warning_tool.query_region_risk_levels（区域天气#8 风险等级）。
+_region_risk_level_queryer = None
+
+
+def _load_region_risk_level_queryer() -> Any:
+    """懒加载 risk_warning_tool.query_region_risk_levels。
+
+    生产 server.py 已先 import custom_tools（命中 sys.modules 缓存，不重跑重依赖
+    __init__）；测试环境 mock 本函数或 _region_risk_level_queryer 即可，避免触发
+    custom_tools/__init__ 的 networkx/rasterio 重依赖链。
+    """
+    from custom_tools.risk_warning_tool import query_region_risk_levels
+
+    return query_region_risk_levels
+
+
+def _query_region_risk_levels(lon: float, lat: float) -> dict | None:
+    """查询区域代表点半径内各灾种当前风险等级分布（风险接口 level，一~四级）。
+
+    返回 {hazard_key: {...}} / {}（可达无风险）/ None（接口失败）。任何异常静默降级
+    返回 None——风险等级是增强，绝不阻断天气回答。
+    """
+    global _region_risk_level_queryer
+    try:
+        if _region_risk_level_queryer is None:
+            _region_risk_level_queryer = _load_region_risk_level_queryer()
+        return _region_risk_level_queryer(float(lon), float(lat), REGION_HAZARD_RADIUS_KM)
+    except Exception as exc:
+        print(f"[region_risk_levels] query failed: {exc}", flush=True)
+        return None
+
+
 def _query_region_hazards(lon: float, lat: float) -> dict | None:
     """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
 
@@ -184,10 +216,15 @@ def _query_region_hazards(lon: float, lat: float) -> dict | None:
     ]
     if not merged:
         return None
+    # 区域天气#8：叠加"本次各灾种风险等级"（风险接口 level，一~四级）。接口失败/异常
+    # 返回 None → risk_levels_available=False，前端不渲染等级列（静态隐患点表照常）。
+    risk_levels = _query_region_risk_levels(lon, lat)
     return {
         "total_found": int(payload.get("total_found") or 0),
         "radius_km": REGION_HAZARD_RADIUS_KM,
         "categories": merged,
+        "risk_levels": risk_levels,
+        "risk_levels_available": risk_levels is not None,
     }
 
 

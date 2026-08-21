@@ -120,3 +120,37 @@ def test_answer_prompt_has_no_tool_selection():
     p = prompts.METEO_ANSWER_SYSTEM_PROMPT
     assert "有工具必须用工具" not in p
     assert "query_decision_weather_for_poi" not in p
+
+
+def test_planner_prompt_knowledge_warning_question_carveout():
+    """2026-08-21 修复：PLANNER 的"无生效预警"最高优先级规则必须排除知识性问法，
+    防止"暴雨预警四个等级是什么"被引导成"当前无生效暴雨预警信号"。"""
+    import prompts
+    p = prompts.PLANNER_SYSTEM_PROMPT
+    assert "当前无生效XX预警信号" in p
+    assert "状态类" in p
+    assert "知识性" in p
+    assert "输出或追加" in p  # "**不得**输出或追加..."
+    assert "四个等级是什么" in p
+
+
+def test_answer_prompt_knowledge_warning_question_carveout():
+    """2026-08-21 修复：旧版 WEATHER_ASSISTANT_PROMPT 的"无生效预警"规则同样排除知识性问法。"""
+    import prompts
+    p = prompts.WEATHER_ASSISTANT_PROMPT
+    assert "当前无生效XX预警信号" in p
+    assert "状态类" in p
+    assert "知识性" in p
+    assert "输出或追加" in p
+    assert "四个等级是什么" in p
+
+
+def test_new_answer_prompt_has_no_no_effective_warning_rule():
+    """新版 METEO_ANSWER_SYSTEM_PROMPT 不含"当前无生效XX预警信号"最高优先级规则，
+    知识性预警问法在 answer 端不会误追加该句（科普解释由 5.2 规则组织表格）。"""
+    import prompts
+    p = prompts.METEO_ANSWER_SYSTEM_PROMPT
+    assert "当前无生效XX预警信号" not in p
+    assert "科普解释类问题" in p
+    assert "分级标准" in p
+    assert "预警等级" in p

@@ -217,3 +217,76 @@ class TestRegionHazardTable:
         assert "| 其他灾害 | 2 处 | 存在风险隐患 |" in section
         # label 为空时回退 key
         assert "| dzzh | 1 处 |" in section
+
+
+class TestFormatRiskLevelCounts:
+    def test_severity_ordered(self):
+        """按严重度排序：一级>二级>三级>四级，与输入顺序无关。"""
+        assert rfr._format_risk_level_counts({"四级": 2, "一级": 1, "三级": 5}) == "一级 1 处、三级 5 处、四级 2 处"
+
+    def test_omits_zero_levels(self):
+        assert rfr._format_risk_level_counts({"一级": 0, "三级": 2}) == "三级 2 处"
+
+    def test_non_standard_keys_appended(self):
+        """非一~四级键（接口降级/未知等级）如实列出、排在标准等级后。"""
+        assert rfr._format_risk_level_counts({"三级": 2, "高风险": 1}) == "三级 2 处、高风险 1 处"
+
+    def test_empty_returns_no_risk(self):
+        assert rfr._format_risk_level_counts({}) == "本次无风险"
+        assert rfr._format_risk_level_counts(None) == "本次无风险"
+
+
+class TestRegionHazardTableRiskLevels:
+    """区域天气#8：risk_levels_available 时渲染"本次风险等级"列，降级不加列。"""
+
+    def _with_levels(self, risk_levels, available=True):
+        payload = _hazards_payload()
+        payload["region_hazards"][0]["risk_levels"] = risk_levels
+        payload["region_hazards"][0]["risk_levels_available"] = available
+        return payload
+
+    def test_levels_column_renders(self):
+        """available=True + 有数据 → 每类多一列"本次风险等级"，含按严重度排序的分布。"""
+        payload = self._with_levels({
+            "dzzh": {"label": "地质灾害风险", "kind": "geologic", "levels": {"四级": 1, "一级": 2}, "total": 3},
+            "sh": {"label": "山洪", "kind": "mountain", "levels": {"三级": 2}, "total": 2},
+        })
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "本次风险等级" in section
+        assert "| 地质灾害 | 2 处 | 一级 2 处、四级 1 处 |" in section
+        assert "| 山洪 | 1 处 | 三级 2 处 |" in section
+
+    def test_levels_column_shows_no_risk(self):
+        """接口可达但本次无风险（levels 空）→ 列存在、显示"本次无风险"。"""
+        payload = self._with_levels({
+            "dzzh": {"label": "地质灾害风险", "kind": "geologic", "levels": {}, "total": 0},
+        })
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "本次风险等级" in section
+        assert "| 地质灾害 | 2 处 | 本次无风险 |" in section
+
+    def test_levels_column_omitted_when_unavailable(self):
+        """接口降级（available=False / risk_levels=None）→ 不加列，表照常。"""
+        payload = self._with_levels(None, available=False)
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "本次风险等级" not in section
+        assert "| 地质灾害 | 2 处 |" in section
+        assert "| 山洪 | 1 处 |" in section
+
+    def test_levels_column_omitted_when_missing(self):
+        """旧 payload 无 risk_levels 字段（升级前）→ 不加列。"""
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", _hazards_payload())
+        assert "本次风险等级" not in bundle["code_section"]
+
+    def test_levels_kind_missing_uses_no_risk(self):
+        """部分灾种无等级数据（如接口只回 dzzh）→ 该行显示"本次无风险"，不崩。"""
+        payload = self._with_levels({
+            "dzzh": {"label": "地质灾害风险", "kind": "geologic", "levels": {"一级": 1}, "total": 1},
+        })
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "| 地质灾害 | 2 处 | 一级 1 处 |" in section
+        assert "| 山洪 | 1 处 | 本次无风险 |" in section

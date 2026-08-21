@@ -326,6 +326,94 @@ class TestEnrichRiskResult:
         assert result["level_advice"]  # 逐级防范建议不依赖数据库
 
 
+class TestRegionRiskLevels:
+    """区域天气#8：query_region_risk_levels 按代表坐标半径查风险接口等级分布。"""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        rwt._region_levels_cache.clear()
+        yield
+        rwt._region_levels_cache.clear()
+
+    def _fetch(self, records_by_kind):
+        def fake(kind, extra_params=None, timeout_sec=30):
+            val = records_by_kind.get(kind)
+            if val is None:
+                raise RuntimeError("风险接口失败")
+            return {"data": val}
+        return fake
+
+    # 蓟州代表点附近（radius 25km）
+    LON, LAT, R = 117.40, 40.09, 25.0
+
+    def test_counts_levels_within_radius(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
+            "geologic": [
+                {"id": 1, "name": "A", "level": "5", "lon": 117.41, "lat": 40.10},  # 一级，在半径内
+                {"id": 2, "name": "B", "level": "3", "lon": 117.42, "lat": 40.08},  # 三级，在半径内
+                {"id": 3, "name": "C", "level": "1", "lon": 117.41, "lat": 40.10},  # 1=无风险，排除
+                {"id": 4, "name": "D", "level": "4", "lon": 116.0, "lat": 39.0},    # 超半径，排除
+            ],
+            "mountain": [],       # 可达但无风险
+            "river": None,        # 接口失败，跳过
+        }))
+        result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        assert set(result.keys()) == {"dzzh"}
+        assert result["dzzh"]["levels"] == {"一级": 1, "三级": 1}
+        assert result["dzzh"]["total"] == 2
+        assert result["dzzh"]["label"] == "地质灾害风险"
+        # level_advice 只含本次出现的等级（一级+三级）
+        assert [a["level"] for a in result["dzzh"]["level_advice"]] == ["一级", "三级"]
+
+    def test_reachable_but_no_risk_returns_empty_dict(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
+            "geologic": [], "mountain": [{"id": 9, "level": "1", "lon": 117.41, "lat": 40.10}],
+            "river": [],
+        }))
+        assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) == {}
+
+    def test_all_kinds_fail_returns_none(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
+            "geologic": None, "mountain": None, "river": None,
+        }))
+        assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) is None
+
+    def test_missing_coords_skipped(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
+            "geologic": [
+                {"id": 1, "level": "5"},                                  # 无经纬度，跳过
+                {"id": 2, "level": "5", "lon": 117.41, "lat": 40.10},     # 有效
+            ],
+            "mountain": [], "river": [],
+        }))
+        result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        assert result["dzzh"]["levels"] == {"一级": 1}
+
+    def test_result_cached_and_none_not_cached(self, monkeypatch):
+        calls = {"n": 0}
+
+        def counting(kind, extra_params=None, timeout_sec=30):
+            calls["n"] += 1
+            return {"data": [{"id": 1, "level": "5", "lon": 117.41, "lat": 40.10}]}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", counting)
+        rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        first = calls["n"]
+        rwt.query_region_risk_levels(self.LON, self.LAT, self.R)  # 命中缓存，不再打接口
+        assert calls["n"] == first
+
+        # None（接口全挂）不缓存，下次仍重试
+        def failing(kind, extra_params=None, timeout_sec=30):
+            calls["n"] += 1
+            raise RuntimeError("down")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", failing)
+        assert rwt.query_region_risk_levels(118.0, 41.0, 25.0) is None
+        after_first_fail = calls["n"]
+        assert rwt.query_region_risk_levels(118.0, 41.0, 25.0) is None
+        assert calls["n"] > after_first_fail  # 第二次仍调接口（None 未缓存）
+
+
 class TestWiring:
     def test_query_risk_warning_calls_enrich(self):
         src = (MCP_DIR / "custom_tools" / "risk_warning_tool.py").read_text(encoding="utf-8")

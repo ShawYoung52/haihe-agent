@@ -481,7 +481,13 @@ def _is_warning_fact_query(user_text: str) -> bool:
     if _is_high_temperature_warning_value_query(text):
         return True
     forecast_values = ("最高气温", "最低气温", "最高会到", "多少度", "温度", "雨量", "降水量", "风力几级", "风力多大", "影响时段", "未来几天", "未来一周", "未来七天", "未来7天")
-    knowledge_words = ("发布标准", "预警标准", "阈值", "分几级", "颜色等级", "定义", "区别")
+    # 知识性问法（等级体系/定义/发布标准/阈值/区别）不属"预警事实/生效状态"查询，
+    # 否则"暴雨预警四个等级是什么"会被误接成"当前无生效暴雨预警信号"（2026-08-21 修复）。
+    knowledge_words = (
+        "发布标准", "预警标准", "阈值", "分几级", "颜色等级", "定义", "区别",
+        "四个等级", "几个等级", "哪几级", "分为几级", "等级划分", "等级有哪些",
+        "有哪些等级", "有哪几级",
+    )
     return not any(word in text for word in forecast_values + knowledge_words)
 
 

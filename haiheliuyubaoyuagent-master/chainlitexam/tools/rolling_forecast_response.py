@@ -580,12 +580,32 @@ _REGION_HAZARD_RISK = {
     "zxhl": ("中小河流洪水风险区", "沿河低洼地段关注水位上涨与行洪安全，遇预警及时转移避险"),
 }
 
+# 风险等级展示顺序（一级最重 → 四级最轻），与 risk_warning_tool._normalize_risk_level 同口径。
+_LEVEL_SEVERITY_ORDER = ("一级", "二级", "三级", "四级")
+
+
+def _format_risk_level_counts(levels: dict) -> str:
+    """把 {一级: n, ...} 渲染成"一级 2 处、三级 5 处"（按严重度排序）；空 → "本次无风险"。"""
+    if not isinstance(levels, dict) or not levels:
+        return "本次无风险"
+    parts: list[str] = []
+    for lv in _LEVEL_SEVERITY_ORDER:
+        n = int(levels.get(lv) or 0)
+        if n > 0:
+            parts.append(f"{lv} {n} 处")
+    for lv, n in levels.items():  # 兜底：非一~四级键也如实列出
+        if lv not in _LEVEL_SEVERITY_ORDER and int(n or 0) > 0:
+            parts.append(f"{lv} {int(n)} 处")
+    return "、".join(parts) if parts else "本次无风险"
+
 
 def _region_hazard_table(region_hazards: list[dict]) -> str:
     """把 payload 的 region_hazards 渲染成【区域】灾害风险表（类型×数量×研判×建议）。
 
     每区域一张表；区域无数据/全部类别 count<=0 时跳过。纯代码确定性生成，
     不依赖 LLM，也不编造具体点位（区域级只报种类与数量）。
+    区域天气#8：entry 带 risk_levels（风险接口当前各灾种等级，一~四级）且
+    risk_levels_available 为真时，追加"本次风险等级"列；接口降级（None）不加列。
     """
     if not region_hazards:
         return ""
@@ -593,6 +613,8 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
     for entry in region_hazards:
         if not isinstance(entry, dict):
             continue
+        risk_levels = entry.get("risk_levels")
+        show_levels = bool(entry.get("risk_levels_available")) and isinstance(risk_levels, dict)
         rows: list[list[str]] = []
         for category in entry.get("categories") or []:
             if not isinstance(category, dict):
@@ -603,14 +625,20 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
                 continue
             label = category.get("label") or key or "未知类型"
             risk, advice = _REGION_HAZARD_RISK.get(key, ("存在风险隐患", "注意防范相关灾害风险"))
-            rows.append([label, f"{count} 处", risk, advice])
+            row = [label, f"{count} 处"]
+            if show_levels:
+                level_info = risk_levels.get(key) or {}
+                row.append(_format_risk_level_counts(level_info.get("levels") or {}))
+            row.extend([risk, advice])
+            rows.append(row)
         if not rows:
             continue
         display = entry.get("region_display") or entry.get("region") or "该区域"
-        blocks.append(
-            f"【{display}灾害风险】\n"
-            + _markdown_table(["灾害类型", "隐患点数量", "风险研判", "防范建议"], rows)
-        )
+        headers = ["灾害类型", "隐患点数量"]
+        if show_levels:
+            headers.append("本次风险等级")
+        headers.extend(["风险研判", "防范建议"])
+        blocks.append(f"【{display}灾害风险】\n" + _markdown_table(headers, rows))
     return "\n\n".join(blocks)
 
 

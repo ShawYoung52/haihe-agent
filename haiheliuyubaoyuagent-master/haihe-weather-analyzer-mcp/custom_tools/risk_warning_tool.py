@@ -593,6 +593,79 @@ def _enrich_risk_result(result: dict, kind: str, all_records: list[dict]) -> dic
     return result
 
 
+# =====================================================================
+# 区域天气「风险等级」查询（#8，2026-08-21，针对国家局）
+#
+# 领导需求：区域天气（如"明天蓟州天气"）除隐患点底数外还要给"风险等级"。
+# 等级数据源 = 风险接口 findDataListByConfig 的 level（与"司南分层回答"同一来源，
+# _normalize_risk_level 归一到 一级(红)~四级(蓝)）。滚动预报区域模式按代表坐标半径
+# 调用本函数，把"本次各灾种风险等级分布"叠加到【区域灾害风险】表上。
+# 每次查询打 3 次风险接口（geologic/mountain/river），故加 120s TTL 缓存；
+# 接口不可达返回 None 不缓存（下次重试），可达（{} 无风险 / {...} 有等级）才缓存。
+# =====================================================================
+REGION_RISK_LEVELS_CACHE_TTL = int(os.getenv("REGION_RISK_LEVELS_CACHE_TTL", "120"))
+REGION_RISK_LEVELS_TIMEOUT_SEC = int(os.getenv("REGION_RISK_LEVELS_TIMEOUT_SEC", "8"))
+
+_region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_cache(
+    REGION_RISK_LEVELS_CACHE_TTL,
+    lambda lon, lat, radius_km: (
+        f"{round(float(lon), 3)}|{round(float(lat), 3)}|{round(float(radius_km), 1)}"
+    ),
+    # 接口不可达(None)不缓存以便重试；可达（{} 无风险 / {...} 有等级）缓存。
+    should_cache=lambda v: v is not None,
+)
+
+
+@_region_levels_decorator
+def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict | None:
+    """按区域代表坐标半径查风险接口当前各灾种风险等级分布。
+
+    返回 ``{hazard_key: {"label", "kind", "levels", "total", "level_advice"}}``：
+    - hazard_key 与区域隐患表 categories 的 key 一致（dzzh/sh/zxhl），便于按灾种对齐；
+    - levels = {一级: n, ...}（只含本次实际出现的等级，_normalize_risk_level 归一）；
+    - level_advice = 逐级防范建议（仅本次出现的等级，代码确定性生成）。
+
+    口径：只统计"有风险"（_is_risky_level）且落在 radius_km 内的记录。接口可达但
+    全域无风险 → {}；接口失败/异常 → None（静默降级，绝不阻断天气回答）。
+    """
+    kinds: dict[str, dict] = {}
+    reachable = False
+    for kind, key in HAZARD_KIND_TO_KEY.items():
+        try:
+            payload = _fetch_risk_warning(kind, timeout_sec=REGION_RISK_LEVELS_TIMEOUT_SEC)
+            reachable = True
+        except Exception:
+            continue  # 单灾种接口失败静默跳过
+        records = [_normalize_record(x) for x in _extract_items(payload)]
+        level_counts: dict[str, int] = {}
+        for rec in records:
+            if not _is_risky_level(rec.get("level")):
+                continue
+            rlon = _safe_float(rec.get("longitude"))
+            rlat = _safe_float(rec.get("latitude"))
+            if rlon is None or rlat is None:
+                continue
+            if _haversine_km(lon, lat, rlon, rlat) > radius_km:
+                continue
+            level = _normalize_risk_level(rec.get("level"))
+            if not level:
+                continue
+            level_counts[level] = level_counts.get(level, 0) + 1
+        if not level_counts:
+            continue
+        kinds[key] = {
+            "label": RISK_CONFIGS[kind]["label"],
+            "kind": kind,
+            "levels": level_counts,
+            "total": sum(level_counts.values()),
+            "level_advice": _level_advice_for(kind, set(level_counts)),
+        }
+    if not kinds:
+        # 接口可达但全域无风险 → {}（前端渲染"本次无风险"）；接口全挂 → None（降级不显示等级列）。
+        return {} if reachable else None
+    return kinds
+
+
 def _error_payload(kind: str, message: str, debug_reason: str = "") -> dict[str, Any]:
     cfg = RISK_CONFIGS.get(kind, {})
     return {

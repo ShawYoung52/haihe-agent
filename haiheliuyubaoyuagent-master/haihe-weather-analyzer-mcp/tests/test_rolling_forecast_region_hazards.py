@@ -53,6 +53,24 @@ def _hazards_ok(categories=None, total=None):
     }
 
 
+@pytest.fixture(autouse=True)
+def _stub_risk_levels(monkeypatch):
+    """区域风险等级走真实风险接口（HTTP）。测试默认 stub 为 None（接口降级，
+    risk_levels_available=False），避免真发 HTTP/触发 custom_tools 重依赖；
+    验证等级附着与渲染的用例再单独 monkeypatch 成有数据的返回。"""
+    monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: None)
+
+
+def _risk_levels_ok():
+    return {
+        "dzzh": {
+            "label": "地质灾害风险", "kind": "geologic",
+            "levels": {"一级": 1, "三级": 2}, "total": 3,
+            "level_advice": [{"level": "一级", "advice": "x"}, {"level": "三级", "advice": "y"}],
+        },
+    }
+
+
 class TestQueryRegionHazards:
     def test_normalizes_ok_payload(self, monkeypatch):
         """status=ok 时归一化：保留 count>0 类型，只带 key/label/kind/count，不泄露 records。"""
@@ -112,6 +130,59 @@ class TestQueryRegionHazards:
         monkeypatch.setattr(rfs, "_region_hazard_queryer", None)
         monkeypatch.setattr(rfs, "_load_region_hazard_queryer", broken_load)
         assert rfs._query_region_hazards(117.45, 40.05) is None
+
+
+class TestQueryRegionHazardsRiskLevels:
+    """区域天气#8：_query_region_hazards 叠加风险接口的"本次各灾种风险等级"。"""
+
+    def test_attaches_risk_levels(self, monkeypatch):
+        """风险接口可达 → risk_levels 附进结果，risk_levels_available=True。"""
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: _risk_levels_ok())
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["risk_levels_available"] is True
+        assert result["risk_levels"]["dzzh"]["levels"] == {"一级": 1, "三级": 2}
+        assert result["risk_levels"]["dzzh"]["total"] == 3
+
+    def test_no_risk_levels_marks_unavailable(self, monkeypatch):
+        """风险接口全挂（返回 None）→ risk_levels_available=False，隐患点表照常。"""
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: None)
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["risk_levels_available"] is False
+        assert result["risk_levels"] is None
+        assert [c["key"] for c in result["categories"]] == ["dzzh", "sh"]
+
+    def test_reachable_no_risk_marks_available_empty(self, monkeypatch):
+        """接口可达但本次无风险（返回 {}）→ available=True、risk_levels={}（渲染"本次无风险"）。"""
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: {})
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["risk_levels_available"] is True
+        assert result["risk_levels"] == {}
+
+    def test_risk_level_exception_degrades(self, monkeypatch):
+        """等级查询抛异常不扩散：available=False，隐患点 categories 完好。"""
+        def boom(lon, lat, radius):
+            raise RuntimeError("risk api down")
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", boom)
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["risk_levels_available"] is False
+        assert result["risk_levels"] is None
+        assert result["total_found"] == 3
+
+    def test_hazards_unavailable_skips_risk_levels(self, monkeypatch):
+        """静态隐患点表查询失败（返回 None）→ 整体 None，不再调风险接口。"""
+        calls = {"n": 0}
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: None)
+
+        def counting(lon, lat, radius):
+            calls["n"] += 1
+            return _risk_levels_ok()
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", counting)
+        assert rfs._query_region_hazards(117.45, 40.05) is None
+        assert calls["n"] == 0
 
 
 class TestCoreAttachesRegionHazards:
