@@ -70,6 +70,14 @@ def _val(v: Any) -> str:
     return str(v)
 
 
+def _count_key(kv: tuple[Any, Any]) -> int:
+    """隐患点总数排序键；值非法时按 0 处理（跨进程数据，单个脏值不能击穿整个回答）。"""
+    try:
+        return -int(kv[1])
+    except (TypeError, ValueError):
+        return 0
+
+
 def _format_records(mo, records: list[dict]) -> str:
     if not records:
         return ""
@@ -79,7 +87,8 @@ def _format_records(mo, records: list[dict]) -> str:
         if not isinstance(row, dict):
             continue
         area = _val(row.get("area"))
-        level = _val(row.get("level"))
+        # 优先用 MCP 端归一好的 level_norm（"5"→"一级"），与本次风险等级统计表一致
+        level = _val(row.get("level_norm") or row.get("level"))
         desc = _val(row.get("description") or row.get("time"))
         if area == "-" and level == "-" and desc == "-":
             continue
@@ -118,7 +127,38 @@ def _format(mo, data: Any, user_text: str, kind: str) -> str:
         if detail:
             lines.append(detail)
 
-    lines.append(f"\n**建议**：{_risk_action(kind, user_text)}")
+    # 逐区县×逐等级风险统计（MCP 端 2026-08-21 灾害点匹配产出）
+    county_risk = data.get("county_risk_summary") if isinstance(data.get("county_risk_summary"), list) else []
+    if county_risk:
+        lines.append("\n**本次风险等级统计**\n")
+        rows = ["| 区县 | 风险等级 | 数量 |", "| :--- | :--- | ---: |"]
+        for item in county_risk:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                f"| {_clean(mo, item.get('county'))} | {_clean(mo, item.get('level'))} "
+                f"| {_clean(mo, item.get('count'))} |"
+            )
+        lines.append("\n".join(rows) + "\n")
+    # 各区县隐患点总数（静态表全量，如"冀州区 257 个"）
+    county_totals = data.get("county_totals") if isinstance(data.get("county_totals"), dict) else {}
+    if county_totals:
+        ordered = sorted(county_totals.items(), key=_count_key)
+        total_line = "、".join(f"{_clean(mo, c)} {n} 个" for c, n in ordered[:10])
+        lines.append(f"\n**隐患点总数**：{total_line}。\n")
+
+    # 逐级防范建议优先（代码确定性生成，逐字采用）；仅当本次确有风险记录时展示，
+    # 避免"本次无风险"的回答被四级文案刷屏；缺省时退回按风险类型的笼统建议。
+    level_advice = data.get("level_advice") if isinstance(data.get("level_advice"), list) else []
+    if level_advice and county_risk:
+        lines.append("\n**防范建议（按风险等级）**\n")
+        for item in level_advice:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- **{_clean(mo, item.get('level'))}**：{_clean(mo, item.get('advice'))}")
+        lines.append("")
+    else:
+        lines.append(f"\n**建议**：{_risk_action(kind, user_text)}")
     return "".join(lines)
 
 

@@ -5,9 +5,9 @@
 //   1. 去掉 GIS socket 钩子（AgentWeb 无 socket，那段是死代码）
 //   2. 排除 data:image/svg+xml 内联图标（AgentWeb 聊天里有大量 data:svg 小图标）
 //   3. 排除渲染尺寸过小的图（头像/图标）——沿用 v2 的 getBoundingClientRect 口径
-// 部署：本文件放 webapps/AgentWeb/img-zoom-agentweb.js，
-//       index.html 在 <!-- JS INJECTION PLACEHOLDER --> 处加一行：
-//       <script src="./img-zoom-agentweb.js"></script>
+// 部署：本文件放 webapps/AgentWeb/public/img-zoom-agentweb.js（前端构建约定 public/ 子目录，
+//       index.html 引用 ./public/img-zoom-agentweb.js；2026-08-21 同事重新构建后根级位置 404，
+//       必须放 public/ 下，别再放 webapp 根级）。无需重启 Tomcat。
 // =====================================================================
 (function () {
   var PREFIX = "[IMG_ZOOM_AW]";

@@ -6,9 +6,9 @@
 //   - 顶部状态行常显"模拟中/真实时间"，防忘记恢复。
 // 后端：调 8003 的 /api/v1/admin/system-time（与 /qa/ask 同机同端口不同服务）。
 // 兼容性：无可选链/无箭头函数/用 XMLHttpRequest，兼容内网旧浏览器。
-// 部署：本文件放 webapps/AgentWeb/sim-time-agentweb.js，
-//       index.html 在 <!-- JS INJECTION PLACEHOLDER --> 处加一行：
-//       <script src="./sim-time-agentweb.js"></script>
+// 部署：本文件放 webapps/AgentWeb/public/sim-time-agentweb.js（前端构建约定 public/ 子目录，
+//       index.html 加一行 <script src="./public/sim-time-agentweb.js"></script>，
+//       与看图器 img-zoom-agentweb.js 同位置；2026-08-21 起统一放 public/）。无需重启 Tomcat。
 // =====================================================================
 (function () {
   var PREFIX = "[SIM_TIME_AW]";
