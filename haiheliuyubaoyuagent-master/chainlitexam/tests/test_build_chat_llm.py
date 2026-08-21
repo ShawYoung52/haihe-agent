@@ -151,15 +151,15 @@ def test_custom_non_qwen_model_does_not_disable_thinking_by_default(captured, mo
     assert "extra_body" not in _CaptureChatOpenAI.last_kwargs
 
 
-def test_split_prompts_are_default_with_legacy_rollback(captured, monkeypatch):
+def test_legacy_prompt_is_default_and_split_prompts_are_opt_in(captured, monkeypatch):
     monkeypatch.delenv("ENABLE_NEW_PLANNER_PROMPT", raising=False)
     monkeypatch.delenv("ENABLE_NEW_ANSWER_PROMPT", raising=False)
     planner_prompt, answer_prompt = captured._select_system_prompts()
-    assert planner_prompt == captured.PLANNER_SYSTEM_PROMPT
-    assert answer_prompt == captured.METEO_ANSWER_SYSTEM_PROMPT
-
-    monkeypatch.setenv("ENABLE_NEW_PLANNER_PROMPT", "false")
-    monkeypatch.setenv("ENABLE_NEW_ANSWER_PROMPT", "false")
-    planner_prompt, answer_prompt = captured._select_system_prompts()
     assert planner_prompt == captured.WEATHER_ASSISTANT_PROMPT
     assert answer_prompt == captured.WEATHER_ASSISTANT_PROMPT
+
+    monkeypatch.setenv("ENABLE_NEW_PLANNER_PROMPT", "true")
+    monkeypatch.setenv("ENABLE_NEW_ANSWER_PROMPT", "true")
+    planner_prompt, answer_prompt = captured._select_system_prompts()
+    assert planner_prompt == captured.PLANNER_SYSTEM_PROMPT
+    assert answer_prompt == captured.METEO_ANSWER_SYSTEM_PROMPT

@@ -8,6 +8,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
+from .request_intent_policy import is_rolling_activity_query
+
 
 _CODE_OWNED_HEADERS = {
     "【未来7天预报表】",
@@ -26,6 +28,8 @@ _CODE_OWNED_HEADERS = {
     "【天气实况】",
     "【天气预报】",
 }
+_CODE_OWNED_FORECAST_HEADER_KEYWORDS = ("天气预报", "预报详情")
+_CODE_OWNED_ACTIVITY_HEADER_KEYWORDS = ("活动预报", "游玩建议", "活动建议", "出行建议")
 
 
 def is_current_rolling_weather_query(user_text: str) -> bool:
@@ -388,7 +392,7 @@ def _query_category(user_text: str) -> str:
         return "visibility"
     if any(word in text for word in ("高温", "气温", "温度", "升温", "降温", "多少度", "冷不冷", "热不热")):
         return "temperature"
-    if any(word in text for word in ("户外", "活动", "作业", "适合", "出行")):
+    if is_rolling_activity_query(text):
         return "activity"
     return "weather"
 
@@ -746,14 +750,32 @@ def _enforce_single_sentence_core(text: str, user_text: str = "") -> str:
     return pattern.sub(replace, str(text or ""), count=1)
 
 
+def _is_code_owned_header(header: str, user_text: str) -> bool:
+    if header in _CODE_OWNED_HEADERS:
+        return True
+    if any(keyword in header for keyword in _CODE_OWNED_FORECAST_HEADER_KEYWORDS):
+        return True
+    if _query_category(user_text) == "activity" and any(
+        keyword in header for keyword in _CODE_OWNED_ACTIVITY_HEADER_KEYWORDS
+    ):
+        return True
+    return _is_mountain_activity_query(user_text) and "注意事项" in header
+
+
+def _normalized_bracket_header(line: str) -> str | None:
+    candidate = re.sub(r"^#{1,6}\s*", "", str(line or "").strip()).strip()
+    candidate = candidate.strip("*_ ").strip()
+    return candidate if re.fullmatch(r"【[^】]+】", candidate) else None
+
+
 def _strip_llm_code_owned_content(llm_text: str, user_text: str = "") -> str:
     kept: list[str] = []
     skipping_owned_section = False
     for line in str(llm_text or "").splitlines():
         stripped = line.strip()
-        header_match = re.fullmatch(r"【[^】]+】", stripped)
-        if header_match:
-            if stripped in _CODE_OWNED_HEADERS:
+        header = _normalized_bracket_header(stripped)
+        if header:
+            if _is_code_owned_header(header, user_text):
                 skipping_owned_section = True
                 continue
             skipping_owned_section = False

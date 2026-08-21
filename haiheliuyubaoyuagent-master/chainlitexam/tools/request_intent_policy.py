@@ -13,6 +13,13 @@ FUTURE_TIME_MARKERS = (
     "明天", "明日", "后天", "未来", "周末", "一周", "下周", "几点开始",
     "什么时候停", "何时停", "预报", "预计",
 )
+ROLLING_ACTIVITY_MARKERS = (
+    "户外", "活动", "作业", "适合", "出行", "游玩", "旅游", "跑步", "徒步",
+    "登山", "露营", "郊游", "骑行",
+)
+ROLLING_CONCRETE_ACTIVITY_MARKERS = (
+    "户外", "出行", "游玩", "旅游", "跑步", "徒步", "登山", "露营", "郊游", "骑行",
+)
 
 EMERGENCY_RESPONSE_INTENT_MARKERS = (
     "防汛应急响应", "应急响应", "防汛响应", "启动响应", "是否启动",
@@ -43,6 +50,28 @@ _SUPPORTED_CURRENT_SCOPE_MARKERS = (
     "天津市", "天津", "北京市", "北京", "河北省", "河北", "中心城区",
     "蓟州", "全市", "市区", "海河流域",
 )
+SUPPORTED_ROLLING_FORECAST_REGIONS = (
+    "天津市区", "蓟州", "宝坻", "武清", "宁河", "静海", "北辰", "西青", "津南",
+    "东丽", "滨海新区",
+)
+_SUPPORTED_ROLLING_ADMIN_SCOPES = {
+    "天津市", "蓟州区", "宝坻区", "武清区", "宁河区", "静海区", "北辰区",
+    "西青区", "津南区", "东丽区", "滨海新区", "中心城区", "市区",
+}
+_SUPPORTED_ROLLING_SCOPE_NAMES = (
+    "天津市区", "天津市", "天津", "市区", "中心城区", "蓟州区", "蓟州", "宝坻区",
+    "宝坻", "武清区", "武清", "宁河区", "宁河", "静海区", "静海", "北辰区",
+    "北辰", "西青区", "西青", "津南区", "津南", "东丽区", "东丽", "滨海新区",
+)
+_ROLLING_SCOPE_FOLLOW_MARKERS = (
+    "今天", "今日", "明天", "明日", "后天", "未来", "周末", "下周", "天气", "气温",
+    "温度", "降雨", "降水", "下雨", "风力", "风向", "能见度", "适合", "合适", "户外",
+    "出行", "游玩", "旅游", "跑步", "徒步", "登山", "露营", "郊游", "骑行",
+)
+_ROLLING_SCOPE_RE = re.compile(
+    rf"(?:{'|'.join(re.escape(name) for name in sorted(_SUPPORTED_ROLLING_SCOPE_NAMES, key=len, reverse=True))})"
+    rf"(?=$|[\s，。！？、,!?]|{'|'.join(map(re.escape, _ROLLING_SCOPE_FOLLOW_MARKERS))})"
+)
 _GENERIC_CURRENT_QUERY_PREFIXES = (
     "现在", "当前", "目前", "实时", "实况", "今天", "今日", "刚才",
     "天气", "气温", "温度", "降水", "降雨", "下雨", "雨", "风力", "阵风",
@@ -62,6 +91,14 @@ def has_mixed_current_future_scope(user_text: str) -> bool:
     return any(word in text for word in CURRENT_TIME_MARKERS) and any(
         word in text for word in FUTURE_TIME_MARKERS
     )
+
+
+def is_rolling_activity_query(user_text: str) -> bool:
+    return any(marker in str(user_text or "") for marker in ROLLING_ACTIVITY_MARKERS)
+
+
+def has_concrete_rolling_activity(user_text: str) -> bool:
+    return any(marker in str(user_text or "") for marker in ROLLING_CONCRETE_ACTIVITY_MARKERS)
 
 
 def is_river_network_relation_intent(user_text: str) -> bool:
@@ -113,3 +150,19 @@ def is_supported_current_observation_scope(user_text: str) -> bool:
         return True
     normalized = re.sub(r"^(?:请问|请|帮我|麻烦|查一下|查询一下)+", "", text).strip()
     return normalized.startswith(_GENERIC_CURRENT_QUERY_PREFIXES)
+
+
+def is_supported_rolling_forecast_scope(user_text: str) -> bool:
+    """滚动预报只支持天津市及其固定行政区域，未知地域交回完整 Planner。"""
+    text = str(user_text or "").strip()
+    # 用户常写“天津蓟州区/天津滨海新区”；先去掉这类市级前缀，避免通用
+    # 行政区正则把两个层级吞成一个未知长串。
+    scope_scan = re.sub(
+        r"天津市?(?=(?:市区|中心城区|蓟州区|宝坻区|武清区|宁河区|静海区|北辰区|西青区|津南区|东丽区|滨海新区))",
+        "",
+        text,
+    )
+    admin_scopes = _CURRENT_SCOPE_RE.findall(scope_scan)
+    if any(scope not in _SUPPORTED_ROLLING_ADMIN_SCOPES for scope in admin_scopes):
+        return False
+    return bool(_ROLLING_SCOPE_RE.search(text))

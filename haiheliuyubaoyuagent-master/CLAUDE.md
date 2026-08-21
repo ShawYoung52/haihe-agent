@@ -159,7 +159,7 @@ This project uses the superpowers plugin for disciplined development:
 
 ## 近期功能（2026-08-05~06 批次）
 
-- **Prompt 拆分**：`WEATHER_ASSISTANT_PROMPT` 拆为 `PLANNER_SYSTEM_PROMPT`（~355行，只含工具选择/参数规则/停止条件）和 `METEO_ANSWER_SYSTEM_PROMPT`（~145行，只含气象表达/格式/结论结构）。拆分版现已默认启用；`ENABLE_NEW_PLANNER_PROMPT=false`/`ENABLE_NEW_ANSWER_PROMPT=false` 可分别回退旧 PROMPT，旧 PROMPT 保留不删。
+- **Prompt 拆分**：`WEATHER_ASSISTANT_PROMPT` 拆为 `PLANNER_SYSTEM_PROMPT`（~355行，只含工具选择/参数规则/停止条件）和 `METEO_ANSWER_SYSTEM_PROMPT`（~145行，只含气象表达/格式/结论结构）。为保持既有问答格式契约，默认继续使用旧 PROMPT；仅在显式设置 `ENABLE_NEW_PLANNER_PROMPT=true`/`ENABLE_NEW_ANSWER_PROMPT=true` 时启用对应拆分版，旧 PROMPT 保留不删。
 - **证据完整性与安全提前收口**：`ToolRoundEvidence` 保存本轮解包后的结构化工具结果；`is_evidence_complete()` 对实况、水位、面雨量做严格完整性判断。`ENABLE_EVIDENCE_EARLY_FINALIZE` 默认 `true`，仅当**请求级主动路由判定**与本轮全部成功证据同属一个安全域时，才跳过下一轮 Planner 直接进入 Answer；应急、混合、预警、河网、影响分析、未知域、跨域结果或任何失败仍走完整原流程。Answer 失败时回退本轮有效 ToolMessage，不丢已取得的数据。显式设为 `false` 可恢复只记录 `[EVIDENCE]` 的 shadow 行为。
 - **主动工具过滤**：`ActiveToolRouter` 仅对黄金问题覆盖的高置信单域问题绑定**固定领域最小白名单**；`ToolCandidateIndex` 只做 shadow 召回观测，不扩展首轮工具。`tools/request_intent_policy.py` 集中判定应急响应、河网关系、降雨影响、面雨量集合、混合时态、未来水位/预警/面雨量和实况支持地域，任一不确定或复杂、混合、GIS 场景自动使用完整工具集。当前点位天气由 `decision_weather_core` 的共享点位/区域排歧处理；裸河名未来天气禁止套天津滚动预报，当前河流天气保守交完整 Planner。`ENABLE_ACTIVE_TOOL_FILTER` 默认 `true`；`ACTIVE_TOOL_LIMIT` 默认 12，仅保留为兼容安全上限。筛选 Planner 无工具调用或调用越界工具时强制且不可关闭地回退一次完整 Planner，后续 Planner 始终使用完整 chain。显式设为 `false` 可恢复首轮完整工具绑定。
 - **LLM 预热**：`chain_gzt._llm_warmup(runtime)` 对 planner/answer 各发一次最小非敏感请求（"请回复一个字：好"），30s 短超时，失败不阻断启动。`ENABLE_LLM_WARMUP=false` 默认关闭。

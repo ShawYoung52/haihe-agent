@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from chainlitexam.tests.stubs import ensure_stubs
@@ -46,6 +48,76 @@ class TestMountainActivityReminder:
             "明天去盘山游玩合适吗", {"daily_summary": _daily("晴", 0.0)}
         )
         assert "【注意事项】" in bundle["code_section"]
+
+    def test_activity_assembly_rejects_llm_generated_forecast_and_advice_sections(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天适合去蓟州游玩吗？",
+            {
+                "daily_summary": _daily("多云", 0.0),
+                "data_source": "天津市气象台滚动预报",
+            },
+        )
+        llm_text = (
+            "【核心结论】\n明天适合游玩。\n\n"
+            "【明日蓟州天气预报】\n天气现象：阵雨\n\n"
+            "【游玩建议】\n建议携带雨具。"
+        )
+
+        answer = rfr.assemble_rolling_forecast_answer(llm_text, [bundle])
+
+        assert "【逐日活动预报】" in answer
+        assert "【注意事项】" in answer
+        assert "【明日蓟州天气预报】" not in answer
+        assert "【游玩建议】" not in answer
+        assert answer.count("数据来源：天津市气象台滚动预报") == 1
+
+
+def test_general_weather_assembly_keeps_llm_travel_advice_section():
+    bundle = rfr.build_rolling_forecast_bundle(
+        "明天天气怎么样",
+        {
+            "daily_summary": _daily("多云", 0.0),
+            "data_source": "天津市气象台滚动预报",
+        },
+    )
+    llm_text = "【核心结论】\n明天天气平稳。\n\n【出行建议】\n可正常安排出行。"
+
+    answer = rfr.assemble_rolling_forecast_answer(llm_text, [bundle])
+
+    assert "【出行建议】" in answer
+    assert "可正常安排出行。" in answer
+
+
+def test_cycling_query_uses_activity_template_consistently_with_router():
+    bundle = rfr.build_rolling_forecast_bundle(
+        "蓟州明天骑行",
+        {"daily_summary": _daily("多云", 0.0)},
+    )
+
+    assert bundle["category"] == "activity"
+    assert "【逐日活动预报】" in bundle["code_section"]
+
+
+@pytest.mark.parametrize(
+    "decorated_header",
+    ("### 【游玩建议】", "**【明日蓟州天气预报】**"),
+)
+def test_activity_assembly_rejects_markdown_decorated_code_owned_headers(decorated_header):
+    bundle = rfr.build_rolling_forecast_bundle(
+        "明天适合去蓟州游玩吗？",
+        {"daily_summary": _daily("多云", 0.0)},
+    )
+    llm_text = (
+        "【核心结论】\n明天适合游玩。\n\n"
+        "【重点关注】\n请关注临近预报。\n\n"
+        f"{decorated_header}\n模型虚构建议。"
+    )
+
+    answer = rfr.assemble_rolling_forecast_answer(llm_text, [bundle])
+
+    assert "【重点关注】" in answer
+    assert decorated_header not in answer
+    assert "模型虚构建议。" not in answer
 
 
 def _hazards_payload():

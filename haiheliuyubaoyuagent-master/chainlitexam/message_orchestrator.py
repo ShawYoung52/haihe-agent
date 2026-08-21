@@ -76,7 +76,10 @@ from tools.meteo_evidence import is_evidence_complete
 from tools.tool_round_evidence import TOOL_QUERY_TYPES, ToolRoundEvidence
 from tools.request_intent_policy import (
     has_mixed_current_future_scope,
+    has_concrete_rolling_activity,
     is_emergency_response_intent,
+    is_rolling_activity_query,
+    is_supported_rolling_forecast_scope,
 )
 from external_skill_tools import TIANHE_ERROR_TEXTS
 
@@ -207,6 +210,7 @@ from tools.decision_weather_core import (
     _parse_decision_dt,
     classify_poi_category,
     filter_redundant_decision_weather_calls,
+    has_decision_weather_poi_marker,
     has_mixed_regional_and_poi_scope,
 )
 
@@ -872,6 +876,13 @@ _SIMPLE_WEATHER_KEYWORD_WORDS = (
     "天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风力", "风向",
     "能见度", "雾", "霾", "暴雨", "雷阵雨", "大风", "降温",
 )
+_NON_WEATHER_ACTIVITY_MARKERS = (
+    "预警", "警报", "旅游局", "办事", "材料", "比赛", "赛事", "报名",
+)
+_ACTIVITY_WEATHER_DECISION_MARKERS = (
+    "天气", "气温", "温度", "下雨", "降雨", "降水", "风力", "风向", "能见度",
+    "适合", "合适", "适宜", "能否", "能不能", "可以吗", "影响",
+)
 # 决策类问题（适合/能否/是否/推荐/周边/附近/去/活动等）交给 planner 或决策工具，
 # 规则路由不碰，避免误判。注意：不含"怎么样/如何/可以"这类普通疑问语气词，
 # 否则"明天天气怎么样"这种最常见问法会被漏掉规则路由。
@@ -917,9 +928,22 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
         return None  # 流域/河系问题走专用河系工具，不误路由
     if has_mixed_current_future_scope(text) or has_mixed_regional_and_poi_scope(text):
         return None
+    has_time = any(w in text for w in _SIMPLE_WEATHER_TIME_WORDS)
+    if (
+        has_time
+        and is_rolling_activity_query(text)
+        and has_concrete_rolling_activity(text)
+        and any(word in text for word in _ACTIVITY_WEATHER_DECISION_MARKERS)
+        and not any(word in text for word in _NON_WEATHER_ACTIVITY_MARKERS)
+        and not is_emergency_response_intent(text)
+    ):
+        poi_category = classify_poi_category(text)
+        if has_decision_weather_poi_marker(text) or poi_category not in (None, "mountain"):
+            return ("query_decision_weather_for_poi", {"user_text": text})
+        if is_supported_rolling_forecast_scope(text):
+            return ("query_rolling_forecast", {"user_query": text, "regions": ""})
     if any(w in text for w in _SIMPLE_WEATHER_EXCLUDE_WORDS):
         return None  # 决策类问题交回 planner
-    has_time = any(w in text for w in _SIMPLE_WEATHER_TIME_WORDS)
     has_weather = any(w in text for w in _SIMPLE_WEATHER_KEYWORD_WORDS)
     if not (has_time and has_weather):
         return None

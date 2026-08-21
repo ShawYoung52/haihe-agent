@@ -2651,9 +2651,9 @@ def _build_chat_llm(role: str) -> "ChatOpenAI":
 
 
 def _select_system_prompts() -> tuple[str, str]:
-    """选择 Planner/Answer Prompt；拆分版默认启用，环境变量可回退旧版。"""
-    planner_new = _env_bool("ENABLE_NEW_PLANNER_PROMPT", True)
-    answer_new = _env_bool("ENABLE_NEW_ANSWER_PROMPT", True)
+    """选择 Planner/Answer Prompt；默认保持旧版问答契约，拆分版显式启用。"""
+    planner_new = _env_bool("ENABLE_NEW_PLANNER_PROMPT", False)
+    answer_new = _env_bool("ENABLE_NEW_ANSWER_PROMPT", False)
     planner_prompt = PLANNER_SYSTEM_PROMPT if planner_new else WEATHER_ASSISTANT_PROMPT
     answer_prompt = METEO_ANSWER_SYSTEM_PROMPT if answer_new else WEATHER_ASSISTANT_PROMPT
     return planner_prompt, answer_prompt
