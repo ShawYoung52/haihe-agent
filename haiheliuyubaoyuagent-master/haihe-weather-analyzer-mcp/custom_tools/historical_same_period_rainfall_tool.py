@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
+import time_source
 from typing import Any, Optional
 
 from fastmcp import FastMCP
@@ -47,7 +48,7 @@ def _parse_time(value: Optional[str]) -> Optional[datetime]:
 
 
 def _default_reference_window() -> tuple[datetime, datetime]:
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    now = time_source.now().replace(minute=0, second=0, microsecond=0)
     return now.replace(hour=0), now
 
 

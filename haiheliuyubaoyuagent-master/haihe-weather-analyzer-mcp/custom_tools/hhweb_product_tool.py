@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import os
 from datetime import datetime
+import time_source
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -124,7 +125,7 @@ def get_haihe_product_longimg_core(
     screenshot: bool = True,
 ) -> dict[str, Any]:
     """拼 product-image 网址；能截图则返回长图 base64，否则返回网址。"""
-    time_str = time.strip() or _fmt(datetime.now(BEIJING_TIMEZONE))
+    time_str = time.strip() or _fmt(time_source.now(BEIJING_TIMEZONE))
     url = build_product_url(time_str, radarTime, types)
 
     global _LAST_SCREENSHOT_REASON

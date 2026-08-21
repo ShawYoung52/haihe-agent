@@ -11,6 +11,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+import time_source
 from typing import Any
 
 from fastmcp import FastMCP
@@ -95,7 +96,7 @@ def _latest_hour_candidates(hours_back: int = 6) -> list[str]:
     项目原降雨核心链路按“北京时间 - 8小时”查询天擎，因此这里也按 UTC 时次倒查。
     例如北京时间 14:52，优先查接口时次 06:00，其次 05:00、04:00。
     """
-    now_bjt = datetime.now().replace(minute=0, second=0, microsecond=0)
+    now_bjt = time_source.now().replace(minute=0, second=0, microsecond=0)
     now_api = now_bjt - timedelta(hours=8)
     count = max(int(hours_back or 6), 1)
     return [(now_api - timedelta(hours=i)).strftime("%Y%m%d%H%M%S") for i in range(count)]
@@ -350,7 +351,7 @@ def _query_poi_nearest_observation_core(
 
     cache_key = (
         f"{keyword}|{basin_codes}|{hours_back}|{max_distance_km}|{admin_code}"
-        f"|{datetime.now().strftime('%Y%m%d%H')}"
+        f"|{time_source.now().strftime('%Y%m%d%H')}"
     )
     with _poi_nearest_obs_cache_lock:
         hit = _poi_nearest_obs_cache.get(cache_key)

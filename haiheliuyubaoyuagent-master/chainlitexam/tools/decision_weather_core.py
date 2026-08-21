@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 
 from tools.rolling_forecast_response import sanitize_forecast_core_summary
 from utils.tool_result import _unwrap_tool_result
+from utils import time_source
 
 DECISION_WEATHER_STATIONS = [
     {"region": "天津市区", "lon": 117.14, "lat": 39.24},
@@ -45,6 +46,65 @@ DECISION_WEATHER_INTERNAL_TOOLS = {
     "analyze_rainfall_by_time",
     "local_analyze_rainfall_by_time",
 }
+DECISION_WEATHER_PREFILTER_SUFFIXES = (
+    "学校", "中学", "小学", "初中", "高中", "大学", "学院", "幼儿园",
+    "医院", "场馆", "中心", "公园", "酒店", "大厦", "广场", "机场",
+    "车站", "站", "码头", "景区", "名胜区", "园区", "小区", "村", "镇",
+    "街道", "乡", "水库", "拦河坝", "港口", "港区", "湿地", "景点",
+    "旅游区", "体育馆", "体育场", "博物馆", "展览馆", "开发区", "工业园",
+    "度假区", "古镇",
+)
+_DECISION_WEATHER_SCHOOL_ABBREVIATION_RE = re.compile(
+    r"[一二三四五六七八九十百\d]{1,3}中"
+)
+_DECISION_WEATHER_REGIONAL_COLLECTION_MARKERS = (
+    "中心城区", "全市各站", "全市站点", "各气象站", "各站点", "各站", "站点",
+)
+_DECISION_WEATHER_STRONG_POI_SUFFIXES = tuple(
+    suffix
+    for suffix in DECISION_WEATHER_PREFILTER_SUFFIXES
+    if suffix not in {"中心", "站"}
+) + ("会展中心",)
+_DECISION_WEATHER_SPECIFIC_STATION_RE = re.compile(r"([\u4e00-\u9fff]{2,12}?)站")
+_DECISION_WEATHER_LOCATION_PREPOSITION_RE = re.compile(
+    r"(?:^|我|我们|你|您|他|她|准备|计划|想要)(?:在|到|去)"
+    r"(?!今天|今日|明天|后天|未来|周末|本周|下周|当前|目前|现在)"
+    r"(?=[\u4e00-\u9fffA-Za-z0-9]{2,})"
+)
+
+
+def has_decision_weather_poi_marker(user_text: str) -> bool:
+    """识别点位后缀，排除“中雨”和区域站点集合等歧义。"""
+    text = str(user_text or "")
+    if any(marker in text for marker in _DECISION_WEATHER_REGIONAL_COLLECTION_MARKERS):
+        return False
+    return any(suffix in text for suffix in DECISION_WEATHER_PREFILTER_SUFFIXES) or bool(
+        _DECISION_WEATHER_SCHOOL_ABBREVIATION_RE.search(text)
+    )
+
+
+def has_mixed_regional_and_poi_scope(user_text: str) -> bool:
+    """区域集合与明确单点同时出现时交完整 Planner 做对比。"""
+    text = str(user_text or "")
+    if not any(marker in text for marker in _DECISION_WEATHER_REGIONAL_COLLECTION_MARKERS):
+        return False
+    if any(suffix in text for suffix in _DECISION_WEATHER_STRONG_POI_SUFFIXES):
+        return True
+    if _DECISION_WEATHER_SCHOOL_ABBREVIATION_RE.search(text):
+        return True
+    for match in _DECISION_WEATHER_SPECIFIC_STATION_RE.finditer(text):
+        prefix = match.group(1)
+        if not prefix.endswith(("各", "全市")) and "全市各" not in prefix:
+            return True
+    return False
+
+
+def _has_decision_weather_location_indicator(user_text: str) -> bool:
+    """用正向地点句式识别位置介词，避免“潜在/现在”等子串误命中。"""
+    text = str(user_text or "")
+    if any(marker in text for marker in ("位于", "附近", "周边", "旁边", "距离", "距")):
+        return True
+    return bool(_DECISION_WEATHER_LOCATION_PREPOSITION_RE.search(text))
 
 
 def filter_redundant_decision_weather_calls(tool_calls: list[Any]) -> list[Any]:
@@ -138,21 +198,8 @@ def _decision_weather_prefilter(user_text: str) -> bool:
     ]
     if not any(k in t for k in weather_keywords):
         return False
-    location_indicators = ["在", "去", "到", "位于", "附近", "周边", "旁边", "距", "距离"]
-    institution_suffixes = [
-        "学校", "中学", "小学", "初中", "高中", "大学", "学院", "幼儿园",
-        "医院", "场馆", "中心", "公园", "酒店", "大厦",
-        "广场", "机场", "车站", "站", "码头", "景区", "名胜区", "园区", "小区", "村", "镇",
-        "街道", "乡", "中",
-        # 与 rolling_forecast_service.POI_PLACE_KEYWORDS 同口径：POI 守卫把这些点位词
-        # 的问题路由到本工具，前置过滤必须同样放行——密云水库生产回归（守卫接了、
-        # prefilter 拒了，空手而返）。同步关系由 MCP 侧静态测试
-        # TestPoiGuardDecisionWeatherKeywordSync 锁定。
-        "水库", "拦河坝", "港口", "港区", "湿地", "景点", "旅游区",
-        "体育馆", "体育场", "博物馆", "展览馆", "开发区", "工业园", "度假区", "古镇",
-    ]
-    has_indicator = any(k in t for k in location_indicators)
-    has_institution = any(s in t for s in institution_suffixes)
+    has_indicator = _has_decision_weather_location_indicator(t)
+    has_institution = has_decision_weather_poi_marker(t)
     time_blocklist = ["周末", "周六", "周日", "今天", "今日", "明天", "后天", "未来一周", "本周"]
     if any(k in t for k in time_blocklist) and not (has_indicator or has_institution):
         return False
@@ -872,7 +919,8 @@ _DECISION_CN_WEEKDAY = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六":
 
 
 def _decision_now_bjt() -> datetime:
-    return datetime.now(timezone(timedelta(hours=8)))
+    # 走统一时间源：切换系统时间激活时，"今天/明天/下周X/M月D日"的锚定基准随覆盖翻转。
+    return time_source.now(timezone(timedelta(hours=8)))
 
 
 def _decision_target_dates(user_text: str, now: datetime) -> set | None:

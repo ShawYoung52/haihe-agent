@@ -3,6 +3,9 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import threading
+import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 # 直接复用仓库中的“核心判定逻辑”
@@ -36,6 +39,64 @@ _ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_CONFIG = os.path.join(_ROOT_DIR, "config.ini")
 _DEFAULT_NINE_ZONE_TABLE = os.getenv("NINE_ZONE_TABLE", "haihe_zone_9").strip() or "haihe_zone_9"
 _DEFAULT_NINE_ZONE_CODE_FIELD = os.getenv("NINE_ZONE_CODE_FIELD", "zone_code").strip() or "zone_code"
+try:
+    _STATIC_METADATA_CACHE_TTL = max(0, int(os.getenv("STATIC_METADATA_CACHE_TTL", "3600")))
+except (TypeError, ValueError):
+    _STATIC_METADATA_CACHE_TTL = 3600
+try:
+    _STATIC_METADATA_CACHE_MAX_SIZE = max(1, int(os.getenv("STATIC_METADATA_CACHE_MAX_SIZE", "32")))
+except (TypeError, ValueError):
+    _STATIC_METADATA_CACHE_MAX_SIZE = 32
+
+_STATIC_METADATA_CACHE: OrderedDict[str, tuple[float, str]] = OrderedDict()
+_STATIC_METADATA_CACHE_LOCK = threading.Lock()
+
+
+def _static_metadata_cache_get(key: str) -> str | None:
+    with _STATIC_METADATA_CACHE_LOCK:
+        hit = _STATIC_METADATA_CACHE.get(key)
+        if hit is None:
+            return None
+        stored_at, value = hit
+        if _STATIC_METADATA_CACHE_TTL <= 0 or time.time() - stored_at >= _STATIC_METADATA_CACHE_TTL:
+            _STATIC_METADATA_CACHE.pop(key, None)
+            return None
+        _STATIC_METADATA_CACHE.move_to_end(key)
+        return value
+
+
+def _static_metadata_cache_set(key: str, value: str) -> None:
+    if not value or _STATIC_METADATA_CACHE_TTL <= 0:
+        return
+    now = time.time()
+    with _STATIC_METADATA_CACHE_LOCK:
+        expired = [
+            existing_key
+            for existing_key, (stored_at, _) in _STATIC_METADATA_CACHE.items()
+            if now - stored_at >= _STATIC_METADATA_CACHE_TTL
+        ]
+        for existing_key in expired:
+            _STATIC_METADATA_CACHE.pop(existing_key, None)
+        _STATIC_METADATA_CACHE[key] = (now, value)
+        _STATIC_METADATA_CACHE.move_to_end(key)
+        while len(_STATIC_METADATA_CACHE) > _STATIC_METADATA_CACHE_MAX_SIZE:
+            _STATIC_METADATA_CACHE.popitem(last=False)
+
+
+def _static_metadata_key(kind: str, config_path: str, zone_codes: tuple[str, ...] = ()) -> str:
+    absolute_path = os.path.abspath(config_path)
+    try:
+        config_stamp = str(os.stat(absolute_path).st_mtime_ns)
+    except OSError:
+        config_stamp = "missing"
+    return "|".join((
+        kind,
+        absolute_path,
+        config_stamp,
+        _DEFAULT_NINE_ZONE_TABLE,
+        _DEFAULT_NINE_ZONE_CODE_FIELD,
+        ",".join(zone_codes),
+    ))
 
 
 def _is_safe_identifier(name: str) -> bool:
@@ -62,7 +123,7 @@ def _read_pg_schema(config_path: str) -> str:
     return "public"
 
 
-def _load_nine_zone_codes_from_db(config_path: str) -> str:
+def _query_nine_zone_codes_from_db(config_path: str) -> str:
     try:
         import psycopg2
     except Exception:
@@ -116,7 +177,17 @@ def _load_nine_zone_codes_from_db(config_path: str) -> str:
             pass
 
 
-def _load_nine_zone_union_wkt(config_path: str, zone_codes: List[str]) -> str:
+def _load_nine_zone_codes_from_db(config_path: str) -> str:
+    key = _static_metadata_key("codes", config_path)
+    cached = _static_metadata_cache_get(key)
+    if cached is not None:
+        return cached
+    result = _query_nine_zone_codes_from_db(config_path)
+    _static_metadata_cache_set(key, result)
+    return result
+
+
+def _query_nine_zone_union_wkt(config_path: str, zone_codes: List[str]) -> str:
     try:
         import psycopg2
     except Exception as exc:
@@ -163,6 +234,17 @@ def _load_nine_zone_union_wkt(config_path: str, zone_codes: List[str]) -> str:
             conn.close()
         except Exception:
             pass
+
+
+def _load_nine_zone_union_wkt(config_path: str, zone_codes: List[str]) -> str:
+    canonical_codes = tuple(sorted({str(code).strip() for code in zone_codes if str(code).strip()}))
+    key = _static_metadata_key("union_wkt", config_path, canonical_codes)
+    cached = _static_metadata_cache_get(key)
+    if cached is not None:
+        return cached
+    result = _query_nine_zone_union_wkt(config_path, list(canonical_codes))
+    _static_metadata_cache_set(key, result)
+    return result
 
 
 def filter_records_by_nine_zone(

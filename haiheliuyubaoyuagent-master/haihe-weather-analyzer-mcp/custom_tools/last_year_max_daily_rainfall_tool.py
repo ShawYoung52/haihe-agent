@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
+import time_source
 from typing import Any
 
 from fastmcp import FastMCP
@@ -17,7 +18,7 @@ DAILY_RAIN_FIELD = "PRE_Time_0808"
 
 
 def _previous_calendar_year_range(now: datetime | None = None) -> tuple[datetime, datetime, str, str]:
-    now = now or datetime.now()
+    now = now or time_source.now()
     year = now.year - 1
     start = datetime(year, 1, 1, 0, 0, 0)
     end = datetime(year, 12, 31, 23, 59, 59)

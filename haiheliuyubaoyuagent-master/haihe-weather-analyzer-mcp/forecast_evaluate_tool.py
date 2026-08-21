@@ -11,9 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sys
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta
+import time_source
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +36,18 @@ from config import Config as EvalConfig
 from forecast_evaluate import request_scores, run_rain_eva, run_temp_eva, generate_charts
 from analyzer import ForecastAnalyzer
 
-# 进程内缓存
-_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+# 进程内缓存：格式化结果与原始 API 数据分层保存。
+# 原始数据缓存供文字/图表工具共用，避免“先查结果、再生成图”重复访问上游。
 _CACHE_TTL_SECONDS = 3600  # 1 小时
+try:
+    _CACHE_MAX_SIZE = max(1, int(os.getenv("FORECAST_EVALUATE_CACHE_MAX_SIZE", "128")))
+except (TypeError, ValueError):
+    _CACHE_MAX_SIZE = 128
+
+_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_RAW_CACHE: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_CACHE_LOCK = threading.RLock()
+_RAW_INFLIGHT: dict[str, threading.Event] = {}
 
 
 def _cache_key(*args: Any) -> str:
@@ -42,28 +55,72 @@ def _cache_key(*args: Any) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def _cache_get(key: str) -> dict[str, Any] | None:
-    entry = _CACHE.get(key)
+def _cache_get_from(
+    cache: OrderedDict[str, tuple[float, dict[str, Any]]], key: str,
+) -> dict[str, Any] | None:
+    entry = cache.get(key)
     if entry is None:
         return None
     stored_at, data = entry
-    if time.time() - stored_at > _CACHE_TTL_SECONDS:
-        _CACHE.pop(key, None)
+    if _CACHE_TTL_SECONDS <= 0 or time.time() - stored_at >= _CACHE_TTL_SECONDS:
+        cache.pop(key, None)
+        return None
+    cache.move_to_end(key)
+    return data
+
+
+def _cache_get(key: str) -> dict[str, Any] | None:
+    with _CACHE_LOCK:
+        data = _cache_get_from(_CACHE, key)
+    if data is None:
         return None
     logger.info("[forecast_evaluate] cache hit key=%s", key[:12])
     return data
 
 
+def _cache_set_to(
+    cache: OrderedDict[str, tuple[float, dict[str, Any]]], key: str, data: dict[str, Any],
+) -> None:
+    now = time.time()
+    with _CACHE_LOCK:
+        expired = [
+            existing_key
+            for existing_key, (stored_at, _) in cache.items()
+            if _CACHE_TTL_SECONDS <= 0 or now - stored_at >= _CACHE_TTL_SECONDS
+        ]
+        for existing_key in expired:
+            cache.pop(existing_key, None)
+        if _CACHE_TTL_SECONDS <= 0:
+            return
+        cache[key] = (now, data)
+        cache.move_to_end(key)
+        while len(cache) > _CACHE_MAX_SIZE:
+            cache.popitem(last=False)
+
+
 def _cache_set(key: str, data: dict[str, Any]) -> None:
-    _CACHE[key] = (time.time(), data)
+    _cache_set_to(_CACHE, key, data)
     logger.info("[forecast_evaluate] cache set key=%s (size=%d)", key[:12], len(_CACHE))
+
+
+def _request_cache_key(
+    element: str,
+    test_type: str,
+    parsed: dict[str, Any],
+    time_session: int,
+    area_codes: str,
+) -> str:
+    return _cache_key(
+        element, test_type, parsed["rain_type"],
+        parsed["b_time"], parsed["e_time"], time_session, area_codes,
+    )
 
 
 def _format_evaluate_result(api_result: dict, element: str, test_type: str,
                             rain_type: str | None) -> dict[str, Any]:
     """将检验API返回的原始数据转化为 LLM 可消费的结构化 JSON。"""
     analyzer = ForecastAnalyzer(api_result)
-    report = analyzer.generate_detailed_report()
+    report = analyzer.generate_detailed_report(include_charts=False)
 
     metrics: dict[str, dict[str, Any]] = {}
     chart_paths_flat: dict[str, dict[str, str]] = {}
@@ -156,7 +213,7 @@ def _parse_evaluate_params(
         rain_type = None  # type: ignore[assignment]
 
     # 默认时间：本月 1 日 ~ 昨天
-    now = datetime.now(TIANJIN_TIMEZONE)
+    now = time_source.now(TIANJIN_TIMEZONE)
     month_begin = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     yesterday_end = (now - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
 
@@ -202,15 +259,55 @@ def _fetch_evaluate_api(
         return {"error": "预报检验查询失败，请稍后重试。"}
 
 
+def _fetch_evaluate_api_cached(
+    cache_key: str,
+    parsed: dict[str, Any],
+    test_type: str,
+    time_session: int,
+    area_codes: str,
+) -> dict[str, Any]:
+    """读取共享原始数据缓存；相同并发请求仅允许一个线程访问上游。"""
+    while True:
+        with _CACHE_LOCK:
+            cached = _cache_get_from(_RAW_CACHE, cache_key)
+            if cached is not None:
+                logger.info("[forecast_evaluate] raw cache hit key=%s", cache_key[:12])
+                return {"api_result": cached}
+
+            inflight = _RAW_INFLIGHT.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _RAW_INFLIGHT[cache_key] = inflight
+                is_owner = True
+            else:
+                is_owner = False
+
+        if not is_owner:
+            inflight.wait()
+            continue
+
+        try:
+            fetched = _fetch_evaluate_api(parsed, test_type, time_session, area_codes)
+            if "api_result" in fetched:
+                _cache_set_to(_RAW_CACHE, cache_key, fetched["api_result"])
+            return fetched
+        finally:
+            with _CACHE_LOCK:
+                completed = _RAW_INFLIGHT.pop(cache_key, None)
+                if completed is not None:
+                    completed.set()
+
+
 def _validate_params_and_fetch(
     element: str, test_type: str, rain_type: str,
     begin_time: str, end_time: str, time_session: int, area_codes: str,
 ) -> dict[str, Any]:
-    """校验 + 默认时间 + 取数一步到位（generate_forecast_charts 等无缓存场景用）。"""
+    """校验 + 默认时间 + 共享原始数据缓存（供图表工具复用）。"""
     parsed = _parse_evaluate_params(element, test_type, rain_type, begin_time, end_time)
     if "error" in parsed:
         return parsed
-    fetched = _fetch_evaluate_api(parsed, test_type, time_session, area_codes)
+    ck = _request_cache_key(element, test_type, parsed, time_session, area_codes)
+    fetched = _fetch_evaluate_api_cached(ck, parsed, test_type, time_session, area_codes)
     if "error" in fetched:
         return fetched
     return {**parsed, **fetched}
@@ -233,13 +330,12 @@ def _evaluate_forecast_core(
     if "error" in parsed:
         return parsed
 
-    ck = _cache_key(element, test_type, parsed["rain_type"],
-                    parsed["b_time"], parsed["e_time"], time_session, area_codes)
+    ck = _request_cache_key(element, test_type, parsed, time_session, area_codes)
     cached = _cache_get(ck)
     if cached is not None:
         return cached
 
-    fetched = _fetch_evaluate_api(parsed, test_type, time_session, area_codes)
+    fetched = _fetch_evaluate_api_cached(ck, parsed, test_type, time_session, area_codes)
     if "error" in fetched:
         return fetched
 

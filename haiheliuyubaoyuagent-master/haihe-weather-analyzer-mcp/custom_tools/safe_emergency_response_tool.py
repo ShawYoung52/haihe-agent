@@ -13,6 +13,8 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+import time_source
+
 from constants import DEFAULT_BASIN_CODES, DEFAULT_THRESHOLDS_MM
 from haihe_mcp_tools import (
     TIANJIN_TIMEZONE,
@@ -27,8 +29,8 @@ def _default_observation_times(times: str) -> str:
     """如果调用方未提供 times，默认取当前北京时整点时刻。"""
     if times and str(times).strip():
         return _normalize_time_param(times)
-    # 实况资料通常以小时为单元落盘，默认取当前整点
-    now = datetime.now(TIANJIN_TIMEZONE)
+    # 实况资料通常以小时为单元落盘，默认取当前整点（time_source：切换系统时间时取锚定时刻）
+    now = time_source.now(TIANJIN_TIMEZONE)
     return now.replace(minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M%S")
 
 

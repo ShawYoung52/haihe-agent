@@ -64,7 +64,7 @@ D:/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe \
 | 滚动预报（简单天气） | **Fix A + 简单天气规则路由** | `_route_simple_weather_query`（"今天/明天/后天/周末+天气"命中即跳过 Planner，省 5-10s）；`_has_complete_rolling_forecast` 数据完整 → 跳过第 2 次 Planner，直接 Answer（Fix A） |
 | 点位决策天气 | **规则槽位抽取** | `tools/decision_weather_core.py::_extract_decision_slots_rule_based` 纯规则抽位置名+问题类型（省 1 次 LLM），失败回退 LLM；`_decision_weather_prefilter` 判定位点意图 |
 | 流域/河系天气 | **河系工具 + 硬防护** | `get_river_system_rainfall_forecast` 优先；`query_rolling_forecast` 内部 `is_basin_weather_query` 硬防护拦截裸河名 |
-| 候选工具召回 | **影子模式** | `tools/tool_candidate_index.py::ToolCandidateIndex` 只记录 `[TOOL_CAND]`，不改 Planner 绑定 |
+| 候选工具召回 | **安全主动过滤** | `ActiveToolRouter` 只过滤高置信单域问题的首轮工具；复杂/混合问题与第二轮均使用完整 Planner，缺调用或越界调用自动完整回退 |
 | 其余 | Planner LLM + 工具循环 | `_run_tool_round` 并行纯数据工具（`_PARALLEL_TOOL_CONCURRENCY=4`）+ 串行副作用工具 |
 
 ---
@@ -156,3 +156,14 @@ POST /api/v1/qa/ask
 - [ ] 全量 `pytest tests/ --ignore=tests/test_decision_weather_tool.py`：252 passed、1 既有 flaky、5 skipped，**新增失败即停**。
 - [ ] 简单天气 / 预警 / 决策点位三类路由行为不改变（fixtures 可作为回归样本）。
 - [ ] 观测类改动（shadow 记录、埋点）不改变工具调用、最终答案、GIS。
+
+---
+
+## 8. 2026-08-21 优化后对比口径
+
+- `ENABLE_ACTIVE_TOOL_FILTER=true`（默认）：高置信实况、水位、面雨量、普通预报、预警或知识库单域问题缩小首轮工具绑定；显式 `false` 恢复完整工具集。
+- 完整 Planner 回退始终存在且不可关闭：筛选首轮未选择必需工具或产生候选集外调用时，重跑一次完整 Planner；所有工具执行后的后续 Planner 固定使用完整 chain。
+- `ENABLE_EVIDENCE_EARLY_FINALIZE=true`（默认）：只对结构化证据完整的实况、水位、面雨量跳过下一轮 Planner；显式 `false` 只保留 shadow 观测。
+- 河系分区边界仅缓存不可变 WKB，OGR Geometry 每次重新物化。`RIVER_SYSTEM_BOUNDARY_CACHE_TTL=3600`、`RIVER_SYSTEM_BOUNDARY_CACHE_MAX_SIZE=32`；TTL 设 0 可关闭。
+- `[PERF]` 对比重点：`planner_rounds`、`planner_rounds_saved`、`tool_filter_mode`、`tool_candidates_count`、`full_planner_fallback`、`evidence_early_finalize`、`total_ms` 的 p50/p95。
+- 当前环境不访问内网，实际 API/LLM 延迟收益需用一般未来天气、水位、面雨量、应急响应、混合问法五组生产 smoke test 验证。

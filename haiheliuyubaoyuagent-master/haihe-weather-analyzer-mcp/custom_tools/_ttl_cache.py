@@ -10,11 +10,18 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from functools import wraps
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Tuple
 
 
-def make_ttl_cache(ttl: float, key_fn: Callable[..., str]):
+def make_ttl_cache(
+    ttl: float,
+    key_fn: Callable[..., str],
+    *,
+    should_cache: Callable[[Any], bool] | None = None,
+    max_size: int | None = None,
+):
     """构造 (decorator, cache, lock)。key_fn 从工具参数算出缓存键。
 
     用法：
@@ -26,21 +33,40 @@ def make_ttl_cache(ttl: float, key_fn: Callable[..., str]):
         @decorator
         def query_x(...) -> dict: ...
     """
-    cache: Dict[str, Tuple[float, Any]] = {}
+    if should_cache is None:
+        should_cache = lambda value: (
+            isinstance(value, dict) and value.get("status") == "ok"
+        )
+    capacity = max_size if max_size is not None and max_size > 0 else None
+    cache: OrderedDict[str, Tuple[float, Any]] = OrderedDict()
     lock = threading.Lock()
 
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapped(*args, **kwargs):
             key = key_fn(*args, **kwargs)
+            now = time.time()
             with lock:
                 hit = cache.get(key)
-                if hit and (time.time() - hit[0]) < ttl:
+                if hit and ttl > 0 and (now - hit[0]) < ttl:
+                    cache.move_to_end(key)
                     return hit[1]
             result = fn(*args, **kwargs)
-            if isinstance(result, dict) and result.get("status") == "ok":
+            if ttl > 0 and should_cache(result):
                 with lock:
-                    cache[key] = (time.time(), result)
+                    stored_at = time.time()
+                    expired = [
+                        item_key
+                        for item_key, (item_time, _) in cache.items()
+                        if ttl <= 0 or (stored_at - item_time) >= ttl
+                    ]
+                    for item_key in expired:
+                        cache.pop(item_key, None)
+                    cache[key] = (stored_at, result)
+                    cache.move_to_end(key)
+                    if capacity is not None:
+                        while len(cache) > capacity:
+                            cache.popitem(last=False)
             return result
         return wrapped
 

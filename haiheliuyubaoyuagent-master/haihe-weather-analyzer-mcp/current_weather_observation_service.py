@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import time_source
+
 
 BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 # 实况短 TTL 缓存：同「时次桶 + hours_back」在 TTL 内命中，跨时次必 miss。
@@ -32,7 +34,7 @@ def build_latest_utc_hour_candidates(
     hours_back: int = 6,
 ) -> list[datetime]:
     """按 POI 实况口径生成 UTC 整点候选时次。"""
-    current = now or datetime.now(BEIJING_TIMEZONE)
+    current = now or time_source.now(BEIJING_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=BEIJING_TIMEZONE)
     current_utc = current.astimezone(timezone.utc).replace(
@@ -373,7 +375,7 @@ def query_current_weather_observation_core(
     hours_back: int = 6,
 ) -> dict[str, Any]:
     """查询同一时次的地区与流域实况，并返回代码统计结果。"""
-    current = now or datetime.now(BEIJING_TIMEZONE)
+    current = now or time_source.now(BEIJING_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=BEIJING_TIMEZONE)
     cache_key = f"{current.strftime('%Y%m%d%H')}|{hours_back}"

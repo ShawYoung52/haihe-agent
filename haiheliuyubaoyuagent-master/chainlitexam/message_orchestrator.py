@@ -59,6 +59,7 @@ except Exception:
             pass
 
 from utils.tool_result import _unwrap_tool_result
+from utils import time_source
 from tools.current_weather_observation_response import (
     build_current_weather_observation_answer,
     build_current_weather_observation_summary_prompt,
@@ -71,12 +72,132 @@ from tools.rolling_forecast_response import (
     rolling_forecast_llm_instruction,
 )
 from tools import decision_weather_fast_path, warning_workflow
+from tools.meteo_evidence import is_evidence_complete
+from tools.tool_round_evidence import TOOL_QUERY_TYPES, ToolRoundEvidence
+from tools.request_intent_policy import (
+    has_mixed_current_future_scope,
+    is_emergency_response_intent,
+)
 from external_skill_tools import TIANHE_ERROR_TEXTS
 
 # Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
 ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
 # Feature flag: when false (default), skip the thinking_chain LLM call in the planner path (saves one 5-17s LLM call).
 ENABLE_LLM_THINKING = os.environ.get("ENABLE_LLM_THINKING", "false").strip().lower() in ("1", "true", "yes")
+
+
+def _answer_timeout_seconds() -> int:
+    """读取 Answer 超时；非法、空值或非正数安全回退 60 秒。"""
+    raw = os.environ.get("ANSWER_TIMEOUT_SECONDS", "60")
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 60
+    return value if value > 0 else 60
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
+def _active_tool_filter_enabled() -> bool:
+    return _env_flag("ENABLE_ACTIVE_TOOL_FILTER", True)
+
+
+def _evidence_early_finalize_enabled() -> bool:
+    return _env_flag("ENABLE_EVIDENCE_EARLY_FINALIZE", True)
+
+
+def _active_tool_limit() -> int:
+    try:
+        value = int(os.environ.get("ACTIVE_TOOL_LIMIT", "12"))
+    except (TypeError, ValueError):
+        return 12
+    return value if 5 <= value <= 20 else 12
+
+
+def _select_request_planner_chain(planner_chain, callbacks: dict, user_text: str):
+    """返回首轮 Planner chain 和路由决策；任何异常都安全回退完整 chain。"""
+    if not _active_tool_filter_enabled():
+        return planner_chain, None
+    router = callbacks.get("active_tool_router")
+    if router is None:
+        return planner_chain, None
+    try:
+        decision = router.select(user_text, limit=_active_tool_limit())
+        return router.chain_for(decision), decision
+    except Exception as exc:
+        print(f"[ACTIVE_TOOL_FILTER] 路由异常，回退完整 Planner：{type(exc).__name__}")
+        return planner_chain, None
+
+
+def _needs_full_planner_fallback(decision, planner_msg) -> str:
+    if decision is None or getattr(decision, "mode", "full") != "filtered":
+        return ""
+    calls = getattr(planner_msg, "tool_calls", None) or []
+    if getattr(decision, "requires_tool", False) and not calls:
+        return "missing_tool_call"
+    allowed = set(getattr(decision, "tool_names", ()) or ())
+    for call in calls:
+        name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+        if name not in allowed:
+            return "candidate_mismatch"
+    return ""
+
+
+def _full_planner_chain(planner_chain, callbacks: dict):
+    router = callbacks.get("active_tool_router")
+    return getattr(router, "full_chain", planner_chain)
+
+
+def _classify_request_for_evidence(callbacks: dict, user_text: str):
+    """独立判断请求是否为安全单域；异常或缺少路由器时保守返回 None。"""
+    router = callbacks.get("active_tool_router")
+    if router is None:
+        return None
+    try:
+        return router.select(user_text, limit=_active_tool_limit())
+    except Exception as exc:
+        print(f"[EVIDENCE] 请求安全分类失败：{type(exc).__name__}")
+        return None
+
+
+def _should_early_finalize(
+    query_type: str,
+    evidence: ToolRoundEvidence,
+    *,
+    emergency: bool,
+    request_decision=None,
+) -> bool:
+    if emergency or query_type not in {"current", "water_level", "rain"}:
+        return False
+    if (
+        request_decision is None
+        or getattr(request_decision, "mode", "full") != "filtered"
+        or getattr(request_decision, "query_type", "unknown") != query_type
+    ):
+        return False
+    all_items = evidence.items
+    if any(item.status != "ok" for item in all_items):
+        return False
+    if {item.query_type for item in all_items} != {query_type}:
+        return False
+    items = evidence.items_for(query_type)
+    if not items or evidence.has_errors_for(query_type):
+        return False
+    return is_evidence_complete(query_type, items)
+
+
+def _mark_full_planner_transition(timing, decision, reason: str) -> None:
+    """记录过滤请求转入完整 Planner；保留最早且最接近根因的原因。"""
+    if decision is None or getattr(decision, "mode", "full") != "filtered":
+        return
+    timing.full_planner_fallback = True
+    if not getattr(timing, "full_planner_fallback_reason", ""):
+        timing.full_planner_fallback_reason = str(reason or "unknown")
 
 from tools.decision_weather_core import (
     _decision_fetch_water_level,
@@ -86,6 +207,7 @@ from tools.decision_weather_core import (
     _parse_decision_dt,
     classify_poi_category,
     filter_redundant_decision_weather_calls,
+    has_mixed_regional_and_poi_scope,
 )
 
 
@@ -310,9 +432,7 @@ def _extract_emergency_response_time(user_text: str) -> tuple[bool, str]:
     now = datetime.now()
 
     # 必须有明确的应急响应意图关键词
-    emergency_keywords = ("防汛应急响应", "应急响应", "启动响应", "是否启动", "应急等级", "响应等级")
-    has_emergency_kw = any(k in t for k in emergency_keywords)
-    if not has_emergency_kw:
+    if not is_emergency_response_intent(t):
         return False, ""
 
     # 完整日期时间：2023年7月30日14时 / 2023-07-30 14:00 / 2023073014
@@ -795,6 +915,8 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
         return None
     if _is_basin_or_river_query(text):
         return None  # 流域/河系问题走专用河系工具，不误路由
+    if has_mixed_current_future_scope(text) or has_mixed_regional_and_poi_scope(text):
+        return None
     if any(w in text for w in _SIMPLE_WEATHER_EXCLUDE_WORDS):
         return None  # 决策类问题交回 planner
     has_time = any(w in text for w in _SIMPLE_WEATHER_TIME_WORDS)
@@ -835,29 +957,10 @@ def _tool_call_names(planner_msg) -> set[str]:
     return names
 
 
-# 工具名 → 证据完整性判定的 query_type 映射（阶段五 shadow）。
-# 不用 _query_category：其只返回 rainstorm/visibility/temperature/activity/weather，
-# 与 is_evidence_complete 的词表（forecast/warning/current/water_level/rain）不匹配，
-# 会导致 would_early_finalize 对预警/实况/水位等恒为 False，shadow 数据失去意义。
-# 注意映射顺序即优先级：warning 工具排最前，多个工具同轮时优先观测预警。
-# _evidence_query_type_from_tool_names 按 dict 插入顺序迭代，首个匹配的工具名决定 query_type。
-_QUERY_TYPE_BY_TOOL: dict[str, str] = {
-    "get_effective_warning_info": "warning",
-    "get_history_warning_info": "warning",
-    "get_national_warning_info": "warning",
-    "get_today_warning_summary": "warning",
-    "query_rolling_forecast": "forecast",
-    "query_current_weather_observation": "current",
-    "query_water_level": "water_level",
-    "query_decision_weather_for_poi": "decision_poi",
-    "query_basin_areal_rainfall": "rain",
-}
-
-
 def _evidence_query_type_from_tool_names(planner_msg) -> str:
-    """根据本轮实际调用的工具名推断 query_type；多个工具时按安全优先级取一个，未知返回 unknown。"""
+    """根据实际工具名推断 query_type；映射和优先级由证据模块统一维护。"""
     names = _tool_call_names(planner_msg)
-    for tool_name, qtype in _QUERY_TYPE_BY_TOOL.items():
+    for tool_name, qtype in TOOL_QUERY_TYPES.items():
         if tool_name in names:
             return qtype
     return "unknown"
@@ -911,6 +1014,16 @@ def _build_hour_tolerant_args(tool_args):
     return new_args, old_hour, new_hour
 
 
+def _record_tool_performance(tool_name: str, elapsed_seconds: float) -> None:
+    """把一次实际工具调用写入请求级 [PERF] 明细；观测失败不影响主流程。"""
+    try:
+        timing = cl.user_session.get("timing_context")
+        if timing is not None:
+            timing.record_tool_call(tool_name, elapsed_seconds * 1000.0)
+    except Exception:
+        pass
+
+
 async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step, user_text: str = "") -> tuple[Any, float]:
     session_id = cl.user_session.get("id") or ""
     query_summary = TimingLogger._safe_summary(user_text) if user_text else ""
@@ -921,11 +1034,13 @@ async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step, use
         elapsed = time.time() - start_time
         print(f"[工具耗时] {tool_name}: {elapsed:.2f}s")
         TimingLogger.log_tool(session_id, query_summary, tool_name, elapsed, status="ok")
+        _record_tool_performance(tool_name, elapsed)
         return result, elapsed
     except Exception as e:
         elapsed = time.time() - start_time
         print(f"[工具耗时] {tool_name}: {elapsed:.2f}s (失败)")
         TimingLogger.log_tool(session_id, query_summary, tool_name, elapsed, status="fail")
+        _record_tool_performance(tool_name, elapsed)
         err_text = str(e)
         if tool_name != "get_city_rainfall_time_range" or "hour%6==2" not in err_text:
             raise
@@ -945,11 +1060,13 @@ async def _invoke_tool_with_tolerance(tool_name: str, tool, tool_args, step, use
             retry_elapsed = time.time() - retry_start
             print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s")
             TimingLogger.log_tool(session_id, query_summary, f"{tool_name}(retry)", retry_elapsed, status="ok")
+            _record_tool_performance(f"{tool_name}(retry)", retry_elapsed)
             return result, retry_elapsed
         except Exception:
             retry_elapsed = time.time() - retry_start
             print(f"[工具耗时] {tool_name}(重试): {retry_elapsed:.2f}s (失败)")
             TimingLogger.log_tool(session_id, query_summary, f"{tool_name}(retry)", retry_elapsed, status="fail")
+            _record_tool_performance(f"{tool_name}(retry)", retry_elapsed)
             raise
 
 
@@ -1075,10 +1192,12 @@ async def _invoke_tool_for_fast_path(tool_name: str, tool, tool_args, user_text:
         result = await tool.ainvoke(tool_args)
         elapsed = time.time() - start
         TimingLogger.log_tool(session_id, user_text, tool_name, elapsed, status="ok")
+        _record_tool_performance(tool_name, elapsed)
         return result
     except Exception as e:
         elapsed = time.time() - start
         TimingLogger.log_tool(session_id, user_text, tool_name, elapsed, status="fail")
+        _record_tool_performance(tool_name, elapsed)
         raise
 
 
@@ -1946,18 +2065,21 @@ def _record_answer_output_chars(text) -> None:
 async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
     """阶段一：并行调用纯数据工具。
 
-    返回 {tool_call_id: (observation, elapsed)}。仅对白名单内工具并行调用，
+    返回 {tool_call_id: (status, observation, elapsed)}。仅对白名单内工具并行调用，
     并以信号量限制并发（默认 _PARALLEL_TOOL_CONCURRENCY=4）；
     有副作用的工具不在此处调用，由阶段二按需串行执行。
     工具失败在本函数内转为失败观测文本（与串行路径 per-tool 处理一致），
     不中断整轮，由阶段二统一组装 ToolMessage。
     """
-    results: dict[str, tuple[Any, float]] = {}
+    results: dict[str, tuple[str, Any, float]] = {}
 
     async def _invoke_one(tool_call):
         tool = _find_tool(tools, tool_call["name"])
         if tool is None:
-            return tool_call["id"], None, (f"工具未找到：{tool_call['name']}", 0.0)
+            return (
+                tool_call["id"],
+                ("missing", f"工具未找到：{tool_call['name']}", 0.0),
+            )
         # 观测埋点：记录工具信号量排队耗时，累计进 TimingContext.tool_queue_wait_ms，
         # 供 P95/P99 分析分离「并发排队」与「工具自身耗时」。纯观测，异常绝不外抛。
         sem_start = time.time()
@@ -1977,7 +2099,7 @@ async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
                         tool_call["name"], tool, tool_call["args"], tool_step, user_text=user_text
                     )
                     tool_step.output = f"查询完成（耗时 {elapsed:.1f} 秒）"
-                    return tool_call["id"], obs, (obs, elapsed)
+                    return tool_call["id"], ("ok", obs, elapsed)
                 except Exception as e:
                     # 与串行路径一致：把失败转为 ToolMessage 文本，不中断整轮
                     err_summary = _scrub_internal_data(str(e)) or "未知错误"
@@ -1987,15 +2109,15 @@ async def _invoke_tools_in_parallel(calls, tools, user_text, parent_step):
                         f"工具 {tool_call['name']} 执行失败（{type(e).__name__}），"
                         f"该数据暂不可用。错误摘要：{err_summary}"
                     )
-                    return tool_call["id"], None, (failure_text, 0.0)
+                    return tool_call["id"], ("error", failure_text, 0.0)
 
     pending = [c for c in calls if c["name"] in _PARALLEL_SAFE_TOOLS]
     gathered = await asyncio.gather(*[_invoke_one(c) for c in pending], return_exceptions=True)
     for g in gathered:
         if isinstance(g, BaseException):
             raise g  # _invoke_one 已兜底，理论上不会走到这里
-        cid, obs, pair = g
-        results[cid] = pair
+        cid, outcome = g
+        results[cid] = outcome
     return results
 
 
@@ -2017,7 +2139,20 @@ def _is_tianhe_passthrough(tianhe_text: str | None, forced_text: str | None) -> 
     return tianhe_text is not None and forced_text == tianhe_text
 
 
-async def _astream_planner_think_retry_once(callbacks, planner_chain, messages, reasoning):
+async def _invoke_planner_once(
+    callbacks, planner_chain, messages, reasoning, timing=None,
+):
+    """调用一次 Planner，并在调用前记录实际尝试次数（失败也计数）。"""
+    if timing is not None:
+        timing.record_planner_round()
+    return await callbacks["astream_planner_think"](
+        planner_chain, {"messages": messages}, reasoning
+    )
+
+
+async def _astream_planner_think_retry_once(
+    callbacks, planner_chain, messages, reasoning, timing=None,
+):
     """planner 调用的超时重试包装（Fix B）：本地 LLM 响应波动导致超时（asyncio.TimeoutError）
     时重试一次，仍超时则把异常上抛给外层数据兜底。
 
@@ -2026,13 +2161,13 @@ async def _astream_planner_think_retry_once(callbacks, planner_chain, messages, 
     astream_planner_think 对超时立即重抛，该契约由 test_astream_planner_think_timeout_no_retry 锁定）。
     """
     try:
-        return await callbacks["astream_planner_think"](
-            planner_chain, {"messages": messages}, reasoning
+        return await _invoke_planner_once(
+            callbacks, planner_chain, messages, reasoning, timing
         )
     except (asyncio.TimeoutError, TimeoutError):
         print("[Fix B] planner 调用超时，重试一次...")
-        return await callbacks["astream_planner_think"](
-            planner_chain, {"messages": messages}, reasoning
+        return await _invoke_planner_once(
+            callbacks, planner_chain, messages, reasoning, timing
         )
 
 
@@ -2078,8 +2213,47 @@ def _assemble_tool_observations_fallback(messages: list) -> str:
     return "\n\n".join(parts)
 
 
+async def _finalize_complete_tool_evidence(
+    *,
+    answer_chain,
+    messages: list,
+    stream_msg,
+    reasoning,
+    callbacks: dict,
+    user_text: str,
+) -> str:
+    """用完整工具证据直接进入 Answer；模型失败时退回已有工具观测。"""
+    await reasoning.stage("✍️ 生成结论", "数据证据已完整，正在生成最终回答...")
+    has_chart = cl.user_session.get("has_chart_generated", False) or False
+    try:
+        _compress_messages(messages)
+        _record_answer_input_chars(messages)
+        text = await asyncio.wait_for(
+            callbacks["astream_answer_chain_to_message"](
+                answer_chain, {"messages": messages}, stream_msg
+            ),
+            timeout=_answer_timeout_seconds(),
+        )
+        _record_answer_output_chars(text)
+    except Exception as exc:
+        print(f"[EVIDENCE] Answer 生成失败，使用工具观测兜底：{type(exc).__name__}")
+        text = _assemble_tool_observations_fallback(messages)
+
+    text = _sanitize_display_text(text or "")
+    if not text:
+        return ""
+    await _maybe_close_reasoning(reasoning)
+    text = callbacks["append_followup_if_needed"](text, user_text)
+    text = _prepend_thinking_summary(text, user_text, has_chart=has_chart)
+    stream_msg.content = text
+    await stream_msg.update()
+    messages.append(AIMessage(content=text))
+    return text
+
+
 async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteration: int, callbacks,
-                          parent_step_id: str | None = None, answer_chain=None):
+                          parent_step_id: str | None = None, answer_chain=None,
+                          evidence_sink: ToolRoundEvidence | None = None):
     ree = None
     forced_final_text = None
     tianhe_passthrough_text = None  # 本轮 forced_final_text 若来自天河 answer，记录原文用于透传判定
@@ -2110,8 +2284,22 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
 
             if tool_call["id"] in pre_fetched:
                 # 阶段一已并行获取该纯数据工具结果，直接进入分支处理
-                observation, tool_elapsed = pre_fetched[tool_call["id"]]
+                prefetch_status, observation, tool_elapsed = pre_fetched[tool_call["id"]]
                 tool_step = None  # 该工具的 step 已在阶段一创建并更新
+                if prefetch_status != "ok":
+                    observation_text = str(observation or "")
+                    if evidence_sink is not None:
+                        evidence_sink.record(
+                            tool_name,
+                            prefetch_status,
+                            {"error": observation_text},
+                        )
+                    messages.append(ToolMessage(
+                        content=observation_text,
+                        tool_call_id=tool_call["id"],
+                        role="tool",
+                    ))
+                    continue
             else:
                 tool = _find_tool(tools, tool_name)
                 async with cl.Step(name=display_name, parent_id=step.id, type="tool") as tool_step:
@@ -2120,6 +2308,8 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
 
                     if tool is None:
                         observation_text = f"工具未找到：{tool_name}"
+                        if evidence_sink is not None:
+                            evidence_sink.record(tool_name, "missing", {"error": observation_text})
                         messages.append(ToolMessage(content=observation_text, tool_call_id=tool_call["id"], role="tool"))
                         tool_step.output = f"❌ {observation_text}"
                         continue
@@ -2135,6 +2325,8 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                             f"该数据暂不可用。错误摘要：{err_summary}"
                         )
                         tool_step.output = f"查询失败：{err_summary[:120]}"
+                        if evidence_sink is not None:
+                            evidence_sink.record(tool_name, "error", {"error": err_summary})
                         messages.append(ToolMessage(content=observation_text, tool_call_id=tool_call["id"], role="tool"))
                         continue
 
@@ -2335,45 +2527,52 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     # 与决策天气历史分支共用同一格式化器组装回答并追加隐患点注意事项，
                     # 保证无论 planner 选哪个工具，历史回答格式统一、都带注意事项。
                     hist_payload = _unwrap_tool_result(observation)
-                    if isinstance(hist_payload, dict) and hist_payload.get("status") == "ok":
-                        point_name = str(hist_payload.get("point_name") or tool_args.get("point_name") or "该点位")
-                        poi_lon = hist_payload.get("lon")
-                        poi_lat = hist_payload.get("lat")
-                        category = classify_poi_category(point_name, "", None, None)
-                        hazard_points = None
-                        if category is not None and poi_lon is not None and poi_lat is not None:
-                            hazard_tool = _find_tool(tools, "query_poi_hazard_reminders")
-                            if hazard_tool is not None:
-                                try:
-                                    hazard_raw = await hazard_tool.ainvoke(
-                                        {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0}
-                                    )
-                                    hazard_payload = _unwrap_tool_result(hazard_raw)
-                                    if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
-                                        hazard_points = hazard_payload
-                                except Exception as hazard_err:
-                                    print(f"[orchestrator] 历史实况隐患点查询失败（跳过注意事项）：{hazard_err}")
-                        # 水库类别：历史日期也查水库水位（数值来自接口、不编造）
-                        water_level_info = None
-                        if category == "reservoir":
-                            water_level_tool = _find_tool(tools, "query_water_level")
-                            water_level_info = await _decision_fetch_water_level(
-                                point_name, water_level_tool,
-                                lambda tool, args: tool.ainvoke(args), "orchestrator",
-                            )
-                        hist_text = await _generate_decision_historical_answer(
-                            user_text,
-                            hist_payload,
-                            {"address": "", "longitude": poi_lon, "latitude": poi_lat},
-                            point_name,
-                            "general_weather",
-                            answer_chain,
-                            callbacks,
-                            poi_category=category,
-                            hazard_points=hazard_points,
-                            water_level_info=water_level_info,
+                    if not isinstance(hist_payload, dict):
+                        hist_payload = {}
+                    hist_is_ok = hist_payload.get("status") == "ok"
+                    point_name = str(hist_payload.get("point_name") or tool_args.get("point_name") or "该点位")
+                    poi_lon = hist_payload.get("lon")
+                    poi_lat = hist_payload.get("lat")
+                    category = classify_poi_category(point_name, "", None, None)
+                    hazard_points = None
+                    # 隐患点/水库水位只在 ok 数据上增强；error/no_data 只走下方格式化器提示
+                    if hist_is_ok and category is not None and poi_lon is not None and poi_lat is not None:
+                        hazard_tool = _find_tool(tools, "query_poi_hazard_reminders")
+                        if hazard_tool is not None:
+                            try:
+                                hazard_raw = await hazard_tool.ainvoke(
+                                    {"lon": poi_lon, "lat": poi_lat, "radius_km": 5.0}
+                                )
+                                hazard_payload = _unwrap_tool_result(hazard_raw)
+                                if isinstance(hazard_payload, dict) and hazard_payload.get("status") == "ok":
+                                    hazard_points = hazard_payload
+                            except Exception as hazard_err:
+                                print(f"[orchestrator] 历史实况隐患点查询失败（跳过注意事项）：{hazard_err}")
+                    # 水库类别：历史日期也查水库水位（数值来自接口、不编造）
+                    water_level_info = None
+                    if hist_is_ok and category == "reservoir":
+                        water_level_tool = _find_tool(tools, "query_water_level")
+                        water_level_info = await _decision_fetch_water_level(
+                            point_name, water_level_tool,
+                            lambda tool, args: tool.ainvoke(args), "orchestrator",
                         )
-                        observation_text = _sanitize_display_text(str(hist_text or ""))
+                    # 非 ok（error/no_data）也走同一历史格式化器输出优雅提示——
+                    # 否则 observation_text 未赋值，在消息追加处抛 UnboundLocalError
+                    # （“7月10号天津市天气怎么样”生产报错）
+                    hist_text = await _generate_decision_historical_answer(
+                        user_text,
+                        hist_payload,
+                        {"address": "", "longitude": poi_lon, "latitude": poi_lat},
+                        point_name,
+                        "general_weather",
+                        answer_chain,
+                        callbacks,
+                        poi_category=category,
+                        hazard_points=hazard_points,
+                        water_level_info=water_level_info,
+                    )
+                    observation_text = _sanitize_display_text(str(hist_text or ""))
+                    if hist_is_ok:
                         forced_final_text = observation_text
                 elif tool_name.startswith("historical_weather_"):
                     img_msgs, observation_text = _extract_historical_weather_images(observation)
@@ -2412,6 +2611,14 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                 if tool_step is not None:
                     tool_step.output = f"查询失败：{err_summary[:120]}"
                     await tool_step.update()
+                if evidence_sink is not None:
+                    evidence_sink.record(tool_name, "error", {"error": err_summary})
+            else:
+                if evidence_sink is not None:
+                    try:
+                        evidence_sink.record(tool_name, "ok", _unwrap_tool_result(observation))
+                    except Exception as evidence_err:
+                        print(f"[EVIDENCE] 记录工具结果失败：{type(evidence_err).__name__}")
 
             messages.append(
                 ToolMessage(
@@ -4569,6 +4776,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     cl.user_session.set("query_start_time", query_start_time)
     timing = TimingContext(request_id=cl.user_session.get("id") or None)
     cl.user_session.set("timing_context", timing)
+    request_evidence_decision = _classify_request_for_evidence(callbacks, message.content)
     # HTTP 接口在 _run_once 之前排队，已把等待时间写入会话，此处回填到 timing。
     try:
         _http_queue_wait_ms = cl.user_session.get("http_queue_wait_ms") or 0.0
@@ -4849,7 +5057,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 {
                     "messages": [HumanMessage(content=message.content)],
                     "system_message": THINKING_PROMPT.format(
-                        current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        current_time=time_source.now().strftime("%Y-%m-%d %H:%M"),
                         user_query=message.content,
                     ),
                 },
@@ -4863,6 +5071,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
 
     await reasoning.stage("🔍 理解问题", "正在规划数据查询方案...")
 
+    request_planner_chain = planner_chain
+    full_request_planner_chain = _full_planner_chain(planner_chain, callbacks)
+    route_decision = None
     try:
         _compress_messages(messages)
         if _is_future_hour_weather_query(message.content):
@@ -4875,6 +5086,21 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 AIMessage(content=""), message.content, simple_route
             )
         else:
+            request_planner_chain, route_decision = _select_request_planner_chain(
+                planner_chain, callbacks, message.content
+            )
+            if route_decision is not None:
+                timing.tool_filter_mode = str(getattr(route_decision, "mode", "full"))
+                timing.tool_candidates_count = len(
+                    getattr(route_decision, "tool_names", ()) or ()
+                )
+                timing.tool_filter_reason = str(getattr(route_decision, "reason", ""))
+                print(
+                    "[ACTIVE_TOOL_FILTER] "
+                    f"mode={timing.tool_filter_mode} "
+                    f"query_type={getattr(route_decision, 'query_type', 'unknown')} "
+                    f"candidates={timing.tool_candidates_count}"
+                )
             try:
                 _timing = cl.user_session.get("timing_context")
                 if _timing is not None:
@@ -4883,8 +5109,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     )
             except Exception:
                 pass
-            planner_msg = await callbacks["astream_planner_think"](
-                planner_chain, {"messages": messages}, reasoning
+            planner_msg = await _invoke_planner_once(
+                callbacks, request_planner_chain, messages, reasoning, timing
             )
             try:
                 _timing = cl.user_session.get("timing_context")
@@ -4893,6 +5119,22 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             except Exception:
                 pass
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
+            fallback_reason = _needs_full_planner_fallback(route_decision, planner_msg)
+            if fallback_reason:
+                _mark_full_planner_transition(timing, route_decision, fallback_reason)
+                print(
+                    "[ACTIVE_TOOL_FILTER] "
+                    f"filtered Planner 未满足安全条件（{fallback_reason}），"
+                    "仅回退一次完整 Planner。"
+                )
+                planner_msg = await _invoke_planner_once(
+                    callbacks,
+                    full_request_planner_chain,
+                    messages,
+                    reasoning,
+                    timing,
+                )
+                planner_msg = _ensure_tool_calls_from_content(planner_msg)
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
         await reasoning.__aexit__(None, None, None)
@@ -4905,7 +5147,6 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         return
 
     timing.mark("planner_round_1")
-    timing.record_planner_round()
 
     # 影子模式：记录候选工具是否召回 Planner 实际调用工具。只打日志，不改 Planner 绑定。
     if planner_msg.tool_calls and callbacks.get("tool_candidate_index"):
@@ -5001,7 +5242,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             _record_answer_input_chars(messages)
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
-                timeout=60,
+                timeout=_answer_timeout_seconds(),
             )
             _record_answer_output_chars(text)
         except Exception as e:
@@ -5045,13 +5286,15 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         await reasoning.stage("📡 查询数据", f"第 {iteration} 轮补充查询中...")
 
         timing.mark(f"tool_round_{iteration}")
+        round_evidence = ToolRoundEvidence()
+        round_query_type = _evidence_query_type_from_tool_names(planner_msg)
         forced_final_text, ree, warning_bundles, round_rolling_forecast_bundles, tianhe_passthrough_text = await _run_tool_round(
             planner_msg, tools, messages, message.content, iteration, callbacks,
             parent_step_id=reasoning.step.id if reasoning and reasoning.step else None,
             answer_chain=answer_chain,
+            evidence_sink=round_evidence,
         )
         timing.mark(f"tool_round_{iteration}")
-        timing.tool_call_count += len(planner_msg.tool_calls)
         rolling_forecast_bundles.extend(round_rolling_forecast_bundles)
         if ree:
             await cl.send_window_message(ree)
@@ -5130,7 +5373,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     callbacks["astream_answer_chain_to_message"](
                         answer_chain, {"messages": messages}, stream_msg
                     ),
-                    timeout=60,
+                    timeout=_answer_timeout_seconds(),
                 )
                 _record_answer_output_chars(text)
             except Exception as e:
@@ -5153,35 +5396,50 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             answer_generated = True
             break
 
-        # 阶段五 shadow：记录证据完整性判断，不改变真实流程。
-        # ENABLE_EVIDENCE_EARLY_FINALIZE=true 时才用 would_early 参与跳过决策。
-        # 这里只在 Fix A 未触发（非滚动预报）时提供 would_early_finalize 观测数据；
-        # query_type 由本轮实际工具名推断（_query_category 词表与 is_evidence_complete 不匹配）。
+        # 结构化证据完整时，实况/水位/面雨量可跳过下一轮 Planner，直接进入 Answer。
+        # 应急、预警、河网、影响分析、未知或任一工具失败都保守走完整原流程。
         try:
-            from tools.meteo_evidence import is_evidence_complete
-            qtype = _evidence_query_type_from_tool_names(planner_msg)
-            if qtype == "warning":
-                shadow_tool_name = "get_effective_warning_info"
-                shadow_bundles = warning_bundles
-            elif qtype in ("current", "water_level"):
-                # bundle 未带 observation_time/water_level_m，保守返回 False（不跳过）
-                shadow_tool_name = qtype
-                shadow_bundles = []
-            else:
-                shadow_tool_name = "query_rolling_forecast"
-                shadow_bundles = rolling_forecast_bundles
-            tool_results = [
-                {"tool_name": shadow_tool_name, "bundle": b}
-                for b in shadow_bundles
-            ]
-            would_early = is_evidence_complete(qtype, tool_results)
-            # 用独立变量名，避免覆盖 process_message 主流程的 timing 局部变量
-            shadow_timing = cl.user_session.get("timing_context")
-            if shadow_timing is not None:
-                shadow_timing.evidence = {"would_early_finalize": would_early, "query_type": qtype}
-            print(f"[EVIDENCE] query_type={qtype} would_early_finalize={would_early}")
-        except Exception:
-            pass
+            would_early = _should_early_finalize(
+                round_query_type,
+                round_evidence,
+                emergency=has_emergency_response_tool,
+                request_decision=request_evidence_decision,
+            )
+        except Exception as evidence_exc:
+            print(f"[EVIDENCE] 完整性判定失败，保留完整 Planner：{type(evidence_exc).__name__}")
+            would_early = False
+        timing.evidence = {
+            "would_early_finalize": would_early,
+            "query_type": round_query_type,
+        }
+        print(
+            f"[EVIDENCE] query_type={round_query_type} "
+            f"would_early_finalize={would_early}"
+        )
+        if would_early and _evidence_early_finalize_enabled():
+            text = await _finalize_complete_tool_evidence(
+                answer_chain=answer_chain,
+                messages=messages,
+                stream_msg=stream_msg,
+                reasoning=reasoning,
+                callbacks=callbacks,
+                user_text=message.content,
+            )
+            if text:
+                timing.evidence_early_finalize = True
+                timing.planner_rounds_saved += 1
+                cl.user_session.set("messages", messages)
+                print("\n=== 证据完整：跳过下一轮 Planner，直接生成回答 ===\n")
+                answer_generated = True
+                break
+
+        if would_early:
+            transition_reason = "early_finalize_disabled"
+        elif any(item.status != "ok" for item in round_evidence.items):
+            transition_reason = "tool_error"
+        else:
+            transition_reason = "evidence_incomplete"
+        _mark_full_planner_transition(timing, route_decision, transition_reason)
 
         await reasoning.stage("✅ 评估结果", "已获取数据，正在判断能否完整回答您的问题...")
         await reasoning.stage("✅ 评估结果", "正在评估是否需要补充查询...")
@@ -5205,14 +5463,22 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             if _has_complete_rolling_forecast(rolling_forecast_bundles):
                 # 滚动预报已完整（多为伴随应急工具、上面滚动早收口未触发二次 planner 的场景）：
                 # 超时由外层 Fix C 兜底，planner 不再重试，避免无谓增加 60s 时延、也不改变已测试的 Fix C 行为。
-                planner_msg = await callbacks["astream_planner_think"](
-                    planner_chain, {"messages": messages}, reasoning
+                planner_msg = await _invoke_planner_once(
+                    callbacks,
+                    full_request_planner_chain,
+                    messages,
+                    reasoning,
+                    timing,
                 )
             else:
                 # 非滚动工具：planner 超时重试一次（Fix B：planner 重试+数据兜底，与滚动 Fix C 互斥），
                 # 仍超时由外层数据兜底组装。
                 planner_msg = await _astream_planner_think_retry_once(
-                    callbacks, planner_chain, messages, reasoning
+                    callbacks,
+                    full_request_planner_chain,
+                    messages,
+                    reasoning,
+                    timing,
                 )
             try:
                 _timing = cl.user_session.get("timing_context")
@@ -5280,7 +5546,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     _record_answer_input_chars(messages)
                     text = await asyncio.wait_for(
                         callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
-                        timeout=60,
+                        timeout=_answer_timeout_seconds(),
                     )
                     _record_answer_output_chars(text)
                 except (asyncio.TimeoutError, TimeoutError) as timeout_exc:
@@ -5294,7 +5560,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                                 callbacks["astream_answer_chain_to_message"](
                                     answer_chain, {"messages": messages}, stream_msg
                                 ),
-                                timeout=60,
+                                timeout=_answer_timeout_seconds(),
                             )
                             _record_answer_output_chars(text)
                         except Exception:
@@ -5351,7 +5617,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                         callbacks["astream_answer_chain_to_message"](
                             answer_chain, {"messages": messages}, stream_msg
                         ),
-                        timeout=60,
+                        timeout=_answer_timeout_seconds(),
                     )
                     _record_answer_output_chars(text)
                 except Exception:
@@ -5427,7 +5693,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             _record_answer_input_chars(messages)
             text = await asyncio.wait_for(
                 callbacks["astream_answer_chain_to_message"](answer_chain, {"messages": messages}, stream_msg),
-                timeout=60,
+                timeout=_answer_timeout_seconds(),
             )
             _record_answer_output_chars(text)
         except Exception as e:

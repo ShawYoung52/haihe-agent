@@ -21,6 +21,7 @@ import io
 import os
 import re
 from datetime import datetime, timedelta
+import time_source
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -240,7 +241,7 @@ def _fmt_hh(t: datetime) -> str:
 
 
 def _window(interval_hours: int) -> tuple[str, str]:
-    now = datetime.now(BEIJING_TIMEZONE)
+    now = time_source.now(BEIJING_TIMEZONE)
     end = now.replace(minute=0, second=0, microsecond=0)
     begin = end - timedelta(hours=interval_hours)
     return _fmt_hh(begin), _fmt_hh(end)
@@ -358,7 +359,7 @@ def _fore_cycle_candidates(max_days: int = 4) -> list[str]:
     14所 的某一起报时次预报数据未就绪时出图接口会返回 500（实测今天 08 时次 500、
     昨天 08 时次 200），因此按序尝试最近时次，取第一个能出图的。
     """
-    now = datetime.now(BEIJING_TIMEZONE)
+    now = time_source.now(BEIJING_TIMEZONE)
     cycles: list[datetime] = []
     for offset in range(0, max_days):
         day = now.replace(hour=8, minute=0, second=0, microsecond=0) - timedelta(days=offset)
@@ -1050,7 +1051,7 @@ def _hhweb_time(end_time: str) -> str:
                 return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:00:00")
             except ValueError:
                 continue
-    return datetime.now(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:00:00")
+    return time_source.now(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:00:00")
 
 
 def generate_haihe_composite_longimg_core(
@@ -1134,7 +1135,7 @@ def _generate_haihe_composite_longimg_core_pil(
     else:
         begin, end = _window(interval_hours)
     fore_cycles = _fore_cycle_candidates()
-    query_time = datetime.now(BEIJING_TIMEZONE).strftime("%Y%m%d%H0000")
+    query_time = time_source.now(BEIJING_TIMEZONE).strftime("%Y%m%d%H0000")
 
     texts: list[str] = []
 

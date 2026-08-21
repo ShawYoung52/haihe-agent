@@ -51,6 +51,13 @@ def test_prefilter_allows_location_with_time_and_rejects_time_only():
     assert dw._decision_weather_prefilter("XX公园适合周末露营吗") is True
     assert dw._decision_weather_prefilter("今天天气怎么样") is False
     assert dw._decision_weather_prefilter("未来24小时会下雨吗") is False
+    assert dw._decision_weather_prefilter("中心城区现在气温和风的实况") is False
+    assert dw._decision_weather_prefilter("全市各站现在气温如何") is False
+    assert dw._decision_weather_prefilter("天津在未来24小时会下雨吗") is False
+    assert dw._decision_weather_prefilter("天津到明天会下雨吗") is False
+    assert dw._decision_weather_prefilter("明天有潜在降雨风险吗") is False
+    assert dw._decision_weather_prefilter("现在有潜在大风风险吗") is False
+    assert dw._decision_weather_prefilter("我在五大道明天天气如何") is True
 
 
 def test_prefilter_accepts_poi_guard_routed_keywords():

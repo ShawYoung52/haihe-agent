@@ -1,6 +1,7 @@
 """Tests for chainlitexam.timing_logger."""
 
 import io
+import inspect
 import re
 import sys
 import time
@@ -15,6 +16,7 @@ ensure_stubs()
 
 from chainlitexam.timing_logger import TimingLogger, TimingContext
 from chainlitexam import message_orchestrator as mo
+import pytest
 
 
 def _capture_stdout(func, *args, **kwargs):
@@ -187,6 +189,26 @@ def test_timing_context_evidence_field():
     assert "would_early_finalize" in d["evidence"]
 
 
+def test_timing_context_active_routing_and_early_finalize_fields():
+    ctx = TimingContext(request_id="req-routing")
+    ctx.tool_filter_mode = "filtered"
+    ctx.tool_candidates_count = 3
+    ctx.tool_filter_reason = "single_domain:water_level"
+    ctx.full_planner_fallback = True
+    ctx.full_planner_fallback_reason = "missing_tool_call"
+    ctx.evidence_early_finalize = True
+    ctx.planner_rounds_saved = 1
+
+    d = ctx.as_dict()
+    assert d["tool_filter_mode"] == "filtered"
+    assert d["tool_candidates_count"] == 3
+    assert d["tool_filter_reason"] == "single_domain:water_level"
+    assert d["full_planner_fallback"] is True
+    assert d["full_planner_fallback_reason"] == "missing_tool_call"
+    assert d["evidence_early_finalize"] is True
+    assert d["planner_rounds_saved"] == 1
+
+
 def _planner_msg_with_tool_calls(tool_calls):
     """构造一个带 tool_calls 的伪 planner 消息对象。"""
     msg = type("FakePlannerMsg", (), {})()
@@ -248,3 +270,77 @@ def test_log_query_exit_does_not_remark_done():
     if "done" not in ctx.stages:
         ctx.mark("done")
     assert ctx.stages.get("done") == done_before
+
+
+class _MemoryUserSession:
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+
+@pytest.mark.asyncio
+async def test_tool_invocation_records_perf_detail(monkeypatch):
+    """普通 planner 工具调用必须进入 [PERF].tools，而不只是打印 TOOL_TIMING。"""
+    ctx = TimingContext(request_id="req-tool")
+    session = _MemoryUserSession({"id": "session-1", "timing_context": ctx})
+    monkeypatch.setattr(mo.cl, "user_session", session)
+
+    class FakeTool:
+        async def ainvoke(self, args):
+            return {"status": "ok"}
+
+    step = type("FakeStep", (), {"input": ""})()
+    result, elapsed = await mo._invoke_tool_with_tolerance(
+        "query_current_weather_observation", FakeTool(), {}, step, user_text="当前天气"
+    )
+
+    assert result == {"status": "ok"}
+    assert elapsed >= 0
+    assert ctx.tool_call_count == 1
+    assert ctx.tool_calls[0][0] == "query_current_weather_observation"
+    assert ctx.tool_calls[0][1] >= 0
+
+
+@pytest.mark.asyncio
+async def test_fast_path_tool_invocation_records_perf_detail(monkeypatch):
+    """快速路径也必须写入同一 TimingContext。"""
+    ctx = TimingContext(request_id="req-fast-tool")
+    session = _MemoryUserSession({"id": "session-2", "timing_context": ctx})
+    monkeypatch.setattr(mo.cl, "user_session", session)
+
+    class FakeTool:
+        async def ainvoke(self, args):
+            return "ok"
+
+    assert await mo._invoke_tool_for_fast_path("get_effective_warning_info", FakeTool(), {}, "预警") == "ok"
+    assert ctx.tool_call_count == 1
+    assert ctx.tool_calls[0][0] == "get_effective_warning_info"
+
+
+def test_process_message_does_not_manually_double_count_tools():
+    """实际调用点负责计数后，process_message 不得按 planner 声明再次累加。"""
+    source = inspect.getsource(mo.process_message)
+    assert "tool_call_count += len(planner_msg.tool_calls)" not in source
+
+
+def test_answer_timeout_reads_env_with_safe_fallback(monkeypatch):
+    monkeypatch.delenv("ANSWER_TIMEOUT_SECONDS", raising=False)
+    assert mo._answer_timeout_seconds() == 60
+
+    monkeypatch.setenv("ANSWER_TIMEOUT_SECONDS", "25")
+    assert mo._answer_timeout_seconds() == 25
+
+    for invalid in ("", "bad", "0", "-1"):
+        monkeypatch.setenv("ANSWER_TIMEOUT_SECONDS", invalid)
+        assert mo._answer_timeout_seconds() == 60
+
+
+def test_answer_waits_do_not_keep_hardcoded_sixty_seconds():
+    source = inspect.getsource(mo.process_message)
+    assert "timeout=60" not in source
+    assert source.count("timeout=_answer_timeout_seconds()") >= 6

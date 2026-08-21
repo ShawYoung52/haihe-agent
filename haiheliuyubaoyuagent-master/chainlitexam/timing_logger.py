@@ -31,7 +31,14 @@ class TimingContext:
         self.planner_output_chars: int = 0
         self.answer_input_chars: int = 0
         self.answer_output_chars: int = 0
-        # 阶段五 shadow：证据完整性判断观测（would_early_finalize / query_type），默认空，不参与跳过决策
+        # 请求级主动工具路由和证据收口埋点。只记录模式/数量/原因，不记录问题和工具结果。
+        self.tool_filter_mode: str = "full"
+        self.tool_candidates_count: int = 0
+        self.tool_filter_reason: str = ""
+        self.full_planner_fallback: bool = False
+        self.full_planner_fallback_reason: str = ""
+        self.evidence_early_finalize: bool = False
+        self.planner_rounds_saved: int = 0
         self.evidence: dict = {}
 
     def mark(self, name: str) -> None:
@@ -62,6 +69,13 @@ class TimingContext:
             "planner_output_chars": self.planner_output_chars,
             "answer_input_chars": self.answer_input_chars,
             "answer_output_chars": self.answer_output_chars,
+            "tool_filter_mode": self.tool_filter_mode,
+            "tool_candidates_count": self.tool_candidates_count,
+            "tool_filter_reason": self.tool_filter_reason,
+            "full_planner_fallback": self.full_planner_fallback,
+            "full_planner_fallback_reason": self.full_planner_fallback_reason,
+            "evidence_early_finalize": self.evidence_early_finalize,
+            "planner_rounds_saved": self.planner_rounds_saved,
             "evidence": self.evidence,
         }
 

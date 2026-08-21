@@ -29,6 +29,8 @@ class TestRouteSimpleWeatherQuery:
             ("后天天津气温", "query_rolling_forecast"),
             ("明天下雨吗", "query_rolling_forecast"),
             ("周末天气预报", "query_rolling_forecast"),
+            ("天津在未来24小时会下雨吗", "query_rolling_forecast"),
+            ("天津到明天会下雨吗", "query_rolling_forecast"),
         ],
     )
     def test_routes_simple_weather(self, question, expected_tool):
@@ -48,6 +50,11 @@ class TestRouteSimpleWeatherQuery:
             "什么是海河流域",          # 无天气词
             "今天",                  # 无天气词
             "暴雨预警",               # 预警类：不走滚动预报
+            "对比天津现在和明天的天气",  # 当前+未来混合：完整 Planner
+            "天津当前气温和未来降雨如何",
+            "现在与后天的气温差多少",
+            "中心城区和梅江会展中心明天气温对比",
+            "全市各站和天津站明天气温对比",
         ],
     )
     def test_does_not_route_ambiguous(self, question):

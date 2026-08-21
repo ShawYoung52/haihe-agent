@@ -346,13 +346,17 @@ class ForecastAnalyzer:
                 summaries.append(sub_summary)   
         return '\n'.join(summaries) if summaries else "暂无检验数据"
     
-    def generate_detailed_report(self) -> Dict:
+    def generate_detailed_report(self, *, include_charts: bool = True) -> Dict:
         """生成详细报告
+
+        Args:
+            include_charts: 是否生成图表文件。文字查询应设为 False，避免无用的
+                Matplotlib 绘图与磁盘写入；命令行等既有调用默认保持 True。
         
         Returns:
             Dict: 包含综述、表格数据、统计信息的字典
         """
-        image_paths = generate_charts(self.json_data)
+        image_paths = generate_charts(self.json_data) if include_charts else {}
         results = self.parse_results()
         
         time_sessions = set()

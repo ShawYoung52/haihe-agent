@@ -21,6 +21,7 @@ import base64
 import os
 import re
 from datetime import datetime, timedelta
+import time_source
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -250,7 +251,7 @@ def generate_rainfall_describe_longimg_core(
     if interval_hours < 1:
         interval_hours = 1
 
-    now = datetime.now(BEIJING_TIMEZONE)
+    now = time_source.now(BEIJING_TIMEZONE)
     explicit_window = bool(beginTime and endTime)
     if not endTime:
         endTime = now.strftime("%Y-%m-%d %H:00:00")

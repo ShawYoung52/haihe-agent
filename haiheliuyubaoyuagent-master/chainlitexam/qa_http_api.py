@@ -33,9 +33,20 @@ from urllib.parse import urlparse
 from chainlit.emitter import BaseChainlitEmitter
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from utils import time_source
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 配置
+
+
+def _runtime_epoch() -> str:
+    """HTTP 运行时失效周期；日期变化时刷新带当前日期的 system prompt。
+
+    走统一时间源：切换系统时间激活时，锚定日期变化 → epoch 变化 → HTTP QARuntime
+    自动重建（无需重启服务）。
+    """
+    return time_source.override_date_str()
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -616,6 +627,7 @@ class QARuntime:
     def __init__(self):
         self._factory = None
         self._runtime: dict[str, Any] | None = None
+        self._runtime_epoch: str | None = None
         self._init_lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
         self.store: ConversationStore = InMemoryConversationStore()
@@ -630,6 +642,7 @@ class QARuntime:
         """
         self._factory = runtime_factory
         self._runtime = None
+        self._runtime_epoch = None
 
     @property
     def configured(self) -> bool:
@@ -642,18 +655,22 @@ class QARuntime:
         所以必须自带超时；否则「180s 超时」形同虚设，所有请求无限期等待。
         失败后清空缓存，让下一个请求可以重试。
         """
-        if self._runtime is not None:
+        current_epoch = _runtime_epoch()
+        if self._runtime is not None and self._runtime_epoch == current_epoch:
             return self._runtime
         if self._factory is None:
             raise QANotConfigured("问答运行时未初始化")
         async with self._init_lock:
-            if self._runtime is None:
+            current_epoch = _runtime_epoch()
+            if self._runtime is None or self._runtime_epoch != current_epoch:
                 try:
                     self._runtime = await asyncio.wait_for(
                         self._factory(), timeout=TIMEOUT_SECONDS
                     )
+                    self._runtime_epoch = current_epoch
                 except BaseException:
                     self._runtime = None  # 允许后续请求重试
+                    self._runtime_epoch = None
                     raise
         return self._runtime
 
@@ -669,6 +686,14 @@ class QARuntime:
             k for k, (ts, _) in self._response_cache.items() if ts < cutoff
         ]:
             del self._response_cache[key]
+
+    def clear_response_cache(self) -> None:
+        """清空单轮响应缓存。
+
+        切换系统时间时调用：响应缓存键只含 {question, include_reasoning, include_gis}，
+        不含时间；不清理的话，覆盖前后问同一个问题会返回陈旧答案。
+        """
+        self._response_cache.clear()
 
     async def ask(
         self,

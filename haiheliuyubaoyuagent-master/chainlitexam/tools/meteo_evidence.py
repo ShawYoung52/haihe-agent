@@ -1,7 +1,7 @@
-"""气象证据完整性判断（阶段五，默认只记录不改变流程）。
+"""气象证据完整性判断。
 
 is_evidence_complete(query_type, tool_results) 判断当前工具结果是否足以直接回答，
-无需再查询。设计为纯函数，便于测试。shadow 记录时由 process_message 调用。
+无需再查询。设计为纯函数，供 shadow 观测和安全提前收口共同使用。
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def _bundle_complete(required_keys: set[str], bundle: dict) -> bool:
     return True
 
 
-def is_evidence_complete(query_type: str, tool_results: list[dict]) -> bool:
+def is_evidence_complete(query_type: str, tool_results: list[Any]) -> bool:
     """判断证据是否完整。
 
     tool_results: list of {"tool_name": str, "bundle": dict}。
@@ -49,7 +49,62 @@ def is_evidence_complete(query_type: str, tool_results: list[dict]) -> bool:
         return False
     if query_type in _KNOWN_UNSAFE:
         return False
-    required = _REQUIRED_BUNDLE_KEYS.get(query_type)
-    if required is None:
-        return False  # 无映射 → 保守 False
-    return any(_bundle_complete(required, r.get("bundle") or {}) for r in tool_results)
+    for result in tool_results:
+        if isinstance(result, dict):
+            # 兼容原 shadow 的 {tool_name, bundle} 结构。
+            bundle = result.get("bundle") or {}
+            required = _REQUIRED_BUNDLE_KEYS.get(query_type)
+            if required is not None and _bundle_complete(required, bundle):
+                return True
+            continue
+
+        status = getattr(result, "status", "error")
+        if status != "ok":
+            continue
+        payload = getattr(result, "payload", None)
+        if _payload_complete(query_type, payload):
+            return True
+    return False
+
+
+def _payload_complete(query_type: str, payload: Any) -> bool:
+    """判断解包后的真实工具 payload 是否足以进入 Answer。"""
+    if query_type == "current":
+        if not isinstance(payload, dict) or payload.get("error"):
+            return False
+        observation_time = (
+            payload.get("observation_time")
+            or payload.get("observation_time_label")
+            or payload.get("observation_time_beijing")
+        )
+        counts = payload.get("record_counts")
+        has_counts = isinstance(counts, dict) and any(
+            isinstance(value, (int, float)) and value > 0 for value in counts.values()
+        )
+        has_records = isinstance(payload.get("records"), list) and bool(payload["records"])
+        return bool(observation_time and (has_counts or has_records))
+
+    if query_type == "water_level":
+        if not isinstance(payload, dict) or payload.get("error"):
+            return False
+        records = payload.get("records")
+        if not isinstance(records, list) or not records:
+            return False
+        water_keys = {
+            "water_level_m", "水位(m)", "库上水位(m)", "闸上水位(m)", "闸下水位(m)"
+        }
+        return any(
+            isinstance(row, dict)
+            and any(row.get(key) is not None for key in water_keys)
+            for row in records
+        )
+
+    if query_type == "rain":
+        return (
+            isinstance(payload, list)
+            and bool(payload)
+            and all(not isinstance(row, dict) or not row.get("error") for row in payload)
+        )
+
+    # forecast 继续使用含 code_section 的 bundle；warning 继续走专用工作流。
+    return False

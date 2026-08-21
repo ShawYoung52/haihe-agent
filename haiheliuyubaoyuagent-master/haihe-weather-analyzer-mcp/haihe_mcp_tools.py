@@ -11,6 +11,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import time_source
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -2900,7 +2901,7 @@ def _query_tianjin_wind_warning_core(times: str = "") -> dict:
     同一请求时次 request_time 在 TTL 内命中缓存；接口失败结果不写缓存。
     """
     # 服务器系统时钟为 UTC+0；接口 times 和前端展示时间均使用天津本地时间（UTC+8）。
-    tianjin_now = datetime.now(TIANJIN_TIMEZONE)
+    tianjin_now = time_source.now(TIANJIN_TIMEZONE)
     request_time = _normalize_time_param(times) if times else tianjin_now.strftime("%Y%m%d%H0000")
     with _tianjin_wind_cache_lock:
         hit = _tianjin_wind_cache.get(request_time)
@@ -3100,6 +3101,9 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         query_window: str = "",
     ) -> dict:
         """查询天津滚动预报。适合未来天气、未来一周、明后天、周末、升降温、强降雨、大暴雨、雾霾/能见度、户外活动适宜性等预报类问题。
+
+        流域、河系或流域面雨量问题（如“海河流域”“大清河流域”“滦河”等）禁止使用本工具，
+        应调用 get_river_system_rainfall_forecast 查询流域分区降雨统计。
 
         当问题询问“暴雨/大风预警期间”的实际雨量、风力、影响时段或影响区域时，
         仍属于动态预报查询，应调用本工具。
@@ -3697,7 +3701,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         """
         import datetime as dt
 
-        now = dt.datetime.now()
+        now = time_source.now()
 
         if not endTime:
             endTime = now.strftime("%Y-%m-%d %H:00:00")
@@ -3823,7 +3827,7 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         """
         from datetime import datetime as _dt, timedelta as _td
 
-        now = _dt.now()
+        now = time_source.now()
         if not end_time:
             end_time = now.strftime("%Y-%m-%d %H:%M:%S")
         if not start_time:

@@ -18,6 +18,7 @@ import requests
 from fastmcp import FastMCP
 
 from custom_tools._ttl_cache import make_ttl_cache
+import time_source
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +319,7 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
         if not start_time and not end_time and not fcst_time:
             import datetime as _dt
             beijing = _dt.timezone(_dt.timedelta(hours=8))
-            now = _dt.datetime.now(beijing)
+            now = time_source.now(beijing)
             if now.hour >= 20:
                 fcst_hour = 20
             elif now.hour >= 8:

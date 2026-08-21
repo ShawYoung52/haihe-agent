@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+import time_source
 from typing import Any
 
 from fastmcp import FastMCP
@@ -20,7 +21,7 @@ from .last_month_areal_rainfall_tool import (
 
 
 def _year_to_date_range(now: datetime | None = None) -> tuple[str, str, str]:
-    now = now or datetime.now()
+    now = now or time_source.now()
     start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
     return (
         start.strftime("%Y%m%d%H%M%S"),

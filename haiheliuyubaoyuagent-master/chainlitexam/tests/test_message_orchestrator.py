@@ -1105,8 +1105,71 @@ async def test_run_tool_round_direct_historical_assembles_with_hazard(monkeypatc
     assert forced is not None
     assert "【核心结论】" in forced
     assert "【同乐小学历史实况】" in forced
-    assert "⚠ 注意事项" in forced
+    assert "【注意事项】" in forced
     assert "风险研判" in forced
     assert "当日实际" in forced
     assert "数据来源：自动站历史实况。" in forced
     assert not any("执行失败" in getattr(m, "content", "") for m in messages)
+
+
+@pytest.mark.parametrize(
+    "hist_payload, expected_fragment, expect_forced",
+    [
+        (
+            {"status": "no_data", "start_time": "2026-07-10 00:00", "end_time": "2026-07-11 00:00",
+             "message": "未查询到 2026-07-10 00:00 至 2026-07-11 00:00 的历史实况数据，该时段内无可用自动站观测。"},
+            "暂无可用历史实况数据",
+            False,
+        ),
+        (
+            {"status": "error", "message": "历史实况服务不可用，请稍后重试。"},
+            "历史实况查询暂不可用",
+            False,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_run_tool_round_direct_historical_non_ok_no_crash(monkeypatch, hist_payload, expected_fragment, expect_forced):
+    """planner 直调 query_poi_historical_weather 返回 no_data/error → 不抛 UnboundLocalError。
+
+    回归：修复前该分支只在 status=="ok" 时赋值 observation_text，非 ok 结果到达
+    messages.append(ToolMessage(content=observation_text)) 处抛
+    "local variable 'observation_text' referenced before assignment"
+    （生产问题“7月10号天津市天气怎么样”）。
+    """
+    import json as _json
+
+    class FakeHistoricalTool:
+        name = "query_poi_historical_weather"
+
+        async def ainvoke(self, args):
+            return [{"text": _json.dumps(hist_payload, ensure_ascii=False)}]
+
+    class FakePlannerMsg:
+        tool_calls = [{"name": "query_poi_historical_weather", "args": {}, "id": "call-h2"}]
+
+    callbacks = {
+        "tool_observation_to_text": lambda obs: str(obs),
+    }
+    tools = [FakeHistoricalTool()]
+    messages = []
+    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+    from chainlit.context import context_var, init_http_context
+
+    context_var.set(init_http_context(thread_id="test-direct-historical-nonok"))
+
+    # 修复前此调用抛 UnboundLocalError；修复后正常返回、非 ok 不强制收口
+    forced, ree, bundles, rolling_bundles, _ = await mo._run_tool_round(
+        FakePlannerMsg(), tools, messages, "7月10号天津市天气怎么样", 1, callbacks,
+        answer_chain=object(),
+    )
+
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert isinstance(tool_msg, mo.ToolMessage)
+    assert expected_fragment in str(getattr(tool_msg, "content", ""))
+    if expect_forced:
+        assert forced is not None
+    else:
+        assert forced is None
+

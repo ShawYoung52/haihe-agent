@@ -6,6 +6,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -40,28 +45,86 @@ class _ForecastSourceError(RiverSystemForecastError):
     """预报数据源不可用。"""
 
 
-def _load_zone_boundaries_from_db(
+@dataclass(frozen=True)
+class _BoundaryRow:
+    """可安全跨请求缓存的不可变边界行；不保存可变 OGR Geometry。"""
+
+    zone_name: str
+    zone_code: str
+    srid: int
+    geom_wkb: bytes
+
+
+_ZONE_BOUNDARY_CACHE: OrderedDict[tuple, tuple[float, tuple[_BoundaryRow, ...]]] = OrderedDict()
+_ZONE_BOUNDARY_CACHE_LOCK = threading.Lock()
+
+
+def _boundary_cache_ttl_seconds() -> float:
+    try:
+        value = float(os.environ.get("RIVER_SYSTEM_BOUNDARY_CACHE_TTL", "3600"))
+    except (TypeError, ValueError):
+        return 3600.0
+    return max(0.0, value)
+
+
+def _boundary_cache_max_size() -> int:
+    try:
+        value = int(os.environ.get("RIVER_SYSTEM_BOUNDARY_CACHE_MAX_SIZE", "32"))
+    except (TypeError, ValueError):
+        return 32
+    return min(32, max(1, value))
+
+
+def _clear_zone_boundary_cache() -> None:
+    """清空边界缓存，供测试和显式配置重载使用。"""
+    with _ZONE_BOUNDARY_CACHE_LOCK:
+        _ZONE_BOUNDARY_CACHE.clear()
+
+
+def _boundary_cache_key(zone_type: str, zone_name: str | None, pg_conf: dict) -> tuple:
+    table = ZONE_TABLES.get(str(zone_type), "haihe_zone_9")
+    return (
+        str(pg_conf.get("host") or ""),
+        str(pg_conf.get("port") or ""),
+        str(pg_conf.get("dbname") or ""),
+        str(pg_conf.get("user") or ""),
+        str(pg_conf.get("schema") or ""),
+        table,
+        str(zone_name or ""),
+    )
+
+
+def _get_cached_boundary_rows(key: tuple, ttl_seconds: float) -> tuple[_BoundaryRow, ...] | None:
+    if ttl_seconds <= 0:
+        return None
+    now = time.monotonic()
+    with _ZONE_BOUNDARY_CACHE_LOCK:
+        entry = _ZONE_BOUNDARY_CACHE.get(key)
+        if entry is None:
+            return None
+        created_at, rows = entry
+        if now - created_at >= ttl_seconds:
+            _ZONE_BOUNDARY_CACHE.pop(key, None)
+            return None
+        _ZONE_BOUNDARY_CACHE.move_to_end(key)
+        return rows
+
+
+def _store_boundary_rows(key: tuple, rows: tuple[_BoundaryRow, ...]) -> None:
+    with _ZONE_BOUNDARY_CACHE_LOCK:
+        _ZONE_BOUNDARY_CACHE[key] = (time.monotonic(), rows)
+        _ZONE_BOUNDARY_CACHE.move_to_end(key)
+        while len(_ZONE_BOUNDARY_CACHE) > _boundary_cache_max_size():
+            _ZONE_BOUNDARY_CACHE.popitem(last=False)
+
+
+def _query_zone_boundary_rows(
     zone_type: str,
     zone_name: str | None,
-    config: dict,
-) -> list[dict]:
-    """从 PostgreSQL 读取分区边界。
-
-    Args:
-        zone_type: 分区类型，默认 "9"（九分区）。
-        zone_name: 若指定，仅返回匹配的分区；否则返回该类型全部分区。
-        config: 包含 postgres 配置的字典。
-
-    Returns:
-        list[dict]: 每个元素含 zone_name、zone_code、geometry（ogr.Geometry）。
-    """
-    from osgeo import ogr
-
+    pg_conf: dict,
+) -> tuple[_BoundaryRow, ...]:
+    """查询并归一化 PostgreSQL 边界行，不创建 OGR 对象。"""
     table = ZONE_TABLES.get(str(zone_type), "haihe_zone_9")
-    pg_conf = config.get("postgres", {})
-    if not pg_conf:
-        raise _BoundaryLoadError("缺少 PostgreSQL 配置")
-
     connect_timeout = int(pg_conf.get("connect_timeout", "5") or "5")
     try:
         with psycopg2.connect(
@@ -93,28 +156,71 @@ def _load_zone_boundaries_from_db(
     if not rows:
         raise _BoundaryLoadError(f"未在 {table} 中找到分区边界数据")
 
-    zones = []
+    normalized: list[_BoundaryRow] = []
     for row in rows:
         wkb = row.get("geom_wkb")
         if not wkb:
             continue
         try:
-            geom = ogr.CreateGeometryFromWkb(wkb)
+            normalized.append(_BoundaryRow(
+                zone_name=str(row.get("zone_name") or "").strip(),
+                zone_code=str(row.get("zone_code") or "").strip(),
+                srid=int(row.get("srid") or 4326),
+                geom_wkb=bytes(wkb),
+            ))
+        except Exception:
+            logger.warning("归一化分区 %s 边界失败", row.get("zone_name"))
+            continue
+
+    if not normalized:
+        raise _BoundaryLoadError("所有分区边界数据无效")
+    return tuple(normalized)
+
+
+def _materialize_zone_boundaries(rows: tuple[_BoundaryRow, ...]) -> list[dict]:
+    """每次请求从 WKB 新建 OGR Geometry，禁止共享可变几何对象。"""
+    from osgeo import ogr
+
+    zones = []
+    for row in rows:
+        try:
+            geom = ogr.CreateGeometryFromWkb(row.geom_wkb)
             if geom is None or geom.IsEmpty():
                 continue
             zones.append({
-                "zone_name": str(row.get("zone_name") or "").strip(),
-                "zone_code": str(row.get("zone_code") or "").strip(),
-                "srid": int(row.get("srid") or 4326),
+                "zone_name": row.zone_name,
+                "zone_code": row.zone_code,
+                "srid": row.srid,
                 "geometry": geom,
             })
         except Exception:
-            logger.warning("解析分区 %s 几何失败", row.get("zone_name"))
-            continue
-
+            logger.warning("解析分区 %s 几何失败", row.zone_name)
     if not zones:
         raise _BoundaryLoadError("所有分区边界几何解析失败")
+    return zones
 
+
+def _load_zone_boundaries_from_db(
+    zone_type: str,
+    zone_name: str | None,
+    config: dict,
+) -> list[dict]:
+    """读取分区边界；缓存不可变 WKB，返回本次请求独立的 OGR Geometry。"""
+    pg_conf = config.get("postgres", {})
+    if not pg_conf:
+        raise _BoundaryLoadError("缺少 PostgreSQL 配置")
+
+    ttl_seconds = _boundary_cache_ttl_seconds()
+    key = _boundary_cache_key(zone_type, zone_name, pg_conf)
+    rows = _get_cached_boundary_rows(key, ttl_seconds)
+    if rows is not None:
+        return _materialize_zone_boundaries(rows)
+
+    rows = _query_zone_boundary_rows(zone_type, zone_name, pg_conf)
+    # 只有查询成功且至少一个几何可解析时才写缓存；失败/空结果绝不污染缓存。
+    zones = _materialize_zone_boundaries(rows)
+    if ttl_seconds > 0:
+        _store_boundary_rows(key, rows)
     return zones
 
 

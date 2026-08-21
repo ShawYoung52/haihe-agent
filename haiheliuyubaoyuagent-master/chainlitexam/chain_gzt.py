@@ -13,6 +13,7 @@ from urllib.parse import quote_plus
 import httpx
 
 from utils.tool_result import _extract_self_report, _unwrap_tool_result
+from utils import time_source
 
 try:
     from timing_logger import TimingLogger
@@ -535,6 +536,66 @@ async def _qa_file(session_id: str, file_id: str):
     return FileResponse(path)
 
 
+# ===============================
+# 切换系统时间接口（AgentWeb 前端控件调用）
+# ===============================
+# 与 /qa/ask 同一网络层鉴权模型：AgentWeb 是无 chainlit cookie 的机器客户端，
+# 鉴权靠部署时网络层限制，不加 _require_admin_current_user（与 cookie 保护的
+# /admin/users/* 不同，注意区分）。
+# set/clear 成功后清 qa_http_api 单轮响应缓存 + bump orchestrator runtime
+# generation，使各 event loop 的【当前日期】前缀与 HTTP QARuntime 立即重建。
+
+
+class SetSystemTimeRequest(BaseModel):
+    datetime: str = Field(..., min_length=8, max_length=32)  # "YYYY-MM-DD[ HH:MM[:SS]]" 或 ISO
+    note: str | None = Field(None, max_length=200)
+
+
+def _after_system_time_changed() -> None:
+    """切换系统时间后清理受影响的缓存。"""
+    qa_http_api.runtime.clear_response_cache()
+    _clear_orchestrator_runtime_cache()
+
+
+@api_sub_app.post("/admin/system-time", tags=["系统时间"])
+def _set_system_time(req: SetSystemTimeRequest):
+    try:
+        data = time_source.set_override_from_text(req.datetime, note=req.note)
+    except ValueError as e:
+        raise HTTPException(400, qa_http_api._scrub(str(e)))
+    except Exception as e:
+        logging.getLogger("chain_gzt").error("set_system_time: %s", type(e).__name__)
+        raise HTTPException(500, f"internal: {type(e).__name__}")
+    _after_system_time_changed()
+    return {"code": 200, "data": data, "message": "success"}
+
+
+@api_sub_app.post("/admin/system-time/clear", tags=["系统时间"])
+def _clear_system_time():
+    try:
+        data = time_source.clear_override()
+    except Exception as e:
+        logging.getLogger("chain_gzt").error("clear_system_time: %s", type(e).__name__)
+        raise HTTPException(500, f"internal: {type(e).__name__}")
+    _after_system_time_changed()
+    return {"code": 200, "data": data, "message": "success"}
+
+
+@api_sub_app.get("/admin/system-time", tags=["系统时间"])
+def _get_system_time():
+    override = time_source.get_override()
+    real = datetime.now()
+    return {
+        "code": 200,
+        "data": {
+            "active": override is not None,
+            "override_datetime": override.isoformat() if override else None,
+            "real_now": real.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "message": "success",
+    }
+
+
 # ---- 预热（即使失败也不影响中间件工作）----
 
 
@@ -575,9 +636,12 @@ async def _warmup_qa():
 async def _build_qa_runtime() -> dict:
     """给 qa_http_api 注入运行时（进程级构造一次）。"""
     await _ensure_chainlit_tables()
-    runtime = await _build_orchestrator_runtime()
+    # HTTP 与网页会话复用同一份无会话状态的 chain/tools；复制 dict 后再注入
+    # HTTP callbacks，避免污染共享缓存对象。
+    runtime = dict(await _get_orchestrator_runtime())
     runtime["callbacks"] = _build_orchestrator_callbacks(execution_mode="http")
     runtime["callbacks"]["tool_candidate_index"] = runtime.get("tool_candidate_index")
+    runtime["callbacks"]["active_tool_router"] = runtime.get("active_tool_router")
     return runtime
 
 
@@ -2567,20 +2631,32 @@ def _build_chat_llm(role: str) -> "ChatOpenAI":
 
     生成端限速（性能排查 2026-08-12）：
     - 始终给 max_tokens 上限（默认 PLANNER=2048 / ANSWER=4096，env 可覆盖），不再默认无界。
-    - LLM_DISABLE_THINKING=true 时经 extra_body 传 chat_template_kwargs.enable_thinking=False，
-      关闭 Qwen3 思考块（默认关——服务端不支持时行为与现状完全一致）。
+    - Qwen3 默认经 extra_body 传 chat_template_kwargs.enable_thinking=False，关闭隐藏思考块；
+      显式 LLM_DISABLE_THINKING=false 可恢复原行为，其他模型默认不附加该参数。
     """
+    model = _env_str(f"{role}_MODEL", "Qwen3.6-27B")
     kwargs = dict(
-        model=_env_str(f"{role}_MODEL", "Qwen3.6-27B"),
+        model=model,
         streaming=True,
         temperature=_env_float(f"{role}_TEMPERATURE", 0.7),
         openai_api_base=_env_str(f"{role}_API_BASE", DEFAULT_API_BASE),
         openai_api_key=_env_str(f"{role}_API_KEY", "EMPTY"),
         max_tokens=_env_int_optional(f"{role}_MAX_TOKENS") or _DEFAULT_MAX_TOKENS[role],
     )
-    if _env_bool("LLM_DISABLE_THINKING", False):
+    # 当前默认 Qwen3 会生成很长的隐藏思考块。仅对 Qwen3 默认关闭；自定义模型
+    # 不主动附加厂商参数。显式 LLM_DISABLE_THINKING=false 可一键回退。
+    if _env_bool("LLM_DISABLE_THINKING", model.strip().lower().startswith("qwen3")):
         kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
     return ChatOpenAI(**kwargs)
+
+
+def _select_system_prompts() -> tuple[str, str]:
+    """选择 Planner/Answer Prompt；拆分版默认启用，环境变量可回退旧版。"""
+    planner_new = _env_bool("ENABLE_NEW_PLANNER_PROMPT", True)
+    answer_new = _env_bool("ENABLE_NEW_ANSWER_PROMPT", True)
+    planner_prompt = PLANNER_SYSTEM_PROMPT if planner_new else WEATHER_ASSISTANT_PROMPT
+    answer_prompt = METEO_ANSWER_SYSTEM_PROMPT if answer_new else WEATHER_ASSISTANT_PROMPT
+    return planner_prompt, answer_prompt
 
 
 async def _build_orchestrator_runtime() -> dict:
@@ -2594,14 +2670,11 @@ async def _build_orchestrator_runtime() -> dict:
     tools = await load_sse_tools()
     tools = tools + build_external_skill_tools() + build_rain_analysis_tools()
     weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    today_str = datetime.now().strftime("%Y年%m月%d日")
-    weekday_str = weekday_map[datetime.now().weekday()]
+    # 走统一时间源：切换系统时间激活时，【当前日期】锚定到指定日期。
+    today_str = time_source.now().strftime("%Y年%m月%d日")
+    weekday_str = weekday_map[time_source.now().weekday()]
     prompt_prefix = f"【当前日期：{today_str}（{weekday_str}）】请基于这个当前日期来理解用户的相对时间表述（如今天、明天、周末等）。\n\n"
-    ENABLE_NEW_PLANNER_PROMPT = os.environ.get("ENABLE_NEW_PLANNER_PROMPT", "false").strip().lower() in ("1", "true", "yes")
-    ENABLE_NEW_ANSWER_PROMPT = os.environ.get("ENABLE_NEW_ANSWER_PROMPT", "false").strip().lower() in ("1", "true", "yes")
-
-    planner_prompt = PLANNER_SYSTEM_PROMPT if ENABLE_NEW_PLANNER_PROMPT else WEATHER_ASSISTANT_PROMPT
-    answer_prompt = METEO_ANSWER_SYSTEM_PROMPT if ENABLE_NEW_ANSWER_PROMPT else WEATHER_ASSISTANT_PROMPT
+    planner_prompt, answer_prompt = _select_system_prompts()
 
     planner_template = ChatPromptTemplate.from_messages([
         ("system", f"{prompt_prefix}{planner_prompt}"),
@@ -2618,8 +2691,18 @@ async def _build_orchestrator_runtime() -> dict:
     tools = tools + decision_weather_tools + rainfall_river_impact_tools
     print(f"✅ 本地工具已合并，当前工具列表：{[t.name for t in tools]}")
     from tools.tool_candidate_index import ToolCandidateIndex
+    from tools.active_tool_router import ActiveToolRouter
     tool_candidate_index = ToolCandidateIndex(tools)
     planner_chain = planner_template | planner_llm.bind_tools(tools)
+    active_tool_router = ActiveToolRouter(
+        tools=tools,
+        full_chain=planner_chain,
+        build_chain=lambda selected: planner_template | planner_llm.bind_tools(selected),
+        candidate_index=tool_candidate_index,
+        chain_cache_max_size=(
+            _env_int_optional("ACTIVE_TOOL_CHAIN_CACHE_MAX_SIZE") or 64
+        ),
+    )
     thinking_chain = (
         ChatPromptTemplate.from_messages([
             ("system", "{system_message}"),
@@ -2634,7 +2717,75 @@ async def _build_orchestrator_runtime() -> dict:
         "thinking_chain": thinking_chain,
         "tools": tools,
         "tool_candidate_index": tool_candidate_index,
+        "active_tool_router": active_tool_router,
     }
+
+
+_ORCHESTRATOR_RUNTIME_GENERATION = 0
+_ORCHESTRATOR_RUNTIME_GENERATION_LOCK = threading.Lock()
+_ORCHESTRATOR_RUNTIME_STATE_ATTR = "_haihe_orchestrator_runtime_state"
+_RUNTIME_CONFIG_ENV_KEYS = (
+    "PLANNER_MODEL", "PLANNER_TEMPERATURE", "PLANNER_API_BASE", "PLANNER_API_KEY",
+    "PLANNER_MAX_TOKENS", "ANSWER_MODEL", "ANSWER_TEMPERATURE", "ANSWER_API_BASE",
+    "ANSWER_API_KEY", "ANSWER_MAX_TOKENS",
+    "LLM_DISABLE_THINKING", "ENABLE_NEW_PLANNER_PROMPT", "ENABLE_NEW_ANSWER_PROMPT",
+    "MCP_SERVER_URL", "EXTRM_SERVER_URL",
+    "ENABLE_ACTIVE_TOOL_FILTER", "ACTIVE_TOOL_LIMIT", "ACTIVE_TOOL_CHAIN_CACHE_MAX_SIZE",
+    "ENABLE_EVIDENCE_EARLY_FINALIZE",
+)
+
+
+def _orchestrator_runtime_cache_key():
+    """缓存键包含本地日期与关键配置，跨日重建日期前缀和工具绑定。
+
+    日期取统一时间源：切换系统时间激活时，覆盖日期变化 → 键变化 → runtime 自动重建
+    【当前日期】前缀（无需重启服务）。
+    """
+    day = time_source.override_date_str()
+    config_values = tuple((name, os.environ.get(name, "")) for name in _RUNTIME_CONFIG_ENV_KEYS)
+    return day, config_values
+
+
+def _clear_orchestrator_runtime_cache() -> None:
+    """让全部事件循环的运行时缓存失效（测试、显式重载使用）。"""
+    global _ORCHESTRATOR_RUNTIME_GENERATION
+    with _ORCHESTRATOR_RUNTIME_GENERATION_LOCK:
+        _ORCHESTRATOR_RUNTIME_GENERATION += 1
+
+
+def _orchestrator_runtime_state() -> dict:
+    """返回当前事件循环独享的 runtime、cache key 和初始化锁。"""
+    loop = asyncio.get_running_loop()
+    with _ORCHESTRATOR_RUNTIME_GENERATION_LOCK:
+        generation = _ORCHESTRATOR_RUNTIME_GENERATION
+    state = getattr(loop, _ORCHESTRATOR_RUNTIME_STATE_ATTR, None)
+    if state is None or state.get("generation") != generation:
+        state = {
+            "generation": generation,
+            "runtime": None,
+            "cache_key": None,
+            "lock": asyncio.Lock(),
+        }
+        setattr(loop, _ORCHESTRATOR_RUNTIME_STATE_ATTR, state)
+    return state
+
+
+async def _get_orchestrator_runtime() -> dict:
+    """取当前事件循环共享运行时；同 loop、同日、同配置只初始化一次。"""
+    if not _env_bool("CACHE_ORCHESTRATOR_RUNTIME", True):
+        return await _build_orchestrator_runtime()
+
+    state = _orchestrator_runtime_state()
+    key = _orchestrator_runtime_cache_key()
+    if state["runtime"] is not None and state["cache_key"] == key:
+        return state["runtime"]
+
+    async with state["lock"]:
+        key = _orchestrator_runtime_cache_key()
+        if state["runtime"] is None or state["cache_key"] != key:
+            state["runtime"] = await _build_orchestrator_runtime()
+            state["cache_key"] = key
+        return state["runtime"]
 
 
 async def _init_runtime_session(messages_seed=None):
@@ -2643,13 +2794,14 @@ async def _init_runtime_session(messages_seed=None):
     """
     await _ensure_chainlit_tables()
 
-    runtime = await _build_orchestrator_runtime()
+    runtime = await _get_orchestrator_runtime()
 
     cl.user_session.set("planner_chain", runtime["planner_chain"])
     cl.user_session.set("answer_chain", runtime["answer_chain"])
     cl.user_session.set("thinking_chain", runtime["thinking_chain"])
     cl.user_session.set("tools", runtime["tools"])
     cl.user_session.set("tool_candidate_index", runtime.get("tool_candidate_index"))
+    cl.user_session.set("active_tool_router", runtime.get("active_tool_router"))
     cl.user_session.set("messages", messages_seed if isinstance(messages_seed, list) else [])
 
 
@@ -3880,6 +4032,7 @@ def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
         "tool_observation_to_text": _tool_observation_to_text,
         "send_gis_linkage": _send_gis_linkage,
         "tool_candidate_index": None,
+        "active_tool_router": None,
     }
 
 
@@ -3909,6 +4062,7 @@ async def on_message(message: cl.Message):
 
     callbacks = _build_orchestrator_callbacks()
     callbacks["tool_candidate_index"] = cl.user_session.get("tool_candidate_index")
+    callbacks["active_tool_router"] = cl.user_session.get("active_tool_router")
     await process_message(
         message=message,
         planner_chain=planner_chain,

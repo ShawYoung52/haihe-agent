@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from datetime import datetime, timedelta
+import time_source
 from typing import Any
 
 import psycopg2
@@ -29,7 +30,7 @@ def _get_postgres_conf():
 
 
 def _previous_calendar_month_range(now: datetime | None = None) -> tuple[str, str, str, str]:
-    now = now or datetime.now()
+    now = now or time_source.now()
     first_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     end_prev = first_this_month - timedelta(seconds=1)
     start_prev = end_prev.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -121,7 +122,41 @@ def _area_id_aliases(area_ids: list[str]) -> list[str]:
     return sorted(aliases)
 
 
-def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _fine_to_zone9_cache_key(area_ids: list[str]) -> str:
+    pg_conf = _get_postgres_conf() or {}
+    source = (
+        str(pg_conf.get("host") or ""),
+        str(pg_conf.get("port") or ""),
+        str(pg_conf.get("dbname") or ""),
+        str(pg_conf.get("schema") or "public"),
+    )
+    canonical_ids: set[str] = set()
+    for raw in area_ids:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        suffix = value.split("_")[-1]
+        canonical_ids.add(str(int(suffix)) if suffix.isdigit() else value)
+    return "|".join((*source, *sorted(canonical_ids)))
+
+
+_fine_to_zone9_decorator, _fine_to_zone9_cache, _fine_to_zone9_lock = make_ttl_cache(
+    _positive_env_int("FINE_TO_ZONE9_CACHE_TTL", 3600),
+    _fine_to_zone9_cache_key,
+    should_cache=bool,
+    max_size=_positive_env_int("FINE_TO_ZONE9_CACHE_MAX_SIZE", 64),
+)
+
+
+def _query_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
     pg_conf = _get_postgres_conf()
     if not pg_conf:
         return {}
@@ -175,6 +210,11 @@ def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
     except Exception:
         return {}
     return mapping
+
+
+@_fine_to_zone9_decorator
+def _map_fine_area_ids_to_zone9(area_ids: list[str]) -> dict[str, dict]:
+    return _query_fine_area_ids_to_zone9(area_ids)
 
 
 def _aggregate_fine_rows_to_zone9(fine_rows: list[dict]) -> list[dict]:

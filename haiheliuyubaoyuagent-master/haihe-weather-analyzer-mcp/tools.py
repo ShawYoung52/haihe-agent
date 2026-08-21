@@ -13,6 +13,8 @@ import pickle
 from datetime import datetime, timedelta
 import time
 
+import time_source
+
 import networkx as nx
 from fastmcp import FastMCP
 
@@ -1432,9 +1434,8 @@ def _query_water_level_core(
     data_type: str = "river",
 ) -> dict:
     """调用十四所接口查询水位数据（河道/水库/堰闸），带 120s TTL 缓存。"""
-    from datetime import datetime as _dt
-
-    now = _dt.now()
+    # 统一走 time_source：切换系统时间激活时，"今日零点"锚定到覆盖日期。
+    now = time_source.now()
     end = end_time or now.strftime("%Y-%m-%d %H:%M:%S")
     begin = begin_time or (
         now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2715,12 +2716,9 @@ def register_tools(mcp: FastMCP):
         """
         from datetime import timezone, timedelta
 
-        # 获取当前 UTC 时间
-        now_utc = datetime.now(timezone.utc)
-
-        # 转换为中国标准时间（UTC+8）
+        # 统一走 time_source：切换系统时间激活时返回锚定时刻，否则返回真实北京时间。
         china_tz = timezone(timedelta(hours=8))
-        now_china = now_utc.astimezone(china_tz)
+        now_china = time_source.now(china_tz)
 
         # 直接返回字符串，避免 JSON 序列化问题
         return f"当前服务器时间：{now_china.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)"
@@ -4361,12 +4359,11 @@ def register_tools(mcp: FastMCP):
         Returns:
             list[dict]: 各分区的面雨量数据，含 zone_name、rainfall 等字段
         """
-        from datetime import datetime as _dt
         from utils.TQ_utils import getSevpEleByTimeRangeHistory, statSevpEleByTimeRangeHistory, getSevpEleByTime
 
         # 自动计算时间范围：结束时刻对齐到上一个整点，避免请求不完整小时数据
         if not time_range:
-            now = _dt.now()
+            now = time_source.now()
             end = now.replace(minute=0, second=0, microsecond=0)
             start = end - timedelta(hours=hours)
             time_range = f"[{start.strftime('%Y%m%d%H%M%S')},{end.strftime('%Y%m%d%H%M%S')}]"

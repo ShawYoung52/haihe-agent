@@ -1,8 +1,7 @@
-"""候选工具召回索引（影子模式）。
+"""候选工具召回索引。
 
-启动时构建一次关键词→工具映射。Planner 仍绑定完整工具列表，
-本模块只用于"记录候选工具是否包含 Planner 实际调用工具"的影子观测，
-不改变 Planner 行为。
+启动时构建一次关键词→工具映射，用于影子召回观测。安全主动工具路由使用
+固定领域最小白名单，不把本索引结果合入首轮 Planner。
 """
 from __future__ import annotations
 
@@ -20,7 +19,6 @@ class ToolCandidateIndex:
 
     def _build(self, tools: list[Any]) -> None:
         """一次构建：提取每个工具的关键词并建立倒排。"""
-        fallback_names = ["rag_search", "query_rolling_forecast"]  # 兜底工具
         for tool in tools:
             name = getattr(tool, "name", "") or ""
             if not name:
@@ -29,12 +27,6 @@ class ToolCandidateIndex:
             keywords = self._keywords_for(name, desc)
             for kw in keywords:
                 self._by_keyword.setdefault(kw, []).append(name)
-            if name in fallback_names:
-                self._default_candidates.append(name)
-        # 兜底工具始终在候选里
-        for fb in fallback_names:
-            if fb not in self._default_candidates:
-                self._default_candidates.append(fb)
 
     def _keywords_for(self, name: str, desc: str) -> list[str]:
         """从工具名+描述提取中文关键词。"""
@@ -44,6 +36,7 @@ class ToolCandidateIndex:
             "天气", "降雨", "降水", "雨", "预警", "水位", "河网", "河流",
             "行政区", "面雨量", "应急", "点位", "短临", "强对流", "雷暴",
             "冰雹", "气温", "风", "能见度", "雾", "霾", "站点", "实况",
+            "知识库", "规范", "制度",
         ]
         return [b for b in biz if b in text]
 

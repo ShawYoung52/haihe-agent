@@ -72,14 +72,15 @@ class TestPoiGuardDecisionWeatherKeywordSync:
     @staticmethod
     def _list_strings(block_name: str) -> list:
         src = TestPoiGuardDecisionWeatherKeywordSync.DWC.read_text(encoding="utf-8")
-        m = re.search(rf"{re.escape(block_name)}\s*=\s*\[(.*?)\]", src, re.S)
+        # 兼容 list [...] 与 tuple (...) 两种写法（重构后为模块级 tuple）
+        m = re.search(rf"{re.escape(block_name)}\s*=\s*[\[(](.*?)[\])]", src, re.S)
         assert m, f"未找到 {block_name}"
         return re.findall(r'"([^"]*)"', m.group(1))
 
     def test_every_guard_keyword_covered_by_prefilter_suffixes(self):
-        suffixes = self._list_strings("institution_suffixes")
+        suffixes = self._list_strings("DECISION_WEATHER_PREFILTER_SUFFIXES")
         missing = [k for k in rfs.POI_PLACE_KEYWORDS if not any(s in k for s in suffixes)]
-        assert not missing, f"POI 守卫关键词在决策天气前置过滤 institution_suffixes 中缺覆盖: {missing}"
+        assert not missing, f"POI 守卫关键词在决策天气前置过滤 DECISION_WEATHER_PREFILTER_SUFFIXES 中缺覆盖: {missing}"
 
     def test_every_guard_keyword_extractable_by_rule_slots(self):
         suffixes = self._list_strings("_DECISION_WEATHER_SUFFIXES")

@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from prompts import WARNING_ROUTE_PROMPT, WARNING_SUMMARY_PROMPT
 from tools.decision_weather_core import _extract_first_json_object
 from utils.tool_result import _unwrap_tool_result
+from utils import time_source
 
 
 WARNING_TOOL_NAMES = frozenset({
@@ -564,7 +565,7 @@ async def _route_warning_tools(answer_chain: Any, user_text: str, callbacks: dic
     # 回退：现有 LLM 路由
     prompt = _fill_prompt(
         WARNING_ROUTE_PROMPT,
-        current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        current_time=time_source.now().strftime("%Y-%m-%d %H:%M:%S"),
         user_query=user_text,
     )
     result = await callbacks["ainvoke_chain"](answer_chain, {"messages": [HumanMessage(content=prompt)]})

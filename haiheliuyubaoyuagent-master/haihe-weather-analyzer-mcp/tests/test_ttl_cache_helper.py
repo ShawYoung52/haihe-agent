@@ -5,14 +5,16 @@
 
 from __future__ import annotations
 
-import sys
+import importlib.util
 from pathlib import Path
 
 MCP_DIR = Path(__file__).resolve().parents[1]
-if str(MCP_DIR) not in sys.path:
-    sys.path.insert(0, str(MCP_DIR))
-
-from custom_tools._ttl_cache import make_ttl_cache
+MODULE_PATH = MCP_DIR / "custom_tools" / "_ttl_cache.py"
+SPEC = importlib.util.spec_from_file_location("ttl_cache_under_test", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+make_ttl_cache = MODULE.make_ttl_cache
 
 
 class TestMakeTtlCache:
@@ -65,6 +67,7 @@ class TestMakeTtlCache:
         after_first = calls["n"]
         wrapped("9")
         assert calls["n"] > after_first, "TTL=0 应每次重新计算"
+        assert cache == {}, "TTL=0 表示完全禁用缓存，不应保留永不命中的条目"
 
     def test_error_result_not_cached(self):
         """status != ok 的结果不写缓存。"""
@@ -81,3 +84,31 @@ class TestMakeTtlCache:
         assert cache == {}, "非 ok 结果不应写缓存"
         wrapped("9")
         assert calls["n"] == 2, "未缓存应重新计算"
+
+    def test_custom_success_predicate_supports_static_mappings(self):
+        calls = {"n": 0}
+
+        def compute(key):
+            calls["n"] += 1
+            return {key: {"zone9_code": "h9_001"}}
+
+        decorator, cache, _ = make_ttl_cache(
+            3600,
+            lambda key: key,
+            should_cache=bool,
+        )
+        wrapped = decorator(compute)
+        assert wrapped("fine-1") == wrapped("fine-1")
+        assert calls["n"] == 1
+
+    def test_cache_capacity_is_bounded(self):
+        decorator, cache, _ = make_ttl_cache(
+            3600,
+            lambda key: key,
+            max_size=2,
+        )
+        wrapped = decorator(lambda key: {"status": "ok", "key": key})
+        for key in ("one", "two", "three"):
+            wrapped(key)
+        assert len(cache) == 2
+        assert "one" not in cache

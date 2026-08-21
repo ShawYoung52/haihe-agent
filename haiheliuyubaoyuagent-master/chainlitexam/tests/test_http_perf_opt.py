@@ -5,6 +5,7 @@ A2  stream_text_to_message 按 execution_mode 累积更新（HTTP 下不逐块 u
 A3  _response_cache 无界增长修剪（内存泄漏修复）
 A4  answer 流式连接错误重试一次（连接错误重试；非连接错误/超时保持原回退，不改变成功结果）
 """
+import asyncio
 import os
 import sys
 import time
@@ -26,6 +27,41 @@ for _mod, _cls in (
         m = types.ModuleType(_mod)
         setattr(m, _cls, type(_cls, (), {}))
         sys.modules[_mod] = m
+
+try:
+    import psycopg2  # noqa: F401
+except ImportError:
+    _pg = types.ModuleType("psycopg2")
+    _pg.connect = lambda *args, **kwargs: None
+    _pg_extras = types.ModuleType("psycopg2.extras")
+    _pg_extras.RealDictCursor = object
+    _pg_pool = types.ModuleType("psycopg2.pool")
+    _pg_pool.ThreadedConnectionPool = object
+    _pg.extras = _pg_extras
+    _pg.pool = _pg_pool
+    sys.modules["psycopg2"] = _pg
+    sys.modules["psycopg2.extras"] = _pg_extras
+    sys.modules["psycopg2.pool"] = _pg_pool
+
+try:
+    import matplotlib.pyplot  # noqa: F401
+except ImportError:
+    _mpl = types.ModuleType("matplotlib")
+    _plt = types.ModuleType("matplotlib.pyplot")
+    _plt.rcParams = {}
+    _fm = types.ModuleType("matplotlib.font_manager")
+    _fm.fontManager = types.SimpleNamespace(addfont=lambda *args, **kwargs: None)
+    _fm.FontProperties = lambda **kwargs: types.SimpleNamespace(get_name=lambda: "sans")
+    _mpl.pyplot = _plt
+    _mpl.font_manager = _fm
+    sys.modules["matplotlib"] = _mpl
+    sys.modules["matplotlib.pyplot"] = _plt
+    sys.modules["matplotlib.font_manager"] = _fm
+
+if "chainlit.data.sql_alchemy" not in sys.modules:
+    _cl_sql = types.ModuleType("chainlit.data.sql_alchemy")
+    _cl_sql.SQLAlchemyDataLayer = type("SQLAlchemyDataLayer", (), {})
+    sys.modules["chainlit.data.sql_alchemy"] = _cl_sql
 
 import pytest
 
@@ -70,8 +106,9 @@ def test_suppress_chainlit_data_layer_returns_none_and_restores():
 
 # ---------------------------------------------------------------- A2
 @pytest.mark.asyncio
-async def test_stream_text_http_mode_updates_once():
+async def test_stream_text_http_mode_updates_once(monkeypatch):
     """execution_mode='http' 时只更新一次，不再逐 32 字块 update+sleep。"""
+    monkeypatch.setattr(chain_gzt, "_attach_pending_images", lambda _: None)
     smsg = _StreamMsg()
     text = "海河流域今日多云，明日转晴。"
     await chain_gzt.stream_text_to_message(text, smsg, execution_mode="http")
@@ -80,8 +117,9 @@ async def test_stream_text_http_mode_updates_once():
 
 
 @pytest.mark.asyncio
-async def test_stream_text_chainlit_default_chunks():
+async def test_stream_text_chainlit_default_chunks(monkeypatch):
     """默认 chainlit 模式保持逐块更新（渐进显示观感不变）。"""
+    monkeypatch.setattr(chain_gzt, "_attach_pending_images", lambda _: None)
     smsg = _StreamMsg()
     text = "海河流域今日多云，明日转晴，请注意防范局地强对流天气带来的不利影响。"
     await chain_gzt.stream_text_to_message(text, smsg)
@@ -183,3 +221,77 @@ async def test_answer_non_connection_error_falls_back_immediately():
     )
     assert result == "兜底答案"
     assert _FakeChain.attempts == 1, "非连接错误不重试，直接回退"
+
+
+# ---------------------------------------------------------------- A5
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_cache_reuses_same_day_and_rebuilds_next_day(monkeypatch):
+    """网页会话共享运行时；日期变化时重建，避免 prompt 的“当前日期”过期。"""
+    builds = []
+    cache_key = ["2026-08-21|config-a"]
+
+    async def fake_build():
+        runtime = {"build": len(builds) + 1}
+        builds.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(chain_gzt, "_build_orchestrator_runtime", fake_build)
+    monkeypatch.setattr(chain_gzt, "_orchestrator_runtime_cache_key", lambda: cache_key[0])
+    chain_gzt._clear_orchestrator_runtime_cache()
+
+    first = await chain_gzt._get_orchestrator_runtime()
+    second = await chain_gzt._get_orchestrator_runtime()
+    assert first is second
+    assert len(builds) == 1
+
+    cache_key[0] = "2026-08-22|config-a"
+    third = await chain_gzt._get_orchestrator_runtime()
+    assert third is not first
+    assert len(builds) == 2
+
+
+def test_orchestrator_runtime_cache_isolated_between_event_loops(monkeypatch):
+    """不同事件循环不得共享可能绑定 loop 的 LLM/MCP runtime 或 asyncio.Lock。"""
+    builds = []
+
+    async def fake_build():
+        runtime = {"build": len(builds) + 1}
+        builds.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(chain_gzt, "_build_orchestrator_runtime", fake_build)
+    monkeypatch.setattr(
+        chain_gzt,
+        "_orchestrator_runtime_cache_key",
+        lambda: "2026-08-21|config-a",
+    )
+    chain_gzt._clear_orchestrator_runtime_cache()
+
+    first = asyncio.run(chain_gzt._get_orchestrator_runtime())
+    second = asyncio.run(chain_gzt._get_orchestrator_runtime())
+
+    assert first is not second
+    assert len(builds) == 2
+
+
+@pytest.mark.asyncio
+async def test_http_runtime_refreshes_on_new_day(monkeypatch):
+    """HTTP 自身的 runtime 缓存也应跨日失效。"""
+    day = ["2026-08-21"]
+    builds = []
+
+    async def factory():
+        runtime = {"build": len(builds) + 1}
+        builds.append(runtime)
+        return runtime
+
+    monkeypatch.setattr(qa_http_api, "_runtime_epoch", lambda: day[0], raising=False)
+    runtime = qa_http_api.QARuntime()
+    runtime.configure(factory)
+
+    first = await runtime._get_runtime()
+    assert await runtime._get_runtime() is first
+    day[0] = "2026-08-22"
+    second = await runtime._get_runtime()
+    assert second is not first
+    assert len(builds) == 2

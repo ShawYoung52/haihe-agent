@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+import time_source
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -39,7 +40,7 @@ PRODUCT_SCENE_RESTRICTION = {
 
 def _latest_synoptic_cycle(now: datetime | None = None) -> datetime:
     """最近一个北京时 08/20 起报时次（与 risk_warning 同口径）。"""
-    current = now or datetime.now(BEIJING_TIMEZONE)
+    current = now or time_source.now(BEIJING_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=BEIJING_TIMEZONE)
     if current.hour >= 20:
@@ -69,7 +70,7 @@ def _parse_ten_minute(value: str) -> datetime | None:
 
 def _default_window() -> tuple[datetime, datetime]:
     """默认时间窗：北京时当前往前 24 小时（10 分钟规整）。"""
-    now = datetime.now(BEIJING_TIMEZONE)
+    now = time_source.now(BEIJING_TIMEZONE)
     end = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
     return end - timedelta(hours=24), end
 

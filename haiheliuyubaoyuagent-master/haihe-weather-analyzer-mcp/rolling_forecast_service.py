@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+import time_source
+
 
 TIANJIN_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
@@ -228,7 +230,7 @@ def resolve_calendar_query_window(
     now: datetime | None = None,
 ) -> dict:
     """将业务日历日参数换算为滚动预报底层时效参数。"""
-    now = now or datetime.now(TIANJIN_TIMEZONE)
+    now = now or time_source.now(TIANJIN_TIMEZONE)
     if now.tzinfo is None:
         now = now.replace(tzinfo=TIANJIN_TIMEZONE)
     start_date = _parse_date(forecast_start_date)
@@ -274,7 +276,7 @@ def resolve_weekend_query_window(
     if "周末" not in query or any(word in query for word in ("上周末", "上个周末")):
         return None
 
-    now = now or datetime.now(TIANJIN_TIMEZONE)
+    now = now or time_source.now(TIANJIN_TIMEZONE)
     if now.tzinfo is None:
         now = now.replace(tzinfo=TIANJIN_TIMEZONE)
     today = now.date()
@@ -387,11 +389,11 @@ def resolve_requested_calendar_window(
         any(keyword in query for keyword in DEFAULT_SEVEN_DAY_QUERY_KEYWORDS)
         and not any(keyword in query for keyword in PAST_QUERY_KEYWORDS)
     ):
-        current = now or datetime.now(TIANJIN_TIMEZONE)
+        current = now or time_source.now(TIANJIN_TIMEZONE)
         if current.tzinfo is None:
             current = current.replace(tzinfo=TIANJIN_TIMEZONE)
         return resolve_calendar_query_window(current.date() + timedelta(days=1), 7, now=current)
-    current = now or datetime.now(TIANJIN_TIMEZONE)
+    current = now or time_source.now(TIANJIN_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=TIANJIN_TIMEZONE)
     future_days_match = re.search(r"未来\s*([0-9一二两三四五六七八九十]+)\s*(?:个)?天", query)
@@ -444,7 +446,7 @@ def resolve_future_hour_query_window(
     hours = _parse_future_hours(user_query)
     if hours is None:
         return None
-    current = now or datetime.now(TIANJIN_TIMEZONE)
+    current = now or time_source.now(TIANJIN_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=TIANJIN_TIMEZONE)
     target_start = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
@@ -479,7 +481,7 @@ def resolve_current_hour_query_window(
         return None
     if not any(keyword in query for keyword in ("天气", "下雨", "有雨", "降雨", "降水", "气温", "温度", "风", "能见度", "雾", "霾")):
         return None
-    current = now or datetime.now(TIANJIN_TIMEZONE)
+    current = now or time_source.now(TIANJIN_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=TIANJIN_TIMEZONE)
     target_start = current.replace(minute=0, second=0, microsecond=0)
@@ -506,7 +508,7 @@ def resolve_named_hour_query_window(
     role = str(query_window or "").strip()
     if role not in {"current_hour", "next_12_hours"}:
         return None
-    current = now or datetime.now(TIANJIN_TIMEZONE)
+    current = now or time_source.now(TIANJIN_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=TIANJIN_TIMEZONE)
     current_hour = current.replace(minute=0, second=0, microsecond=0)
@@ -533,7 +535,7 @@ def resolve_named_hour_query_window(
     }
 
 def select_rolling_forecast_time(now: datetime | None = None) -> str:
-    now = now or datetime.now(TIANJIN_TIMEZONE)
+    now = now or time_source.now(TIANJIN_TIMEZONE)
     if now.tzinfo is None:
         now = now.replace(tzinfo=TIANJIN_TIMEZONE)
     return _latest_available_fcst_time(now).strftime("%Y%m%d%H%M%S")
@@ -1278,7 +1280,7 @@ def query_rolling_forecast_core(
     now: datetime | None = None,
 ) -> dict:
     """执行滚动预报查询，日历日入参存在时覆盖底层时效参数。"""
-    now = now or datetime.now(TIANJIN_TIMEZONE)
+    now = now or time_source.now(TIANJIN_TIMEZONE)
     if now.tzinfo is None:
         now = now.replace(tzinfo=TIANJIN_TIMEZONE)
     point_mode = lon is not None and lat is not None

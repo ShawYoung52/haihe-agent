@@ -63,10 +63,116 @@ class TestLoadZoneBoundaries:
         if loader is None:
             pytest.skip("_load_zone_boundaries_from_db 尚未实现")
 
-        zones = loader(zone_type="9", zone_name=None, config={"postgres": {}})
+        zones = loader(
+            zone_type="9",
+            zone_name=None,
+            config={"postgres": {"host": "fake-db", "dbname": "weather"}},
+        )
         assert len(zones) == 2
         assert zones[0]["zone_name"] == "大清河"
         assert zones[1]["zone_name"] == "子牙河"
+
+    def test_boundary_rows_are_cached_but_geometry_is_fresh(self, monkeypatch):
+        rsf._clear_zone_boundary_cache()
+        monkeypatch.setenv("RIVER_SYSTEM_BOUNDARY_CACHE_TTL", "3600")
+        calls = {"query": 0}
+        row = rsf._BoundaryRow("大清河", "h9_01", 4326, b"wkb")
+
+        def fake_query(*args, **kwargs):
+            calls["query"] += 1
+            return (row,)
+
+        def fake_materialize(rows):
+            return [{
+                "zone_name": rows[0].zone_name,
+                "zone_code": rows[0].zone_code,
+                "srid": rows[0].srid,
+                "geometry": object(),
+            }]
+
+        monkeypatch.setattr(rsf, "_query_zone_boundary_rows", fake_query)
+        monkeypatch.setattr(rsf, "_materialize_zone_boundaries", fake_materialize)
+        config = {"postgres": {"host": "db", "dbname": "weather"}}
+
+        first = rsf._load_zone_boundaries_from_db("9", None, config)
+        second = rsf._load_zone_boundaries_from_db("9", None, config)
+
+        assert calls["query"] == 1
+        assert first[0]["geometry"] is not second[0]["geometry"]
+
+    def test_boundary_cache_ttl_zero_disables_and_failures_are_not_cached(self, monkeypatch):
+        rsf._clear_zone_boundary_cache()
+        monkeypatch.setenv("RIVER_SYSTEM_BOUNDARY_CACHE_TTL", "0")
+        calls = {"query": 0}
+        row = rsf._BoundaryRow("子牙河", "h9_02", 4326, b"wkb")
+
+        def fake_query(*args, **kwargs):
+            calls["query"] += 1
+            if calls["query"] == 1:
+                raise rsf._BoundaryLoadError("temporary")
+            return (row,)
+
+        monkeypatch.setattr(rsf, "_query_zone_boundary_rows", fake_query)
+        monkeypatch.setattr(
+            rsf,
+            "_materialize_zone_boundaries",
+            lambda rows: [{"zone_name": rows[0].zone_name, "geometry": object()}],
+        )
+        config = {"postgres": {"host": "db", "dbname": "weather"}}
+
+        with pytest.raises(rsf._BoundaryLoadError):
+            rsf._load_zone_boundaries_from_db("9", None, config)
+        rsf._load_zone_boundaries_from_db("9", None, config)
+        rsf._load_zone_boundaries_from_db("9", None, config)
+
+        assert calls["query"] == 3
+
+    def test_boundary_cache_key_isolated_by_database_and_zone(self, monkeypatch):
+        rsf._clear_zone_boundary_cache()
+        monkeypatch.setenv("RIVER_SYSTEM_BOUNDARY_CACHE_TTL", "3600")
+        calls = []
+
+        def fake_query(zone_type, zone_name, pg_conf):
+            calls.append((zone_type, zone_name, pg_conf.get("dbname")))
+            return (rsf._BoundaryRow(zone_name or "全部", "code", 4326, b"wkb"),)
+
+        monkeypatch.setattr(rsf, "_query_zone_boundary_rows", fake_query)
+        monkeypatch.setattr(
+            rsf,
+            "_materialize_zone_boundaries",
+            lambda rows: [{"zone_name": rows[0].zone_name, "geometry": object()}],
+        )
+
+        rsf._load_zone_boundaries_from_db("9", None, {"postgres": {"dbname": "a"}})
+        rsf._load_zone_boundaries_from_db("9", "大清河", {"postgres": {"dbname": "a"}})
+        rsf._load_zone_boundaries_from_db("9", None, {"postgres": {"dbname": "b"}})
+
+        assert calls == [("9", None, "a"), ("9", "大清河", "a"), ("9", None, "b")]
+
+    def test_boundary_cache_lru_capacity_evicts_oldest(self, monkeypatch):
+        rsf._clear_zone_boundary_cache()
+        monkeypatch.setenv("RIVER_SYSTEM_BOUNDARY_CACHE_TTL", "3600")
+        monkeypatch.setenv("RIVER_SYSTEM_BOUNDARY_CACHE_MAX_SIZE", "2")
+        calls = []
+
+        def fake_query(zone_type, zone_name, pg_conf):
+            calls.append(pg_conf["dbname"])
+            return (rsf._BoundaryRow("大清河", "code", 4326, b"wkb"),)
+
+        monkeypatch.setattr(rsf, "_query_zone_boundary_rows", fake_query)
+        monkeypatch.setattr(
+            rsf,
+            "_materialize_zone_boundaries",
+            lambda rows: [{"zone_name": rows[0].zone_name, "geometry": object()}],
+        )
+
+        for dbname in ("a", "b", "c", "a"):
+            rsf._load_zone_boundaries_from_db(
+                "9", None, {"postgres": {"dbname": dbname}}
+            )
+
+        assert calls == ["a", "b", "c", "a"]
+        assert len(rsf._ZONE_BOUNDARY_CACHE) == 2
 
 
 @pytest.mark.skipif(not _gdal_available(), reason="GDAL 未安装")
