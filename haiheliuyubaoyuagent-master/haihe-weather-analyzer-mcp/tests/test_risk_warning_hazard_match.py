@@ -13,7 +13,9 @@
 """
 from __future__ import annotations
 
+import datetime
 import importlib.util
+import re
 import sys
 import types
 from pathlib import Path
@@ -414,6 +416,151 @@ class TestRegionRiskLevels:
         assert calls["n"] > after_first_fail  # 第二次仍调接口（None 未缓存）
 
 
+class TestFcstTimeRequired:
+    """后端 findDataListByConfig 必传 fcstTime（yyyyMMddHHmmss）。
+
+    2026-08-24 服务器 curl 三连证实：
+      model+type 不带 fcstTime          → HTTP 500
+      fcstTime=20260824080000           → 200
+      fcstTime=2026-08-24 08:00:00      → 400
+    且同事前端只发 type/model/fcstTime，不发 startTime/endTime。风险预警是
+    实时产品（后端无历史起报周期），默认 fcstTime 必须取真实北京时间，
+    不得跟随 time_source 模拟时间（模拟的历史日期在后端没有周期，同样 500）。
+    """
+
+    class _FakeResp:
+        ok = True
+        status_code = 200
+        text = '{"data": []}'
+
+        def json(self):
+            return {"data": []}
+
+    def _capture_get(self, monkeypatch):
+        captured = {}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["params"] = dict(params or {})
+            return self._FakeResp()
+
+        monkeypatch.setattr(rwt.requests, "get", fake_get)
+        return captured
+
+    def test_fetch_guarantees_fcst_time_when_missing(self, monkeypatch):
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("river", {})
+        params = captured["params"]
+        assert params["model"] == "EC"
+        assert params["type"] == 1
+        assert re.fullmatch(r"\d{14}", str(params.get("fcstTime", ""))), params
+
+    def test_fetch_preserves_explicit_fcst_time(self, monkeypatch):
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("mountain", {"fcstTime": "20260101080000"})
+        assert captured["params"]["fcstTime"] == "20260101080000"
+        assert captured["params"]["model"] == "EC"
+        assert captured["params"]["type"] == 2
+
+    def test_fetch_strips_start_end_time(self, monkeypatch):
+        # startTime/endTime 不是同事前端口径内的参数，一律不转发（防后端 500）
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("geologic", {
+            "startTime": "20260101080000",
+            "endTime": "20260102080000",
+            "fcstTime": "20260101080000",
+        })
+        params = captured["params"]
+        assert "startTime" not in params
+        assert "endTime" not in params
+        assert params["fcstTime"] == "20260101080000"
+
+    def test_default_fcst_time_uses_real_now_not_sim_time(self, monkeypatch):
+        # 即使 time_source 被模拟到历史日期，默认 fcstTime 也必须跟随真实时间。
+        real_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+        fcst = rwt._default_fcst_time()
+        assert re.fullmatch(r"\d{14}", fcst)
+        # 与真实"现在"推算的最近起报时次一致（允许跨边界 1 个周期内的误差：
+        # 直接断言与 _latest_fcst_cycle(real_now) 相同即可，边界跨度的概率极低）
+        assert fcst == rwt._latest_fcst_cycle(real_now)
+
+
+class TestLatestFcstCycle:
+    BJT = datetime.timezone(datetime.timedelta(hours=8))
+
+    def _now(self, day, hour):
+        return datetime.datetime(2026, 8, day, hour, 30, tzinfo=self.BJT)
+
+    def test_before_8_uses_yesterday_20(self):
+        assert rwt._latest_fcst_cycle(self._now(24, 7)) == "20260823200000"
+        assert rwt._latest_fcst_cycle(self._now(24, 0)) == "20260823200000"
+
+    def test_between_8_and_20_uses_today_08(self):
+        assert rwt._latest_fcst_cycle(self._now(24, 8)) == "20260824080000"
+        assert rwt._latest_fcst_cycle(self._now(24, 19)) == "20260824080000"
+
+    def test_at_or_after_20_uses_today_20(self):
+        assert rwt._latest_fcst_cycle(self._now(24, 20)) == "20260824200000"
+        assert rwt._latest_fcst_cycle(self._now(24, 23)) == "20260824200000"
+
+
+class _FakeMcp:
+    def __init__(self):
+        self.tools = {}
+
+    def tool(self):
+        def deco(fn):
+            self.tools[fn.__name__] = fn
+            return fn
+        return deco
+
+
+class TestToolParamForwarding:
+    """query_risk_warning 工具层：只转发 fcstTime，不发 startTime/endTime。"""
+
+    def _tool_and_capture(self, monkeypatch):
+        mcp = _FakeMcp()
+        rwt.register_risk_warning_tool(mcp)
+        captured = {}
+
+        def fake_fetch(kind, extra_params=None, timeout_sec=30):
+            captured["extra"] = dict(extra_params or {})
+            return {"data": []}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fake_fetch)
+        # 隔离 DB 侧的隐患点 enrich（本类只测参数转发口径）
+        monkeypatch.setattr(rwt, "_enrich_risk_result", lambda result, kind, records: result)
+        return mcp.tools["query_risk_warning"], captured
+
+    def test_no_time_args_sends_only_fcst_time(self, monkeypatch):
+        # 缓存键不含 region 但含 extra_params_json，用唯一 tag 防跨用例缓存命中
+        tool, captured = self._tool_and_capture(monkeypatch)
+        result = tool("river", extra_params_json='{"_t": "case1"}')
+        extra = captured["extra"]
+        assert "startTime" not in extra
+        assert "endTime" not in extra
+        assert re.fullmatch(r"\d{14}", str(extra.get("fcstTime", ""))), extra
+        assert result["query"]["fcst_time"] == extra["fcstTime"]
+
+    def test_explicit_fcst_time_forwarded(self, monkeypatch):
+        tool, captured = self._tool_and_capture(monkeypatch)
+        result = tool("river", fcst_time="20260101080000", extra_params_json='{"_t": "case2"}')
+        assert captured["extra"]["fcstTime"] == "20260101080000"
+        assert result["query"]["fcst_time"] == "20260101080000"
+
+    def test_explicit_start_end_time_not_forwarded(self, monkeypatch):
+        tool, captured = self._tool_and_capture(monkeypatch)
+        tool(
+            "river",
+            start_time="20260101080000",
+            end_time="20260102080000",
+            extra_params_json='{"_t": "case3"}',
+        )
+        extra = captured["extra"]
+        assert "startTime" not in extra
+        assert "endTime" not in extra
+
+
 class TestWiring:
     def test_query_risk_warning_calls_enrich(self):
         src = (MCP_DIR / "custom_tools" / "risk_warning_tool.py").read_text(encoding="utf-8")
@@ -425,3 +572,17 @@ class TestWiring:
     def test_numeric_map_handles_five(self):
         assert rwt._NUMERIC_LEVEL_MAP["5"] == "一级"
         assert rwt._NUMERIC_LEVEL_MAP["2"] == "四级"
+
+    def test_no_start_end_time_forwarding(self):
+        src = (MCP_DIR / "custom_tools" / "risk_warning_tool.py").read_text(encoding="utf-8")
+        assert 'setdefault("startTime"' not in src
+        assert 'setdefault("endTime"' not in src
+        assert 'extra["startTime"]' not in src
+        assert 'extra["endTime"]' not in src
+
+    def test_no_sim_time_dependency(self):
+        # 风险预警是实时产品，fcstTime 不得跟随 time_source 模拟时间
+        # （docstring 里允许出现 time_source 字样解释原因，只锁真实依赖/调用）
+        src = (MCP_DIR / "custom_tools" / "risk_warning_tool.py").read_text(encoding="utf-8")
+        assert "import time_source" not in src
+        assert "time_source.now" not in src

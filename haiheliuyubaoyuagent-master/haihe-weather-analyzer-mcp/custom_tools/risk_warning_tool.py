@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import math
@@ -19,7 +20,6 @@ import requests
 from fastmcp import FastMCP
 
 from custom_tools._ttl_cache import make_ttl_cache
-import time_source
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +121,30 @@ def _risk_api_base_urls() -> list[str]:
     return bases
 
 
+def _latest_fcst_cycle(now: _dt.datetime) -> str:
+    """把北京时间折到最近一个起报时次（08/20），格式 yyyyMMddHHmmss。"""
+    if now.hour >= 20:
+        fcst = now.replace(hour=20, minute=0, second=0, microsecond=0)
+    elif now.hour >= 8:
+        fcst = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    else:
+        fcst = (now - _dt.timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+    return fcst.strftime("%Y%m%d%H%M%S")
+
+
+def _default_fcst_time() -> str:
+    """默认 fcstTime：真实北京时间的最近起报时次。
+
+    后端 findDataListByConfig 必传 fcstTime（yyyyMMddHHmmss）：不传 HTTP 500、
+    格式错误 400（2026-08-24 服务器 curl 三连证实）。风险预警是实时产品、
+    后端只有当前起报周期，所以用真实系统时间，不跟 time_source 模拟时间走
+    （模拟的历史日期在后端没有对应周期，同样 500——8-21 验收模拟 2026-07-10
+    时接口开发看到的"那个日期的报错"即此）。
+    """
+    beijing = _dt.timezone(_dt.timedelta(hours=8))
+    return _latest_fcst_cycle(_dt.datetime.now(beijing))
+
+
 def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
     cfg = RISK_CONFIGS[kind]
     bases = _risk_api_base_urls()
@@ -128,8 +152,13 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
         raise RuntimeError("风险预警服务地址未配置，请配置 RISK_WARN_BASE 或 HHFW_API_BASE。")
 
     params: dict[str, Any] = {k: v for k, v in (extra_params or {}).items() if v not in (None, "")}
+    # 后端只认 model/type/fcstTime（同事前端口径）：startTime/endTime 一律不转发；
+    # fcstTime 必填（缺省补最近起报时次），否则后端 HTTP 500。
+    params.pop("startTime", None)
+    params.pop("endTime", None)
     params["model"] = cfg["model"]
     params["type"] = cfg["type"]
+    params.setdefault("fcstTime", _default_fcst_time())
     headers = {"Accept": "application/json", "User-Agent": "haihe-weather-analyzer/1.0"}
 
     errors: list[str] = []
@@ -699,9 +728,9 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """查询山洪、地质灾害或中小河流洪水风险预警。
 
-        时间参数格式为 YYYYMMDDHHmmss（北京时间），未传时自动取最近一个
-        起报时次（08:00 或 20:00）作为 fcstTime 和 startTime，
-        endTime = fcstTime + 24h。
+        fcst_time 格式为 YYYYMMDDHHmmss（北京时间），未传时自动取真实北京时间
+        最近一个起报时次（08:00 或 20:00）。后端只接受 model/type/fcstTime：
+        start_time/end_time 仅为兼容保留，不转发到后端。
         """
         try:
             kind = _normalize_risk_kind(risk_kind)
@@ -716,32 +745,16 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
                     extra.update(obj)
             except Exception as exc:
                 logger.warning("[risk_warning] extra_params_json parse failed: %s", exc)
-        # 后端 /hhfw/riskWarnNew/findDataListByConfig 不支持 region query
-        # parameter，传入即 HTTP 500（同事前端也未发 region）。若需区域过滤，
-        # 由 LLM 侧基于返回结果筛选即可。
-        if not start_time and not end_time and not fcst_time:
-            import datetime as _dt
-            beijing = _dt.timezone(_dt.timedelta(hours=8))
-            now = time_source.now(beijing)
-            if now.hour >= 20:
-                fcst_hour = 20
-            elif now.hour >= 8:
-                fcst_hour = 8
-            else:
-                fcst_hour = 20
-                now -= _dt.timedelta(days=1)
-            fcst = now.replace(hour=fcst_hour, minute=0, second=0, microsecond=0)
-            fcst_str = fcst.strftime("%Y%m%d%H%M%S")
-            end_dt = fcst + _dt.timedelta(hours=24)
-            start_time = fcst_str
-            end_time = end_dt.strftime("%Y%m%d%H%M%S")
-            fcst_time = fcst_str
-        if start_time:
-            extra.setdefault("startTime", start_time)
-        if end_time:
-            extra.setdefault("endTime", end_time)
-        if fcst_time:
-            extra.setdefault("fcstTime", fcst_time)
+        # 后端 /hhfw/riskWarnNew/findDataListByConfig 只认 model + type + fcstTime
+        # （同事前端口径；2026-08-24 curl 证实缺 fcstTime → HTTP 500，格式非
+        # yyyyMMddHHmmss → 400）。region 与 startTime/endTime 均不上接口：region
+        # 过滤由 LLM 侧基于返回结果筛选；风险预警是实时产品，fcstTime 默认取真实
+        # 北京时间的最近起报时次，不跟随 time_source 模拟时间。
+        explicit_fcst = str(fcst_time or "").strip()
+        if explicit_fcst:
+            extra["fcstTime"] = explicit_fcst
+        effective_fcst = str(extra.get("fcstTime") or "").strip() or _default_fcst_time()
+        extra["fcstTime"] = effective_fcst
 
         try:
             payload = _fetch_risk_warning(kind, extra)
@@ -750,7 +763,7 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
             # 灾害点就近匹配 + 逐级汇总（2026-08-21 需求）：给每条风险记录挂上
             # 隐患点 id/名称/区县，并产出 county_totals/county_risk_summary/level_advice。
             result = _enrich_risk_result(result, kind, all_records)
-            result["query"] = {"region": region, "start_time": start_time, "end_time": end_time, "fcst_time": fcst_time}
+            result["query"] = {"region": region, "start_time": start_time, "end_time": end_time, "fcst_time": effective_fcst}
             return result
         except Exception as exc:
             logger.warning("[risk_warning] failed kind=%s error=%s", kind, exc)

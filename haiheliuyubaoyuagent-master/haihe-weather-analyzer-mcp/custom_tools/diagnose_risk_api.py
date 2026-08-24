@@ -15,7 +15,8 @@
 - --offline：只验证模块加载与打印逻辑，不发请求（本地无内网时用）。
 
 取数口径与 risk_warning_tool 完全一致（`RISK_WARN_BASE`/`RISK_WARN_BASES`/`HHFW_API_BASE`
-env 可覆盖，默认同工具；不写死新地址）。
+env 可覆盖，默认同工具；不写死新地址）。后端必传 fcstTime（yyyyMMddHHmmss，不传 500、
+格式错 400），由 `_fetch_risk_warning` 自动补最近起报时次，本脚本无需显式传。
 """
 from __future__ import annotations
 
