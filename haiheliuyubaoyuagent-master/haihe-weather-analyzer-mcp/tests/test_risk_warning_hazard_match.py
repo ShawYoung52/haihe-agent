@@ -471,9 +471,9 @@ class TestFcstTimeRequired:
         assert captured["params"]["type"] == 2
 
     def test_fetch_strips_start_end_time(self, monkeypatch):
-        # startTime/endTime 不是同事前端口径内的参数，一律不转发（防后端 500）
+        # EC 两类（山洪/中小河流）只认 fcstTime：调用方给的 startTime/endTime 剥离
         captured = self._capture_get(monkeypatch)
-        rwt._fetch_risk_warning("geologic", {
+        rwt._fetch_risk_warning("river", {
             "startTime": "20260101080000",
             "endTime": "20260102080000",
             "fcstTime": "20260101080000",
@@ -482,6 +482,50 @@ class TestFcstTimeRequired:
         assert "startTime" not in params
         assert "endTime" not in params
         assert params["fcstTime"] == "20260101080000"
+
+    def test_scmoc_derives_time_range_from_fcst_time(self, monkeypatch):
+        # SCMOC 地灾：fcstTime + startTime + endTime 缺一不可（缺 → 500），
+        # startTime=fcstTime、endTime=fcstTime+24h（2026-08-24 接口开发确认的调法）
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("geologic", {"fcstTime": "20260824080000"})
+        params = captured["params"]
+        assert params["fcstTime"] == "20260824080000"
+        assert params["startTime"] == "20260824080000"
+        assert params["endTime"] == "20260825080000"
+
+    def test_scmoc_time_range_month_boundary(self, monkeypatch):
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("geologic", {"fcstTime": "20260831200000"})
+        assert captured["params"]["endTime"] == "20260901200000"
+
+    def test_scmoc_caller_time_range_overridden_by_derived(self, monkeypatch):
+        # 调用方传入的 startTime/endTime 不可信（可能与 fcstTime 不一致），一律以推导为准
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("geologic", {
+            "fcstTime": "20260824080000",
+            "startTime": "20260101000000",
+            "endTime": "20260102000000",
+        })
+        params = captured["params"]
+        assert params["startTime"] == "20260824080000"
+        assert params["endTime"] == "20260825080000"
+
+    def test_scmoc_auto_fcst_time_also_gets_range(self, monkeypatch):
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("geologic", {})
+        params = captured["params"]
+        assert re.fullmatch(r"\d{14}", str(params.get("fcstTime", ""))), params
+        assert params["startTime"] == params["fcstTime"]
+        assert re.fullmatch(r"\d{14}", str(params.get("endTime", ""))), params
+
+    def test_scmoc_bad_fcst_time_skips_range_derivation(self, monkeypatch):
+        # 显式传入非法 fcstTime：不崩、不编造时间段，原样发出（后端会 400/500，由调用方负责）
+        captured = self._capture_get(monkeypatch)
+        rwt._fetch_risk_warning("geologic", {"fcstTime": "not-a-time"})
+        params = captured["params"]
+        assert params["fcstTime"] == "not-a-time"
+        assert "startTime" not in params
+        assert "endTime" not in params
 
     def test_default_fcst_time_uses_real_now_not_sim_time(self, monkeypatch):
         # 即使 time_source 被模拟到历史日期，默认 fcstTime 也必须跟随真实时间。
@@ -581,10 +625,12 @@ class TestWiring:
         assert rwt._NUMERIC_LEVEL_MAP["5"] == "一级"
         assert rwt._NUMERIC_LEVEL_MAP["2"] == "四级"
 
-    def test_no_start_end_time_forwarding(self):
+    def test_start_end_time_only_derived_for_scmoc(self):
+        # 调用方提供的 startTime/endTime 一律剥离；仅 SCMOC 地灾由 fcstTime 推导补上
         src = (MCP_DIR / "custom_tools" / "risk_warning_tool.py").read_text(encoding="utf-8")
+        assert 'params.pop("startTime", None)' in src
+        assert 'params.pop("endTime", None)' in src
         assert 'setdefault("startTime"' not in src
-        assert 'setdefault("endTime"' not in src
         assert 'extra["startTime"]' not in src
         assert 'extra["endTime"]' not in src
 

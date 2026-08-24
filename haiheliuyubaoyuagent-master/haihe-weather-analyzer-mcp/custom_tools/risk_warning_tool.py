@@ -44,6 +44,9 @@ RISK_CONFIGS: dict[str, dict[str, Any]] = {
         "type": 3,
         "label": "地质灾害风险",
         "question": "有没有地质灾害风险？",
+        # SCMOC 地灾接口除 fcstTime 外还要求 startTime/endTime 时间段（缺任一 →
+        # HTTP 500，2026-08-24 接口开发给的可用调法证实）；EC 两类只认 fcstTime。
+        "needs_time_range": True,
     },
 }
 
@@ -152,13 +155,23 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
         raise RuntimeError("风险预警服务地址未配置，请配置 RISK_WARN_BASE 或 HHFW_API_BASE。")
 
     params: dict[str, Any] = {k: v for k, v in (extra_params or {}).items() if v not in (None, "")}
-    # 后端只认 model/type/fcstTime（同事前端口径）：startTime/endTime 一律不转发；
-    # fcstTime 必填（缺省补最近起报时次），否则后端 HTTP 500。
+    # 调用方提供的 startTime/endTime 一律剥离——时间段只允许由 fcstTime 推导（见下），
+    # 避免 planner/extra_params_json 传入与 fcstTime 不一致的窗口。
     params.pop("startTime", None)
     params.pop("endTime", None)
     params["model"] = cfg["model"]
     params["type"] = cfg["type"]
+    # fcstTime 必填（缺省补最近起报时次），否则后端 HTTP 500。
     params.setdefault("fcstTime", _default_fcst_time())
+    if cfg.get("needs_time_range"):
+        # SCMOC 地灾：fcstTime + startTime + endTime 三者缺一不可（缺 → 500），
+        # 接口开发确认的口径：startTime=fcstTime、endTime=fcstTime+24h。
+        try:
+            fcst_dt = _dt.datetime.strptime(str(params["fcstTime"]), "%Y%m%d%H%M%S")
+            params["startTime"] = fcst_dt.strftime("%Y%m%d%H%M%S")
+            params["endTime"] = (fcst_dt + _dt.timedelta(hours=24)).strftime("%Y%m%d%H%M%S")
+        except ValueError:
+            logger.warning("[risk_warning] fcstTime %r 无法解析，跳过 startTime/endTime 推导", params["fcstTime"])
     headers = {"Accept": "application/json", "User-Agent": "haihe-weather-analyzer/1.0"}
 
     errors: list[str] = []
@@ -733,8 +746,9 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
         """查询山洪、地质灾害或中小河流洪水风险预警。
 
         fcst_time 格式为 YYYYMMDDHHmmss（北京时间），未传时自动取真实北京时间
-        最近一个起报时次（08:00 或 20:00）。后端只接受 model/type/fcstTime：
-        start_time/end_time 仅为兼容保留，不转发到后端。
+        最近一个起报时次（08:00 或 20:00）。start_time/end_time 入参仅兼容保留、
+        不直接使用：SCMOC 地质灾害需要的时间段由 fcstTime 自动推导
+        （startTime=fcstTime、endTime=+24h），EC 两类只发 fcstTime。
         """
         try:
             kind = _normalize_risk_kind(risk_kind)
@@ -749,11 +763,11 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
                     extra.update(obj)
             except Exception as exc:
                 logger.warning("[risk_warning] extra_params_json parse failed: %s", exc)
-        # 后端 /hhfw/riskWarnNew/findDataListByConfig 只认 model + type + fcstTime
-        # （同事前端口径；2026-08-24 curl 证实缺 fcstTime → HTTP 500，格式非
-        # yyyyMMddHHmmss → 400）。region 与 startTime/endTime 均不上接口：region
-        # 过滤由 LLM 侧基于返回结果筛选；风险预警是实时产品，fcstTime 默认取真实
-        # 北京时间的最近起报时次，不跟随 time_source 模拟时间。
+        # 后端 /hhfw/riskWarnNew/findDataListByConfig 口径（2026-08-24 服务器 curl
+        # + 接口开发确认）：fcstTime 必填（缺 → 500，格式非 yyyyMMddHHmmss → 400）；
+        # SCMOC 地灾另需 startTime/endTime（由 fetch 层按 fcstTime 推导）；region
+        # 不上接口，区域过滤由 LLM 侧基于返回结果筛选；fcstTime 默认取真实北京时间
+        # 的最近起报时次，不跟随 time_source 模拟时间。
         explicit_fcst = str(fcst_time or "").strip()
         if explicit_fcst:
             extra["fcstTime"] = explicit_fcst
