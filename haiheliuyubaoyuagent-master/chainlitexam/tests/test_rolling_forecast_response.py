@@ -311,18 +311,17 @@ class TestRegionHazardTableRiskLevels:
         assert "| 地质灾害 | 2 处 | 接口暂不可用 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
-    def test_levels_kind_no_data_marker_shows_cycle_no_data(self):
+    def test_levels_kind_no_data_marker_shows_no_risk(self):
         """单灾种该起报时次无资料（risk_levels 中该 key 为 "no_data" 哨兵）→
-        该行"该时次暂无数据"，与"本次无风险""接口暂不可用"三态区分——
-        2026-08-24 curl 实证：无资料时次后端回 HTTP 200 + success=false
-        "资料在当前时刻下无数据"，不得误报"本次无风险"。"""
+        该行"无风险"（2026-08-24 用户口径：本次风险等级列不再写"该时次暂无数据"，
+        直接写无风险即可）；接口不可达(None)仍写"接口暂不可用"与无风险区分。"""
         payload = self._with_levels({
             "dzzh": "no_data",
             "sh": {"label": "山洪", "kind": "mountain", "levels": {"三级": 2}, "total": 2},
         })
         bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
         section = bundle["code_section"]
-        assert "| 地质灾害 | 2 处 | 该时次暂无数据 |" in section
+        assert "| 地质灾害 | 2 处 | 无风险 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
 

@@ -67,7 +67,7 @@ class TestCoreBasinCityRouting:
         monkeypatch.setattr(rfs.requests, "get", fake_get)
         rfs._rolling_forecast_cache.clear()
         # 隔离隐患点/风险等级增强（本类只测坐标路由口径）
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, fcst_times=None: None)
         result = rfs.query_rolling_forecast_core(user_query=user_query, now=NOW, **core_kwargs)
         return result, captured.get("params") or {}
 
@@ -104,7 +104,7 @@ class TestCoreBasinCityRouting:
         monkeypatch.setattr(
             rfs,
             "_query_region_hazards",
-            lambda lon, lat: hazards_calls.append((lon, lat)) or {
+            lambda lon, lat, fcst_times=None: hazards_calls.append((lon, lat)) or {
                 "total_found": 1,
                 "radius_km": 25.0,
                 "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],

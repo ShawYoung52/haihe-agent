@@ -424,6 +424,114 @@ class TestRegionRiskLevels:
         assert calls["n"] > after_first_fail  # 第二次仍调接口（None 未缓存）
 
 
+class TestRegionRiskLevelsMultiDay:
+    """风险接口逐日调用（2026-08-24 用户口径）：风险数据按起报时次只出 24h
+    （08→次日 08、20→次日 20），"未来三天"按 明天/后天/大后天 08:00 各调一次、
+    等级统计合并到同一列；无资料时次跳过（渲染层按用户要求显示"无风险"）。
+    fcst_times 为 None 时保持原行为（单次默认最近起报时次）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        rwt._region_levels_cache.clear()
+        yield
+        rwt._region_levels_cache.clear()
+
+    LON, LAT, R = 116.50, 39.50, 25.0
+
+    def _rec(self, lon, lat, level, rid=1):
+        return {"id": rid, "name": "测试点", "level": level, "lon": lon, "lat": lat}
+
+    def test_merges_level_counts_across_days(self, monkeypatch):
+        calls: dict[str, list] = {}
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            t = (extra_params or {}).get("fcstTime")
+            calls.setdefault(kind, []).append(t)
+            if t == "20260825080000":
+                return {"data": [self._rec(self.LON, self.LAT, "5", 1),
+                                 self._rec(self.LON, self.LAT, "3", 2)]}
+            if t == "20260826080000":
+                return {"data": [self._rec(self.LON, self.LAT, "2", 3)]}
+            return {"data": []}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        times = ["20260825080000", "20260826080000", "20260827080000"]
+        levels = rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=times)
+        info = levels["dzzh"]
+        assert info["levels"] == {"一级": 1, "三级": 1, "四级": 1}  # 三天累计
+        assert info["total"] == 3
+        # 逐日各调一次（dzzh=geologic）
+        assert calls["geologic"] == times
+
+    def test_no_data_days_skipped_others_merged(self, monkeypatch):
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            t = (extra_params or {}).get("fcstTime")
+            if t == "20260825080000":  # 该日无资料（未来时次常见）→ 跳过
+                raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+            return {"data": [self._rec(self.LON, self.LAT, "4", 1)]}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        levels = rwt.query_region_risk_levels(
+            self.LON, self.LAT, self.R, fcst_times=["20260825080000", "20260826080000"]
+        )
+        assert levels["dzzh"]["levels"] == {"二级": 1}
+        assert levels["sh"]["levels"] == {"二级": 1}
+
+    def test_all_days_no_data_marks_sentinel(self, monkeypatch):
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        levels = rwt.query_region_risk_levels(
+            self.LON, self.LAT, self.R, fcst_times=["20260825080000", "20260826080000"]
+        )
+        assert levels is not None  # 接口是通的 → 不是整体 None
+        assert all(v == rwt.RISK_LEVELS_NO_DATA for v in levels.values())
+
+    def test_any_kind_failure_marks_none_even_with_earlier_data(self, monkeypatch):
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            t = (extra_params or {}).get("fcstTime")
+            if t == "20260827080000":
+                raise RuntimeError("HTTP 500")
+            return {"data": [self._rec(self.LON, self.LAT, "5", 1)]}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        levels = rwt.query_region_risk_levels(
+            self.LON, self.LAT, self.R, fcst_times=["20260825080000", "20260827080000"]
+        )
+        assert levels["dzzh"] is None  # 有一次失败 → 该灾种"接口暂不可用"
+
+    def test_no_fcst_times_single_default_call(self, monkeypatch):
+        seen: list = []
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            seen.append((kind, extra_params))
+            return {"data": [self._rec(self.LON, self.LAT, "5", 1)]}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        levels = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        assert levels["dzzh"]["levels"] == {"一级": 1}
+        # 未传 fcstTime → 每灾种单次默认调用（fcstTime 由 fetch 层补最近起报时次）
+        assert [k for k, _ in seen] == ["geologic", "mountain", "river"]
+        assert all(extra in (None, {}) for _, extra in seen)
+
+    def test_cache_key_includes_fcst_times(self, monkeypatch):
+        calls: list = []
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            calls.append((extra_params or {}).get("fcstTime"))
+            return {"data": [self._rec(self.LON, self.LAT, "5", 1)]}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        a = ["20260825080000"]
+        b = ["20260826080000"]
+        rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=a)
+        rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=b)  # 不同时次→重调
+        rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=a)  # 同键→缓存命中
+        assert calls == ["20260825080000"] * 3 + ["20260826080000"] * 3
+
+
 class TestFcstTimeRequired:
     """后端 findDataListByConfig 必传 fcstTime（yyyyMMddHHmmss）。
 

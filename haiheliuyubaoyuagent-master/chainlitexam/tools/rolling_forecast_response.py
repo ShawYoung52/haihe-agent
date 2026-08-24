@@ -624,10 +624,11 @@ _REGION_HAZARD_RISK = {
 # 风险等级展示顺序（一级最重 → 四级最轻），与 risk_warning_tool._normalize_risk_level 同口径。
 _LEVEL_SEVERITY_ORDER = ("一级", "二级", "三级", "四级")
 
-# 区域风险等级"该起报时次暂无数据"哨兵（与 MCP 侧 risk_warning_tool.RISK_LEVELS_NO_DATA
-# 同值，跨进程经 JSON 透传）。区别于 None（接口失败→"接口暂不可用"）与缺键（可达无风险
-# →"本次无风险"）——2026-08-24 curl 实证：无资料时次后端回 HTTP 200 + success=false
-# "资料在当前时刻下无数据"。
+# 区域风险等级"该起报时次无资料"哨兵（与 MCP 侧 risk_warning_tool.RISK_LEVELS_NO_DATA
+# 同值，跨进程经 JSON 透传）。渲染层按用户口径显示"无风险"（2026-08-24：
+# "本次风险等级，不要写该时次暂无数据，写无风险就行"）——区别于 None（接口失败
+# →"接口暂不可用"）与缺键（可达无风险 →"本次无风险"）。哨兵仍保留以区分
+# "接口是通的但该时次无资料"与"接口全挂"，避免把整体降级成"接口暂不可用"。
 _RISK_LEVELS_NO_DATA = "no_data"
 
 
@@ -683,8 +684,8 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
                         # 该灾种接口单独失败（MCP 侧 None 打标）——区别于"可达但无风险"
                         row.append("接口暂不可用")
                     elif level_info == _RISK_LEVELS_NO_DATA:
-                        # 该起报时次无资料（MCP 侧 no_data 哨兵）——区别于"本次无风险"
-                        row.append("该时次暂无数据")
+                        # 该起报时次无资料（MCP 侧 no_data 哨兵）→ 用户口径显示"无风险"
+                        row.append("无风险")
                     else:
                         row.append(_format_risk_level_counts((level_info or {}).get("levels") or {}))
                 else:

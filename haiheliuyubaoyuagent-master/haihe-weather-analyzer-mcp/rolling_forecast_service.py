@@ -212,23 +212,51 @@ def _load_region_risk_level_queryer() -> Any:
     return query_region_risk_levels
 
 
-def _query_region_risk_levels(lon: float, lat: float) -> dict | None:
-    """查询区域代表点半径内各灾种当前风险等级分布（风险接口 level，一~四级）。
+def _query_region_risk_levels(lon: float, lat: float, fcst_times: list[str] | None = None) -> dict | None:
+    """查询区域代表点半径内各灾种风险等级分布（风险接口 level，一~四级）。
 
     返回 {hazard_key: {...}} / {}（可达无风险）/ None（接口失败）。任何异常静默降级
-    返回 None——风险等级是增强，绝不阻断天气回答。
+    返回 None——风险等级是增强，绝不阻断天气回答。fcst_times：跨日窗口（如"未来三天"）
+    传各日 08:00 起报时次列表，逐日调用并把等级统计合并；None=单次最近起报时次。
     """
     global _region_risk_level_queryer
     try:
         if _region_risk_level_queryer is None:
             _region_risk_level_queryer = _load_region_risk_level_queryer()
-        return _region_risk_level_queryer(float(lon), float(lat), REGION_HAZARD_RADIUS_KM)
+        return _region_risk_level_queryer(
+            float(lon), float(lat), REGION_HAZARD_RADIUS_KM, fcst_times
+        )
     except Exception as exc:
         print(f"[region_risk_levels] query failed: {exc}", flush=True)
         return None
 
 
-def _query_region_hazards(lon: float, lat: float) -> dict | None:
+# 风险接口逐日调用时最多取的日数（风险为增强字段，逐日调用会随天数放大请求数，
+# 默认 3 天覆盖"未来三天"最常见口径，更长窗口截断不阻断天气回答）。
+RISK_FCST_MAX_DAYS = int(os.getenv("RISK_FCST_MAX_DAYS", "3"))
+
+
+def _risk_fcst_times_from_window(calendar_window: dict | None) -> list[str] | None:
+    """把日历日查询窗口换算为逐日风险接口起报时次列表（各日 08:00，yyyyMMddHHmmss）。
+
+    风险接口按起报时次只出 24h（08→次日 08、20→次日 20），问题窗口跨多日
+    （如"未来三天"）时逐日以"该日 08:00"调一次并合并（2026-08-24 用户口径）。
+    window 为空/异常 → None（保持单次最近起报时次原行为）。
+    """
+    if not calendar_window:
+        return None
+    try:
+        start = _parse_date(calendar_window.get("forecast_start_date") or "")
+        days = max(1, min(int(calendar_window.get("forecast_days") or 1), RISK_FCST_MAX_DAYS))
+    except Exception:
+        return None
+    return [
+        (start + timedelta(days=i)).strftime("%Y%m%d") + "080000"
+        for i in range(days)
+    ]
+
+
+def _query_region_hazards(lon: float, lat: float, fcst_times: list[str] | None = None) -> dict | None:
     """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
 
     只保留有数据的类型（status=="ok" 且 count>0）；无数据/接口失败/异常均返回
@@ -260,7 +288,8 @@ def _query_region_hazards(lon: float, lat: float) -> dict | None:
         return None
     # 区域天气#8：叠加"本次各灾种风险等级"（风险接口 level，一~四级）。接口失败/异常
     # 返回 None → risk_levels_available=False，前端不渲染等级列（静态隐患点表照常）。
-    risk_levels = _query_region_risk_levels(lon, lat)
+    # fcst_times 非 None 时按窗口逐日调风险接口并合并（"未来三天"= 三天 08:00 时次）。
+    risk_levels = _query_region_risk_levels(lon, lat, fcst_times)
     return {
         "total_found": int(payload.get("total_found") or 0),
         "radius_km": REGION_HAZARD_RADIUS_KM,
@@ -1599,10 +1628,13 @@ def query_rolling_forecast_core(
         result.update(analyze_rolling_forecast_periods(periods))
     # 区域模式附带灾害风险表数据：按区域代表坐标查地质灾害/山洪/中小河流隐患点，
     # 供前端渲染【区域】灾害风险表。点位模式与异常/历史/越界提前 return 分支不附着。
+    # 日历窗口跨多日（如"未来三天"）时风险等级逐日调接口并合并（各日 08:00 起报时次，
+    # 风险接口每时次只出 24h——2026-08-24 用户口径）；窗口解析失败退单次默认时次。
     if not point_mode and region_names:
+        risk_fcst_times = _risk_fcst_times_from_window(calendar_window)
         region_hazards = []
         for name, lon_t, lat_t in zip(region_names, lons, lats):
-            hazards = _query_region_hazards(lon_t, lat_t)
+            hazards = _query_region_hazards(lon_t, lat_t, risk_fcst_times)
             if hazards:
                 region_hazards.append(
                     {

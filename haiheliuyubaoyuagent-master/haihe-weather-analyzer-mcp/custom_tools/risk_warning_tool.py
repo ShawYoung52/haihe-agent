@@ -685,8 +685,9 @@ REGION_RISK_LEVELS_TIMEOUT_SEC = int(os.getenv("REGION_RISK_LEVELS_TIMEOUT_SEC",
 
 _region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_cache(
     REGION_RISK_LEVELS_CACHE_TTL,
-    lambda lon, lat, radius_km: (
-        f"{round(float(lon), 3)}|{round(float(lat), 3)}|{round(float(radius_km), 1)}"
+    lambda lon, lat, radius_km, fcst_times=None: (
+        f"{round(float(lon), 3)}|{round(float(lat), 3)}|{round(float(radius_km), 1)}|"
+        f"{'|'.join(fcst_times) if fcst_times else ''}"
     ),
     # 接口不可达(None)不缓存以便重试；可达（{} 无风险 / {...} 有等级）缓存。
     should_cache=lambda v: v is not None,
@@ -694,7 +695,9 @@ _region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_c
 
 
 @_region_levels_decorator
-def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict | None:
+def query_region_risk_levels(
+    lon: float, lat: float, radius_km: float, fcst_times: list[str] | None = None
+) -> dict | None:
     """按区域代表坐标半径查风险接口当前各灾种风险等级分布。
 
     返回 ``{hazard_key: {"label", "kind", "levels", "total", "level_advice"} | None | "no_data"}``：
@@ -710,44 +713,61 @@ def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict |
     口径：只统计"有风险"（_is_risky_level）且落在 radius_km 内的记录。接口可达但
     全域无风险 → {}；全部灾种接口失败/异常 → None（静默降级，绝不阻断天气回答）。
     某灾种"该时次无资料"算接口可达（reachable=True），不致整体返回 None。
+
+    fcst_times（2026-08-24 用户口径）：风险接口按起报时次只出 24h
+    （08→次日 08、20→次日 20），问题窗口跨多日（如"未来三天"）时传各日
+    08:00 起报时次列表（yyyyMMddHHmmss），逐日各调一次并把各时次返回的
+    记录等级统计合并（累计到同一"本次风险等级"列）；"无资料"时次跳过
+    （未来时次大概率无资料，渲染层按用户要求显示"无风险"）。为 None 时
+    只调最近起报时次单次（原行为）。缓存键含 fcst_times，不同窗口不互串。
     """
+    times: list[str | None] = fcst_times or [None]
     kinds: dict[str, dict | None] = {}
     reachable = False
     for kind, key in HAZARD_KIND_TO_KEY.items():
-        try:
-            payload = _fetch_risk_warning(kind, timeout_sec=REGION_RISK_LEVELS_TIMEOUT_SEC)
-            reachable = True
-        except RiskInterfaceNoDataError:
-            reachable = True  # 接口是通的，只是该起报时次无资料
-            kinds[key] = RISK_LEVELS_NO_DATA
-            continue
-        except Exception:
-            kinds[key] = None  # 单灾种失败打标，交给渲染层显示"接口暂不可用"
-            continue  # 单灾种接口失败静默跳过
-        records = [_normalize_record(x) for x in _extract_items(payload)]
         level_counts: dict[str, int] = {}
-        for rec in records:
-            if not _is_risky_level(rec.get("level")):
+        saw_no_data = False
+        failed = False
+        for t in times:
+            try:
+                extra = {} if t is None else {"fcstTime": t}
+                payload = _fetch_risk_warning(kind, extra, timeout_sec=REGION_RISK_LEVELS_TIMEOUT_SEC)
+            except RiskInterfaceNoDataError:
+                saw_no_data = True  # 接口可达，仅该起报时次无资料 → 跳过继续
                 continue
-            rlon = _safe_float(rec.get("longitude"))
-            rlat = _safe_float(rec.get("latitude"))
-            if rlon is None or rlat is None:
-                continue
-            if _haversine_km(lon, lat, rlon, rlat) > radius_km:
-                continue
-            level = _normalize_risk_level(rec.get("level"))
-            if not level:
-                continue
-            level_counts[level] = level_counts.get(level, 0) + 1
-        if not level_counts:
+            except Exception:
+                failed = True  # 该灾种接口调用失败 → 打标"接口暂不可用"
+                break
+            reachable = True
+            records = [_normalize_record(x) for x in _extract_items(payload)]
+            for rec in records:
+                if not _is_risky_level(rec.get("level")):
+                    continue
+                rlon = _safe_float(rec.get("longitude"))
+                rlat = _safe_float(rec.get("latitude"))
+                if rlon is None or rlat is None:
+                    continue
+                if _haversine_km(lon, lat, rlon, rlat) > radius_km:
+                    continue
+                level = _normalize_risk_level(rec.get("level"))
+                if not level:
+                    continue
+                level_counts[level] = level_counts.get(level, 0) + 1
+        if failed:
+            kinds[key] = None
             continue
-        kinds[key] = {
-            "label": RISK_CONFIGS[kind]["label"],
-            "kind": kind,
-            "levels": level_counts,
-            "total": sum(level_counts.values()),
-            "level_advice": _level_advice_for(kind, set(level_counts)),
-        }
+        if saw_no_data:
+            reachable = True  # 接口是通的，只是该起报时次无资料
+        if level_counts:
+            kinds[key] = {
+                "label": RISK_CONFIGS[kind]["label"],
+                "kind": kind,
+                "levels": level_counts,
+                "total": sum(level_counts.values()),
+                "level_advice": _level_advice_for(kind, set(level_counts)),
+            }
+        elif saw_no_data:
+            kinds[key] = RISK_LEVELS_NO_DATA
     if not reachable:
         # 全部灾种接口失败 → None（不缓存以便重试；前端整列显示"接口暂不可用"）。
         return None

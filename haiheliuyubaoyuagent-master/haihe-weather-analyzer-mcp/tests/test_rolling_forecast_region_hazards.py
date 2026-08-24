@@ -58,7 +58,7 @@ def _stub_risk_levels(monkeypatch):
     """区域风险等级走真实风险接口（HTTP）。测试默认 stub 为 None（接口降级，
     risk_levels_available=False），避免真发 HTTP/触发 custom_tools 重依赖；
     验证等级附着与渲染的用例再单独 monkeypatch 成有数据的返回。"""
-    monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: None)
+    monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: None)
 
 
 def _risk_levels_ok():
@@ -138,7 +138,7 @@ class TestQueryRegionHazardsRiskLevels:
     def test_attaches_risk_levels(self, monkeypatch):
         """风险接口可达 → risk_levels 附进结果，risk_levels_available=True。"""
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: _risk_levels_ok())
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: _risk_levels_ok())
         result = rfs._query_region_hazards(117.45, 40.05)
         assert result["risk_levels_available"] is True
         assert result["risk_levels"]["dzzh"]["levels"] == {"一级": 1, "三级": 2}
@@ -147,7 +147,7 @@ class TestQueryRegionHazardsRiskLevels:
     def test_no_risk_levels_marks_unavailable(self, monkeypatch):
         """风险接口全挂（返回 None）→ risk_levels_available=False，隐患点表照常。"""
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: None)
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: None)
         result = rfs._query_region_hazards(117.45, 40.05)
         assert result["risk_levels_available"] is False
         assert result["risk_levels"] is None
@@ -156,14 +156,14 @@ class TestQueryRegionHazardsRiskLevels:
     def test_reachable_no_risk_marks_available_empty(self, monkeypatch):
         """接口可达但本次无风险（返回 {}）→ available=True、risk_levels={}（渲染"本次无风险"）。"""
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius: {})
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: {})
         result = rfs._query_region_hazards(117.45, 40.05)
         assert result["risk_levels_available"] is True
         assert result["risk_levels"] == {}
 
     def test_risk_level_exception_degrades(self, monkeypatch):
         """等级查询抛异常不扩散：available=False，隐患点 categories 完好。"""
-        def boom(lon, lat, radius):
+        def boom(lon, lat, radius, fcst_times=None):
             raise RuntimeError("risk api down")
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", boom)
@@ -175,9 +175,9 @@ class TestQueryRegionHazardsRiskLevels:
     def test_hazards_unavailable_skips_risk_levels(self, monkeypatch):
         """静态隐患点表查询失败（返回 None）→ 整体 None，不再调风险接口。"""
         calls = {"n": 0}
-        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: None)
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius, fcst_times=None: None)
 
-        def counting(lon, lat, radius):
+        def counting(lon, lat, radius, fcst_times=None):
             calls["n"] += 1
             return _risk_levels_ok()
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", counting)
@@ -189,7 +189,7 @@ class TestCoreAttachesRegionHazards:
     def _run(self, monkeypatch, user_query="蓟州天气怎么样", **core_kwargs):
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat: _hazards_ok())
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, fcst_times=None: _hazards_ok())
         return rfs.query_rolling_forecast_core(user_query=user_query, now=NOW, **core_kwargs)
 
     def test_region_mode_attaches_hazards(self, monkeypatch):
@@ -221,7 +221,7 @@ class TestCoreAttachesRegionHazards:
 
     def test_hazards_failure_degrades_weather_unchanged(self, monkeypatch):
         """隐患查询全失败（返回 None）不阻断天气回答，也不出现 region_hazards 字段。"""
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, fcst_times=None: None)
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
         result = rfs.query_rolling_forecast_core(user_query="蓟州天气怎么样", now=NOW)
@@ -234,7 +234,7 @@ class TestCoreAttachesRegionHazards:
         captured = []
         monkeypatch.setattr(
             rfs, "_query_region_hazards",
-            lambda lon, lat: captured.append((float(lon), float(lat))) or _hazards_ok(),
+            lambda lon, lat, fcst_times=None: captured.append((float(lon), float(lat))) or _hazards_ok(),
         )
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
@@ -245,3 +245,69 @@ class TestCoreAttachesRegionHazards:
         # 坐标应来自 ROLLING_FORECAST_COORDS
         assert (117.45, 40.05) in captured
         assert (117.28, 39.73) in captured
+
+
+class TestRiskFcstTimesFromWindow:
+    """窗口→逐日风险接口起报时次（各日 08:00）推导（2026-08-24 用户口径：
+    风险接口按起报时次只出 24h，跨日窗口逐日调一次并合并）。"""
+
+    def test_three_day_window_yields_three_0800_times(self):
+        win = {"forecast_start_date": "2026-08-25", "forecast_days": 3}
+        times = rfs._risk_fcst_times_from_window(win)
+        assert times == [
+            "20260825080000",
+            "20260826080000",
+            "20260827080000",
+        ]
+
+    def test_single_day_window_yields_one(self):
+        win = {"forecast_start_date": "2026-08-25", "forecast_days": 1}
+        assert rfs._risk_fcst_times_from_window(win) == ["20260825080000"]
+
+    def test_none_window_returns_none(self):
+        assert rfs._risk_fcst_times_from_window(None) is None
+
+    def test_bad_window_returns_none(self):
+        assert rfs._risk_fcst_times_from_window({"forecast_days": 3}) is None
+        assert rfs._risk_fcst_times_from_window({}) is None
+
+    def test_capped_at_max_days(self):
+        # 风险是增强字段，逐日调用最多 RISK_FCST_MAX_DAYS（默认 3）天，防长窗口请求放大
+        win = {"forecast_start_date": "2026-08-25", "forecast_days": 10}
+        times = rfs._risk_fcst_times_from_window(win)
+        assert len(times) == rfs.RISK_FCST_MAX_DAYS
+
+    def test_core_forwards_window_to_region_hazards(self, monkeypatch):
+        """query_rolling_forecast_core 区域模式把日历窗口换算的时次透传给
+        _query_region_hazards（多日窗口 → 逐日 08:00 列表）。"""
+        captured = {}
+
+        def fake_hazards(lon, lat, fcst_times=None):
+            captured["fcst_times"] = fcst_times
+            return {
+                "total_found": 1, "radius_km": 25.0,
+                "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],
+            }
+
+        monkeypatch.setattr(rfs.requests, "get", _fake_request)
+        rfs._rolling_forecast_cache.clear()
+        monkeypatch.setattr(rfs, "_query_region_hazards", fake_hazards)
+        rfs.query_rolling_forecast_core(user_query="蓟州未来三天天气怎么样", now=NOW)
+        assert captured.get("fcst_times") == ["20260820080000", "20260821080000", "20260822080000"]
+
+    def test_core_default_region_passes_none(self, monkeypatch):
+        """无日历窗口（普通"蓟州天气"）→ fcst_times=None（单次最近起报时次）。"""
+        captured = {}
+
+        def fake_hazards(lon, lat, fcst_times=None):
+            captured["fcst_times"] = fcst_times
+            return {
+                "total_found": 1, "radius_km": 25.0,
+                "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],
+            }
+
+        monkeypatch.setattr(rfs.requests, "get", _fake_request)
+        rfs._rolling_forecast_cache.clear()
+        monkeypatch.setattr(rfs, "_query_region_hazards", fake_hazards)
+        rfs.query_rolling_forecast_core(user_query="蓟州天气怎么样", now=NOW)
+        assert captured.get("fcst_times") is None
