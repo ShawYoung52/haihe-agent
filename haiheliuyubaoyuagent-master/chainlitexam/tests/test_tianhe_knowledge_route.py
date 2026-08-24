@@ -20,9 +20,13 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import message_orchestrator as mo  # noqa: E402
+from chainlitexam.tests.stubs import ensure_stubs  # noqa: E402
+
+ensure_stubs()
+
+import chainlitexam.message_orchestrator as mo  # noqa: E402
 
 
 class TestTianheKnowledgeRouteHit:
@@ -35,8 +39,6 @@ class TestTianheKnowledgeRouteHit:
             "暴雨预警等级怎么划分",
             "暴雨预警分为几级",
             "暴雨预警信号的颜色等级",
-            "气象预警等级划分标准",
-            "洪水预警等级定义",
             # 防范建议家族（暴雨）
             "暴雨天气的防范建议",
             "暴雨天气的防范建议有哪些？",
@@ -60,7 +62,6 @@ class TestTianheKnowledgeRouteHit:
         """带句末标点也原样传（天河 Fixed QA 规范化自己会去句末标点）。"""
         route = mo._route_tianhe_knowledge_query("暴雨天气的防范建议有哪些？")
         assert route == ("query_tianhe_fixed_qa", {"query": "暴雨天气的防范建议有哪些？"})
-
 
 class TestTianheDisasterPreventionCatalog:
     """04 防灾减灾类目录（知识）全覆盖。"""
@@ -165,6 +166,7 @@ class TestTianheKnowledgeRouteMiss:
             "密云水库水位多少",
             # 未来/预报/出行决策词不路由到天河
             "明天风大吗",
+            "未来三天的天气怎么样？",
             "这个周末适合去哪玩",
             # 今日实况/预报缺 05 时段词，不命中气候统计
             "今天大风怎么样",
@@ -175,6 +177,11 @@ class TestTianheKnowledgeRouteMiss:
             "去年天气怎么样",
             # 盘山能见度是点位实况，非目录全市/市区能见度问法
             "盘山能见度怎么样",
+            # 三份目录以外的灾种/泛预警知识不得借天河普通问答扩展
+            "气象预警等级划分标准",
+            "洪水预警等级定义",
+            "寒潮天气怎么应对",
+            "雷电预警分为几级",
         ],
     )
     def test_miss_returns_none(self, question):
@@ -190,6 +197,7 @@ class TestTianheKnowledgeRouteWiring:
 
         src = inspect.getsource(mo.process_message)
         assert "_route_tianhe_knowledge_query" in src
+        assert src.count("_enforce_tianhe_catalog_boundary") >= 2
 
     def test_enforce_route_label(self):
         """强制路由复用 _enforce_simple_weather_route，且日志标签可区分天河知识路由。"""
@@ -203,3 +211,47 @@ class TestTianheKnowledgeRouteWiring:
         )
         assert msg.tool_calls[0]["name"] == "query_tianhe_fixed_qa"
         assert msg.tool_calls[0]["args"] == {"query": "暴雨预警四个等级是什么"}
+
+
+class TestTianheCatalogBoundaryGuard:
+    """Planner 无权扩大天河目录；执行前必须按用户原问题重新校验。"""
+
+    def test_removes_tianhe_call_for_non_catalog_forecast(self):
+        from langchain_core.messages import AIMessage
+
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "query_rolling_forecast",
+                    "args": {"user_query": "未来三天的天气怎么样？", "regions": ""},
+                    "id": "rolling-1",
+                },
+                {
+                    "name": "query_tianhe_fixed_qa",
+                    "args": {"query": "未来三天的天气怎么样？"},
+                    "id": "tianhe-1",
+                },
+            ],
+        )
+
+        guarded = mo._enforce_tianhe_catalog_boundary(msg, "未来三天的天气怎么样？")
+
+        assert [call["name"] for call in guarded.tool_calls] == ["query_rolling_forecast"]
+
+    def test_keeps_catalog_call_and_forces_original_user_query(self):
+        from langchain_core.messages import AIMessage
+
+        user_text = "今天雨下了多长时间？"
+        msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "query_tianhe_fixed_qa",
+                "args": {"query": "被 Planner 改写过的问题"},
+                "id": "tianhe-1",
+            }],
+        )
+
+        guarded = mo._enforce_tianhe_catalog_boundary(msg, user_text)
+
+        assert guarded.tool_calls[0]["args"] == {"query": user_text}

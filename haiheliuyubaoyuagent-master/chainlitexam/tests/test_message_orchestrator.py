@@ -408,6 +408,30 @@ async def test_tianhe_answer_passthrough_sets_forced_final_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tianhe_tool_round_rejects_non_catalog_forecast(monkeypatch):
+    """即使后续 Planner 误选天河，普通天气预报也不得实际调用供应方接口。"""
+    planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, "不应被调用")
+    invoked = False
+
+    async def fail_if_invoked(*args, **kwargs):
+        nonlocal invoked
+        invoked = True
+        return "不应被调用", 0.0
+
+    monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", fail_if_invoked)
+
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
+        planner_msg, tools, messages, "未来三天的天气怎么样？", 2, callbacks
+    )
+
+    assert invoked is False
+    assert planner_msg.tool_calls == []
+    assert messages == []
+    assert forced is None
+    assert tianhe_text is None
+
+
+@pytest.mark.asyncio
 async def test_tianhe_degraded_answer_also_passthrough(monkeypatch):
     """天河 HTTP 200 但返回降级文案时，按对接文档 9.4 原样展示，不走本地兜底也不再过 LLM。"""
     degraded = "智能体服务暂时不可用，请稍后重试。"

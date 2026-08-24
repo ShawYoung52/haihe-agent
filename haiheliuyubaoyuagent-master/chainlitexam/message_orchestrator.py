@@ -953,8 +953,8 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
 
 
 # 天河知识类问题规则路由（2026-08-24 用户口径）："暴雨预警四个等级是什么"
-# "暴雨天气的防范建议有哪些"这类纯知识问题确定性走天河问答接口
-# （/api/qa 不限 Fixed QA，目录外问题走天河普通问答链路，接口文档 §6），
+# "暴雨天气的防范建议有哪些"这类目录问题确定性走天河问答接口，
+# 目录之外的问题不得调用天河，仍由既有本地业务工具处理。
 # 不靠 planner LLM 自觉（prompt 0.5 段引导可能漏接），也不走本地 rag_search。
 # 命中后强制调 query_tianhe_fixed_qa、跳过 planner；天河工具级失败也直接展示失败说明，
 # 不交回本地智能体代答（见 _run_tool_round 天河特判）。
@@ -969,11 +969,11 @@ _TIANHE_ADVICE_WORDS = (
 )
 _TIANHE_RAIN_CONTEXT_WORDS = ("暴雨", "强降雨", "大暴雨", "特大暴雨")
 # 04 防灾减灾扩展：非降雨类灾害的防范/应对知识问法
-_TIANHE_HAZARD_CONTEXT_WORDS = ("大风", "高温", "强对流", "雷电", "台风", "寒潮", "大雾")
+_TIANHE_HAZARD_CONTEXT_WORDS = ("大风", "高温", "强对流")
 # 04 等级/划分/定义类知识问的要素词（不含"预警"，预警由上面单独家族处理）
-_TIANHE_LEVEL_ELEMENT_WORDS = ("降雨量", "降雨", "降水", "暴雨", "台风", "大风", "高温", "大雾", "寒潮")
+_TIANHE_LEVEL_ELEMENT_WORDS = ("降雨量", "降雨", "降水", "暴雨", "台风")
 # 04 形成/危害类知识问的要素词（不含"影响"——"暴雨影响哪些河流"是本地河网问题）
-_TIANHE_CAUSE_ELEMENT_WORDS = ("暴雨", "强对流", "台风", "高温", "大雾", "寒潮", "雷电")
+_TIANHE_CAUSE_ELEMENT_WORDS = ("暴雨",)
 _TIANHE_CAUSE_WORDS = ("形成", "成因", "危害")
 # 查当前生效预警的问法绝不能去天河（本地预警工具）；带时间词/日期的决策类
 # 问法也不在知识路由范围（"明天去盘山暴雨注意事项"是决策天气，不是知识问答）。
@@ -1044,11 +1044,13 @@ def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
        时间词是问法一部分，不排除；仍排除 POI 点位防误伤决策天气。
     ③ 05 气候统计类：去年/近5年/今年X月 的高温/低温/寒潮/大风/大雾统计与排名，
        含区县不按 POI 排除；统计词+时段词双约束区分今日实况。
-    query 原样透传用户问题（天河 /api/qa 不限 Fixed QA，目录外走其普通问答链路，文档 §6）。
+    query 原样透传用户问题；目录之外一律返回 None，不允许 Planner 扩大天河任务范围。
     """
     text = str(user_text or "").strip()
     if not text:
         return None
+
+    tianhe_route = ("query_tianhe_fixed_qa", {"query": text})
 
     def _hit(rule_table) -> bool:
         return any(
@@ -1063,44 +1065,77 @@ def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
     )
     if not knowledge_blocked:
         # 预警 + 等级/颜色/划分/标准/定义（"暴雨预警四个等级是什么"）
-        if "预警" in text and any(w in text for w in _TIANHE_LEVEL_WORDS):
-            return ("query_tianhe_fixed_qa", {"query": text})
+        if "暴雨预警" in text and any(w in text for w in _TIANHE_LEVEL_WORDS):
+            return tianhe_route
         # 预警 + 怎么办/应对措施（"暴雨预警发出后公众该怎么办"）
-        if "预警" in text and any(
+        if "暴雨预警" in text and any(
             w in text for w in ("怎么办", "该怎么办", "怎么做", "应对措施", "如何应对", "怎么应对")
         ):
-            return ("query_tianhe_fixed_qa", {"query": text})
+            return tianhe_route
         # 暴雨/大风/高温/强对流等 + 防范/应对/怎么办（"大风天气的防范建议""强对流天气怎么应对"）
         if any(w in text for w in _TIANHE_RAIN_CONTEXT_WORDS + _TIANHE_HAZARD_CONTEXT_WORDS) and any(
             w in text for w in _TIANHE_ADVICE_WORDS
         ):
-            return ("query_tianhe_fixed_qa", {"query": text})
+            return tianhe_route
         # 降雨量/暴雨/台风等 + 等级/划分/定义（"降雨量怎么分等级""台风等级""暴雨等级如何划分"）
         if any(w in text for w in _TIANHE_LEVEL_ELEMENT_WORDS) and any(
             w in text for w in _TIANHE_LEVEL_WORDS
         ):
-            return ("query_tianhe_fixed_qa", {"query": text})
+            return tianhe_route
         # 高温定义（"高温怎么定义""气温多高算是高温""多少度算高温"）
         if "高温" in text and any(
-            w in text for w in ("算是", "多高", "多少度", "几摄氏度", "多少摄氏度", "达到多少", "是多少")
+            w in text for w in ("定义", "算是", "多高", "多少度", "几摄氏度", "多少摄氏度", "达到多少", "是多少")
         ):
-            return ("query_tianhe_fixed_qa", {"query": text})
+            return tianhe_route
         # 暴雨/强对流等 + 形成/成因/危害（"暴雨是如何形成的""暴雨的主要危害有哪些"）
         if any(w in text for w in _TIANHE_CAUSE_ELEMENT_WORDS) and any(
             w in text for w in _TIANHE_CAUSE_WORDS
         ):
-            return ("query_tianhe_fixed_qa", {"query": text})
+            return tianhe_route
 
     # —— ②③ 数据类目录：未来/预报/决策词排除 ——
     if any(w in text for w in _TIANHE_DATA_EXCLUDE_WORDS):
         return None
     # ② 03 实况监测（排除 POI 点位）
     if not _decision_weather_prefilter(text) and _hit(_TIANHE_LIVE_CATALOG_RULES):
-        return ("query_tianhe_fixed_qa", {"query": text})
+        return tianhe_route
     # ③ 05 气候统计（含区县，不按 POI 排除）
     if _hit(_TIANHE_CLIMATE_CATALOG_RULES):
-        return ("query_tianhe_fixed_qa", {"query": text})
+        return tianhe_route
     return None
+
+
+def _enforce_tianhe_catalog_boundary(planner_msg, user_text: str):
+    """拦截 Planner 越权选择天河工具，并固定透传用户原问题。
+
+    天河只承接三份目录文档覆盖的 03 实况监测、04 防灾减灾、05 气候统计问题。
+    该校验同时用于首轮、补充规划轮和工具执行入口，避免模型在后续数据评估中把
+    普通天气预报、点位决策或其它本地业务问题补调到天河。
+    """
+    calls = list(getattr(planner_msg, "tool_calls", None) or [])
+    if not any(call.get("name") == "query_tianhe_fixed_qa" for call in calls):
+        return planner_msg
+
+    allowed = _route_tianhe_knowledge_query(user_text) is not None
+    guarded_calls: list[dict] = []
+    kept_tianhe = False
+    for call in calls:
+        if call.get("name") != "query_tianhe_fixed_qa":
+            guarded_calls.append(call)
+            continue
+        if not allowed or kept_tianhe:
+            continue
+        normalized = dict(call)
+        normalized["args"] = {"query": str(user_text or "").strip()}
+        guarded_calls.append(normalized)
+        kept_tianhe = True
+
+    removed = len(calls) - len(guarded_calls)
+    if removed:
+        reason = "非天河目录问题" if not allowed else "重复天河调用"
+        print(f"[天河目录边界] 已拦截 {removed} 个调用：{reason}")
+    _set_tool_calls(planner_msg, guarded_calls)
+    return planner_msg
 
 
 def _enforce_simple_weather_route(
@@ -2436,6 +2471,16 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     tianhe_passthrough_text = None  # 本轮 forced_final_text 若来自天河 answer，记录原文用于透传判定
     warning_bundles = []
     rolling_forecast_bundles = []
+    had_tool_calls = bool(getattr(planner_msg, "tool_calls", None))
+    planner_msg = _enforce_tianhe_catalog_boundary(planner_msg, user_text)
+    if had_tool_calls and not planner_msg.tool_calls:
+        return (
+            forced_final_text,
+            ree,
+            warning_bundles,
+            rolling_forecast_bundles,
+            tianhe_passthrough_text,
+        )
     tool_names = [tc['name'] for tc in planner_msg.tool_calls]
     print(f"\n=== 第 {iteration} 轮工具调用 ===")
 
@@ -5360,6 +5405,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         _log_query_exit(query_start_time, session_id, query_summary, "fail")
         return
 
+    planner_msg = _enforce_tianhe_catalog_boundary(planner_msg, message.content)
     timing.mark("planner_round_1")
 
     # 影子模式：记录候选工具是否召回 Planner 实际调用工具。只打日志，不改 Planner 绑定。
@@ -5701,6 +5747,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             except Exception:
                 pass
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
+            planner_msg = _enforce_tianhe_catalog_boundary(planner_msg, message.content)
             if _is_future_hour_weather_query(message.content) and planner_msg.tool_calls:
                 print("[未来小时天气路由] 已取得滚动预报，忽略后续重复工具调用并进入回答生成。")
                 _set_tool_calls(planner_msg, [])

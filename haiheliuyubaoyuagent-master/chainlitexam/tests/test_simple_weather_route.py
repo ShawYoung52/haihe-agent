@@ -21,6 +21,7 @@ class TestRouteSimpleWeatherQuery:
             ("明天天气", "query_rolling_forecast"),
             ("明天天气怎么样", "query_rolling_forecast"),
             ("明天天气如何", "query_rolling_forecast"),
+            ("未来三天的天气怎么样？", "query_rolling_forecast"),
             ("今天会下雨吗", "query_rolling_forecast"),
             ("梅江会展中心明日天气", "query_decision_weather_for_poi"),
             ("天津二十中学明天天气", "query_decision_weather_for_poi"),
