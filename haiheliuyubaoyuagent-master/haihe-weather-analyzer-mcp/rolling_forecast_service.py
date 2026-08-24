@@ -292,13 +292,18 @@ def _query_region_hazards(lon: float, lat: float, attach_risk_levels: bool = Tru
         return None
     # 区域天气#8：叠加"本次各灾种风险等级"（风险接口 level，一~四级）。仅 24h 内窗口
     # （attach_risk_levels=True）才调风险接口；接口失败/异常返回 None →
-    # risk_levels_available=False，前端不渲染等级列（静态隐患点表照常）。
-    # 24h 外窗口（attach_risk_levels=False）整列隐藏——不带 risk_levels 字段。
+    # risk_levels_available=False，前端显示"接口暂不可用"（静态隐患点表照常）。
+    # 24h 外窗口（attach_risk_levels=False）不调风险接口（风险接口只出最近 24h 起报预报，
+    # 没有该窗口的对应资料），但按 2026-08-24 甲方口径"别空出来，没风险就写本次无风险"，
+    # 仍带 risk_levels_available=True + 空 risk_levels={}，渲染层据此把每行显示为"本次无风险"
+    # （列不隐藏、不显示"该时次暂无数据"）。
     if not attach_risk_levels:
         return {
             "total_found": int(payload.get("total_found") or 0),
             "radius_km": REGION_HAZARD_RADIUS_KM,
             "categories": merged,
+            "risk_levels": {},
+            "risk_levels_available": True,
         }
     risk_levels = _query_region_risk_levels(lon, lat)
     return {
@@ -813,12 +818,63 @@ def _time_of_day_label(user_query: str, target_start: datetime, now: datetime) -
     return f"{day_word}{phrase}" if phrase else day_word
 
 
+_TOD_WIND_DIR_RE = re.compile(r"^([东南西北偏]+风)")
+
+
+def _summarize_tod_wind(eda_values: list) -> str | None:
+    """时段汇总风力风向：按风向分组、合并该风向的风力区间，风向按出现顺序用"转"连接。
+
+    修复甲方 2026-08-24 反馈的可读性问题——把逐小时 EDA 原文简单去重拼接会出
+    "西北风0-1级；东南风0-1级；东风0-1级；东风1-2级"这种既长又自相矛盾的列表。
+    同风向的多条合并风力区间（东风0-1级 + 东风1-2级 → 东风0~2级）；复合风况
+    （X～Y级阵风Z级）取全部数字的区间；无风向词的原文（如"静风"）原样保留不丢信息。
+    纯代码确定性、零编造：只重组工具返回的 EDA 文本，不引入任何新数值。
+    """
+    groups: list[list] = []  # [direction, min_level, max_level]，保持出现顺序
+    dir_index: dict[str, int] = {}
+    fallback: list[str] = []  # 无风向词的原文
+    for raw in eda_values:
+        e = str(raw or "").strip()
+        if not e or e == "--":
+            continue
+        match = _TOD_WIND_DIR_RE.match(e)
+        if not match:
+            if e not in fallback:
+                fallback.append(e)
+            continue
+        direction = match.group(1)
+        levels: list[int] = []
+        for m in re.finditer(r"(\d+)\s*[-~～]\s*(\d+)\s*级", e):
+            levels.extend([int(m.group(1)), int(m.group(2))])
+        for m in re.finditer(r"(\d+)\s*级", e):
+            levels.append(int(m.group(1)))
+        if not levels:
+            if e not in fallback:
+                fallback.append(e)
+            continue
+        lo, hi = min(levels), max(levels)
+        if direction in dir_index:
+            g = groups[dir_index[direction]]
+            g[1] = min(g[1], lo)
+            g[2] = max(g[2], hi)
+        else:
+            dir_index[direction] = len(groups)
+            groups.append([direction, lo, hi])
+    parts = [
+        f"{direction}{lo}级" if lo == hi else f"{direction}{lo}~{hi}级"
+        for direction, lo, hi in groups
+    ]
+    parts.extend(fallback)
+    return "转".join(parts) if parts else None
+
+
 def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
     """时段化查询：把逐小时 periods 按区域聚合为单条时段汇总（甲方 2026-08-24 口径：
     "今天下午有雨吗"不要逐小时，给该时段整体天气——时段/天气现象/气温/风力风向/降水量）。
 
     聚合口径（纯代码确定性，零编造）：天气现象按出现顺序去重、相邻不同用"转"连接；
-    气温取时段内 tmin 最小~tmax 最大；风力风向取 EDA 原文去重拼接；降水量为各小时求和。
+    气温取时段内 tmin 最小~tmax 最大；风力风向按风向分组合并区间、风向变化用"转"连接
+    （`_summarize_tod_wind`，避免逐小时 EDA 拼接出自相矛盾的长列表）；降水量为各小时求和。
     """
     by_region: dict[str, list[dict]] = {}
     order: list[str] = []
@@ -841,18 +897,13 @@ def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
         weather = weathers[0] if len(weathers) == 1 else ("转".join(weathers) if weathers else None)
         tmax_vals = [v for v in (_to_float(it.get("TMAX")) for it in items) if v is not None]
         tmin_vals = [v for v in (_to_float(it.get("TMIN")) for it in items) if v is not None]
-        eda_parts: list[str] = []
-        for it in items:
-            e = str(it.get("EDA") or "").strip()
-            if e and e != "--" and e not in eda_parts:
-                eda_parts.append(e)
         rain_vals = [v for v in (_to_float(it.get("TP1H")) for it in items) if v is not None]
         rows.append({
             "region": region,
             "weather": weather,
             "tmax": _temperature_display_text(max(tmax_vals)) if tmax_vals else None,
             "tmin": _temperature_display_text(min(tmin_vals)) if tmin_vals else None,
-            "EDA": "；".join(eda_parts) if eda_parts else None,
+            "EDA": _summarize_tod_wind([it.get("EDA") for it in items]),
             "rainfall_mm": round(sum(rain_vals), 1) if rain_vals else None,
         })
     return rows

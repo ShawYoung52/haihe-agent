@@ -334,7 +334,7 @@ class TestQueryRegionHazardsRiskLevelsGating:
         assert result["risk_levels_available"] is True
         assert "risk_levels" in result
 
-    def test_attach_false_skips_risk_and_no_fields(self, monkeypatch):
+    def test_attach_false_skips_risk_but_marks_no_risk(self, monkeypatch):
         called = {"n": 0}
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: self._hazards_ok())
 
@@ -345,8 +345,67 @@ class TestQueryRegionHazardsRiskLevelsGating:
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", fake_levels)
         result = rfs._query_region_hazards(117.45, 40.05, attach_risk_levels=False)
         assert called["n"] == 0, "24h 外不应调用风险接口"
-        assert "risk_levels" not in result
-        assert "risk_levels_available" not in result
+        # 2026-08-24 甲方口径"别空出来，没风险写本次无风险"：列不隐藏，
+        # 带 risk_levels_available=True + 空 risk_levels（渲染层据此每行显示"本次无风险"）。
+        assert result["risk_levels_available"] is True
+        assert result["risk_levels"] == {}
         # 灾害表其余字段照常
         assert result["total_found"] == 3
         assert result["categories"]
+
+
+class TestSummarizeTodWind:
+    """时段汇总风力风向：按风向分组合并风力区间、风向按出现顺序"转"连接。
+
+    修复甲方反馈的可读性问题——逐小时 EDA 原文去重拼接会出
+    "西北风0-1级；东南风0-1级；东风0-1级；东风1-2级"这种既长又自相矛盾的列表。
+    """
+
+    def test_same_direction_merges_force_range(self):
+        # 东风 0-1 与 1-2 合并为 0~2，风向变化用"转"连接
+        out = rfs._summarize_tod_wind(["西北风0-1级", "东南风0-1级", "东风0-1级", "东风1-2级"])
+        assert out == "西北风0~1级转东南风0~1级转东风0~2级"
+
+    def test_single_uniform_wind(self):
+        assert rfs._summarize_tod_wind(["南风2级", "南风2级"]) == "南风2级"
+
+    def test_direction_changes_joined_with_zhuan(self):
+        out = rfs._summarize_tod_wind(["北风3级", "南风2级"])
+        assert out == "北风3级转南风2级"
+
+    def test_compound_wind_range_taken(self):
+        # 复合风况取全部数字的区间（阵风并入）
+        out = rfs._summarize_tod_wind(["东南风3～4级阵风6级"])
+        assert out == "东南风3~6级"
+
+    def test_empty_and_placeholder_skipped(self):
+        assert rfs._summarize_tod_wind([]) is None
+        assert rfs._summarize_tod_wind(["", "--"]) is None
+
+    def test_unparseable_kept_verbatim(self):
+        # 无风向词的原文原样保留，不丢信息
+        out = rfs._summarize_tod_wind(["静风"])
+        assert out == "静风"
+
+    def test_summary_rows_uses_wind_summarizer(self, monkeypatch):
+        """集成：time_of_day_summary 的风力风向走 _summarize_tod_wind，不再逐小时"；"拼接。"""
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"resultData": {"117.45_40.05": {
+                    "WEA": ["多云"] * 6, "TP1H": [0.0] * 6,
+                    "TMAX": [33.0] * 6, "TMIN": [30.0] * 6,
+                    "EDA": ["西北风0-1级", "东南风0-1级", "东风0-1级", "东风1-2级", "东风1-2级", "东风1-2级"],
+                    "VISMIN": [10.0] * 6,
+                }}}
+
+        monkeypatch.setattr(rfs.requests, "get", lambda *a, **k: Resp())
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        rfs._rolling_forecast_cache.clear()
+        result = rfs.query_rolling_forecast_core(user_query="今天下午蓟州天气怎么样", now=NOW)
+        row = result["time_of_day_summary"][0]
+        assert "；" not in row["EDA"]
+        assert row["EDA"] == "西北风0~1级转东南风0~1级转东风0~2级"

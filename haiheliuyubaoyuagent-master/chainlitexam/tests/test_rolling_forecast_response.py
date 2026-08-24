@@ -324,6 +324,17 @@ class TestRegionHazardTableRiskLevels:
         assert "| 地质灾害 | 2 处 | 无风险 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
+    def test_levels_column_beyond_24h_shows_no_risk_not_hidden(self):
+        """24h 外窗口（明天/未来N天）：MCP 不调风险接口、带 risk_levels_available=True +
+        空 risk_levels={} → 列不隐藏、每行显示"本次无风险"（2026-08-24 甲方口径：
+        "风险等级别空出来，没风险就写本次无风险"）。"""
+        payload = self._with_levels({}, available=True)
+        bundle = rfr.build_rolling_forecast_bundle("明天蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "本次风险等级" in section
+        assert "| 地质灾害 | 2 处 | 本次无风险 |" in section
+        assert "| 山洪 | 1 处 | 本次无风险 |" in section
+
 
 def _rain_only_daily():
     """外埠城市（唐山等）滚动预报只回降水格点 TP1H，文字要素全空（2026-08-19 探针实锤）。"""
