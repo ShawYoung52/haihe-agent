@@ -76,10 +76,16 @@ def verify_geojson_properties(river_geojson: dict) -> bool:
         # 检查 per-edge 传播时间
         prop_dist = props.get("propagation_distance_km")
         prop_time = props.get("propagation_time_hours")
-        if prop_dist is None or prop_time is None:
+        travel_unknown = props.get("travel_time_unknown") is True
+        if prop_dist is None:
             null_prop_issues += 1
-        else:
-            pass  # OK
+        elif travel_unknown:
+            # 传播时间确实无法确定时，null 是业务规定值，不能用 0 或猜测值代替。
+            if prop_time is not None:
+                null_prop_issues += 1
+                print(f"  ✗ {props.get('river_name', '?')}: travel_time_unknown=true 但 propagation_time_hours 非 null")
+        elif prop_time is None:
+            null_prop_issues += 1
 
         if impact_type == "direct_buffer":
             direct_count += 1
@@ -104,9 +110,9 @@ def verify_geojson_properties(river_geojson: dict) -> bool:
     print(f"  下游河段 features: {downstream_count}")
 
     if null_prop_issues > 0:
-        print(f"  ✗ {null_prop_issues} 条 feature 缺 propagation_distance_km/propagation_time_hours")
+        print(f"  ✗ {null_prop_issues} 条 feature 的传播时间字段与 travel_time_unknown 不一致")
     else:
-        print(f"  ✓ 所有 feature 均有 per-edge 传播时间属性")
+        print(f"  ✓ 所有 feature 的 per-edge 传播时间属性有效（未知值按 null 处理）")
 
     if null_prop_direct_issues == 0 and direct_count > 0:
         print(f"  ✓ 直接河段属性完整（{direct_count} 条）")
@@ -115,7 +121,7 @@ def verify_geojson_properties(river_geojson: dict) -> bool:
 
     total_null = null_prop_issues + null_prop_direct_issues + null_prop_downstream_issues
     if total_null == 0:
-        print("  ✓ 所有 feature properties 无非 null 字段")
+        print("  ✓ 所有 feature properties 完整（业务允许的未知时间为 null）")
     return total_null == 0
 
 
@@ -144,6 +150,7 @@ def verify_propagation_consistency(result: dict) -> bool:
     farthest_downstream: dict[str, float] = {}      # 最远下游累计距离 end_downstream_distance_km
     river_arrivals: dict[str, list[datetime]] = {}
     river_entry_t0: dict[str, list[datetime]] = {}
+    travel_unknown_names: set[str] = set()
     iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
     for feat in river_geojson.get("features", []):
         props = feat.get("properties", {})
@@ -151,6 +158,8 @@ def verify_propagation_consistency(result: dict) -> bool:
         if not name:
             continue
         per_edge_names.add(name)
+        if props.get("travel_time_unknown") is True:
+            travel_unknown_names.add(name)
         if props.get("impact_type") == "downstream_50km":
             raw = props.get("end_downstream_distance_km")
             try:
@@ -188,6 +197,27 @@ def verify_propagation_consistency(result: dict) -> bool:
     for name, summary in prop_rivers.items():
         summary_hours = summary.get("propagation_time_hours")
         summary_dist = summary.get("propagation_distance_km")
+        expected_unknown = name in travel_unknown_names
+        if expected_unknown:
+            invalid_unknown_fields = {
+                "travel_time_unknown": summary.get("travel_time_unknown"),
+                "propagation_distance_km": summary_dist,
+                "propagation_time_hours": summary_hours,
+                "earliest_arrival_time": summary.get("earliest_arrival_time"),
+                "latest_arrival_time": summary.get("latest_arrival_time"),
+            }
+            if (
+                summary.get("travel_time_unknown") is not True
+                or any(invalid_unknown_fields[field] is not None for field in (
+                    "propagation_distance_km", "propagation_time_hours",
+                    "earliest_arrival_time", "latest_arrival_time",
+                ))
+            ):
+                print(f"  ✗ {name}: per-edge travel 未知，但 summary 未按 null/unknown 输出: {invalid_unknown_fields}")
+                issues += 1
+        elif summary.get("travel_time_unknown") is True:
+            print(f"  ✗ {name}: per-edge travel 均已知，但 summary 错标 travel_time_unknown=true")
+            issues += 1
         entries = river_entry_t0.get(name, [])
         arrivals = river_arrivals.get(name, [])
         if entries and arrivals:
@@ -210,7 +240,8 @@ def verify_propagation_consistency(result: dict) -> bool:
 def verify_arrival_time_consistency(result: dict) -> bool:
     """验证 6：预计到达时间一致性。
 
-    - 每个有 t0_source_time 的 feature 必须有 estimated_arrival_time
+    - 每个有 t0_source_time 且 travel 已知的 feature 必须有 estimated_arrival_time
+    - travel_time_unknown=true 时 estimated_arrival_time 必须为 null
     - ISO UTC 格式正则
     - 直接段：|arrival - t0 - propagation_time_hours * 3600| ≤ 200s
     - 下游段：arrival ≥ t0（时间不倒流）
@@ -221,6 +252,11 @@ def verify_arrival_time_consistency(result: dict) -> bool:
     iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
     features = result.get("river_geojson", {}).get("features", [])
     issues = 0
+    try:
+        velocity_mps = float(result.get("river_propagation", {}).get("flow_velocity_mps") or 0.0)
+    except (TypeError, ValueError):
+        velocity_mps = 0.0
+    velocity_kmh = velocity_mps * 3.6
 
     # 逐 feature 检查
     feature_arrivals: dict[str, list[datetime]] = {}
@@ -232,33 +268,62 @@ def verify_arrival_time_consistency(result: dict) -> bool:
         prop_hours = props.get("propagation_time_hours", 0)
 
         if t0 is not None:
-            # 有 t0 必须有 arrival
-            if arrival is None:
-                print(f"  ✗ {name}: t0_source_time={t0} 但 estimated_arrival_time 为 None")
-                issues += 1
-                continue
+            travel_unknown = props.get("travel_time_unknown") is True
             # ISO 格式
             if not iso_re.match(t0):
                 print(f"  ✗ {name}: t0_source_time 格式异常: {t0}")
                 issues += 1
+            if travel_unknown:
+                if arrival is not None:
+                    print(f"  ✗ {name}: travel_time_unknown=true 但 estimated_arrival_time={arrival}")
+                    issues += 1
+                continue
+            # 有已知 travel 的 t0 必须有 arrival
+            if arrival is None:
+                print(f"  ✗ {name}: t0_source_time={t0} 且 travel 已知，但 estimated_arrival_time 为 None")
+                issues += 1
+                continue
             if not iso_re.match(arrival):
                 print(f"  ✗ {name}: estimated_arrival_time 格式异常: {arrival}")
                 issues += 1
 
-            # 直接段：arrival - t0 ≈ prop_hours * 3600s
-            # 容忍度 200s：propagation_time_hours 是 round(x, 1) 精度，最差 0.05h*3600=180s 误差
-            if prop_hours and math.isfinite(prop_hours) and prop_hours > 0:
+            # 无论 travel_time_hour 是否因舍入变成 0.0，都必须禁止时间倒流。
+            try:
+                t0_dt = datetime.fromisoformat(t0.replace("Z", "+00:00"))
+                arr_dt = datetime.fromisoformat(arrival.replace("Z", "+00:00"))
+                diff_s = (arr_dt - t0_dt).total_seconds()
+                if diff_s < 0:
+                    print(f"  ✗ {name}: estimated_arrival_time 早于 impact_start_time（倒流 {diff_s}s）")
+                    issues += 1
+
+                prop_distance = props.get("propagation_distance_km")
                 try:
-                    t0_dt = datetime.fromisoformat(t0.replace("Z", "+00:00"))
-                    arr_dt = datetime.fromisoformat(arrival.replace("Z", "+00:00"))
-                    diff_s = (arr_dt - t0_dt).total_seconds()
-                    expected_s = prop_hours * 3600
+                    prop_distance = float(prop_distance)
+                except (TypeError, ValueError):
+                    prop_distance = None
+                if (
+                    prop_distance is not None and math.isfinite(prop_distance)
+                    and prop_distance >= 0 and velocity_kmh > 0
+                ):
+                    expected_s = prop_distance / velocity_kmh * 3600.0
+                    # distance 输出到 0.001km、时间输出到秒；低流速时距离量化误差
+                    # 会被放大，因此容差随流速计算，不写死默认 2m/s。
+                    tolerance_s = 2.0 + 0.0005 / velocity_kmh * 3600.0
+                    if abs(diff_s - expected_s) > tolerance_s:
+                        print(
+                            f"  ✗ {name}: arrival-t0={diff_s}s, 按距离/流速应为 {expected_s:.3f}s，"
+                            f"偏差 > {tolerance_s:.3f}s"
+                        )
+                        issues += 1
+                elif prop_hours is not None and math.isfinite(float(prop_hours)) and float(prop_hours) > 0:
+                    # 兼容旧结果没有 propagation_distance_km 的情况。
+                    expected_s = float(prop_hours) * 3600.0
                     if abs(diff_s - expected_s) > 200:
                         print(f"  ✗ {name}: arrival-t0={diff_s}s, 预期={expected_s}s (prop={prop_hours}h), 偏差 > 200s")
                         issues += 1
-                except Exception as e:
-                    print(f"  ✗ {name}: 时间解析失败: {e}")
-                    issues += 1
+            except Exception as e:
+                print(f"  ✗ {name}: 时间解析失败: {e}")
+                issues += 1
         else:
             # 无 t0 → arrival 应为 None
             if arrival is not None:
@@ -332,15 +397,12 @@ def verify_arrival_time_consistency(result: dict) -> bool:
 
 
 def verify_impact_topology_consistency(river_geojson: dict) -> bool:
-    """验证 7：影响时间拓扑一致性（upstream_ids/downstream_id/affected/impact_sources）。
+    """验证 7：基于河网拓扑的最早影响时间传播一致性。
 
-    规则（用户确认，对齐 GPT 递推模型；时间语义映射现有字段）：
-      - 每条 feature 都有 4 个新字段；affected 恒 True（输出即受影响）
-      - direct feature：impact_sources == ["DIRECT"]
-      - downstream feature：impact_sources 必须恰好等于所有 arrival_time == 本边
-        t0_source_time 的上游；并列最早来源必须全部保留，后到来源仅保留在 upstream_ids
-      - 闭环：本边 downstream_id 指向的下游 feature，其 t0_source_time == 本边 estimated_arrival_time
-      - upstream_ids / downstream_id 引用的 edge_key 必须存在于 features 集合
+    任意 feature 的开始时间必须等于自身 direct_impact_time 与全部有效上游
+    arrival_time 的最小值；并列最早来源必须全部保留。分汊通过 downstream_ids
+    完整表达，旧 downstream_id 仅验证为该列表首项。后到支流只属于 upstream_ids，
+    不要求其 arrival_time 等于当前 feature 的 impact_start_time。
     """
     _sep("验证 7：影响时间拓扑一致性")
     features = river_geojson.get("features", [])
@@ -355,70 +417,151 @@ def verify_impact_topology_consistency(river_geojson: dict) -> bool:
         key = str(props.get("edge_key") or "")
         by_key[key] = props
 
+    # 独立使用结构化节点字段重建邻接，不能依赖待验证的 upstream/downstream 自报值。
+    by_from_node: dict[str, list[str]] = {}
+    by_to_node: dict[str, list[str]] = {}
+    for key, props in by_key.items():
+        topology_from = str(props.get("topology_from") or "")
+        topology_to = str(props.get("topology_to") or "")
+        if topology_from:
+            by_from_node.setdefault(topology_from, []).append(key)
+        if topology_to:
+            by_to_node.setdefault(topology_to, []).append(key)
+
     for feat in features:
         props = feat.get("properties", {})
         name = props.get("river_name", "")
         key = str(props.get("edge_key") or "")
-        # 1) 新字段存在
-        for field in ("upstream_ids", "downstream_id", "affected", "impact_sources"):
+        # 1) 新旧兼容字段必须同时存在
+        for field in (
+            "upstream_ids", "downstream_id", "downstream_ids", "affected",
+            "impact_sources", "direct_impact_time", "impact_start_time",
+            "arrival_time", "travel_time_hour", "travel_time_unknown",
+            "topology_from", "topology_to",
+        ):
             if field not in props:
                 print(f"  ✗ {name}({key}): 缺字段 {field}")
                 issues += 1
-        # 2) affected 恒 True
-        if props.get("affected") is not True:
-            print(f"  ✗ {name}({key}): affected 应为 True，实际 {props.get('affected')}")
+
+        # 2) 新旧时间字段必须同值，避免消费者看到两套冲突结果
+        if props.get("impact_start_time") != props.get("t0_source_time"):
+            print(f"  ✗ {name}({key}): impact_start_time 与 t0_source_time 不一致")
             issues += 1
-        # 3) 引用的 edge_key 必须存在
-        for ukey in props.get("upstream_ids") or []:
+        if props.get("arrival_time") != props.get("estimated_arrival_time"):
+            print(f"  ✗ {name}({key}): arrival_time 与 estimated_arrival_time 不一致")
+            issues += 1
+        if props.get("travel_time_hour") != props.get("propagation_time_hours"):
+            print(f"  ✗ {name}({key}): travel_time_hour 与 propagation_time_hours 不一致")
+            issues += 1
+
+        # 3) 从结构化节点独立重建完整邻接，并与自报列表逐项一致
+        topology_from = str(props.get("topology_from") or "")
+        topology_to = str(props.get("topology_to") or "")
+        if not topology_from or not topology_to:
+            print(f"  ✗ {name}({key}): topology_from/topology_to 不能为空")
+            issues += 1
+        expected_upstream = sorted(
+            item for item in by_to_node.get(topology_from, []) if item != key
+        ) if topology_from else []
+        expected_downstream = sorted(
+            item for item in by_from_node.get(topology_to, []) if item != key
+        ) if topology_to else []
+        upstream_ids = sorted(props.get("upstream_ids") or [])
+        if upstream_ids != expected_upstream:
+            print(f"  ✗ {name}({key}): upstream_ids={upstream_ids}，拓扑重建应为 {expected_upstream}")
+            issues += 1
+        downstream_ids = props.get("downstream_ids") or []
+        if isinstance(downstream_ids, list) and sorted(downstream_ids) != expected_downstream:
+            print(f"  ✗ {name}({key}): downstream_ids={sorted(downstream_ids)}，拓扑重建应为 {expected_downstream}")
+            issues += 1
+
+        for ukey in upstream_ids:
             if ukey not in by_key:
                 print(f"  ✗ {name}({key}): upstream_ids 引用不存在 {ukey}")
+                issues += 1
+        if not isinstance(downstream_ids, list):
+            print(f"  ✗ {name}({key}): downstream_ids 必须是列表")
+            issues += 1
+            downstream_ids = []
+        for dkey in downstream_ids:
+            if dkey not in by_key:
+                print(f"  ✗ {name}({key}): downstream_ids 引用不存在 {dkey}")
+                issues += 1
+            elif key not in (by_key[dkey].get("upstream_ids") or []):
+                print(f"  ✗ {name}({key}): 下游 {dkey} 未反向引用本边为 upstream")
                 issues += 1
         did = props.get("downstream_id")
         if did is not None and did not in by_key:
             print(f"  ✗ {name}({key}): downstream_id 引用不存在 {did}")
             issues += 1
-        # 4) impact_sources 语义
-        itype = props.get("impact_type")
+        expected_legacy = sorted(downstream_ids)[0] if downstream_ids else None
+        if did != expected_legacy:
+            print(f"  ✗ {name}({key}): downstream_id={did}，应为 downstream_ids 首项 {expected_legacy}")
+            issues += 1
+
+        # 4) affected=false 时不得伪造时间或来源
+        affected = props.get("affected") is True
         sources = props.get("impact_sources") or []
-        if itype == "direct_buffer":
-            if sources != ["DIRECT"]:
-                print(f"  ✗ {name}({key}): direct impact_sources 应为 [DIRECT]，实际 {sources}")
+        if not affected:
+            if props.get("impact_start_time") is not None or props.get("arrival_time") is not None or sources:
+                print(f"  ✗ {name}({key}): affected=false 时开始/到达时间应为 null，来源应为空")
                 issues += 1
-        elif itype == "downstream_50km":
-            if not sources:
-                print(f"  ✗ {name}({key}): downstream impact_sources 为空")
+            continue
+
+        # 5) start = min(direct, all upstream arrivals)，并列来源必须恰好完整
+        candidates = []
+        direct_time = props.get("direct_impact_time")
+        if direct_time is not None:
+            candidates.append(("DIRECT", direct_time))
+        for ukey in props.get("upstream_ids") or []:
+            if ukey in by_key:
+                upstream_arrival = by_key[ukey].get("arrival_time")
+                if upstream_arrival is not None:
+                    candidates.append((ukey, upstream_arrival))
+
+        start = props.get("impact_start_time")
+        if candidates:
+            expected_start = min(value for _source, value in candidates)
+            expected_sources = sorted(source for source, value in candidates if value == expected_start)
+            if start != expected_start:
+                print(f"  ✗ {name}({key}): start={start}，候选最早时间应为 {expected_start}")
                 issues += 1
-            elif not set(sources) <= set(props.get("upstream_ids") or []):
-                print(f"  ✗ {name}({key}): impact_sources 不在 upstream_ids 内: {sources}")
-                issues += 1
-            # 5) impact_sources == 所有 arrival == t0 的上游（并列最早必须全列）
-            t0 = props.get("t0_source_time")
-            if t0 is not None:
-                upstream_ids = props.get("upstream_ids") or []
-                up_arrivals = [
-                    by_key[uk].get("estimated_arrival_time")
-                    for uk in upstream_ids if uk in by_key
-                ]
-                if t0 not in up_arrivals:
-                    print(f"  ✗ {name}({key}): t0={t0} 不等于任何上游 arrival {up_arrivals}")
-                    issues += 1
-                expected_sources = sorted(
-                    uk for uk in upstream_ids
-                    if uk in by_key and by_key[uk].get("estimated_arrival_time") == t0
+            if sorted(sources) != expected_sources:
+                print(
+                    f"  ✗ {name}({key}): impact_sources={sorted(sources)}，"
+                    f"并列最早来源应为 {expected_sources}"
                 )
-                if sorted(sources) != expected_sources:
-                    print(
-                        f"  ✗ {name}({key}): impact_sources={sorted(sources)}，"
-                        f"应完整列出并列最早来源 {expected_sources}"
-                    )
-                    issues += 1
-        # 6) 闭环：下游 feature 的 t0 == 本边 arrival
-        if did is not None and did in by_key:
-            down_t0 = by_key[did].get("t0_source_time")
-            my_arrival = props.get("estimated_arrival_time")
-            if down_t0 is not None and my_arrival is not None and down_t0 != my_arrival:
-                print(f"  ✗ {name}({key}): 下游 {did}.t0={down_t0} != 本边 arrival={my_arrival}（闭环断裂）")
                 issues += 1
+        elif props.get("impact_type") == "direct_buffer":
+            # 老数据可能缺 direct 时间；河段仍由本地暴雨直接命中，但不能生成假时间。
+            if start is not None or sources != ["DIRECT"]:
+                print(f"  ✗ {name}({key}): direct 时间缺失时 start=null、sources=[DIRECT]")
+                issues += 1
+        else:
+            print(f"  ✗ {name}({key}): downstream affected=true 但没有有效时间候选")
+            issues += 1
+
+        # 6) travel 缺失时 arrival 必须为空；否则有 start 就必须有 arrival
+        arrival = props.get("arrival_time")
+        if props.get("travel_time_unknown") is True:
+            if arrival is not None:
+                print(f"  ✗ {name}({key}): travel_time_unknown=true 时 arrival 必须为 null")
+                issues += 1
+        elif start is not None and arrival is None:
+            print(f"  ✗ {name}({key}): 有 impact_start_time 和有效 travel，但 arrival 为空")
+            issues += 1
+
+        # 7) 只对真正触发下游最早开始的来源检查闭环；后到分支允许 arrival > start
+        my_arrival = props.get("arrival_time")
+        for dkey in downstream_ids:
+            if dkey not in by_key:
+                continue
+            down = by_key[dkey]
+            if key in (down.get("impact_sources") or []):
+                down_start = down.get("impact_start_time")
+                if my_arrival != down_start:
+                    print(f"  ✗ {name}({key}): 作为下游 {dkey} 的最早来源时 arrival={my_arrival} != start={down_start}")
+                    issues += 1
 
     if issues == 0:
         print(f"  ✓ 影响时间拓扑一致性验证通过（{len(features)} 条 features）")
@@ -504,7 +647,7 @@ def main():
         print(f"  {status} - {name}")
 
     if all_pass:
-        print("\n全部验证通过。传播时间在顶层 JSON 和 GeoJSON feature 属性中均已输出，无 null 字段。")
+        print("\n全部验证通过。传播时间与拓扑字段完整；业务确实未知的时间按 null 输出且不会继续传播。")
     else:
         print("\n部分验证未通过。✗ 项对应字段可能为 null 或缺失，请检查代码是否为最新版本。")
     return 0 if all_pass else 1

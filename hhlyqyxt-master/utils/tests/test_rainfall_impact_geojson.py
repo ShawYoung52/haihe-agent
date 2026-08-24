@@ -1726,3 +1726,457 @@ def test_impact_topology_cross_day_and_shuffled_order():
     assert sprops["101"]["upstream_ids"] == props["101"]["upstream_ids"]
     assert sprops["101"]["impact_sources"] == props["101"]["impact_sources"]
     assert sprops["101"]["t0_source_time"] == props["101"]["t0_source_time"]
+
+
+def test_direct_edge_uses_earlier_upstream_arrival_and_keeps_chain_closed():
+    """B 同时被本地暴雨命中且接收 A 来水时，必须取更早的 A.arrival。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("2,0", "3,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (2.0, 0.0), (3.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    stations = [
+        _station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+        _station("S2", 1.0, 0.0, "2026-08-20T10:00:00"),
+    ]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    a, b, c = props["100"], props["200"], props["300"]
+
+    assert b["direct_impact_time"] == "2026-08-20T10:00:00Z"
+    assert b["impact_start_time"] == a["arrival_time"] == "2026-08-20T09:00:00Z"
+    assert b["arrival_time"] == "2026-08-20T10:00:00Z"
+    assert b["impact_sources"] == [a["edge_key"]]
+    assert c["impact_start_time"] == b["arrival_time"]
+    assert c["impact_sources"] == [b["edge_key"]]
+
+
+def test_direct_edge_keeps_direct_source_when_direct_time_is_earlier():
+    """B 的本地直接影响早于 A.arrival 时，后到的 A 不能覆盖 B。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+    ]
+    stations = [
+        _station("S1", 0.0, 0.0, "2026-08-20T10:00:00"),
+        _station("S2", 1.0, 0.0, "2026-08-20T08:00:00"),
+    ]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    b = props["200"]
+
+    assert b["impact_start_time"] == "2026-08-20T08:00:00Z"
+    assert b["arrival_time"] == "2026-08-20T09:00:00Z"
+    assert b["impact_sources"] == ["DIRECT"]
+
+
+def test_direct_edge_preserves_direct_and_upstream_when_they_tie():
+    """本地直接时间与上游 arrival 并列最早时，两类来源都必须保留。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+    ]
+    stations = [
+        _station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+        _station("S2", 1.0, 0.0, "2026-08-20T09:00:00"),
+    ]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    a, b = props["100"], props["200"]
+
+    assert b["impact_start_time"] == "2026-08-20T09:00:00Z"
+    assert b["impact_sources"] == sorted(["DIRECT", a["edge_key"]])
+
+
+def test_bifurcation_propagates_to_every_downstream_and_keeps_legacy_id():
+    """A→B、C 分汊时，两个分支都传播；downstream_id 仅作为兼容首项。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("1,0", "2,1", 0, {"objectid": "300", "src_name": "丙河", "length_km": 14.4}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+        _candidate_row("300", (1.0, 0.0), (2.0, 1.0), min_dist=30.0, len_km=14.4),
+    ]
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00")]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    a, b, c = props["100"], props["200"], props["300"]
+    expected_downstream = sorted([b["edge_key"], c["edge_key"]])
+
+    assert a["downstream_ids"] == expected_downstream
+    assert a["downstream_id"] == expected_downstream[0]
+    assert b["impact_start_time"] == a["arrival_time"]
+    assert c["impact_start_time"] == a["arrival_time"]
+    assert b["impact_sources"] == [a["edge_key"]]
+    assert c["impact_sources"] == [a["edge_key"]]
+
+
+def test_validator_accepts_confluence_when_later_upstream_is_not_impact_source():
+    """A、B→C 中 B 后到是合法状态，验证器不能要求 B.arrival == C.start。"""
+    import intranet_verify_rain_impact as verifier
+
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("0,1", "1,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (0.0, 1.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    stations = [
+        _station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+        _station("S2", 0.0, 1.0, "2026-08-20T10:00:00"),
+    ]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+
+    assert verifier.verify_impact_topology_consistency(geojson) is True
+
+
+def test_missing_travel_time_stops_time_propagation_without_guessing():
+    """当前边传播时间未知时保留其开始时间，但 arrival=null，不能激活下游。"""
+    features = [
+        {"type": "Feature", "properties": {
+            "edge_key": "A", "river_name": "甲河", "impact_type": "direct_buffer",
+            "topology_from": "N0", "topology_to": "N1",
+            "min_station_distance_km": 1.0, "trigger_station_count": 1,
+            "trigger_stations": [{"station_id": "S1"}],
+            "propagation_distance_km": 0.0, "propagation_time_hours": None,
+            "direct_impact_time": "2026-08-20T08:00:00Z",
+            "t0_source_time": "2026-08-20T08:00:00Z",
+            "estimated_arrival_time": "2026-08-20T08:00:00Z",
+        }},
+        {"type": "Feature", "properties": {
+            "edge_key": "B", "river_name": "乙河", "impact_type": "downstream_50km",
+            "topology_from": "N1", "topology_to": "N2",
+            "propagation_distance_km": 7.2, "propagation_time_hours": 1.0,
+            "direct_impact_time": None,
+            "t0_source_time": "2026-08-20T08:00:00Z",
+            "estimated_arrival_time": "2026-08-20T09:00:00Z",
+        }},
+    ]
+
+    rig._attach_impact_topology(features, flow_velocity_mps=2.0)
+    a, b = (f["properties"] for f in features)
+
+    assert a["affected"] is True
+    assert a["impact_start_time"] == "2026-08-20T08:00:00Z"
+    assert a["arrival_time"] is None
+    assert a["travel_time_unknown"] is True
+    assert b["affected"] is False
+    assert b["impact_start_time"] is None
+    assert b["arrival_time"] is None
+    assert b["impact_sources"] == []
+
+    import intranet_verify_rain_impact as verifier
+    final_geojson = {"type": "FeatureCollection", "features": features}
+    rig._drop_unaffected_features(final_geojson, flow_velocity_mps=2.0)
+    assert [f["properties"]["edge_key"] for f in final_geojson["features"]] == ["A"]
+    assert final_geojson["features"][0]["properties"]["downstream_ids"] == []
+    assert rig._active_downstream_edges([{"edge_key": "B"}], final_geojson) == []
+    result = {
+        "river_geojson": final_geojson,
+        "params": {"reference_time": "2026-08-20T08:00:00Z"},
+        "river_propagation": {"rivers": []},
+    }
+    assert verifier.verify_geojson_properties(final_geojson) is True
+    assert verifier.verify_arrival_time_consistency(result) is True
+    assert verifier.verify_impact_topology_consistency(final_geojson) is True
+
+
+def test_complete_propagation_is_independent_of_graph_and_row_order():
+    """同一多分支河网反转边和数据库行顺序，最终时间和来源必须完全一致。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("0,1", "1,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 14.4}),
+        ("1,0", "2,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+        ("2,0", "3,0", 0, {"objectid": "400", "src_name": "丁河", "length_km": 7.2}),
+        ("2,0", "3,1", 0, {"objectid": "500", "src_name": "戊河", "length_km": 14.4}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (0.0, 1.0), (1.0, 0.0), min_dist=5.0, len_km=14.4,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+        _candidate_row("400", (2.0, 0.0), (3.0, 0.0), min_dist=35.0, len_km=7.2),
+        _candidate_row("500", (2.0, 0.0), (3.0, 1.0), min_dist=35.0, len_km=14.4),
+    ]
+    stations = [
+        _station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+        _station("S2", 0.0, 1.0, "2026-08-20T08:00:00"),
+    ]
+
+    first = _run_full_geojson(edges, rows, stations)
+    second = _run_full_geojson(list(reversed(edges)), list(reversed(rows)), stations)
+
+    def snapshot(geojson):
+        return {
+            p["objectid"]: {
+                "start": p["impact_start_time"],
+                "arrival": p["arrival_time"],
+                "sources": sorted(p["impact_sources"]),
+                "upstream": sorted(p["upstream_ids"]),
+                "downstream": sorted(p["downstream_ids"]),
+            }
+            for f in geojson["features"] for p in [f["properties"]]
+        }
+
+    assert snapshot(first) == snapshot(second)
+
+
+def test_positive_length_cycle_terminates_and_keeps_earliest_source():
+    """正长度环 B→C→B 不能无限传播，B 仍保留从 A 首次到达的最早时间。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("2,0", "1,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+        _candidate_row("300", (2.0, 0.0), (1.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00")]
+
+    geojson = _run_full_geojson(edges, rows, stations, downstream_km=50.0)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    a, b, c = props["100"], props["200"], props["300"]
+
+    assert b["impact_start_time"] == a["arrival_time"]
+    assert b["impact_sources"] == [a["edge_key"]]
+    assert c["impact_start_time"] == b["arrival_time"]
+    assert c["impact_sources"] == [b["edge_key"]]
+
+
+def test_subsecond_arrivals_that_render_to_same_second_are_tied_sources():
+    """输出精度为秒；同一显示秒内的上游 arrival 必须都算并列最早来源。"""
+    import intranet_verify_rain_impact as verifier
+
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.201}),
+        ("0,1", "1,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.201,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (0.0, 1.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S2"}], trigger_station_count=1),
+        _candidate_row("300", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    stations = [
+        _station("S1", 0.0, 0.0, "2026-08-20T08:00:00"),
+        _station("S2", 0.0, 1.0, "2026-08-20T08:00:00"),
+    ]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+    a, b, c = props["100"], props["200"], props["300"]
+
+    assert a["arrival_time"] == b["arrival_time"] == "2026-08-20T09:00:00Z"
+    assert c["impact_sources"] == sorted([a["edge_key"], b["edge_key"]])
+    assert verifier.verify_impact_topology_consistency(geojson) is True
+
+
+def test_endpoint_haversine_fallback_is_not_used_as_travel_time():
+    """长度属性和 DB 长度都缺失时，端点弦距只能辅助几何，不能生成 arrival。"""
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河"}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=None,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+    ]
+    stations = [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00")]
+
+    geojson = _run_full_geojson(edges, rows, stations)
+    props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
+
+    assert props["100"]["impact_start_time"] == "2026-08-20T08:00:00Z"
+    assert props["100"]["travel_time_unknown"] is True
+    assert props["100"]["arrival_time"] is None
+    assert props["200"]["affected"] is False
+    assert props["200"]["impact_start_time"] is None
+
+
+def test_validator_rebuilds_topology_and_rejects_symmetrically_hidden_branch():
+    """同时删掉分汊两侧的自报引用也必须失败，验证器应从节点字段独立重建邻接。"""
+    import copy
+    import intranet_verify_rain_impact as verifier
+
+    edges = [
+        ("0,0", "1,0", 0, {"objectid": "100", "src_name": "甲河", "length_km": 7.2}),
+        ("1,0", "2,0", 0, {"objectid": "200", "src_name": "乙河", "length_km": 7.2}),
+        ("1,0", "2,1", 0, {"objectid": "300", "src_name": "丙河", "length_km": 7.2}),
+    ]
+    rows = [
+        _candidate_row("100", (0.0, 0.0), (1.0, 0.0), min_dist=5.0, len_km=7.2,
+                       trigger_stations=[{"station_id": "S1"}], trigger_station_count=1),
+        _candidate_row("200", (1.0, 0.0), (2.0, 0.0), min_dist=30.0, len_km=7.2),
+        _candidate_row("300", (1.0, 0.0), (2.0, 1.0), min_dist=30.0, len_km=7.2),
+    ]
+    valid = _run_full_geojson(
+        edges, rows, [_station("S1", 0.0, 0.0, "2026-08-20T08:00:00")])
+    broken = copy.deepcopy(valid)
+    props = {p["objectid"]: p for f in broken["features"] for p in [f["properties"]]}
+    a, b, c = props["100"], props["200"], props["300"]
+    a["downstream_ids"] = [b["edge_key"]]
+    a["downstream_id"] = b["edge_key"]
+    c["upstream_ids"] = []
+    c["affected"] = False
+    c["impact_sources"] = []
+    c["impact_start_time"] = c["t0_source_time"] = None
+    c["arrival_time"] = c["estimated_arrival_time"] = None
+
+    assert verifier.verify_impact_topology_consistency(broken) is False
+
+
+def test_arrival_validator_rejects_backwards_time_when_rounded_travel_is_zero():
+    """极短河段 travel_time_hour=0.0 时仍必须检查 arrival 不得早于 start。"""
+    import intranet_verify_rain_impact as verifier
+
+    result = {
+        "river_geojson": {"type": "FeatureCollection", "features": [{
+            "properties": {
+                "river_name": "短河段",
+                "t0_source_time": "2026-08-20T08:00:00Z",
+                "estimated_arrival_time": "2026-08-20T07:59:59Z",
+                "propagation_distance_km": 0.001,
+                "propagation_time_hours": 0.0,
+                "travel_time_unknown": False,
+            }
+        }]},
+        "params": {"reference_time": "2026-08-20T08:00:00Z"},
+        "river_propagation": {"flow_velocity_mps": 2.0, "rivers": []},
+    }
+
+    assert verifier.verify_arrival_time_consistency(result) is False
+
+
+def test_river_summary_keeps_direct_river_with_unknown_travel_as_null():
+    """直接河段 travel 未知时，河级摘要必须保留河名，但不得给出猜测时长。"""
+    import intranet_verify_rain_impact as verifier
+
+    feature = {
+        "type": "Feature",
+        "properties": {
+            "river_name": "甲河", "impact_type": "direct_buffer", "affected": True,
+            "travel_time_unknown": True,
+            "t0_source_time": "2026-08-20T08:00:00Z",
+            "estimated_arrival_time": None,
+            "end_downstream_distance_km": 0.0,
+        },
+    }
+    direct = {
+        "A": {
+            "edge_key": "A", "river_name": "甲河", "length_km": 111.0,
+            "travel_length_known": False,
+            "row": {"src_name": "甲河", "len_km": None},
+        }
+    }
+
+    summary = rig._build_river_propagation(direct, [], 2.0, features=[feature])
+    river = summary["rivers"][0]
+
+    assert river["river_name"] == "甲河"
+    assert river["travel_time_unknown"] is True
+    assert river["propagation_distance_km"] is None
+    assert river["propagation_time_hours"] is None
+    assert river["earliest_arrival_time"] is None
+    assert river["latest_arrival_time"] is None
+    assert verifier.verify_propagation_consistency({
+        "river_geojson": {"type": "FeatureCollection", "features": [feature]},
+        "river_propagation": summary,
+    }) is True
+    broken_summary = {"flow_velocity_mps": 2.0, "rivers": [dict(river)]}
+    broken_summary["rivers"][0].update({
+        "travel_time_unknown": False,
+        "propagation_distance_km": 111.0,
+        "propagation_time_hours": 15.4,
+    })
+    assert verifier.verify_propagation_consistency({
+        "river_geojson": {"type": "FeatureCollection", "features": [feature]},
+        "river_propagation": broken_summary,
+    }) is False
+
+
+def test_river_summary_marks_activated_downstream_unknown_without_guessing():
+    """A 已知到达 B，但 B 自身 travel 未知时，B 摘要必须为未知且不能沿距离换算。"""
+    import intranet_verify_rain_impact as verifier
+
+    features = [
+        {"type": "Feature", "properties": {
+            "river_name": "甲河", "impact_type": "direct_buffer", "affected": True,
+            "travel_time_unknown": False,
+            "t0_source_time": "2026-08-20T08:00:00Z",
+            "estimated_arrival_time": "2026-08-20T09:00:00Z",
+            "end_downstream_distance_km": 0.0,
+        }},
+        {"type": "Feature", "properties": {
+            "river_name": "乙河", "impact_type": "downstream_50km", "affected": True,
+            "travel_time_unknown": True,
+            "t0_source_time": "2026-08-20T09:00:00Z",
+            "estimated_arrival_time": None,
+            "end_downstream_distance_km": 25.0,
+        }},
+    ]
+    direct = {
+        "A": {
+            "edge_key": "A", "river_name": "甲河", "length_km": 7.2,
+            "travel_length_known": True,
+            "row": {"src_name": "甲河", "len_km": 7.2},
+        }
+    }
+    downstream = [{
+        "edge_key": "B", "river_name": "乙河", "end_distance_km": 25.0,
+        "from_x": 0.0, "from_y": 0.0, "to_x": 1.0, "to_y": 0.0,
+    }]
+
+    summary = rig._build_river_propagation(direct, downstream, 2.0, features=features)
+    rivers = {item["river_name"]: item for item in summary["rivers"]}
+
+    assert set(rivers) == {"甲河", "乙河"}
+    assert rivers["甲河"]["travel_time_unknown"] is False
+    assert rivers["乙河"]["travel_time_unknown"] is True
+    assert rivers["乙河"]["propagation_distance_km"] is None
+    assert rivers["乙河"]["propagation_time_hours"] is None
+    assert rivers["乙河"]["earliest_arrival_time"] is None
+    assert verifier.verify_propagation_consistency({
+        "river_geojson": {"type": "FeatureCollection", "features": features},
+        "river_propagation": summary,
+    }) is True

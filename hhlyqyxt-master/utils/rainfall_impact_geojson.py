@@ -229,6 +229,8 @@ def build_rainstorm_impact_thematic_map(
 
     river_geojson = _build_river_geojson(direct_edges, downstream_edges, geometry_rows,
                                          graph_path=graph_path, flow_velocity_mps=flow_velocity_mps)
+    _drop_unaffected_features(river_geojson, flow_velocity_mps=flow_velocity_mps)
+    downstream_edges = _active_downstream_edges(downstream_edges, river_geojson)
     segments = geojson_to_plot_segments(river_geojson, rainstorm_stations)
     if max_segments and max_segments > 0:
         segments = segments[:max_segments]
@@ -684,8 +686,11 @@ def _classify_graph_edges(
                 if t is not None:
                     trigger_end_times.append(t)
         trigger_rain_end_time = min(trigger_end_times) if trigger_end_times else None
+        explicit_edge_length = get_explicit_edge_length_km(attr)
         edge_info = {
             "edge_key": edge_key,
+            "topology_from": str(u),
+            "topology_to": str(v),
             "objectid": objectid,
             "river_name": get_edge_river_name(attr),
             "from_x": p1[0],
@@ -693,6 +698,7 @@ def _classify_graph_edges(
             "to_x": p2[0],
             "to_y": p2[1],
             "length_km": get_edge_length_km(attr, from_xy=(p1[0], p1[1]), to_xy=(p2[0], p2[1])),
+            "travel_length_known": explicit_edge_length is not None,
             "is_direct_graph_edge": is_direct,
             "is_luan": bool(attr.get("is_luan")),
             "min_station_distance_km": round(float(min_dist), 3),
@@ -712,12 +718,15 @@ def _classify_graph_edges(
         if trigger_rain_end_time is not None and velocity_kmh > 0:
             # 与 _resolve_edge_features 直接 feature 同长度源（full_v6 len_km 优先，
             # 缺失/NaN 回退 pkl 边长），保证下游链起点时刻 == 直接 feature 自身到达时刻。
-            edge_length = _feature_length_km(row, edge_info, "direct_buffer")
-            travel_hours = edge_length / velocity_kmh
-            arrival = trigger_rain_end_time + timedelta(hours=travel_hours)
-            existing = start_nodes_arrival.get(v)
-            if existing is None or arrival < existing:
-                start_nodes_arrival[v] = arrival
+            edge_length = _feature_travel_length_km(row, edge_info, "direct_buffer")
+            if edge_length is not None:
+                travel_hours = edge_length / velocity_kmh
+                arrival = trigger_rain_end_time + timedelta(hours=travel_hours)
+                existing = start_nodes_arrival.get(v)
+                if existing is None or arrival < existing:
+                    start_nodes_arrival[v] = arrival
+            else:
+                start_nodes_arrival.setdefault(v, None)
         else:
             # trigger_rain_end_time 为 None：保持 key 存在（值为 None）
             start_nodes_arrival.setdefault(v, None)
@@ -899,6 +908,7 @@ def _save_downstream_edge(
 ) -> float:
     objectid = _edge_objectid_key(attr)
     river_name = get_edge_river_name(attr)
+    explicit_edge_length = get_explicit_edge_length_km(attr)
     length_km = get_edge_length_km(attr, from_xy=_parse_node_xy(u), to_xy=_parse_node_xy(v))
     end_km = start_km + length_km
     if not objectid or not river_name or not (length_km > 0):
@@ -921,6 +931,8 @@ def _save_downstream_edge(
     to_x, to_y = _parse_node_xy(v)
     edges[edge_key] = {
         "edge_key": edge_key,
+        "topology_from": str(u),
+        "topology_to": str(v),
         "objectid": objectid,
         "river_name": river_name,
         "min_distance_km": _round(start_km, 3) or 0.0,
@@ -928,6 +940,7 @@ def _save_downstream_edge(
         "keep_km": _round(keep_km, 3) or 0.0,
         "clip_fraction": _round(keep_km / length_km, 8) or 0.0,
         "is_direct_graph_edge": edge_key in direct_keys,
+        "travel_length_known": explicit_edge_length is not None,
         "is_luan": bool(attr.get("is_luan")),
         "from_node": u,  # 存原始 node 对象，用于回填 T0（避免依赖 str(u) 反解 edge_key）
         "from_x": from_x,
@@ -967,8 +980,38 @@ def _build_river_geojson(
             f["properties"].get("min_downstream_distance_km", 0.0),
         )
     )
-    _attach_impact_topology(features)
+    _attach_impact_topology(features, flow_velocity_mps=flow_velocity_mps)
     return {"type": "FeatureCollection", "features": features}
+
+
+def _drop_unaffected_features(
+    river_geojson: dict,
+    *,
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
+) -> None:
+    """最终业务输出不包含因时间链中断而未被激活的下游 feature。
+
+    保持 ``_build_river_geojson`` 作为通用几何构造器的兼容契约；过滤仅在完整
+    业务流程调用。过滤后重算一次拓扑，避免 downstream_ids 引用已移除 feature。
+    """
+    features = river_geojson.get("features") or []
+    if not any((f.get("properties") or {}).get("affected") is False for f in features):
+        return
+    kept = [f for f in features if (f.get("properties") or {}).get("affected") is True]
+    _attach_impact_topology(kept, flow_velocity_mps=flow_velocity_mps)
+    river_geojson["features"] = kept
+
+
+def _active_downstream_edges(downstream_edges: list[dict], river_geojson: dict) -> list[dict]:
+    """让顶层边列表/计数/汇总与最终已激活 GeoJSON feature 保持同一集合。"""
+    active_edge_keys = {
+        str((feature.get("properties") or {}).get("edge_key") or "")
+        for feature in river_geojson.get("features", [])
+    }
+    return [
+        edge for edge in downstream_edges
+        if str(edge.get("edge_key") or "") in active_edge_keys
+    ]
 
 
 def _parse_edge_nodes(edge_key: str) -> tuple[str, str]:
@@ -982,23 +1025,32 @@ def _parse_edge_nodes(edge_key: str) -> tuple[str, str]:
     return "", ""
 
 
-def _attach_impact_topology(features: list[dict]) -> None:
-    """为每条 feature 附加影响时间拓扑字段（纯增量，不改现有字段名）。
+def _attach_impact_topology(
+    features: list[dict],
+    *,
+    flow_velocity_mps: float = DEFAULT_FLOW_VELOCITY_MPS,
+) -> None:
+    """附加拓扑，并按河网计算最早影响开始/到达时间。
 
-    规则（用户确认，对齐 GPT 递推模型；时间语义映射现有字段）：
-      - affected：输出即受影响（direct_buffer/downstream_50km 都是被影响到的），恒 True
-      - upstream_ids：流入本边起点的受影响上游边（edge_key 列表）
-      - downstream_id：从本边终点流出的受影响下游边（edge_key；多条取首个，无则 None）
-      - impact_sources：直接边 ["DIRECT"]；下游边 = 所有 estimated_arrival_time
-        等于本边 t0_source_time（= 最早到达本边起点时刻）的受影响上游边
-        （汇流并列最早时全部列出）
+    每条边把 ``direct_impact_time`` 与所有上游 ``arrival_time`` 作为候选，
+    ``impact_start_time`` 取最早值；并列最早来源全部进入 ``impact_sources``。
+    正传播时间保证正长度环必然收敛。传播时间未知时保留当前边开始时间，
+    ``arrival_time`` 置空且不再激活下游。
+
+    旧字段 ``t0_source_time``、``estimated_arrival_time``、``downstream_id``
+    均保留；新增语义字段只做兼容别名或补充，不改已有字段名。
     """
     by_from: dict[str, list[str]] = {}
     by_to: dict[str, list[str]] = {}
     for feat in features:
         props = feat.get("properties") or {}
         key = str(props.get("edge_key") or "")
-        u, v = _parse_edge_nodes(key)
+        u = str(props.get("topology_from") or "")
+        v = str(props.get("topology_to") or "")
+        if not u or not v:
+            u, v = _parse_edge_nodes(key)
+        props["topology_from"] = u
+        props["topology_to"] = v
         if not u or not v:
             continue
         by_from.setdefault(u, []).append(key)
@@ -1008,26 +1060,105 @@ def _attach_impact_topology(features: list[dict]) -> None:
         str((f.get("properties") or {}).get("edge_key") or ""): f.get("properties") or {}
         for f in features
     }
+    downstream_by_key: dict[str, list[str]] = {}
     for feat in features:
         props = feat.get("properties") or {}
         key = str(props.get("edge_key") or "")
-        u, v = _parse_edge_nodes(key)
+        u = str(props.get("topology_from") or "")
+        v = str(props.get("topology_to") or "")
         upstream_ids = [k for k in by_to.get(u, []) if k != key] if (u and v) else []
         downstream_ids = [k for k in by_from.get(v, []) if k != key] if (u and v) else []
         props["upstream_ids"] = sorted(upstream_ids)
-        props["downstream_id"] = downstream_ids[0] if downstream_ids else None
+        props["downstream_ids"] = sorted(downstream_ids)
+        props["downstream_id"] = props["downstream_ids"][0] if props["downstream_ids"] else None
+        downstream_by_key[key] = props["downstream_ids"]
+
+        is_direct = props.get("impact_type") == "direct_buffer"
+        direct_raw = props.get("direct_impact_time")
+        if "direct_impact_time" not in props and is_direct:
+            direct_raw = props.get("t0_source_time")
+        direct_dt = _normalize_end_time(direct_raw) if direct_raw is not None else None
+        props["direct_impact_time"] = _iso_utc(direct_dt) if is_direct else None
+        props["affected"] = bool(is_direct)
+        props["impact_sources"] = ["DIRECT"] if is_direct and direct_dt is None else []
+        props["impact_start_time"] = None
+        props["arrival_time"] = None
+        props["t0_source_time"] = None
+        props["estimated_arrival_time"] = None
+
+    velocity_kmh = float(flow_velocity_mps) * 3.6
+
+    def _travel_hours(props: dict) -> float | None:
+        distance = _safe_float(props.get("propagation_distance_km"))
+        if velocity_kmh <= 0 or distance is None or not math.isfinite(distance) or distance <= 0:
+            return None
+        return distance / velocity_kmh
+
+    # (候选开始时间, 稳定序号, 当前边 key, 候选来源)。时间优先队列使结果不依赖
+    # feature/图/数据库行顺序，也天然支持任意多汇流、分汊和正长度环。
+    events: list[tuple[datetime, int, str, str]] = []
+    event_seq = count()
+    for key, props in props_by_key.items():
+        if props.get("impact_type") != "direct_buffer":
+            continue
+        direct_dt = _normalize_end_time(props.get("direct_impact_time"))
+        if direct_dt is not None:
+            heapq.heappush(events, (direct_dt, next(event_seq), key, "DIRECT"))
+
+    best_start: dict[str, datetime] = {}
+    best_arrival: dict[str, datetime] = {}
+    best_sources: dict[str, set[str]] = {}
+    while events:
+        candidate, _seq, key, source = heapq.heappop(events)
+        props = props_by_key.get(key)
+        if props is None:
+            continue
+        current = best_start.get(key)
+        if current is not None:
+            # 对外时间精度是秒；同一显示秒内的候选必须视为并列，否则会出现
+            # 两个上游 arrival 字符串相同、impact_sources 却只保留一个的矛盾。
+            if _iso_utc(candidate) == _iso_utc(current):
+                best_sources.setdefault(key, set()).add(source)
+                continue
+            if candidate > current:
+                continue
+
+        best_start[key] = candidate
+        best_sources[key] = {source}
         props["affected"] = True
-        if props.get("impact_type") == "direct_buffer":
-            props["impact_sources"] = ["DIRECT"]
-        else:
-            sources = []
-            t0 = props.get("t0_source_time")
-            if t0 is not None:
-                for k in upstream_ids:
-                    other = props_by_key.get(k)
-                    if other is not None and other.get("estimated_arrival_time") == t0:
-                        sources.append(k)
-            props["impact_sources"] = sorted(sources)
+        travel_hours = _travel_hours(props)
+        if travel_hours is None:
+            continue
+        arrival = candidate + timedelta(hours=travel_hours)
+        best_arrival[key] = arrival
+        for downstream_key in downstream_by_key.get(key, []):
+            heapq.heappush(events, (arrival, next(event_seq), downstream_key, key))
+
+    for key, props in props_by_key.items():
+        travel_hours = _travel_hours(props)
+        props["travel_time_unknown"] = travel_hours is None
+        props["travel_time_hour"] = round(travel_hours, 1) if travel_hours is not None else None
+        # 保持原字段与新增兼容字段完全同值。
+        props["propagation_time_hours"] = props["travel_time_hour"]
+
+        start = best_start.get(key)
+        arrival = best_arrival.get(key)
+        start_iso = _iso_utc(start)
+        arrival_iso = _iso_utc(arrival)
+        props["impact_start_time"] = start_iso
+        props["arrival_time"] = arrival_iso
+        props["t0_source_time"] = start_iso
+        props["estimated_arrival_time"] = arrival_iso
+        if start is not None:
+            props["impact_sources"] = sorted(best_sources.get(key, set()))
+        elif props.get("impact_type") != "direct_buffer":
+            props["impact_sources"] = []
+
+        if props.get("affected") and start is not None and travel_hours is None:
+            logger.warning(
+                "河段 %s 缺少有效传播距离/时间，arrival_time=null，停止向下游传播",
+                key,
+            )
 
 
 def _resolve_edge_features(
@@ -1076,15 +1207,16 @@ def _resolve_edge_features(
 
         river_name = _pick_river_name(row, edge, luan_mapping)
         is_direct = impact_type == "direct_buffer"
-        # 基准时间 T0：直接段=trigger_rain_end_time，下游段=t0_source_time（待实现）
+        # 初始基准时间：直接段=trigger_rain_end_time，下游段=收集器的链式 t0；
+        # _attach_impact_topology 会再统一执行 direct + upstream 的最早时间传播。
         t0 = edge.get("trigger_rain_end_time" if is_direct else "t0_source_time")
         # 传播距离
-        if not is_direct:
-            # 下游段：本段距离（keep_km），非累计。链式语义。
-            prop_distance = float(edge.get("keep_km") or 0)
-        else:
-            prop_distance = _feature_length_km(row, edge, impact_type)
-        if velocity_kmh > 0 and math.isfinite(prop_distance):
+        travel_distance = _feature_travel_length_km(row, edge, impact_type)
+        prop_distance = float(travel_distance) if travel_distance is not None else 0.0
+        travel_time_unknown = not (
+            velocity_kmh > 0 and math.isfinite(prop_distance) and prop_distance > 0
+        )
+        if not travel_time_unknown:
             prop_time = round(prop_distance / velocity_kmh, 1)
             # 到达时刻用未舍入的精确传播时间：保证 arrival = t0 + 真实传播，
             # 与下游链式传播的 t0_source_time（best_arrival 精确值）在同一边界上完全衔接，
@@ -1092,11 +1224,11 @@ def _resolve_edge_features(
             exact_hours = prop_distance / velocity_kmh
         else:
             prop_distance = 0.0
-            prop_time = 0.0
-            exact_hours = 0.0
+            prop_time = None
+            exact_hours = None
 
         # 预计到达时间
-        if t0 is not None and math.isfinite(exact_hours) and exact_hours >= 0:
+        if t0 is not None and exact_hours is not None and math.isfinite(exact_hours) and exact_hours >= 0:
             arrival = t0 + timedelta(hours=exact_hours)
             t0_iso = _iso_utc(t0)
             arrival_iso = _iso_utc(arrival)
@@ -1115,6 +1247,8 @@ def _resolve_edge_features(
                 "impact_type": impact_type,
                 "length_km": _feature_length_km(row, edge, impact_type),
                 "edge_key": edge["edge_key"],
+                "topology_from": str(edge.get("topology_from") or ""),
+                "topology_to": str(edge.get("topology_to") or ""),
                 "flow_direction": "database_geometry_order",
                 "direction_source": f"full_{RIVER_TABLE_VERSION}_original_geometry",
                 "geometry_source": (
@@ -1135,7 +1269,12 @@ def _resolve_edge_features(
                 # 传播时间（所有河段统一）
                 "propagation_distance_km": round(prop_distance, 3),
                 "propagation_time_hours": prop_time,
+                "travel_time_hour": prop_time,
+                "travel_time_unknown": travel_time_unknown,
                 # 预计到达时间（UTC ISO 字符串；缺失时为 None）
+                "direct_impact_time": t0_iso if is_direct else None,
+                "impact_start_time": t0_iso,
+                "arrival_time": arrival_iso,
                 "t0_source_time": t0_iso,
                 "estimated_arrival_time": arrival_iso,
             },
@@ -1164,6 +1303,39 @@ def _feature_length_km(row: dict | None, edge: dict, impact_type: str) -> float:
         except (TypeError, ValueError):
             pass
     return round(float(edge.get("length_km") or 0.0), 3)
+
+
+def _feature_travel_length_km(
+    row: dict | None,
+    edge: dict,
+    impact_type: str,
+) -> float | None:
+    """返回可用于时间传播的权威长度；端点弦距估算不得用于 arrival。
+
+    优先使用 full_v6 ``len_km``。数据库长度缺失时，仅接受 pkl 中显式长度属性；
+    ``get_edge_length_km`` 为几何遍历计算的端点 haversine 兜底只用于空间筛选，
+    不能冒充河道传播行程。下游裁剪段按同一边的裁剪比例折算权威全长。
+    """
+    row_len = _safe_float(row.get("len_km")) if row else None
+    if row_len is not None and row_len > 0:
+        if impact_type == "downstream_50km":
+            fraction = _safe_float(edge.get("clip_fraction"))
+            if fraction is None or fraction <= 0:
+                return None
+            return round(row_len * min(fraction, 1.0), 3)
+        return round(row_len, 3)
+
+    length_known = edge.get("travel_length_known")
+    # 兼容旧调用/单元夹具：未提供显式标志时，调用方直接给出的 length_km 视为权威。
+    if length_known is None:
+        length_known = _safe_float(edge.get("length_km")) not in (None, 0.0)
+    if not length_known:
+        return None
+    if impact_type == "downstream_50km":
+        keep_km = _safe_float(edge.get("keep_km"))
+        return round(keep_km, 3) if keep_km is not None and keep_km > 0 else None
+    edge_len = _safe_float(edge.get("length_km"))
+    return round(edge_len, 3) if edge_len is not None and edge_len > 0 else None
 
 
 def _pick_river_name(row: dict | None, edge: dict, luan_mapping: dict[str, str]) -> str:
@@ -1568,8 +1740,8 @@ def _build_river_propagation(
         name = _pick_river_name(row, edge, mapping)
         if name == "未知":
             continue
-        length = _feature_length_km(row, edge, "direct_buffer")
-        if not (length > 0):
+        length = _feature_travel_length_km(row, edge, "direct_buffer")
+        if length is None or not (length > 0):
             continue
         direct_len[name] = max(direct_len.get(name, 0.0), length)
 
@@ -1598,15 +1770,37 @@ def _build_river_propagation(
             "propagation_time_hours": round(raw_hours, 1),
             "arrival_estimate_readable": _propagation_readable(raw_hours),
             "has_downstream": has_downstream,
+            "travel_time_unknown": False,
         })
     # 注意：features 精化会改写 propagation_time_hours，统一在精化完成后排序（见下）。
     if features:
         from dateutil import parser as dateparser
         river_arrivals: dict[str, list[datetime]] = {}
         river_entry_t0: dict[str, list[datetime]] = {}
+        feature_names: set[str] = set()
+        unknown_names: set[str] = set()
+        downstream_feature_names: set[str] = set()
+        feature_distances: dict[str, list[float]] = {}
+        feature_hours: dict[str, list[float]] = {}
         for feat in features:
             props = feat.get("properties", {})
             name = props.get("river_name", "")
+            is_business_feature = (
+                props.get("affected") is True
+                or props.get("impact_type") in {"direct_buffer", "downstream_50km"}
+            )
+            if name and is_business_feature:
+                feature_names.add(name)
+                if props.get("travel_time_unknown") is True:
+                    unknown_names.add(name)
+                if props.get("impact_type") == "downstream_50km":
+                    downstream_feature_names.add(name)
+                distance = _safe_float(props.get("propagation_distance_km"))
+                hours = _safe_float(props.get("propagation_time_hours"))
+                if distance is not None and distance > 0:
+                    feature_distances.setdefault(name, []).append(distance)
+                if hours is not None and hours >= 0:
+                    feature_hours.setdefault(name, []).append(hours)
             arrival_str = props.get("estimated_arrival_time")
             if name and arrival_str:
                 try:
@@ -1621,8 +1815,38 @@ def _build_river_propagation(
                         river_entry_t0.setdefault(name, []).append(dateparser.parse(t0_str))
                     except Exception:
                         pass
-        for r in rivers:
+        rivers_by_name = {r["river_name"]: r for r in rivers}
+        # 受影响 feature 是河名集合的最终事实来源。即使 travel 未知、原始距离聚合
+        # 无法建项，也必须在河级摘要中保留该河并明确输出 null，而不是静默遗漏。
+        for name in feature_names:
+            if name in rivers_by_name:
+                continue
+            distances = feature_distances.get(name, [])
+            hours_values = feature_hours.get(name, [])
+            fallback_hours = max(hours_values) if hours_values else None
+            rivers_by_name[name] = {
+                "river_name": name,
+                "propagation_distance_km": max(distances) if distances else None,
+                "propagation_time_hours": fallback_hours,
+                "arrival_estimate_readable": (
+                    _propagation_readable(fallback_hours) if fallback_hours is not None
+                    else "传播时间未知"
+                ),
+                "has_downstream": name in downstream_feature_names,
+                "travel_time_unknown": name in unknown_names,
+            }
+
+        for r in rivers_by_name.values():
             name = r["river_name"]
+            r["has_downstream"] = bool(r.get("has_downstream") or name in downstream_feature_names)
+            r["travel_time_unknown"] = name in unknown_names
+            if r["travel_time_unknown"]:
+                r["propagation_distance_km"] = None
+                r["propagation_time_hours"] = None
+                r["arrival_estimate_readable"] = "传播时间未知"
+                r["earliest_arrival_time"] = None
+                r["latest_arrival_time"] = None
+                continue
             arrivals = river_arrivals.get(name, [])
             if arrivals:
                 r["earliest_arrival_time"] = _iso_utc(min(arrivals))
@@ -1644,8 +1868,16 @@ def _build_river_propagation(
                     r["propagation_time_hours"] = round(raw_hours, 1)
                     r["arrival_estimate_readable"] = _propagation_readable(raw_hours)
 
+        rivers = list(rivers_by_name.values())
+
     # 精化完成后统一排序：传播时间最长的河排最前（QA 简报取 rivers[0] 作头条）。
-    rivers.sort(key=lambda r: r["propagation_time_hours"], reverse=True)
+    rivers.sort(
+        key=lambda r: (
+            r.get("propagation_time_hours") is not None,
+            r.get("propagation_time_hours") or -math.inf,
+        ),
+        reverse=True,
+    )
     return {"flow_velocity_mps": float(flow_velocity_mps), "rivers": rivers}
 
 
@@ -1663,6 +1895,26 @@ def get_edge_river_name(attr: dict) -> str:
     return ""
 
 
+def get_explicit_edge_length_km(
+    attr: dict,
+    attr_name: str = "length_km",
+) -> float | None:
+    """读取边属性中明确提供的长度，不进行端点距离估算。"""
+    if not isinstance(attr, dict):
+        return None
+    for key in (attr_name, "length_km", "len_km", "length"):
+        value = attr.get(key)
+        if value is None:
+            continue
+        number = _safe_float(value)
+        if number is not None and number > 0:
+            return number
+    length_m = _safe_float(attr.get("len_m"))
+    if length_m is not None and length_m > 0:
+        return length_m / 1000.0
+    return None
+
+
 def get_edge_length_km(
     attr: dict,
     attr_name: str = "length_km",
@@ -1674,23 +1926,9 @@ def get_edge_length_km(
 
     滦河系边的 len_km 在数据中可能为 NaN，必须兜底，否则会污染下游 Dijkstra 距离累积。
     """
-    if isinstance(attr, dict):
-        for key in (attr_name, "length_km", "len_km", "length"):
-            value = attr.get(key)
-            if value is None:
-                continue
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(number) and number > 0:
-                return number
-        try:
-            length_m = float(attr.get("len_m"))
-            if math.isfinite(length_m) and length_m > 0:
-                return max(length_m / 1000.0, 0.0)
-        except (TypeError, ValueError):
-            pass
+    explicit = get_explicit_edge_length_km(attr, attr_name)
+    if explicit is not None:
+        return explicit
     if from_xy is not None and to_xy is not None:
         fx, fy = _safe_float(from_xy[0]), _safe_float(from_xy[1])
         tx, ty = _safe_float(to_xy[0]), _safe_float(to_xy[1])
