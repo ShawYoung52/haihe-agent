@@ -532,6 +532,77 @@ class TestRegionRiskLevelsMultiDay:
         assert calls == ["20260825080000"] * 3 + ["20260826080000"] * 3
 
 
+class TestRegionRiskLevelsFallback:
+    """默认最近起报时次无资料 → 回退前一个起报时次一次（2026-08-24 甲方口径：24h 内要出风险）。
+
+    场景：上午问"今天下午/晚上"，最近 08:00 时次的数据可能还没出；前一周期（昨日 20:00，
+    覆盖昨晚 20:00→今晚 20:00）仍覆盖今日下午/晚上，应回退取它的数据，而不是显示
+    "该时次暂无数据"。显式 fcst_times（外部传入）不做回退，保持逐日合并语义。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        rwt._region_levels_cache.clear()
+        yield
+        rwt._region_levels_cache.clear()
+
+    LON, LAT, R = 117.40, 40.09, 25.0
+
+    def test_default_no_data_falls_back_to_previous_cycle(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_default_fcst_time", lambda: "20260824080000")
+        seen: list = []
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            t = (extra_params or {}).get("fcstTime")
+            seen.append(t)
+            if t == "20260823200000":  # 前一周期（昨日20:00）有数据
+                return {"data": [{"id": 1, "level": "5", "lon": self.LON, "lat": self.LAT}]}
+            raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")  # 默认时次无资料
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        assert result["dzzh"]["levels"] == {"一级": 1}
+        # 每灾种两次调用：默认(None) + 回退前一周期(20260823200000)
+        assert seen.count(None) == 3
+        assert seen.count("20260823200000") == 3
+
+    def test_default_has_data_no_fallback(self, monkeypatch):
+        seen: list = []
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            seen.append((extra_params or {}).get("fcstTime"))
+            return {"data": [{"id": 1, "level": "5", "lon": self.LON, "lat": self.LAT}]}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        assert result["dzzh"]["levels"] == {"一级": 1}
+        assert seen == [None, None, None]  # 每灾种只调一次默认，无回退
+
+    def test_default_and_fallback_both_no_data_marks_sentinel(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_default_fcst_time", lambda: "20260824080000")
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
+        assert result is not None
+        assert all(v == rwt.RISK_LEVELS_NO_DATA for v in result.values())
+
+    def test_explicit_fcst_times_no_fallback(self, monkeypatch):
+        seen: list = []
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            seen.append((extra_params or {}).get("fcstTime"))
+            raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=["20260825080000"])
+        # 显式时次不做回退（保持逐日合并语义），每灾种只调该时次一次
+        assert seen == ["20260825080000"] * 3
+        assert all(v == rwt.RISK_LEVELS_NO_DATA for v in result.values())
+
+
 class TestFcstTimeRequired:
     """后端 findDataListByConfig 必传 fcstTime（yyyyMMddHHmmss）。
 

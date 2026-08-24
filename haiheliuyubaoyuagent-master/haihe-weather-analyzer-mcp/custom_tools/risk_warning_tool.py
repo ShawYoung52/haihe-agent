@@ -179,6 +179,20 @@ def _default_fcst_time() -> str:
     return _latest_fcst_cycle(time_source.now(beijing))
 
 
+def _previous_fcst_cycle(cycle_str: str) -> str:
+    """前一个起报时次（08/20 往前推 12h），格式 yyyyMMddHHmmss。非法输入原样返回。
+
+    用于"最近起报时次无资料"时回退一个时次再试（2026-08-24 甲方口径：24h 内的
+    天气要出风险——上午问"今天下午/晚上"时最近 08:00 时次数据可能还没出，前一周期
+    昨日 20:00 仍覆盖今日下午/晚上，应取它的数据而非显示"该时次暂无数据"）。
+    """
+    try:
+        dt = _dt.datetime.strptime(cycle_str, "%Y%m%d%H%M%S")
+    except (ValueError, TypeError):
+        return cycle_str
+    return (dt - _dt.timedelta(hours=12)).strftime("%Y%m%d%H%M%S")
+
+
 def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
     cfg = RISK_CONFIGS[kind]
     bases = _risk_api_base_urls()
@@ -719,9 +733,18 @@ def query_region_risk_levels(
     08:00 起报时次列表（yyyyMMddHHmmss），逐日各调一次并把各时次返回的
     记录等级统计合并（累计到同一"本次风险等级"列）；"无资料"时次跳过
     （未来时次大概率无资料，渲染层按用户要求显示"无风险"）。为 None 时
-    只调最近起报时次单次（原行为）。缓存键含 fcst_times，不同窗口不互串。
+    只调最近起报时次单次，**该时次无资料则回退前一个起报时次再试一次**
+    （_previous_fcst_cycle，甲方口径：24h 内的天气要出风险——上午问"今天下午/
+    晚上"时最近 08:00 时次数据可能还没出，前一周期昨日 20:00 仍覆盖今日下午/
+    晚上；回退拿到数据即收口，不再继续往前，也不与多个时次合并——区别于显式
+    fcst_times 的逐日合并）。缓存键含 fcst_times，不同窗口不互串。
     """
-    times: list[str | None] = fcst_times or [None]
+    fallback_mode = fcst_times is None
+    if fallback_mode:
+        # 默认路径：最近起报时次(None) → 无资料时回退前一个起报时次一次。
+        times = [None, _previous_fcst_cycle(_default_fcst_time())]
+    else:
+        times = list(fcst_times)
     kinds: dict[str, dict | None] = {}
     reachable = False
     for kind, key in HAZARD_KIND_TO_KEY.items():
@@ -753,6 +776,10 @@ def query_region_risk_levels(
                 if not level:
                     continue
                 level_counts[level] = level_counts.get(level, 0) + 1
+            if fallback_mode:
+                # 默认路径：第一个有资料（可达且成功返回）的起报时次即收口，
+                # 不再回退/合并更早时次。可达但零风险记录属"本次无风险"，不回退。
+                break
         if failed:
             kinds[key] = None
             continue

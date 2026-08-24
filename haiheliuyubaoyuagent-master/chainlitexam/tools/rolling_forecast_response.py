@@ -14,6 +14,7 @@ from .request_intent_policy import is_rolling_activity_query
 _CODE_OWNED_HEADERS = {
     "【未来7天预报表】",
     "【明日预报】",
+    "【今日预报】",
     "【本周末天气预报】",
     "【逐日天气预报】",
     "【未来一周气温预报】",
@@ -398,24 +399,37 @@ def _query_category(user_text: str) -> str:
 
 
 def _weather_table(daily: list[dict], user_text: str) -> str:
-    if "周末" in str(user_text or ""):
+    text = str(user_text or "")
+    if "周末" in text:
         title = "【本周末天气预报】"
     elif len(daily) == 1:
-        title = "【明日预报】"
+        # 单日标题按所问日历日区分（2026-08-24 修复：今天查询曾误标【明日预报】）：
+        # 今天→【今日预报】、明天→【明日预报】、后天/明确日期等→中性【天气预报】
+        # （行内 date_label 已带具体日期）。
+        if "今天" in text or "今日" in text:
+            title = "【今日预报】"
+        elif "明天" in text or "明日" in text:
+            title = "【明日预报】"
+        else:
+            title = "【天气预报】"
     elif len(daily) == 7:
         title = "【未来7天预报表】"
     else:
         title = "【逐日天气预报】"
+    # 降水量列（2026-08-24 甲方反馈矛盾修复）：天气现象可能为"阴转多云"但当
+    # 日仍有降水（WEA 是天气现象、TP1H 是时段累计降水量，两者可并存），必须同表
+    # 列出降水量，避免核心结论说阴、注意事项/风险表又提降雨的自相矛盾。
     rows = [
         [
             item.get("date_label"),
             item.get("weather"),
             _temperature_range_display(item),
             item.get("EDA"),
+            _cell(item.get("rainfall_max_24h_display") or item.get("rainfall_max_24h_mm")),
         ]
         for item in daily
     ]
-    return f"{title}\n{_markdown_table(['日期', '天气现象', '气温(℃)', '风力风向'], rows)}"
+    return f"{title}\n{_markdown_table(['日期', '天气现象', '气温(℃)', '风力风向', '降水量(毫米)'], rows)}"
 
 
 def _daily_rain_only(daily: list[dict]) -> bool:
@@ -535,9 +549,12 @@ def _hourly_weather_table(hourly: list[dict]) -> str:
                 else _temperature_display_text(item.get("tmax") if item.get("tmax") is not None else item.get("tmin")) or "—"
             ),
             item.get("EDA") if item.get("EDA") is not None else item.get("wind"),
+            # 降水量列（2026-08-24 矛盾修复，同 _weather_table）：时段天气现象与时段
+            # 累计降水量可并存，必须列出避免"阴转多云 vs 有降雨"自相矛盾。
+            _cell(item.get("rainfall_mm")),
         ])
     return "【未来小时预报】\n" + _markdown_table(
-        ["时段", "天气现象", "气温(℃)", "风力风向"],
+        ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"],
         rows,
     )
 
@@ -826,6 +843,9 @@ def rolling_forecast_llm_instruction(bundle: dict | None) -> str:
         "该句只回答用户最关心的问题，不得追加背景、原因、建议、风险或表格内容。"
         "除非数据存在与用户问题直接相关且核心结论未覆盖的显著风险，否则不要生成【重点关注】。"
         "核心结论不要机械补充“无降水/无降雨”或“风力为X级”等泛化描述；只有用户明确询问降水或风力时才回答对应要素。"
+        "但当权威事实中降水量大于0或天气现象含雨（小雨/中雨/大雨/暴雨/阵雨/雷阵雨等）时，"
+        "核心结论必须提及降雨（如“有中雨”），即使天气现象写的是阴转多云——天气现象与时段"
+        "累计降水量可并存，只写“阴转多云”而不提降雨会与表格、注意事项、风险表自相矛盾。"
         "核心结论中的所有温度数值必须四舍五入为整数，不得保留小数。"
         "你不得生成任何表格、表头、"
         "逐日数据行、【关键节点】、【过程详情】或数据来源。"

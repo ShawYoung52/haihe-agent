@@ -189,7 +189,7 @@ class TestCoreAttachesRegionHazards:
     def _run(self, monkeypatch, user_query="蓟州天气怎么样", **core_kwargs):
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, fcst_times=None: _hazards_ok())
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: _hazards_ok())
         return rfs.query_rolling_forecast_core(user_query=user_query, now=NOW, **core_kwargs)
 
     def test_region_mode_attaches_hazards(self, monkeypatch):
@@ -209,7 +209,7 @@ class TestCoreAttachesRegionHazards:
         calls = {"n": 0}
         monkeypatch.setattr(
             rfs, "_query_region_hazards",
-            lambda lon, lat: calls.update(n=calls["n"] + 1) or _hazards_ok(),
+            lambda lon, lat, attach_risk_levels=True: calls.update(n=calls["n"] + 1) or _hazards_ok(),
         )
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
@@ -221,7 +221,7 @@ class TestCoreAttachesRegionHazards:
 
     def test_hazards_failure_degrades_weather_unchanged(self, monkeypatch):
         """隐患查询全失败（返回 None）不阻断天气回答，也不出现 region_hazards 字段。"""
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, fcst_times=None: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
         result = rfs.query_rolling_forecast_core(user_query="蓟州天气怎么样", now=NOW)
@@ -234,7 +234,7 @@ class TestCoreAttachesRegionHazards:
         captured = []
         monkeypatch.setattr(
             rfs, "_query_region_hazards",
-            lambda lon, lat, fcst_times=None: captured.append((float(lon), float(lat))) or _hazards_ok(),
+            lambda lon, lat, attach_risk_levels=True: captured.append((float(lon), float(lat))) or _hazards_ok(),
         )
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
@@ -247,43 +247,21 @@ class TestCoreAttachesRegionHazards:
         assert (117.28, 39.73) in captured
 
 
-class TestRiskFcstTimesFromWindow:
-    """窗口→逐日风险接口起报时次（各日 08:00）推导（2026-08-24 用户口径：
-    风险接口按起报时次只出 24h，跨日窗口逐日调一次并合并）。"""
+class TestRiskLevelsGating:
+    """"本次风险等级"列按 24h 门控（2026-08-24 甲方口径）。
 
-    def test_three_day_window_yields_three_0800_times(self):
-        win = {"forecast_start_date": "2026-08-25", "forecast_days": 3}
-        times = rfs._risk_fcst_times_from_window(win)
-        assert times == [
-            "20260825080000",
-            "20260826080000",
-            "20260827080000",
-        ]
+    原"跨日窗口逐日调风险接口合并"的 _risk_fcst_times_from_window 已移除——风险接口
+    每起报时次只出 24h，未来 24h 之外没有对应时段的风险资料，该列只在 24h 内窗口出现。
+    具体行为详见 tests/test_rolling_forecast_time_of_day.py 的
+    TestRiskFcstWindowApplies / TestCoreRiskAttachGating。
+    """
 
-    def test_single_day_window_yields_one(self):
-        win = {"forecast_start_date": "2026-08-25", "forecast_days": 1}
-        assert rfs._risk_fcst_times_from_window(win) == ["20260825080000"]
-
-    def test_none_window_returns_none(self):
-        assert rfs._risk_fcst_times_from_window(None) is None
-
-    def test_bad_window_returns_none(self):
-        assert rfs._risk_fcst_times_from_window({"forecast_days": 3}) is None
-        assert rfs._risk_fcst_times_from_window({}) is None
-
-    def test_capped_at_max_days(self):
-        # 风险是增强字段，逐日调用最多 RISK_FCST_MAX_DAYS（默认 3）天，防长窗口请求放大
-        win = {"forecast_start_date": "2026-08-25", "forecast_days": 10}
-        times = rfs._risk_fcst_times_from_window(win)
-        assert len(times) == rfs.RISK_FCST_MAX_DAYS
-
-    def test_core_forwards_window_to_region_hazards(self, monkeypatch):
-        """query_rolling_forecast_core 区域模式把日历窗口换算的时次透传给
-        _query_region_hazards（多日窗口 → 逐日 08:00 列表）。"""
+    def test_future_window_no_risk_levels_attached(self, monkeypatch):
+        """"未来三天"（起始日=明天，24h 外）→ attach_risk_levels=False，不接等级。"""
         captured = {}
 
-        def fake_hazards(lon, lat, fcst_times=None):
-            captured["fcst_times"] = fcst_times
+        def fake_hazards(lon, lat, attach_risk_levels=True):
+            captured["attach_risk_levels"] = attach_risk_levels
             return {
                 "total_found": 1, "radius_km": 25.0,
                 "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],
@@ -293,14 +271,14 @@ class TestRiskFcstTimesFromWindow:
         rfs._rolling_forecast_cache.clear()
         monkeypatch.setattr(rfs, "_query_region_hazards", fake_hazards)
         rfs.query_rolling_forecast_core(user_query="蓟州未来三天天气怎么样", now=NOW)
-        assert captured.get("fcst_times") == ["20260820080000", "20260821080000", "20260822080000"]
+        assert captured["attach_risk_levels"] is False
 
-    def test_core_default_region_passes_none(self, monkeypatch):
-        """无日历窗口（普通"蓟州天气"）→ fcst_times=None（单次最近起报时次）。"""
+    def test_plain_query_attaches_risk_levels(self, monkeypatch):
+        """普通"蓟州天气"（无窗口，24h 内）→ attach_risk_levels=True，接等级。"""
         captured = {}
 
-        def fake_hazards(lon, lat, fcst_times=None):
-            captured["fcst_times"] = fcst_times
+        def fake_hazards(lon, lat, attach_risk_levels=True):
+            captured["attach_risk_levels"] = attach_risk_levels
             return {
                 "total_found": 1, "radius_km": 25.0,
                 "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],
@@ -310,4 +288,4 @@ class TestRiskFcstTimesFromWindow:
         rfs._rolling_forecast_cache.clear()
         monkeypatch.setattr(rfs, "_query_region_hazards", fake_hazards)
         rfs.query_rolling_forecast_core(user_query="蓟州天气怎么样", now=NOW)
-        assert captured.get("fcst_times") is None
+        assert captured["attach_risk_levels"] is True

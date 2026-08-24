@@ -231,37 +231,41 @@ def _query_region_risk_levels(lon: float, lat: float, fcst_times: list[str] | No
         return None
 
 
-# 风险接口逐日调用时最多取的日数（风险为增强字段，逐日调用会随天数放大请求数，
-# 默认 3 天覆盖"未来三天"最常见口径，更长窗口截断不阻断天气回答）。
-RISK_FCST_MAX_DAYS = int(os.getenv("RISK_FCST_MAX_DAYS", "3"))
+# 风险接口每个起报时次只覆盖 24h（08→次日 08、20→次日 20），"本次风险等级"只对
+# 24h 内的窗口有意义；未来 24h 之外（明天/未来N天/后天/下周…）没有该时段的风险资料，
+# 甲方口径（2026-08-24）：24h 外"本次风险等级"这一列整列去掉、24h 内必须出风险。
+def _risk_fcst_window_applies(
+    calendar_window: dict | None,
+    hourly_window: dict | None,
+    now: datetime,
+) -> bool:
+    """是否给区域查询附"本次风险等级"列：仅 24h 内（窗口起始日=今天，或普通当前查询）。
 
-
-def _risk_fcst_times_from_window(calendar_window: dict | None) -> list[str] | None:
-    """把日历日查询窗口换算为逐日风险接口起报时次列表（各日 08:00，yyyyMMddHHmmss）。
-
-    风险接口按起报时次只出 24h（08→次日 08、20→次日 20），问题窗口跨多日
-    （如"未来三天"）时逐日以"该日 08:00"调一次并合并（2026-08-24 用户口径）。
-    window 为空/异常 → None（保持单次最近起报时次原行为）。
+    时段化窗口（"今天下午/晚上"）按其 target_start 所在日判定；日历窗口按 forecast_start_date
+    判定；无窗口（普通"蓟州天气"当前查询）视为 24h 内。未来 24h 之外返回 False（不接等级列）。
     """
-    if not calendar_window:
-        return None
-    try:
-        start = _parse_date(calendar_window.get("forecast_start_date") or "")
-        days = max(1, min(int(calendar_window.get("forecast_days") or 1), RISK_FCST_MAX_DAYS))
-    except Exception:
-        return None
-    return [
-        (start + timedelta(days=i)).strftime("%Y%m%d") + "080000"
-        for i in range(days)
-    ]
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TIANJIN_TIMEZONE)
+    today = now.date()
+    if hourly_window is not None:
+        target = hourly_window.get("target_start")
+        return bool(target is not None and target.date() == today)
+    if calendar_window is not None:
+        try:
+            return _parse_date(calendar_window.get("forecast_start_date") or "") == today
+        except Exception:
+            return True
+    return True
 
 
-def _query_region_hazards(lon: float, lat: float, fcst_times: list[str] | None = None) -> dict | None:
+def _query_region_hazards(lon: float, lat: float, attach_risk_levels: bool = True) -> dict | None:
     """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
 
     只保留有数据的类型（status=="ok" 且 count>0）；无数据/接口失败/异常均返回
     None（静默降级，风险表是增强）。categories 只带 key/label/kind/count，
     不带 records 明细（区域级只报种类与数量，避免 payload 膨胀）。
+    attach_risk_levels=False 时（24h 外窗口）不调风险接口、不带 risk_levels/
+    risk_levels_available 字段，渲染层据此隐藏"本次风险等级"列（甲方口径）。
     """
     global _region_hazard_queryer
     try:
@@ -286,10 +290,17 @@ def _query_region_hazards(lon: float, lat: float, fcst_times: list[str] | None =
     ]
     if not merged:
         return None
-    # 区域天气#8：叠加"本次各灾种风险等级"（风险接口 level，一~四级）。接口失败/异常
-    # 返回 None → risk_levels_available=False，前端不渲染等级列（静态隐患点表照常）。
-    # fcst_times 非 None 时按窗口逐日调风险接口并合并（"未来三天"= 三天 08:00 时次）。
-    risk_levels = _query_region_risk_levels(lon, lat, fcst_times)
+    # 区域天气#8：叠加"本次各灾种风险等级"（风险接口 level，一~四级）。仅 24h 内窗口
+    # （attach_risk_levels=True）才调风险接口；接口失败/异常返回 None →
+    # risk_levels_available=False，前端不渲染等级列（静态隐患点表照常）。
+    # 24h 外窗口（attach_risk_levels=False）整列隐藏——不带 risk_levels 字段。
+    if not attach_risk_levels:
+        return {
+            "total_found": int(payload.get("total_found") or 0),
+            "radius_km": REGION_HAZARD_RADIUS_KM,
+            "categories": merged,
+        }
+    risk_levels = _query_region_risk_levels(lon, lat)
     return {
         "total_found": int(payload.get("total_found") or 0),
         "radius_km": REGION_HAZARD_RADIUS_KM,
@@ -689,6 +700,85 @@ def select_rolling_forecast_time(now: datetime | None = None) -> str:
     if now.tzinfo is None:
         now = now.replace(tzinfo=TIANJIN_TIMEZONE)
     return _latest_available_fcst_time(now).strftime("%Y%m%d%H%M%S")
+
+
+# 时段词 → [start_hour, end_hour)（北京时间）。end_hour=24 表示当日 24:00（次日 00:00）；
+# >24 表示跨到次日（如"夜里" 20:00→次日06:00=30）。与"今天/明天/…"日历日组合使用。
+_TOD_RANGES = {
+    "凌晨": (0, 6),
+    "早晨": (6, 8),
+    "早上": (6, 8),
+    "清晨": (6, 8),
+    "上午": (8, 12),
+    "中午": (11, 14),
+    "下午": (12, 18),
+    "傍晚": (17, 20),
+    "晚上": (18, 24),
+    "夜里": (20, 30),
+    "夜间": (20, 30),
+    "深夜": (20, 30),
+}
+
+
+def _detect_time_of_day_range(user_query: str) -> tuple[int, int] | None:
+    """识别"上午/下午/晚上/中午/夜里/凌晨/傍晚"等时段词，返回合并的 [start_hour, end_hour)。
+
+    多个时段词取并集（min start / max end），如"今天下午和晚上"→(12, 24)。
+    无时段词返回 None（只收窄时段化问法，整日问法不受影响）。
+    """
+    text = re.sub(r"\s+", "", str(user_query or ""))
+    spans = [rng for word, rng in _TOD_RANGES.items() if word in text]
+    if not spans:
+        return None
+    return min(s for s, _ in spans), max(e for _, e in spans)
+
+
+def _narrow_calendar_window_to_time_of_day(
+    calendar_window: dict,
+    user_query: str,
+    now: datetime | None = None,
+) -> dict | None:
+    """把单日日历窗口收窄为"时段逐小时"窗口（"今天下午/晚上"等）；不适配返回 None。
+
+    日历窗口已解析出目标日（今天/明天/后天/周X/明确日期），时段词把当日 00:00-24:00
+    收窄到所问时段，interval=1 逐小时取数。时段超出滚动预报 240h 时效或多日窗口时
+    返回 None（调用方回退整日窗口）。
+    """
+    if not isinstance(calendar_window, dict):
+        return None
+    rng = _detect_time_of_day_range(user_query)
+    if rng is None:
+        return None
+    try:
+        days = int(calendar_window.get("forecast_days") or 1)
+    except (TypeError, ValueError):
+        return None
+    if days != 1:
+        return None  # 只收窄单日窗口，多日窗口保持逐日
+    base = calendar_window.get("target_start")
+    if base is None:
+        return None
+    now = now or time_source.now(TIANJIN_TIMEZONE)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TIANJIN_TIMEZONE)
+    start_h, end_h = rng
+    target_start = base + timedelta(hours=start_h)
+    target_end = base + timedelta(hours=end_h)
+    selected_fcst = _select_fcst_for_target(target_start, now)
+    start_period = int((target_start - selected_fcst).total_seconds() // 3600)
+    end_period = int((target_end - selected_fcst).total_seconds() // 3600)
+    if start_period < 0 or end_period > MAX_FORECAST_PERIOD_HOURS:
+        return None  # 时段超滚动预报时效 → 回退整日窗口
+    return {
+        "mode": "time_of_day",
+        "hours": end_period - start_period,
+        "target_start": target_start,
+        "target_end": target_end,
+        "fcst_time": selected_fcst.strftime("%Y%m%d%H%M%S"),
+        "start_period": start_period,
+        "end_period": end_period,
+        "interval": 1,
+    }
 
 
 _BASIN_STRONG_KEYWORDS = ("海河流域", "流域", "河系")
@@ -1535,6 +1625,14 @@ def query_rolling_forecast_core(
         return _build_calendar_error_payload(
             calendar_error, point_mode, region_names, lon, lat, point_name, matched_region, now
         )
+    # 时段化收窄（2026-08-24 甲方口径）："今天下午和今天晚上"等带时段词的单日日历窗口
+    # 收窄为逐小时时段窗口（只覆盖所问时段），不再铺开整日。历史/越界窗口已提前 return，
+    # 这里 calendar_window 必是未来/今天窗口。
+    if hourly_window is None and calendar_window is not None:
+        tod_window = _narrow_calendar_window_to_time_of_day(calendar_window, user_query, now)
+        if tod_window is not None:
+            hourly_window = tod_window
+            calendar_window = None  # 时段化后走 hourly 分支，不再走整日日历窗口
     if hourly_window:
         selected_fcst_time = hourly_window["fcst_time"]
         start_period = hourly_window["start_period"]
@@ -1628,13 +1726,14 @@ def query_rolling_forecast_core(
         result.update(analyze_rolling_forecast_periods(periods))
     # 区域模式附带灾害风险表数据：按区域代表坐标查地质灾害/山洪/中小河流隐患点，
     # 供前端渲染【区域】灾害风险表。点位模式与异常/历史/越界提前 return 分支不附着。
-    # 日历窗口跨多日（如"未来三天"）时风险等级逐日调接口并合并（各日 08:00 起报时次，
-    # 风险接口每时次只出 24h——2026-08-24 用户口径）；窗口解析失败退单次默认时次。
+    # "本次风险等级"列仅 24h 内窗口接（_risk_fcst_window_applies）：风险接口每起报时次
+    # 只出 24h，未来 24h 之外（明天/未来N天）没有对应时段的风险资料，甲方口径（2026-08-24）
+    # 24h 外整列去掉、24h 内必须出风险。
     if not point_mode and region_names:
-        risk_fcst_times = _risk_fcst_times_from_window(calendar_window)
+        attach_risk = _risk_fcst_window_applies(calendar_window, hourly_window, now)
         region_hazards = []
         for name, lon_t, lat_t in zip(region_names, lons, lats):
-            hazards = _query_region_hazards(lon_t, lat_t, risk_fcst_times)
+            hazards = _query_region_hazards(lon_t, lat_t, attach_risk_levels=attach_risk)
             if hazards:
                 region_hazards.append(
                     {

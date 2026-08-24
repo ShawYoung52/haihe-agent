@@ -376,3 +376,103 @@ class TestRainOnlyDailyTable:
             "明天天气怎么样", {"daily_summary": _daily("多云", 0.0)}
         )
         assert not bundle.get("rain_only")
+
+
+def _daily_full(weather, rain_mm, rain_display=None):
+    """全要素逐日项（天气/气温/风 + 降水），用于天气表降水量列测试。"""
+    return [{
+        "date_label": "8月24日", "weather": weather,
+        "tmax_c": 29.0, "tmin_c": 22.0, "tmax_display": "29", "tmin_display": "22",
+        "EDA": "南风1-2级",
+        "rainfall_max_24h_mm": rain_mm,
+        "rainfall_max_24h_display": rain_display if rain_display is not None else (str(rain_mm) if rain_mm is not None else None),
+    }]
+
+
+def _hourly(rain_mm, weather="阴"):
+    return [{
+        "period_label": "12:00-13:00", "weather": weather,
+        "tmax": "29", "tmin": "29", "EDA": "南风2级", "rainfall_mm": rain_mm,
+    }]
+
+
+class TestWeatherTableRainColumn:
+    """矛盾修复（2026-08-24 甲方反馈）：核心结论说阴转多云、表里却又出现降雨。
+
+    根因：天气表/小时表无降水量列，核心结论又被"只有明确问降水才提"的规则省去降雨，
+    而【注意事项】/灾害风险表却按 rainfall_max_24h 提了降雨 → 自相矛盾。修复 = 表格
+    补降水量列 + LLM 指令强制核心结论提及降雨。
+    """
+
+    def test_daily_weather_table_has_rain_column(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("阴转多云", 15.0, "15.0")}
+        )
+        section = bundle["code_section"]
+        assert "降水量" in section
+        assert "15.0" in section
+
+    def test_daily_weather_table_rain_none_shows_dash(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天蓟州天气怎么样", {"daily_summary": _daily_full("多云", None, None)}
+        )
+        section = bundle["code_section"]
+        assert "降水量" in section
+        # 无降水数据 → —，不出现 None
+        assert "None" not in section
+
+    def test_hourly_table_has_rain_column(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午和今天晚上蓟州的天气", {"hourly_summary": _hourly(0.5, "小雨")}
+        )
+        section = bundle["code_section"]
+        assert "降水量" in section
+        assert "0.5" in section
+
+    def test_hourly_table_rain_none_shows_dash(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州的天气", {"hourly_summary": _hourly(None)}
+        )
+        assert "None" not in bundle["code_section"]
+
+
+class TestWeatherTableTodayTitle:
+    """单日"今天"查询的标题应为【今日预报】而非【明日预报】。"""
+
+    def test_today_single_day_title(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("多云", 0.0)}
+        )
+        assert "【今日预报】" in bundle["code_section"]
+        assert "【明日预报】" not in bundle["code_section"]
+
+    def test_tomorrow_single_day_title(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天蓟州天气怎么样", {"daily_summary": _daily_full("多云", 0.0)}
+        )
+        assert "【明日预报】" in bundle["code_section"]
+
+    def test_other_single_day_neutral_title(self):
+        """后天/明确日期等单日查询用中性标题（日期由行内 date_label 表达）。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "后天蓟州天气怎么样", {"daily_summary": _daily_full("多云", 0.0)}
+        )
+        assert "【明日预报】" not in bundle["code_section"]
+        assert "【今日预报】" not in bundle["code_section"]
+
+    def test_today_header_is_code_owned(self):
+        """【今日预报】必须登记为代码所有表头，防 LLM 重复生成。"""
+        assert "【今日预报】" in rfr._CODE_OWNED_HEADERS
+
+
+class TestCoreConclusionRainMention:
+    """LLM 指令：当日/当时段有降水或天气现象含雨时，核心结论必须提及降雨（消除矛盾）。"""
+
+    def test_instruction_mentions_rain_rule(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("阴转多云", 15.0, "15.0")}
+        )
+        instruction = rfr.rolling_forecast_llm_instruction(bundle)
+        # 必须含"降水量>0 或天气现象含雨时核心结论要提及降雨"的强制口径
+        assert "降水" in instruction
+        assert "必须" in instruction or "应当" in instruction
