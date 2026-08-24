@@ -952,8 +952,56 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
     return ("query_rolling_forecast", {"user_query": text, "regions": ""})
 
 
-def _enforce_simple_weather_route(planner_msg, user_text: str, route: tuple[str, dict]):
-    """把简单天气问题强制路由到指定工具，跳过 planner LLM。"""
+# 天河知识类问题规则路由（2026-08-24 用户口径）："暴雨预警四个等级是什么"
+# "暴雨天气的防范建议有哪些"这类纯知识问题确定性走天河问答接口
+# （/api/qa 不限 Fixed QA，目录外问题走天河普通问答链路，接口文档 §6），
+# 不靠 planner LLM 自觉（prompt 0.5 段引导可能漏接），也不走本地 rag_search。
+# 命中后强制调 query_tianhe_fixed_qa、跳过 planner；天河工具级失败时作为
+# 普通 ToolMessage 交回 planner 回退本地工具（_run_tool_round 天河特判不变）。
+_TIANHE_LEVEL_WORDS = ("等级", "颜色", "划分", "分级", "标准", "定义", "几级")
+_TIANHE_ADVICE_WORDS = (
+    "防范建议", "防御指南", "防范措施", "防御措施", "注意事项",
+    "如何防范", "怎么防范", "如何防御", "怎么防御", "如何应对", "怎么应对",
+)
+_TIANHE_RAIN_CONTEXT_WORDS = ("暴雨", "强降雨", "大暴雨", "特大暴雨")
+# 查当前生效预警的问法绝不能去天河（本地预警工具）；带时间词/日期的决策类
+# 问法也不在本路由范围（"明天去盘山暴雨注意事项"是决策天气，不是知识问答）。
+_TIANHE_KNOWLEDGE_EXCLUDE_WORDS = (
+    "现在", "当前", "最新", "生效", "发布",
+    "今天", "今日", "明天", "明日", "后天", "昨天", "前天", "未来",
+    "本周", "这周", "下周", "周末", "星期",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+)
+
+
+def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
+    """天河知识类问题规则路由：命中返回 ("query_tianhe_fixed_qa", {"query": 原文})，否则 None。
+
+    两个家族：① 预警 + 等级/颜色/划分/分级/标准/定义/几级；
+    ② 暴雨/强降雨/大暴雨/特大暴雨 + 防范建议/防御指南/注意事项/如何防范等。
+    收紧口径：含当前预警状态词（现在/当前/最新/生效/发布）、时间词，
+    或 POI 点位（_decision_weather_prefilter 命中）的一律不命中，交回原路由。
+    """
+    text = str(user_text or "").strip()
+    if not text:
+        return None
+    if any(w in text for w in _TIANHE_KNOWLEDGE_EXCLUDE_WORDS):
+        return None
+    if _decision_weather_prefilter(text):
+        return None
+    if "预警" in text and any(w in text for w in _TIANHE_LEVEL_WORDS):
+        return ("query_tianhe_fixed_qa", {"query": text})
+    if any(w in text for w in _TIANHE_RAIN_CONTEXT_WORDS) and any(
+        w in text for w in _TIANHE_ADVICE_WORDS
+    ):
+        return ("query_tianhe_fixed_qa", {"query": text})
+    return None
+
+
+def _enforce_simple_weather_route(
+    planner_msg, user_text: str, route: tuple[str, dict], label: str = "简单天气路由"
+):
+    """把规则路由命中（简单天气/天河知识）的问题强制路由到指定工具，跳过 planner LLM。"""
     tool_name, tool_args = route
     calls = [{
         "id": f"simple_weather_{uuid.uuid4().hex}",
@@ -963,7 +1011,7 @@ def _enforce_simple_weather_route(planner_msg, user_text: str, route: tuple[str,
     }]
     _set_tool_calls(planner_msg, calls)
     planner_msg.content = ""
-    print(f"[简单天气路由] 强制使用工具: {tool_name}")
+    print(f"[{label}] 强制使用工具: {tool_name}")
     return planner_msg
 
 
@@ -5071,6 +5119,11 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         simple_route = _route_simple_weather_query(message.content)
     else:
         simple_route = None
+    simple_route_label = "简单天气路由"
+    if simple_route is None:
+        simple_route = _route_tianhe_knowledge_query(message.content)
+        if simple_route is not None:
+            simple_route_label = "天河知识路由"
 
     # 生成并展示深度思考（规则路由命中时跳过，省一次 5-17s 的 LLM 调用）
     if ENABLE_LLM_THINKING and not simple_route:
@@ -5107,7 +5160,8 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             )
         elif simple_route:
             planner_msg = _enforce_simple_weather_route(
-                AIMessage(content=""), message.content, simple_route
+                AIMessage(content=""), message.content, simple_route,
+                label=simple_route_label,
             )
         else:
             request_planner_chain, route_decision = _select_request_planner_chain(
