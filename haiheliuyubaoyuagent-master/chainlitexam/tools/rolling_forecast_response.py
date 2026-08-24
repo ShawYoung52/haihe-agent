@@ -631,8 +631,12 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
             row = [label, f"{count} 处"]
             if show_levels:
                 if isinstance(risk_levels, dict):
-                    level_info = risk_levels.get(key) or {}
-                    row.append(_format_risk_level_counts(level_info.get("levels") or {}))
+                    level_info = risk_levels.get(key)
+                    if level_info is None and key in risk_levels:
+                        # 该灾种接口单独失败（MCP 侧 None 打标）——区别于"可达但无风险"
+                        row.append("接口暂不可用")
+                    else:
+                        row.append(_format_risk_level_counts((level_info or {}).get("levels") or {}))
                 else:
                     row.append("接口暂不可用")
             row.extend([risk, advice])

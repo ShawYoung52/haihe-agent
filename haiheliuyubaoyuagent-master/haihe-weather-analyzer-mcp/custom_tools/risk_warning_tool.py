@@ -649,21 +649,24 @@ _region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_c
 def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict | None:
     """按区域代表坐标半径查风险接口当前各灾种风险等级分布。
 
-    返回 ``{hazard_key: {"label", "kind", "levels", "total", "level_advice"}}``：
+    返回 ``{hazard_key: {"label", "kind", "levels", "total", "level_advice"} | None}``：
     - hazard_key 与区域隐患表 categories 的 key 一致（dzzh/sh/zxhl），便于按灾种对齐；
+    - 值为 None 表示该灾种接口调用失败（渲染层显示"接口暂不可用"，不得误报
+      "本次无风险"——2026-08-24 SCMOC 地灾接口单独 500 时被静默吞掉的教训）；
     - levels = {一级: n, ...}（只含本次实际出现的等级，_normalize_risk_level 归一）；
     - level_advice = 逐级防范建议（仅本次出现的等级，代码确定性生成）。
 
     口径：只统计"有风险"（_is_risky_level）且落在 radius_km 内的记录。接口可达但
-    全域无风险 → {}；接口失败/异常 → None（静默降级，绝不阻断天气回答）。
+    全域无风险 → {}；全部灾种接口失败/异常 → None（静默降级，绝不阻断天气回答）。
     """
-    kinds: dict[str, dict] = {}
+    kinds: dict[str, dict | None] = {}
     reachable = False
     for kind, key in HAZARD_KIND_TO_KEY.items():
         try:
             payload = _fetch_risk_warning(kind, timeout_sec=REGION_RISK_LEVELS_TIMEOUT_SEC)
             reachable = True
         except Exception:
+            kinds[key] = None  # 单灾种失败打标，交给渲染层显示"接口暂不可用"
             continue  # 单灾种接口失败静默跳过
         records = [_normalize_record(x) for x in _extract_items(payload)]
         level_counts: dict[str, int] = {}
@@ -689,9 +692,10 @@ def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict |
             "total": sum(level_counts.values()),
             "level_advice": _level_advice_for(kind, set(level_counts)),
         }
-    if not kinds:
-        # 接口可达但全域无风险 → {}（前端渲染"本次无风险"）；接口全挂 → None（降级不显示等级列）。
-        return {} if reachable else None
+    if not reachable:
+        # 全部灾种接口失败 → None（不缓存以便重试；前端整列显示"接口暂不可用"）。
+        return None
+    # 可达：无风险且无失败 → {}（前端渲染"本次无风险"）；含 None 值 = 对应灾种失败。
     return kinds
 
 

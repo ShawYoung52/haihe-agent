@@ -298,3 +298,15 @@ class TestRegionHazardTableRiskLevels:
         section = bundle["code_section"]
         assert "| 地质灾害 | 2 处 | 一级 1 处 |" in section
         assert "| 山洪 | 1 处 | 本次无风险 |" in section
+
+    def test_levels_kind_none_marker_shows_unavailable(self):
+        """单灾种接口失败（risk_levels 中该 key 显式为 None）→ 该行"接口暂不可用"，
+        其余灾种正常——2026-08-24 SCMOC 地灾单独 500 时不得静默显示"本次无风险"。"""
+        payload = self._with_levels({
+            "dzzh": None,
+            "sh": {"label": "山洪", "kind": "mountain", "levels": {"三级": 2}, "total": 2},
+        })
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "| 地质灾害 | 2 处 | 接口暂不可用 |" in section
+        assert "| 山洪 | 1 处 | 三级 2 处 |" in section

@@ -360,7 +360,8 @@ class TestRegionRiskLevels:
             "river": None,        # 接口失败，跳过
         }))
         result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
-        assert set(result.keys()) == {"dzzh"}
+        assert set(result.keys()) == {"dzzh", "zxhl"}
+        assert result["zxhl"] is None  # river 接口失败 → None 打标（渲染层"接口暂不可用"）
         assert result["dzzh"]["levels"] == {"一级": 1, "三级": 1}
         assert result["dzzh"]["total"] == 2
         assert result["dzzh"]["label"] == "地质灾害风险"
@@ -373,6 +374,13 @@ class TestRegionRiskLevels:
             "river": [],
         }))
         assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) == {}
+
+    def test_single_kind_failure_marked_none(self, monkeypatch):
+        # 只有地灾接口失败：该灾种 None 打标，不得静默吞掉显示成"本次无风险"
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
+            "geologic": None, "mountain": [], "river": [],
+        }))
+        assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) == {"dzzh": None}
 
     def test_all_kinds_fail_returns_none(self, monkeypatch):
         monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
