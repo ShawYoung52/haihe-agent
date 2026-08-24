@@ -375,6 +375,44 @@ def resolve_weekend_query_window(
 
     return resolve_calendar_query_window(start_date, days, now=now)
 
+
+# 星期问法（下周一/本周五/周三）→ 单日日历窗口。与决策天气层
+# decision_weather_core._decision_target_dates 的星期语义必须同口径：
+# 下周X=下一自然周星期X；周X（无"下"）=本自然周星期X、已过去取下一周。
+# 2026-08-24 生产缺陷：星期问法不识别 → 落默认 240h/12h 全量窗口，
+# "下周一"（8/31）根本不在取数范围内，答案错锚到 8/25 并铺开整周表格。
+_CN_WEEKDAY = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+
+
+def resolve_weekday_query_window(user_query: str, now: datetime | None = None) -> dict | None:
+    """把"下周一/下星期X/本周X/周X/星期X"换算为单日（1 天）日历窗口；无星期问法返回 None。
+
+    - "下周X/下星期X" → 下一自然周的星期X；
+    - "本周X/这周X/周X/星期X"（无"下"）→ 本自然周的星期X，已过去则取下一周。
+    目标日超出 240h 时效时由 resolve_calendar_query_window 抛 ValueError
+    （core 转 out_of_range 结构化提示），不静默回退。
+    "下周末/周末"已由 resolve_weekend_query_window 先行处理，本函数不会命中。
+    """
+    query = re.sub(r"\s+", "", str(user_query or ""))
+    if not query:
+        return None
+    now = now or time_source.now(TIANJIN_TIMEZONE)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TIANJIN_TIMEZONE)
+    today = now.date()
+    monday = today - timedelta(days=today.weekday())
+    match = re.search(r"下(?:周|星期)([一二三四五六日天])", query)
+    if match:
+        target = monday + timedelta(days=7 + _CN_WEEKDAY[match.group(1)])
+        return resolve_calendar_query_window(target, 1, now=now)
+    match = re.search(r"(?:本周|这周|周|星期)([一二三四五六日天])", query)
+    if match:
+        target = monday + timedelta(days=_CN_WEEKDAY[match.group(1)])
+        if target < today:
+            target += timedelta(days=7)
+        return resolve_calendar_query_window(target, 1, now=now)
+    return None
+
 _CN_SMALL_NUMBERS = {
     "一": 1,
     "二": 2,
@@ -497,6 +535,10 @@ def resolve_requested_calendar_window(
         if len(explicit_dates) >= 2 and explicit_dates[1] >= start_date:
             days = min((explicit_dates[1] - start_date).days + 1, 10)
         return resolve_calendar_query_window(start_date, days, now=current)
+    # 星期问法（下周一/本周五/周三）：明确日期（"8月25日周一"）优先，星期兜底。
+    weekday_window = resolve_weekday_query_window(query, now=current)
+    if weekday_window is not None:
+        return weekday_window
     if forecast_start_date or forecast_days:
         if not forecast_start_date or not forecast_days:
             raise ValueError("日历日查询必须同时提供 forecast_start_date 和 forecast_days")

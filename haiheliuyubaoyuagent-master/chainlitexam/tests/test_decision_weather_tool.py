@@ -311,6 +311,14 @@ def test_rule_based_slot_extraction_locations():
     assert dw_core._extract_decision_slots_rule_based("梅江会展中心适合户外活动吗")["question_type"] == "activity"
     # 天/日/周 时段词不得泄漏进位置名：无具体名词后缀前内容时回退 LLM（None）
     assert dw_core._extract_decision_slots_rule_based("未来三天学校天气") is None
+    # 星期词（下周一/本周五/周三/下周）同样不得泄漏进位置名——2026-08-24 生产缺陷：
+    # "下周一津泰达实验学校附近天气怎么样" 把"下周一"带进 POI 检索词与表标题。
+    assert dw_core._extract_decision_slots_rule_based("下周一津泰达实验学校附近天气怎么样")["location_name"] == "津泰达实验学校"
+    assert dw_core._extract_decision_slots_rule_based("下周一天津大学天气怎么样")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("本周五天津大学天气")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("周三天津大学天气")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("下星期五天津大学天气")["location_name"] == "天津大学"
+    assert dw_core._extract_decision_slots_rule_based("下周一学校天气") is None  # 剥掉星期词后无具体名词
 
 
 def test_rule_based_slot_extraction_falls_back_on_ambiguous():
@@ -1464,6 +1472,16 @@ class TestDecisionTargetDayScoping:
     """单日问法（下周一/明天/具体日期）把结论/表格/注意事项聚焦到所问那天。"""
 
     NOW = dw_core.datetime(2026, 8, 19)  # 周三
+
+    @pytest.fixture(autouse=True)
+    def _pin_now(self, monkeypatch):
+        # scope 函数内部走 _decision_now_bjt()（真实时间）——钉死为 2026-08-19（周三），
+        # 否则日历一走动"下周一"的解析目标就漂移（2026-08-24 起该测试曾因此失效）。
+        monkeypatch.setattr(
+            dw_core,
+            "_decision_now_bjt",
+            lambda: dw_core.datetime(2026, 8, 19, 12, 0, tzinfo=dw_core.timezone(dw_core.timedelta(hours=8))),
+        )
 
     def test_target_dates_next_monday(self):
         out = dw_core._decision_target_dates("下周一天津泰达实验学校附近天气怎么样？", self.NOW)
