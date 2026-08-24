@@ -60,6 +60,7 @@ except Exception:
 
 from utils.tool_result import _unwrap_tool_result
 from utils import time_source
+from utils.markdown import normalize_markdown_ranges
 from tools.current_weather_observation_response import (
     build_current_weather_observation_answer,
     build_current_weather_observation_summary_prompt,
@@ -397,7 +398,7 @@ def _clean_table_cell(text) -> str:
     """清理 Markdown 表格单元格中的换行、管道符、HTML 标签等会破坏表格的字符。"""
     if text is None:
         return ""
-    text = str(text)
+    text = normalize_markdown_ranges(text)
     # 统一处理各类换行与 HTML 换行标签
     text = text.replace("\r", " ").replace("\n", " ")
     text = text.replace("<br>", " ").replace("<br/>", " ").replace("<br />", " ")

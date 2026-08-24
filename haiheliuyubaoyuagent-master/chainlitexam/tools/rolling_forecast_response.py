@@ -11,6 +11,13 @@ from typing import Any
 
 from .request_intent_policy import is_rolling_activity_query
 
+try:
+    # 包式导入：python -m / pytest 从项目根目录运行。
+    from ..utils.markdown import normalize_markdown_ranges
+except ImportError:
+    # Chainlit 生产启动目录为 chainlitexam，模块以 tools.* 导入。
+    from utils.markdown import normalize_markdown_ranges
+
 
 _CODE_OWNED_HEADERS = {
     "【未来7天预报表】",
@@ -68,7 +75,7 @@ def build_current_rolling_weather_query_plan(
 def _cell(value: Any, default: str = "—") -> str:
     if value is None or str(value).strip() == "":
         return default
-    text = str(value).strip()
+    text = normalize_markdown_ranges(value).strip()
     text = text.replace("\r", " ").replace("\n", " ").replace("|", "｜")
     return re.sub(r"\s+", " ", text)
 

@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage
 from tools.rolling_forecast_response import sanitize_forecast_core_summary
 from utils.tool_result import _unwrap_tool_result
 from utils import time_source
+from utils.markdown import normalize_markdown_ranges
 
 DECISION_WEATHER_STATIONS = [
     {"region": "天津市区", "lon": 117.14, "lat": 39.24},
@@ -896,7 +897,8 @@ def _decision_table_cell(value: Any, default: str = "—") -> str:
     """清理代码生成的 Markdown 表格单元格，不改变接口字段的业务内容。"""
     if value is None or str(value).strip() == "":
         return default
-    text = str(value).strip().replace("\r", " ").replace("\n", " ").replace("|", "｜")
+    text = normalize_markdown_ranges(value).strip()
+    text = text.replace("\r", " ").replace("\n", " ").replace("|", "｜")
     return re.sub(r"\s+", " ", text)
 
 

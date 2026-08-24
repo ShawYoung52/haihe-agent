@@ -192,9 +192,37 @@ def test_point_time_of_day_query_renders_one_afternoon_summary_row(monkeypatch):
     table = dw_core._build_decision_weather_table("今天下午天津港附近有雨吗", facts)
 
     assert "【天津港今天下午天气预报】" in table
-    assert "| 今天下午 | 多云 | 30~31 | 东风1-2级转东南风1-2级 | 0.0 |" in table
+    assert "| 今天下午 | 多云 | 30～31 | 东风1-2级转东南风1-2级 | 0.0 |" in table
     assert "12时" not in table and "17时" not in table
     assert table.count("\n|") == 3  # 表头、分隔行、唯一数据行
+
+
+def test_point_weather_table_normalizes_markdown_tildes_without_breaking_columns(monkeypatch):
+    r"""接口遗留的 ~、\~、~~ 都必须显示为范围号，不能触发 Markdown 删除线。"""
+    monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: datetime(2026, 8, 24, 8, 0))
+    winds = ["东南风0~~1级", r"西南风0\~2级", "南风0~1级"]
+    facts = {
+        "poi": {"name": "蓟州"},
+        "periods": [{
+            "start_time": f"2026-08-24 {hour:02d}:00:00",
+            "end_time": f"2026-08-24 {hour + 1:02d}:00:00",
+            "weather": "多云",
+            "tmax": 29 if hour == 12 else 32,
+            "tmin": 29 if hour == 12 else 32,
+            "EDA": winds[(hour - 12) % len(winds)],
+            "rain_1h": 0.0,
+        } for hour in range(12, 18)],
+    }
+
+    table = dw_core._build_decision_weather_table("今天下午蓟州天气怎么样", facts)
+
+    assert "| 时段 | 天气现象 | 气温(℃) | 风力风向 | 降水量(毫米) |" in table
+    assert "29～32" in table
+    assert "东南风0～1级转西南风0～2级转南风0～1级" in table
+    assert "~~" not in table
+    assert r"\~" not in table
+    table_rows = [line for line in table.splitlines() if line.startswith("|")]
+    assert table_rows and len({line.count("|") for line in table_rows}) == 1
 
 
 def test_point_time_of_day_table_aggregates_valid_visibility(monkeypatch):

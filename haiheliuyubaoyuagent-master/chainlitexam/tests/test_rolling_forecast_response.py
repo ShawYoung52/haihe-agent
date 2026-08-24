@@ -543,10 +543,33 @@ class TestTimeOfDayPeriodTable:
         section = bundle["code_section"]
         assert "今天下午" in section
         assert "雷阵雨转多云" in section
-        assert "23~30" in section
+        assert "23～30" in section
         assert "降水量" in section and "8.0" in section
         # 只有一行数据（时段列出现一次）
         assert section.count("今天下午") >= 1
+
+    def test_markdown_range_markers_do_not_create_strikethrough_or_break_table(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary(
+                 tmin="29", tmax="32",
+                 eda=r"东南风0~~1级转西南风0\~2级转南风0~1级",
+                 rain=0.0,
+             )},
+        )
+
+        section = bundle["code_section"]
+        assert "| 时段 | 天气现象 | 气温(℃) | 风力风向 | 降水量(毫米) |" in section
+        assert "29～32" in section
+        assert "东南风0～1级转西南风0～2级转南风0～1级" in section
+        assert "~~" not in section
+        assert r"\~" not in section
+        table_rows = [line for line in section.splitlines() if line.startswith("|")]
+        assert table_rows and len({line.count("|") for line in table_rows}) == 1
+
+    def test_signed_temperature_range_is_markdown_safe(self):
+        assert rfr._cell("-2~~+3℃") == "-2～+3℃"
 
     def test_not_hourly_table(self):
         bundle = rfr.build_rolling_forecast_bundle(
