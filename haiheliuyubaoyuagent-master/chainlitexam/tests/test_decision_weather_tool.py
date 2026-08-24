@@ -770,8 +770,8 @@ def test_build_poi_reminder_section_hazard_points():
     assert "降雨信号" not in text
 
 
-def test_point_risk_level_section_distinguishes_data_states():
-    """点位天气/游玩回答列出真实风险等级，并区分无风险、无资料和接口失败。"""
+def test_point_risk_level_section_uses_business_no_risk_wording_for_no_data():
+    """点位回答不展示“暂无资料”；no_data 按用户口径显示“本次无风险”。"""
     facts = {
         "point_risk_levels": {
             "dzzh": {"label": "地质灾害", "levels": {"四级": 2}, "total": 2},
@@ -785,8 +785,9 @@ def test_point_risk_level_section_distinguishes_data_states():
 
     assert "【本次风险等级】" in text
     assert "| 地质灾害 | 四级 2 处 |" in text
-    assert "| 山洪 | 暂无对应时次风险资料 |" in text
+    assert "| 山洪 | 本次无风险 |" in text
     assert "| 中小河流 | 接口暂不可用 |" in text
+    assert "暂无对应时次风险资料" not in text
 
 
 def test_point_risk_level_section_reports_confirmed_no_risk():

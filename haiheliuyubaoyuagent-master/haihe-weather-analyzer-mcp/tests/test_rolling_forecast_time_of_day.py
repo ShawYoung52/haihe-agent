@@ -1,10 +1,9 @@
-"""滚动预报"时段词"（上午/下午/晚上/夜里/凌晨/中午/傍晚）收窄与 24h 风险列门控测试。
+"""滚动预报时段收窄与按目标日期逐日查询风险等级测试。
 
 覆盖三类修复（2026-08-24 甲方反馈）：
 1. "今天下午和今天晚上蓟州的天气"应真正按所问时段（逐小时）回答，而不是铺开整日。
    时段化后 query_mode 走 hourly（_time_of_day），hourly_summary 只含所问小时。
-2. 当天整日或当前起报 24h 覆盖的小时窗接"本次风险等级"；
-   其他窗口保留列并显示“暂无对应时次风险资料”，不冒充无风险。
+2. 单日和多日窗口都查询对应起报时次；多日逐日合并，不能用 24h 门控跳过接口。
 3. 时段化与"今天"窗口衔接："今天下午"→ 今天 12:00-18:00；"今天下午和晚上"→ 12:00-24:00。
 """
 from __future__ import annotations
@@ -277,53 +276,52 @@ def test_daily_summary_ignores_zero_visibility_placeholder():
     assert row["visibility_min_km"] == 8.0
 
 
-class TestRiskFcstWindowApplies:
-    """"本次风险等级"查询门控：单日/小时窗按 08/20 时起报覆盖期判定。"""
+class TestRiskFcstTimesFromWindowRegression:
+    """风险接口支持按预报窗口逐日查询，不能因 24h 门控直接伪造 no_data。"""
 
-    def test_today_calendar_window_applies(self):
-        win = {"forecast_start_date": "2026-08-24", "forecast_days": 1}
-        assert rfs._risk_fcst_window_applies(win, None, NOW) is True
+    def test_future_three_days_builds_three_daily_cycles(self):
+        calendar = {"forecast_start_date": "2026-08-25", "forecast_days": 3}
 
-    def test_no_window_applies(self):
-        assert rfs._risk_fcst_window_applies(None, None, NOW) is True
+        assert rfs._risk_fcst_times_from_window(calendar) == [
+            "20260825080000",
+            "20260826080000",
+            "20260827080000",
+        ]
 
-    def test_tomorrow_single_day_overlaps_current_cycle(self):
-        win = {"forecast_start_date": "2026-08-25", "forecast_days": 1}
-        assert rfs._risk_fcst_window_applies(win, None, NOW) is True
+    def test_future_three_days_core_passes_cycles_to_risk_query(self, monkeypatch):
+        captured = {}
 
-    def test_future_three_days_not_applies(self):
-        win = {"forecast_start_date": "2026-08-25", "forecast_days": 3}
-        assert rfs._risk_fcst_window_applies(win, None, NOW) is False
+        def fake_hazards(lon, lat, risk_fcst_times=None):
+            captured["risk_fcst_times"] = risk_fcst_times
+            return {
+                "total_found": 1,
+                "radius_km": 25.0,
+                "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],
+                "risk_levels": {},
+                "risk_levels_available": True,
+            }
 
-    def test_day_after_tomorrow_not_applies(self):
-        win = {"forecast_start_date": "2026-08-26", "forecast_days": 1}
-        assert rfs._risk_fcst_window_applies(win, None, NOW) is False
+        monkeypatch.setattr(rfs.requests, "get", _fake_get_for("117.45_40.05"))
+        monkeypatch.setattr(rfs, "_query_region_hazards", fake_hazards)
+        rfs._rolling_forecast_cache.clear()
 
-    def test_tod_today_applies(self):
-        hourly = {"target_start": rfs.datetime(2026, 8, 24, 12, 0, tzinfo=rfs.TIANJIN_TIMEZONE)}
-        assert rfs._risk_fcst_window_applies(None, hourly, NOW) is True
+        rfs.query_rolling_forecast_core(user_query="蓟州未来三天天气怎么样", now=NOW)
 
-    def test_tod_tomorrow_not_applies(self):
-        hourly = {"target_start": rfs.datetime(2026, 8, 25, 12, 0, tzinfo=rfs.TIANJIN_TIMEZONE)}
-        assert rfs._risk_fcst_window_applies(None, hourly, NOW) is False
-
-    def test_next_midnight_overlaps_evening_cycle(self):
-        now = rfs.datetime(2026, 8, 24, 20, 30, tzinfo=rfs.TIANJIN_TIMEZONE)
-        hourly = {
-            "target_start": rfs.datetime(2026, 8, 25, 0, 0, tzinfo=rfs.TIANJIN_TIMEZONE),
-            "target_end": rfs.datetime(2026, 8, 25, 1, 0, tzinfo=rfs.TIANJIN_TIMEZONE),
-        }
-        assert rfs._risk_fcst_window_applies(None, hourly, now) is True
+        assert captured["risk_fcst_times"] == [
+            "20260825080000",
+            "20260826080000",
+            "20260827080000",
+        ]
 
 
-class TestCoreRiskAttachGating:
-    """query_rolling_forecast_core 按 24h 门控决定是否给 _query_region_hazards 接风险等级。"""
+class TestCoreRiskForecastTimes:
+    """query_rolling_forecast_core 按目标日向风险接口传逐日起报时次。"""
 
     def _capture(self, monkeypatch, user_query):
         captured = {}
 
-        def fake_hazards(lon, lat, attach_risk_levels=True):
-            captured["attach_risk_levels"] = attach_risk_levels
+        def fake_hazards(lon, lat, risk_fcst_times=None):
+            captured["risk_fcst_times"] = risk_fcst_times
             return {
                 "total_found": 1, "radius_km": 25.0,
                 "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 1}],
@@ -335,25 +333,27 @@ class TestCoreRiskAttachGating:
         rfs.query_rolling_forecast_core(user_query=user_query, now=NOW)
         return captured
 
-    def test_today_query_attaches_risk(self, monkeypatch):
+    def test_today_query_uses_default_cycle_fallback(self, monkeypatch):
         captured = self._capture(monkeypatch, "今天蓟州的天气怎么样")
-        assert captured["attach_risk_levels"] is True
+        assert captured["risk_fcst_times"] is None
 
-    def test_afternoon_evening_query_attaches_risk(self, monkeypatch):
+    def test_afternoon_evening_query_uses_default_cycle_fallback(self, monkeypatch):
         captured = self._capture(monkeypatch, "今天下午和今天晚上蓟州的天气")
-        assert captured["attach_risk_levels"] is True
+        assert captured["risk_fcst_times"] is None
 
-    def test_future_three_days_not_attach(self, monkeypatch):
+    def test_future_three_days_passes_all_daily_cycles(self, monkeypatch):
         captured = self._capture(monkeypatch, "蓟州未来三天天气怎么样")
-        assert captured["attach_risk_levels"] is False
+        assert captured["risk_fcst_times"] == [
+            "20260825080000", "20260826080000", "20260827080000",
+        ]
 
-    def test_tomorrow_single_day_attaches_current_cycle_risk(self, monkeypatch):
+    def test_tomorrow_single_day_uses_tomorrow_cycle(self, monkeypatch):
         captured = self._capture(monkeypatch, "明天蓟州天气怎么样")
-        assert captured["attach_risk_levels"] is True
+        assert captured["risk_fcst_times"] == ["20260825080000"]
 
 
-class TestQueryRegionHazardsRiskLevelsGating:
-    """attach_risk_levels=False 时不调风险接口，但透传 no_data 三态。"""
+class TestQueryRegionHazardsRiskLevels:
+    """区域隐患查询始终按目标风险时次调用等级接口。"""
 
     def _hazards_ok(self):
         return {
@@ -362,39 +362,23 @@ class TestQueryRegionHazardsRiskLevelsGating:
             ],
         }
 
-    def test_attach_true_calls_risk_and_marks_available(self, monkeypatch):
+    def test_explicit_cycles_are_forwarded_and_marked_available(self, monkeypatch):
         called = {"n": 0}
+        captured = {}
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: self._hazards_ok())
 
         def fake_levels(lon, lat, radius, fcst_times=None):
             called["n"] += 1
+            captured["fcst_times"] = fcst_times
             return {"dzzh": {"label": "地质灾害风险", "kind": "geologic", "levels": {"三级": 2}, "total": 2}}
 
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", fake_levels)
-        result = rfs._query_region_hazards(117.45, 40.05, attach_risk_levels=True)
+        cycles = ["20260825080000", "20260826080000"]
+        result = rfs._query_region_hazards(117.45, 40.05, cycles)
         assert called["n"] == 1
+        assert captured["fcst_times"] == cycles
         assert result["risk_levels_available"] is True
         assert "risk_levels" in result
-
-    def test_attach_false_skips_risk_and_marks_corresponding_time_as_no_data(self, monkeypatch):
-        called = {"n": 0}
-        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: self._hazards_ok())
-
-        def fake_levels(lon, lat, radius, fcst_times=None):
-            called["n"] += 1
-            return {}
-
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", fake_levels)
-        result = rfs._query_region_hazards(117.45, 40.05, attach_risk_levels=False)
-        assert called["n"] == 0, "24h 外不应调用风险接口"
-        # 超出接口时效不是“无风险”：列保留，但逐灾种明确标记对应时次无资料。
-        assert result["risk_levels_available"] is True
-        assert result["risk_levels"] == {
-            "dzzh": "no_data", "sh": "no_data", "zxhl": "no_data",
-        }
-        # 灾害表其余字段照常
-        assert result["total_found"] == 3
-        assert result["categories"]
 
 
 class TestSummarizeTodWind:

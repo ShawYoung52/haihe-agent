@@ -337,26 +337,26 @@ class TestRegionHazardTableRiskLevels:
         assert "| 地质灾害 | 2 处 | 接口暂不可用 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
-    def test_levels_kind_no_data_marker_shows_missing_corresponding_time(self):
-        """单灾种该起报时次无资料（risk_levels 中该 key 为 "no_data" 哨兵）→
-        明确显示“暂无对应时次风险资料”；接口不可达(None)仍显示“接口暂不可用”。"""
+    def test_levels_kind_no_data_marker_uses_business_no_risk_wording(self):
+        """业务展示不出现“暂无资料”；no_data 哨兵按用户口径显示“本次无风险”。"""
         payload = self._with_levels({
             "dzzh": "no_data",
             "sh": {"label": "山洪", "kind": "mountain", "levels": {"三级": 2}, "total": 2},
         })
         bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
         section = bundle["code_section"]
-        assert "| 地质灾害 | 2 处 | 暂无对应时次风险资料 |" in section
+        assert "| 地质灾害 | 2 处 | 本次无风险 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
-    def test_levels_column_beyond_24h_shows_no_data_not_hidden(self):
-        """24h 外窗口保留等级列，但不能把没有对应时次资料冒充成无风险。"""
+    def test_levels_column_beyond_24h_uses_business_no_risk_wording(self):
+        """24h 外无等级记录时保留等级列，并按用户口径显示“本次无风险”。"""
         payload = self._with_levels({"dzzh": "no_data", "sh": "no_data"}, available=True)
         bundle = rfr.build_rolling_forecast_bundle("明天蓟州天气怎么样", payload)
         section = bundle["code_section"]
         assert "本次风险等级" in section
-        assert "| 地质灾害 | 2 处 | 暂无对应时次风险资料 |" in section
-        assert "| 山洪 | 1 处 | 暂无对应时次风险资料 |" in section
+        assert "| 地质灾害 | 2 处 | 本次无风险 |" in section
+        assert "| 山洪 | 1 处 | 本次无风险 |" in section
+        assert "暂无对应时次风险资料" not in section
 
     def test_risk_only_category_is_not_lost_when_static_category_missing(self):
         payload = self._with_levels({

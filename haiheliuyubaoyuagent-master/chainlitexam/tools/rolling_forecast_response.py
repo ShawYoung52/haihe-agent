@@ -752,9 +752,9 @@ _REGION_HAZARD_LABELS = {
 # 风险等级展示顺序（一级最重 → 四级最轻），与 risk_warning_tool._normalize_risk_level 同口径。
 _LEVEL_SEVERITY_ORDER = ("一级", "二级", "三级", "四级")
 
-# 区域风险等级"该起报时次无资料"哨兵（与 MCP 侧 risk_warning_tool.RISK_LEVELS_NO_DATA
-# 同值，跨进程经 JSON 透传）。渲染层明确显示“暂无对应时次风险资料”，区别于
-# None（接口失败 →“接口暂不可用”）和缺键（接口成功且该灾种无风险 →“本次无风险”）。
+# 区域风险等级无资料哨兵（与 MCP 侧 risk_warning_tool.RISK_LEVELS_NO_DATA 同值）。
+# 内部保留该状态用于诊断；按用户业务口径，最终回答与无风险记录统一显示“本次无风险”。
+# None 仍表示真实接口失败，显示“接口暂不可用”。
 _RISK_LEVELS_NO_DATA = "no_data"
 
 
@@ -845,8 +845,7 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
                         # 该灾种接口单独失败（MCP 侧 None 打标）——区别于"可达但无风险"
                         row.append("接口暂不可用")
                     elif level_info == _RISK_LEVELS_NO_DATA:
-                        # 对应起报时次无资料不等于无风险，必须明确区分。
-                        row.append("暂无对应时次风险资料")
+                        row.append("本次无风险")
                     elif level_info is None:
                         row.append("本次无风险")
                     elif not isinstance(level_info, dict):
