@@ -90,15 +90,55 @@ def _install_langchain_stub():
         class _BaseMessage:
             def __init__(self, content: str = "", **kwargs):
                 self.content = content
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
 
-        for name in ("ToolMessage", "HumanMessage", "AIMessage"):
-            setattr(lcms, name, type(name, (_BaseMessage,), {}))
+        class AIMessage(_BaseMessage):
+            def __init__(self, content: str = "", **kwargs):
+                super().__init__(content=content, **kwargs)
+                if not hasattr(self, "tool_calls"):
+                    self.tool_calls = []
+
+        lcms.ToolMessage = type("ToolMessage", (_BaseMessage,), {})
+        lcms.HumanMessage = type("HumanMessage", (_BaseMessage,), {})
+        lcms.AIMessage = AIMessage
         sys.modules["langchain_core.messages"] = lcms
+
+    if "langchain_core.tools" not in sys.modules:
+        lctools = types.ModuleType("langchain_core.tools")
+
+        def tool(func):
+            class _ToolWrapper:
+                def __init__(self, fn):
+                    self.func = fn
+                    self.name = fn.__name__
+                    self.description = fn.__doc__
+
+                async def ainvoke(self, args):
+                    result = self.func(**args) if isinstance(args, dict) else self.func(args)
+                    if hasattr(result, "__await__"):
+                        return await result
+                    return result
+
+            return _ToolWrapper(func)
+
+        lctools.tool = tool
+        sys.modules["langchain_core.tools"] = lctools
 
 
 def _install_httpx_stub():
-    if "httpx" not in sys.modules:
-        sys.modules["httpx"] = types.ModuleType("httpx")
+    if "httpx" in sys.modules:
+        return sys.modules["httpx"]
+    # 安装了真实 httpx 时必须保留其异常类型与 AsyncClient；空模块只适合完全
+    # 不触碰网络层的测试，抢先注入会让后续天河接口测试受收集顺序影响。
+    try:
+        import httpx as real_httpx
+
+        return real_httpx
+    except ImportError:
+        httpx = types.ModuleType("httpx")
+        sys.modules["httpx"] = httpx
+        return httpx
 
 
 def ensure_stubs():

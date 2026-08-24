@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -130,15 +131,20 @@ TIANHE_QA_API_URL = os.getenv("TIANHE_QA_API_URL", "http://10.226.188.156:8001/a
 # 加 300s TTL 缓存减少重复打远程接口（项目已有 rolling_forecast/POI 缓存先例）。
 TIANHE_QA_TIMEOUT = (5, 120)
 TIANHE_QA_CACHE_TTL = int(os.getenv("TIANHE_QA_CACHE_TTL", "300"))
+# 对接文档允许连接失败或明确临时服务错误最多重试 2 次。这里是两次重试前的
+# 递增等待；测试可改成 (0, 0)，生产不做无等待重放。
+TIANHE_QA_RETRY_DELAYS = (0.2, 0.5)
 
 _TIANHE_ERR_EMPTY = "问题不能为空。"
 _TIANHE_ERR_CONNECT = "天河问答服务连接超时，请稍后重试或换一种问法。"
 _TIANHE_ERR_UNAVAILABLE = "天河问答服务暂时不可用，请稍后重试。"
 _TIANHE_ERR_FORMAT = "天河问答服务返回格式异常，请稍后重试。"
+TIANHE_UNAVAILABLE_TEXT = _TIANHE_ERR_UNAVAILABLE
 
-# 工具级失败文案集合（单一事实源）：供 message_orchestrator 区分"工具级失败"与"命中/200 降级"。
-# 集合内是本工具自身生成的失败提示，应让 planner 回退本地工具；200 降级文案（对接文档 9.4，
-# 如"智能体服务暂时不可用"）由天河 API 在 200 时作为 answer 返回，不在此集合，应原样透传。
+# 工具级失败文案集合（单一事实源）：供观测过滤、测试和日志识别。天河目录问题无论成功、
+# HTTP 200 降级还是工具级失败都由 orchestrator 强制收口，不回退本地智能体。
+# 200 降级文案（对接文档 9.4，如“智能体服务暂时不可用”）由天河 API 作为 answer 返回，
+# 不在此集合并保持原样透传。
 TIANHE_ERROR_TEXTS = frozenset({
     _TIANHE_ERR_EMPTY,
     _TIANHE_ERR_CONNECT,
@@ -163,7 +169,7 @@ async def call_tianhe_qa_api(query: str) -> str:
     """真实调用天河平台问答接口（POST /api/qa），返回 answer 字符串。
 
     天河 Fixed QA 是整句精确匹配；本函数只做 HTTP 调用与解析，不判断命中。
-    失败不抛异常，返回中文提示（供 planner 兜底走本地工具）。
+    失败不抛异常，返回中文提示；上层对天河目录问题直接展示，不交给本地智能体代答。
     """
     q = (query or "").strip()
     if not q:
@@ -173,20 +179,46 @@ async def call_tianhe_qa_api(query: str) -> str:
     if hit and (time.time() - hit[0]) < TIANHE_QA_CACHE_TTL:
         return hit[1]
 
-    try:
-        resp = await _get_tianhe_client().post(
-            TIANHE_QA_API_URL,
-            json={"question": q, "history": [], "stream": False},
+    resp = None
+    last_request_error: httpx.RequestError | None = None
+    for attempt in range(len(TIANHE_QA_RETRY_DELAYS) + 1):
+        try:
+            resp = await _get_tianhe_client().post(
+                TIANHE_QA_API_URL,
+                json={"question": q, "history": [], "stream": False},
+            )
+            last_request_error = None
+        except httpx.RequestError as exc:
+            last_request_error = exc
+            resp = None
+
+        retryable_status = resp is not None and resp.status_code in {502, 503, 504}
+        # 只重试建立连接阶段的临时失败。ReadTimeout/WriteError 等异常可能发生在
+        # 服务端已经收到请求之后，重复提交既会放大等待时间，也可能产生重复任务。
+        retryable_error = isinstance(
+            last_request_error, (httpx.ConnectError, httpx.ConnectTimeout)
         )
-    except httpx.ConnectTimeout:
-        logger.warning("天河问答接口连接超时（query=%s）", q[:50])
-        return _TIANHE_ERR_CONNECT
-    except httpx.RequestError as e:
-        logger.warning("天河问答接口调用失败：%s", type(e).__name__)
+        if (retryable_error or retryable_status) and attempt < len(TIANHE_QA_RETRY_DELAYS):
+            delay = TIANHE_QA_RETRY_DELAYS[attempt]
+            logger.warning(
+                "天河问答接口临时失败，准备第 %s 次重试（原因=%s）",
+                attempt + 1,
+                type(last_request_error).__name__ if last_request_error else resp.status_code,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+            continue
+        break
+
+    if last_request_error is not None:
+        if isinstance(last_request_error, httpx.ConnectTimeout):
+            logger.warning("天河问答接口连接超时（query=%s）", q[:50])
+            return _TIANHE_ERR_CONNECT
+        logger.warning("天河问答接口调用失败：%s", type(last_request_error).__name__)
         return _TIANHE_ERR_UNAVAILABLE
 
-    if resp.status_code >= 400:
-        logger.warning("天河问答接口返回非成功状态码：%s", resp.status_code)
+    if resp is None or resp.status_code >= 400:
+        logger.warning("天河问答接口返回非成功状态码：%s", getattr(resp, "status_code", "unknown"))
         return _TIANHE_ERR_UNAVAILABLE
 
     try:
@@ -218,7 +250,7 @@ async def query_tianhe_fixed_qa(query: str) -> str:
     （去空白/去句末标点规范化），不要自行改写或提炼 query。
     参数 query：用户问题原文（中文）。
     返回：天河生成的完整回答正文（可能含 Markdown 表格）；失败返回中文提示，
-    planner 应改用其他本地工具回答。
+    上层应直接展示且不得改用本地智能体代答。
     """
     return await call_tianhe_qa_api(query)
 

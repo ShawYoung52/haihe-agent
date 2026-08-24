@@ -81,7 +81,7 @@ from tools.request_intent_policy import (
     is_rolling_activity_query,
     is_supported_rolling_forecast_scope,
 )
-from external_skill_tools import TIANHE_ERROR_TEXTS
+from external_skill_tools import TIANHE_ERROR_TEXTS, TIANHE_UNAVAILABLE_TEXT
 
 # Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
 ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
@@ -956,8 +956,8 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
 # "暴雨天气的防范建议有哪些"这类纯知识问题确定性走天河问答接口
 # （/api/qa 不限 Fixed QA，目录外问题走天河普通问答链路，接口文档 §6），
 # 不靠 planner LLM 自觉（prompt 0.5 段引导可能漏接），也不走本地 rag_search。
-# 命中后强制调 query_tianhe_fixed_qa、跳过 planner；天河工具级失败时作为
-# 普通 ToolMessage 交回 planner 回退本地工具（_run_tool_round 天河特判不变）。
+# 命中后强制调 query_tianhe_fixed_qa、跳过 planner；天河工具级失败也直接展示失败说明，
+# 不交回本地智能体代答（见 _run_tool_round 天河特判）。
 # 2026-08-24 甲方提供三份天河目录文档（03 实况监测 / 04 防灾减灾 / 05 气候统计），
 # 要求"这些问题都要接入天河问答接口"：知识类（04）扩家族，数据类（03 实况 / 05 气候统计）
 # 新增目录规则确定性路由。
@@ -2484,7 +2484,12 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     print(f"[工具] {tool_name} 参数: {tool_args}")
 
                     if tool is None:
-                        observation_text = f"工具未找到：{tool_name}"
+                        if tool_name == "query_tianhe_fixed_qa":
+                            observation_text = TIANHE_UNAVAILABLE_TEXT
+                            forced_final_text = observation_text
+                            tianhe_passthrough_text = observation_text
+                        else:
+                            observation_text = f"工具未找到：{tool_name}"
                         if evidence_sink is not None:
                             evidence_sink.record(tool_name, "missing", {"error": observation_text})
                         messages.append(ToolMessage(content=observation_text, tool_call_id=tool_call["id"], role="tool"))
@@ -2497,10 +2502,15 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
                         err_summary = _scrub_internal_data(str(e)) or "未知错误"
                         print(f"[工具错误] {tool_name}: {err_summary}")
-                        observation_text = (
-                            f"工具 {tool_name} 执行失败（{type(e).__name__}），"
-                            f"该数据暂不可用。错误摘要：{err_summary}"
-                        )
+                        if tool_name == "query_tianhe_fixed_qa":
+                            observation_text = TIANHE_UNAVAILABLE_TEXT
+                            forced_final_text = observation_text
+                            tianhe_passthrough_text = observation_text
+                        else:
+                            observation_text = (
+                                f"工具 {tool_name} 执行失败（{type(e).__name__}），"
+                                f"该数据暂不可用。错误摘要：{err_summary}"
+                            )
                         tool_step.output = f"查询失败：{err_summary[:120]}"
                         if evidence_sink is not None:
                             evidence_sink.record(tool_name, "error", {"error": err_summary})
@@ -2761,13 +2771,22 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     # 直接作为 forced_final_text 收口，跳过 answer LLM——避免 LLM 超时/改写把现成答案拖死。
                     # 透传判定在 process_message 收口处做值绑定：仅当 forced_final_text 仍等于本轮天河原文时
                     # 才原样透传，保证被后续工具覆盖或应急清空后不误判（不再用会话级标志，避免跨消息泄漏）。
-                    # 工具级失败（TIANHE_ERROR_TEXTS：空问题/连接超时/不可用/格式异常）不强制收口，
-                    # 作为普通 ToolMessage 观测交给 planner 回退本地工具（符合工具 docstring 设计意图）。
-                    answer_text = str(_unwrap_tool_result(observation) or "").strip()
-                    observation_text = answer_text or "天河问答服务返回为空。"
-                    if answer_text and answer_text not in TIANHE_ERROR_TEXTS:
-                        forced_final_text = answer_text
-                        tianhe_passthrough_text = answer_text
+                    # 天河目录属于供应方专属任务：工具级失败也展示天河调用层的失败说明并强制收口，
+                    # 绝不交回本地 planner 代答，避免跨越既定业务分工。
+                    raw_answer = getattr(observation, "content", observation)
+                    if (
+                        isinstance(raw_answer, list)
+                        and raw_answer
+                        and isinstance(raw_answer[0], dict)
+                        and "text" in raw_answer[0]
+                    ):
+                        raw_answer = raw_answer[0]["text"]
+                    # 天河 answer 是最终展示正文：不能走通用 JSON 解包，也不能 strip，
+                    # 否则合法 JSON 文本会变 Python repr，首尾格式也会被改写。
+                    answer_text = raw_answer if isinstance(raw_answer, str) else str(raw_answer or "")
+                    observation_text = answer_text if answer_text.strip() else "天河问答服务返回为空。"
+                    forced_final_text = observation_text
+                    tianhe_passthrough_text = observation_text
                 else:
                     observation_text = callbacks["tool_observation_to_text"](observation)
 
@@ -2781,10 +2800,17 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                 # 而是由 LLM 根据 ToolMessage 中的失败说明统一组织回答。
                 err_summary = _scrub_internal_data(str(e)) or "未知错误"
                 print(f"[工具错误] {tool_name}: {err_summary}")
-                observation_text = (
-                    f"工具 {tool_name} 执行失败（{type(e).__name__}），"
-                    f"该数据暂不可用。错误摘要：{err_summary}"
-                )
+                if tool_name == "query_tianhe_fixed_qa":
+                    # 天河目录是供应方专属边界；即使工具层出现未预期异常，也只展示
+                    # 统一失败说明并强制收口，不把问题交回本地 planner 代答。
+                    observation_text = TIANHE_UNAVAILABLE_TEXT
+                    forced_final_text = observation_text
+                    tianhe_passthrough_text = observation_text
+                else:
+                    observation_text = (
+                        f"工具 {tool_name} 执行失败（{type(e).__name__}），"
+                        f"该数据暂不可用。错误摘要：{err_summary}"
+                    )
                 if tool_step is not None:
                     tool_step.output = f"查询失败：{err_summary[:120]}"
                     await tool_step.update()

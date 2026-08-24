@@ -6,7 +6,6 @@ import sys
 import time
 from pathlib import Path
 
-import langchain_core.messages  # noqa: F401  在 ensure_stubs() 之前导入，避免安装 langchain stub（stub 会丢弃 tool_call_id）
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -16,6 +15,7 @@ from chainlitexam.tests.stubs import ensure_stubs
 ensure_stubs()
 
 import chainlit
+import langchain_core.messages  # noqa: F401
 import chainlitexam.message_orchestrator as mo
 import external_skill_tools as est
 
@@ -403,6 +403,21 @@ async def test_tianhe_degraded_answer_also_passthrough(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tianhe_json_like_text_and_whitespace_are_preserved_verbatim(monkeypatch):
+    """天河 answer 即使长得像 JSON，也不能被解包成 dict/repr 或裁掉首尾空白。"""
+    answer = '  {"level": "degraded", "answer": "keep me"} \n'
+    planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, answer)
+
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
+        planner_msg, tools, messages, "今天雨下了多长时间", 1, callbacks
+    )
+
+    assert forced == answer
+    assert tianhe_text == answer
+    assert messages[0].content == answer
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "err_text",
     [
@@ -412,19 +427,51 @@ async def test_tianhe_degraded_answer_also_passthrough(monkeypatch):
         est._TIANHE_ERR_FORMAT,
     ],
 )
-async def test_tianhe_tool_level_failure_falls_back(monkeypatch, err_text):
-    """天河工具级失败（连接超时/不可用/格式异常/空问题）时，不得当最终答案透传：
-    forced_final_text 保持 None，失败文案作为普通 ToolMessage 观测交给 planner 回退本地工具。"""
+async def test_tianhe_tool_level_failure_still_stops_local_agent(monkeypatch, err_text):
+    """天河专属问题即使接口失败也直接展示其失败说明，不交给本地智能体代答。"""
     planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, err_text)
 
     forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
         planner_msg, tools, messages, "今天雨下了多长时间", 1, callbacks
     )
 
-    assert forced is None, "工具级失败不应强制收口，否则 planner 无法回退本地工具"
-    assert tianhe_text is None, "工具级失败不应记录为透传原文"
+    assert forced == err_text, "天河专属问题失败后也应强制收口，禁止本地智能体代答"
+    assert tianhe_text == err_text, "失败说明也应绑定为天河透传文本"
     assert len(messages) == 1
-    assert messages[0].content == err_text, "失败文案应进 ToolMessage，让 planner 看到后回退本地工具"
+    assert messages[0].content == err_text
+
+
+@pytest.mark.asyncio
+async def test_tianhe_unexpected_tool_exception_still_stops_local_agent(monkeypatch):
+    """天河工具发生未预期异常时也必须由供应方失败说明收口，不能落回本地 planner。"""
+    planner_msg, tools, messages, callbacks = _tianhe_round_setup(monkeypatch, "unused")
+
+    async def _raise(*args, **kwargs):
+        raise RuntimeError("unexpected client failure")
+
+    monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", _raise)
+
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
+        planner_msg, tools, messages, "今天雨下了多长时间", 1, callbacks
+    )
+
+    assert forced == est._TIANHE_ERR_UNAVAILABLE
+    assert tianhe_text == est._TIANHE_ERR_UNAVAILABLE
+    assert messages[0].content == est._TIANHE_ERR_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_tianhe_missing_tool_still_stops_local_agent(monkeypatch):
+    """天河工具装配缺失时也必须统一失败收口，不能把专属问题交给本地 planner。"""
+    planner_msg, _tools, messages, callbacks = _tianhe_round_setup(monkeypatch, "unused")
+
+    forced, ree, bundles, rolling_bundles, tianhe_text = await mo._run_tool_round(
+        planner_msg, [], messages, "今天雨下了多长时间", 1, callbacks
+    )
+
+    assert forced == est._TIANHE_ERR_UNAVAILABLE
+    assert tianhe_text == est._TIANHE_ERR_UNAVAILABLE
+    assert messages[0].content == est._TIANHE_ERR_UNAVAILABLE
 
 
 def test_is_tianhe_passthrough_value_binding():
@@ -833,7 +880,9 @@ def _fixb_non_rolling_setup(monkeypatch, planner_behavior, observation):
     monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
     monkeypatch.setattr(mo, "ENABLE_LLM_THINKING", False)
 
-    user_query = "今天雨下了多长时间"
+    # 使用非天河目录问法，专注验证通用 planner 超时重试；天河目录问题现在按业务边界
+    # 强制由 query_tianhe_fixed_qa 收口，不再进入本地 planner。
+    user_query = "请分析当前综合气象观测数据"
     stream_contents: list[str] = []
     final_messages: list = []
     counters = {"planner": 0, "answer": 0}
@@ -1092,10 +1141,11 @@ async def test_run_tool_round_direct_historical_assembles_with_hazard(monkeypatc
     tools = [FakeHistoricalTool(), FakeHazardTool()]
     messages = []
     monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
-    # 直调 _run_tool_round 走真实 chainlit.Step 需要 Chainlit 上下文；自包含设置避免依赖测试顺序。
-    from chainlit.context import context_var, init_http_context
+    # 真实 Chainlit Step 需要上下文；裸环境使用 tests/stubs.py 的无上下文 Step。
+    if hasattr(chainlit, "__path__"):
+        from chainlit.context import context_var, init_http_context
 
-    context_var.set(init_http_context(thread_id="test-direct-historical"))
+        context_var.set(init_http_context(thread_id="test-direct-historical"))
 
     forced, ree, bundles, rolling_bundles, _ = await mo._run_tool_round(
         FakePlannerMsg(), tools, messages, "同乐小学7月11日天气怎么样", 1, callbacks,
@@ -1154,9 +1204,10 @@ async def test_run_tool_round_direct_historical_non_ok_no_crash(monkeypatch, his
     tools = [FakeHistoricalTool()]
     messages = []
     monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
-    from chainlit.context import context_var, init_http_context
+    if hasattr(chainlit, "__path__"):
+        from chainlit.context import context_var, init_http_context
 
-    context_var.set(init_http_context(thread_id="test-direct-historical-nonok"))
+        context_var.set(init_http_context(thread_id="test-direct-historical-nonok"))
 
     # 修复前此调用抛 UnboundLocalError；修复后正常返回、非 ok 不强制收口
     forced, ree, bundles, rolling_bundles, _ = await mo._run_tool_round(

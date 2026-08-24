@@ -2,8 +2,36 @@
 
 from __future__ import annotations
 
+import sys
+import types
+from pathlib import Path
+
 import httpx
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from chainlitexam.tests.stubs import ensure_stubs
+
+ensure_stubs()
+
+# 裸测试环境可能没有 langchain_core.tools；这里只提供装饰器所需的最小接口，
+# 让本文件可独立收集，避免依赖其他测试文件先安装全局 stub。
+if "langchain_core.tools" not in sys.modules:
+    lc_tools = types.ModuleType("langchain_core.tools")
+
+    def _tool_stub(fn):
+        class _ToolWrapper:
+            name = fn.__name__
+            description = fn.__doc__
+
+            async def ainvoke(self, args):
+                return await fn(**args) if isinstance(args, dict) else await fn(args)
+
+        return _ToolWrapper()
+
+    lc_tools.tool = _tool_stub
+    sys.modules["langchain_core.tools"] = lc_tools
 
 import external_skill_tools as est
 import prompts as prompts_mod
@@ -74,6 +102,7 @@ async def test_call_timeout_returns_hint(monkeypatch):
 @pytest.mark.asyncio
 async def test_call_connect_error_returns_hint(monkeypatch):
     _install_fake_client(monkeypatch, exc=httpx.ConnectError("refused"))
+    monkeypatch.setattr(est, "TIANHE_QA_RETRY_DELAYS", (0, 0), raising=False)
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert "暂时不可用" in out
 
@@ -99,6 +128,109 @@ async def test_call_degraded_body_passthrough(monkeypatch):
     _install_fake_client(monkeypatch, json_body={"answer": degraded})
     out = await est.call_tianhe_qa_api("今天雨下了多长时间")
     assert out == degraded
+
+
+@pytest.mark.asyncio
+async def test_call_retries_transient_connection_error_then_returns_tianhe_answer(monkeypatch):
+    """天河仍是唯一回答方；临时连接错误最多重试后直接透传天河 answer。"""
+    calls = {"n": 0}
+
+    class _FlakyClient:
+        async def post(self, url, json):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("temporary")
+            return _Resp(200, {"answer": "天河返回的今日降雨时长答案"})
+
+    monkeypatch.setattr(est, "_get_tianhe_client", lambda: _FlakyClient())
+    monkeypatch.setattr(est, "TIANHE_QA_RETRY_DELAYS", (0, 0), raising=False)
+    est._tianhe_cache.clear()
+
+    out = await est.call_tianhe_qa_api("今天雨下了多长时间")
+
+    assert calls["n"] == 2
+    assert out == "天河返回的今日降雨时长答案"
+
+
+@pytest.mark.asyncio
+async def test_call_retries_503_then_returns_tianhe_answer(monkeypatch):
+    calls = {"n": 0}
+
+    class _FlakyClient:
+        async def post(self, url, json):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Resp(503, {"detail": "busy"})
+            return _Resp(200, {"answer": "天河恢复后的答案"})
+
+    monkeypatch.setattr(est, "_get_tianhe_client", lambda: _FlakyClient())
+    monkeypatch.setattr(est, "TIANHE_QA_RETRY_DELAYS", (0, 0), raising=False)
+    est._tianhe_cache.clear()
+
+    out = await est.call_tianhe_qa_api("现在市区风大吗")
+
+    assert calls["n"] == 2
+    assert out == "天河恢复后的答案"
+
+
+@pytest.mark.asyncio
+async def test_call_does_not_retry_or_replace_http_200_degraded_answer(monkeypatch):
+    """文档 9.4：200 降级正文仍由天河负责，原样展示且不得改成本地智能体答案。"""
+    calls = {"n": 0}
+
+    class _DegradedClient:
+        async def post(self, url, json):
+            calls["n"] += 1
+            return _Resp(200, {"answer": "暂时无法获取今日降雨过程数据，请稍后重试。"})
+
+    monkeypatch.setattr(est, "_get_tianhe_client", lambda: _DegradedClient())
+    monkeypatch.setattr(est, "TIANHE_QA_RETRY_DELAYS", (0, 0), raising=False)
+    est._tianhe_cache.clear()
+
+    out = await est.call_tianhe_qa_api("今天雨下了多长时间")
+
+    assert calls["n"] == 1
+    assert out == "暂时无法获取今日降雨过程数据，请稍后重试。"
+
+
+@pytest.mark.asyncio
+async def test_call_does_not_retry_non_transient_request_error(monkeypatch):
+    """协议/配置类 RequestError 不是临时网络故障，不应重复发送请求。"""
+    calls = {"n": 0}
+
+    class _InvalidClient:
+        async def post(self, url, json):
+            calls["n"] += 1
+            raise httpx.UnsupportedProtocol("unsupported protocol")
+
+    monkeypatch.setattr(est, "_get_tianhe_client", lambda: _InvalidClient())
+    monkeypatch.setattr(est, "TIANHE_QA_RETRY_DELAYS", (0, 0), raising=False)
+    est._tianhe_cache.clear()
+
+    out = await est.call_tianhe_qa_api("今天雨下了多长时间")
+
+    assert calls["n"] == 1
+    assert out == est._TIANHE_ERR_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_call_does_not_retry_read_timeout(monkeypatch):
+    """读取阶段超时可能发生在请求已被服务端接收后，不能重复提交 Fixed QA。"""
+    calls = {"n": 0}
+
+    class _ReadTimeoutClient:
+        async def post(self, url, json):
+            calls["n"] += 1
+            raise httpx.ReadTimeout("read timeout")
+
+    monkeypatch.setattr(est, "_get_tianhe_client", lambda: _ReadTimeoutClient())
+    monkeypatch.setattr(est, "TIANHE_QA_RETRY_DELAYS", (0, 0), raising=False)
+    est._tianhe_cache.clear()
+
+    out = await est.call_tianhe_qa_api("今天雨下了多长时间")
+
+    assert calls["n"] == 1
+    assert out == est._TIANHE_ERR_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -165,7 +297,7 @@ def test_tianhe_guidance_boundary_excludes_variables_not_fixed_words():
 
 
 def test_tianhe_error_texts_exported():
-    """工具级失败文案应以单一事实源集合导出，供 orchestrator 区分"失败回退"与"命中/降级透传"。"""
+    """工具级失败文案以单一事实源集合导出，供观测过滤、日志与契约测试复用。"""
     assert isinstance(est.TIANHE_ERROR_TEXTS, frozenset)
     assert est.TIANHE_ERROR_TEXTS == {
         est._TIANHE_ERR_EMPTY,

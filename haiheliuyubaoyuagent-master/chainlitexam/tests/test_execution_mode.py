@@ -27,6 +27,8 @@ if "langchain_mcp_adapters" in sys.modules:
 
 import pytest
 
+pytest.importorskip("chainlit.data", reason="chain_gzt tests require the real Chainlit package")
+
 
 @pytest.mark.asyncio
 async def test_http_mode_accumulates_answer_and_updates_once():

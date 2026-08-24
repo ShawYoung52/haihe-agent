@@ -14,6 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+pytest.importorskip("chainlit.emitter", reason="qa_http_api tests require the real Chainlit package")
+
 import qa_http_api as qa
 
 # 1x1 透明 PNG，用于图片相关测试

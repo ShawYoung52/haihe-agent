@@ -122,6 +122,145 @@ def test_full_text_point_still_renders_weather_table():
     assert "天气现象" in table and "多云" in table and "东南风3级" in table
 
 
+def test_point_time_of_day_query_renders_one_afternoon_summary_row(monkeypatch):
+    """点位“今天下午”问法只展示一个时段汇总，不铺 6 条逐小时记录。"""
+    monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: datetime(2026, 8, 24, 8, 0))
+    facts = {
+        "poi": {"name": "天津港"},
+        "periods": [
+            {
+                "start_time": f"2026-08-24 {hour:02d}:00:00",
+                "end_time": f"2026-08-24 {hour + 1:02d}:00:00",
+                "weather": "多云",
+                "tmax": 30 + (1 if hour in (13, 14) else 0),
+                "tmin": 30 + (1 if hour in (13, 14) else 0),
+                "EDA": "东风1-2级" if hour == 12 else "东南风1-2级",
+                "rain_1h": 0.0,
+            }
+            for hour in range(12, 18)
+        ],
+    }
+
+    table = dw_core._build_decision_weather_table("今天下午天津港附近有雨吗", facts)
+
+    assert "【天津港今天下午天气预报】" in table
+    assert "| 今天下午 | 多云 | 30~31 | 东风1-2级转东南风1-2级 | 0.0 |" in table
+    assert "12时" not in table and "17时" not in table
+    assert table.count("\n|") == 3  # 表头、分隔行、唯一数据行
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "今天下午天津港逐小时天气",
+        "按小时看今天下午天津港天气",
+        "今天下午天津港小时级天气",
+        "今天下午天津港分小时天气",
+        "今天下午每隔一小时显示天津港天气",
+        "今天下午每隔两小时显示天津港天气",
+        "今天下午天津港一小时一报",
+    ],
+)
+def test_point_time_of_day_query_keeps_hourly_rows_when_explicitly_requested(query):
+    """明确要求逐小时详情时保持既有格式，不被时段汇总覆盖。"""
+    facts = {
+        "poi": {"name": "天津港"},
+        "periods": [
+            {
+                "start_time": "2026-08-24 12:00:00",
+                "end_time": "2026-08-24 13:00:00",
+                "period_label": "08月24日12时-08月24日13时",
+                "weather": "多云",
+                "tmax": 30,
+                "tmin": 30,
+                "EDA": "东风1-2级",
+                "rain_1h": 0.0,
+            },
+            {
+                "start_time": "2026-08-24 13:00:00",
+                "end_time": "2026-08-24 14:00:00",
+                "period_label": "08月24日13时-08月24日14时",
+                "weather": "多云",
+                "tmax": 31,
+                "tmin": 31,
+                "EDA": "东南风1-2级",
+                "rain_1h": 0.0,
+            },
+        ],
+    }
+
+    table = dw_core._build_decision_weather_table(query, facts)
+
+    assert "今天下午天气预报" not in table
+    assert "12时" in table and "13时" in table
+
+
+@pytest.mark.parametrize("query", ["8月29日下午天津港天气怎么样", "下周六下午天津港天气怎么样"])
+def test_point_time_of_day_query_uses_actual_date_for_explicit_day(query):
+    """明确日期/星期不能被时段聚合误标成“今天下午”。"""
+    facts = {
+        "poi": {"name": "天津港"},
+        "periods": [{
+            "start_time": f"2026-08-29 {hour:02d}:00:00",
+            "end_time": f"2026-08-29 {hour + 1:02d}:00:00",
+            "weather": "晴",
+            "tmax": 28,
+            "tmin": 28,
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+        } for hour in range(12, 18)],
+    }
+
+    table = dw_core._build_decision_weather_table(query, facts)
+
+    assert "【天津港8月29日下午天气预报】" in table
+    assert "今天下午" not in table
+
+
+def test_multi_day_time_of_day_query_does_not_merge_dates_into_one_row():
+    """多日“下午”不能跨日期合并为一个虚假的单日时段。"""
+    facts = {
+        "poi": {"name": "天津港"},
+        "periods": [{
+            "start_time": f"2026-08-{day:02d} 12:00:00",
+            "end_time": f"2026-08-{day:02d} 13:00:00",
+            "period_label": f"08月{day:02d}日12时-08月{day:02d}日13时",
+            "weather": weather,
+            "tmax": 28,
+            "tmin": 28,
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+        } for day, weather in ((25, "晴"), (26, "多云"), (27, "阴"))],
+    }
+
+    table = dw_core._build_decision_weather_table("未来三天下午天津港天气怎么样", facts)
+
+    assert "今天下午天气预报" not in table
+    assert "8月25日" in table and "8月26日" in table and "8月27日" in table
+
+
+def test_historical_point_afternoon_keeps_historical_title():
+    """历史下午问法不能被新预报汇总误标为“今天下午天气预报”。"""
+    facts = {
+        "poi": {"name": "天津港"},
+        "query_mode": "historical_obs",
+        "periods": [{
+            "start_time": "2026-08-23 12:00:00",
+            "end_time": "2026-08-23 13:00:00",
+            "weather": "多云",
+            "tmax": 30,
+            "tmin": 30,
+            "EDA": "东风1-2级",
+            "rain_1h": 0.0,
+        }],
+    }
+
+    table = dw_core._build_decision_weather_table("昨天下午天津港天气怎么样", facts)
+
+    assert "【天津港历史实况】" in table
+    assert "天气预报" not in table
+
+
 def test_point_display_name_prefers_keyword_for_fuzzy_prefix_match():
     # 模糊命中"基名+机构后缀"（水库本体不在库、命中水库旁医院）→ 展示用户所问基名
     assert dw_core._decision_point_display_name("密云水库医院", "密云水库", "fuzzy") == "密云水库"
@@ -593,6 +732,21 @@ def test_build_poi_reminder_section_wind_and_visibility():
     assert "低能见度" not in plain
 
 
+def test_dry_scenic_fallback_does_not_claim_slippery_conditions():
+    """模型建议全部被过滤时，晴好景区的安全兜底也不能固定声称需要防滑。"""
+    text = dw_core._build_poi_reminder_section({
+        "poi_category": "scenic",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{"weather": "晴", "EDA": "西北风2-3级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+
+    assert "遵守景区安全提示" in text
+    assert "防滑" not in text
+    assert "能见度较低" not in text
+
+
 def test_decision_max_wind_level_compound_wind():
     """复合风况（X～Y级转Z级 / X～Y级阵风Z级）取真实最大风力，不被区间下限低估。"""
     # 阵风 7 级 → 必须识别为 >=6 触发大风提示（修复前取区间下限 6，恰好压线；转 5 级则更明显地低估）
@@ -827,6 +981,168 @@ async def test_decision_weather_answer_reminder_position():
     # 提醒位于数据来源之前
     assert result.find("【注意事项】") < result.find("数据来源：")
     assert result.rstrip().endswith("数据来源：天津市气象台滚动预报。")
+
+
+@pytest.mark.asyncio
+async def test_activity_model_advice_is_dynamic_and_drops_unsupported_weather_claims():
+    """活动建议由模型组织，但无降雨/低能见度事实时必须剔除对应虚构提醒。"""
+    facts = {
+        "poi": {"name": "天津泰达航母主题公园", "address": "天津市滨海新区"},
+        "question_type": "activity",
+        "data_source": "天津市气象台滚动预报",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{
+            "start_time": "2026-08-29 00:00:00",
+            "end_time": "2026-08-30 00:00:00",
+            "weather": "多云转晴",
+            "tmax": 28,
+            "tmin": 21,
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+            "visibility_min_km": 10.0,
+        }],
+        "poi_category": "scenic",
+        "hazard_points": None,
+    }
+    captured = {}
+
+    class _FakeResult:
+        content = (
+            "【核心结论】本周末天气总体适宜游玩。\n"
+            "【注意事项】\n"
+            "1. [action:visibility_travel]\n"
+            "2. [action:rain_protection]\n"
+            "3. [action:sun_protection]"
+        )
+
+    async def _fake_ainvoke_chain(chain, inputs):
+        captured["prompt"] = inputs["messages"][0].content
+        return _FakeResult()
+
+    result = await dw_core._generate_decision_weather_answer(
+        "本周末适合去泰达航母主题公园游玩吗？",
+        facts,
+        None,
+        {"ainvoke_chain": _fake_ainvoke_chain},
+    )
+
+    assert "【注意事项】" in result
+    assert "防晒补水" in result
+    assert "能见度较低" not in result
+    assert "雨具" not in result and "道路湿滑" not in result
+    assert "景区游览请注意防滑" not in result, "晴好天气不应拼接固定防滑断言"
+    assert "气象专业" in captured["prompt"]
+    assert "只能依据" in captured["prompt"]
+    assert "可选注意事项动作" in captured["prompt"]
+    assert "[action:action_id]" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_activity_model_advice_drops_unverified_weather_numbers():
+    """注意事项不得把模型虚构的温度、风力或能见度数值带入最终回答。"""
+    facts = {
+        "poi": {"name": "天津泰达航母主题公园"},
+        "question_type": "activity",
+        "data_source": "天津市气象台滚动预报",
+        "periods": [{
+            "start_time": "2026-08-29 00:00:00",
+            "end_time": "2026-08-30 00:00:00",
+            "weather": "晴",
+            "tmax": 28,
+            "tmin": 21,
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+            "visibility_min_km": 10.0,
+        }],
+        "poi_category": "scenic",
+    }
+
+    class _FakeResult:
+        content = (
+            "【核心结论】天气适宜游玩。\n"
+            "【注意事项】\n"
+            "1. [heat] 气温将升至38℃，注意防暑。\n"
+            "2. [wind] 风力可达6级，请远离临时搭建物。\n"
+            "3. [visibility] 能见度将降至500米，驾车请减速。\n"
+            "4. [general] 建议随身携带折叠伞，以备天气变化。\n"
+            "5. [general] 周边地质灾害风险较高，请立即转移。\n"
+            "6. [action:stagger_visit]"
+        )
+
+    async def _fake_ainvoke_chain(chain, inputs):
+        return _FakeResult()
+
+    result = await dw_core._generate_decision_weather_answer(
+        "本周末适合去泰达航母主题公园游玩吗？",
+        facts,
+        None,
+        {"ainvoke_chain": _fake_ainvoke_chain},
+    )
+
+    assert "38℃" not in result
+    assert "6级" not in result
+    assert "500米" not in result
+    assert "折叠伞" not in result
+    assert "地质灾害风险较高" not in result
+    assert "错峰游览" in result
+
+
+def test_model_advice_rejects_qualitative_weather_claims_without_active_condition():
+    """结构化条件标签必须与实际 facts 一致，定性改写也不能绕过。"""
+    facts = {
+        "periods": [{
+            "weather": "多云",
+            "tmax": 28,
+            "tmin": 21,
+            "EDA": "东风1-2级",
+            "visibility_min_km": 10.0,
+            "rain_1h": 0.0,
+        }],
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "poi_category": "scenic",
+    }
+    answer = (
+        "【注意事项】\n"
+        "1. [heat] 高温酷热，请防暑。\n"
+        "2. [wind] 风力偏大，请注意。\n"
+        "3. [visibility] 视线不佳，驾车请减速。\n"
+        "4. [general] 请关注降水变化并随身携伞。\n"
+        "5. [general] 周边滑坡风险中等，建议转移避险。\n"
+        "6. [rain] 预计可能引发城市洪涝，建议启动四级响应。\n"
+        "7. [general] 库容压力较大，请加强泄洪调度。\n"
+        "8. [action:scenic_schedule]"
+    )
+
+    advice = dw_core._decision_model_weather_advice(answer, facts)
+
+    assert advice == ["出发前核实景区开放、预约及重点项目运行安排，合理规划游览路线。"]
+
+
+def test_model_advice_supplements_instead_of_replacing_port_safety_lines():
+    """模型仅提供场景补充，不能覆盖港口按实际天气生成的防雷、防滑、系泊提醒。"""
+    facts = {
+        "poi_category": "port",
+        "has_rain_signal": True,
+        "total_rain_mm": 12.0,
+        "periods": [{
+            "start_time": "2026-08-24 12:00:00",
+            "weather": "雷阵雨",
+            "EDA": "西北风6级",
+            "rain_1h": 12.0,
+        }],
+        "hazard_points": None,
+    }
+
+    text = dw_core._build_poi_reminder_section(
+        facts, model_weather_advice=["提前核实港区作业安排。"]
+    )
+
+    assert "提前核实港区作业安排" in text
+    assert "防雨防雷" in text
+    assert "系泊加固" in text
+    assert "码头路面湿滑" in text
 
 
 # ---------- 历史日期 → 历史实况查询 ----------

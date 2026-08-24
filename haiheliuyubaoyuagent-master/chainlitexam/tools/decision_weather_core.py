@@ -918,6 +918,121 @@ def _decision_rain_cell(value: Any) -> str:
         return _decision_table_cell(value)
 
 
+_DECISION_HOURLY_DETAIL_WORDS = (
+    "逐小时", "每小时", "按小时", "小时级", "分小时", "小时变化", "分时详情", "逐时",
+)
+_DECISION_HOURLY_DETAIL_RE = re.compile(
+    r"(?:每(?:隔)?[一二两三四五六七八九十\d]*小时|[一二两三四五六七八九十\d]+小时一(?:报|次|条))"
+)
+_DECISION_TIME_OF_DAY_SPECS = (
+    (("上午", "早上", "早晨"), "上午", 6, 12),
+    (("下午",), "下午", 12, 18),
+    (("今晚", "晚上", "晚间", "夜间", "夜里"), "晚上", 18, 24),
+)
+
+
+def _decision_time_of_day_spec(user_text: str) -> tuple[str, int, int] | None:
+    """提取“今天下午/今晚”等整段问法；明确逐小时请求保持原格式。"""
+    text = str(user_text or "")
+    if any(word in text for word in _DECISION_HOURLY_DETAIL_WORDS) or _DECISION_HOURLY_DETAIL_RE.search(text):
+        return None
+    for markers, period_name, start_hour, end_hour in _DECISION_TIME_OF_DAY_SPECS:
+        if not any(marker in text for marker in markers):
+            continue
+        return period_name, start_hour, end_hour
+    return None
+
+
+def _decision_float_values(periods: list[dict], key: str) -> list[float]:
+    values: list[float] = []
+    for period in periods:
+        try:
+            value = period.get(key)
+            if value is not None:
+                values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _decision_time_of_day_table(user_text: str, facts: dict, periods: list[dict]) -> str:
+    """把点位逐小时预报聚合成一个上午/下午/晚间时段。"""
+    spec = _decision_time_of_day_spec(user_text)
+    if spec is None:
+        return ""
+    period_name, start_hour, end_hour = spec
+    hourly_periods: list[dict] = []
+    for period in periods:
+        start = _parse_decision_dt(period.get("start_time"))
+        end = _parse_decision_dt(period.get("end_time"))
+        if start is None or end is None or (end - start) > timedelta(hours=6):
+            continue
+        if start_hour <= start.hour < end_hour:
+            hourly_periods.append(period)
+    if not hourly_periods:
+        return ""
+
+    # 时段汇总只适用于一个自然日。跨日问法若在这里合并，会把不同日期的天气
+    # 拼成一个并不存在的“下午”；此时回退既有逐时/逐日表格。
+    period_dates = {
+        start.date()
+        for period in hourly_periods
+        if (start := _parse_decision_dt(period.get("start_time"))) is not None
+    }
+    if len(period_dates) != 1:
+        return ""
+    target_date = next(iter(period_dates))
+    day_offset = (target_date - _decision_now_bjt().date()).days
+    if day_offset == 0:
+        day_name = "今天"
+    elif day_offset == 1:
+        day_name = "明天"
+    elif day_offset == 2:
+        day_name = "后天"
+    else:
+        day_name = f"{target_date.month}月{target_date.day}日"
+    label = f"{day_name}{period_name}"
+
+    weather_parts: list[str] = []
+    wind_parts: list[str] = []
+    rain_values: list[float] = []
+    for period in hourly_periods:
+        weather = str(period.get("weather") or period.get("WEA") or "").strip()
+        if weather and weather != "--" and weather not in weather_parts:
+            weather_parts.append(weather)
+        wind = str(period.get("EDA") or period.get("wind") or "").strip()
+        if wind and wind != "--" and wind not in wind_parts:
+            wind_parts.append(wind)
+        rain = _decision_rain_value(period)
+        if rain is not None:
+            rain_values.append(rain)
+
+    tmin_values = _decision_float_values(hourly_periods, "tmin")
+    tmax_values = _decision_float_values(hourly_periods, "tmax")
+    low = min(tmin_values or tmax_values) if (tmin_values or tmax_values) else None
+    high = max(tmax_values or tmin_values) if (tmax_values or tmin_values) else None
+    if low is not None and high is not None:
+        temperature = f"{_decision_temperature_text_value(low)}~{_decision_temperature_text_value(high)}"
+    else:
+        temperature = "—"
+
+    location = _decision_table_cell((facts.get("poi") or {}).get("name"), "该位置")
+    row = [
+        label,
+        "转".join(weather_parts) if weather_parts else "—",
+        temperature,
+        "转".join(wind_parts) if wind_parts else "—",
+        _decision_rain_cell(round(sum(rain_values), 1) if rain_values else None),
+    ]
+    headers = ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"]
+    return "\n".join([
+        f"【{location}{label}天气预报】",
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+        "| " + " | ".join(_decision_table_cell(value) for value in row) + " |",
+    ])
+
+
 _DECISION_CN_WEEKDAY = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
 
 
@@ -1011,6 +1126,14 @@ def _build_decision_weather_table(user_text: str, facts: dict) -> str:
         return ""
 
     location = _decision_table_cell((facts.get("poi") or {}).get("name"), "该位置")
+
+    time_of_day_table = (
+        ""
+        if _decision_is_historical_facts(facts)
+        else _decision_time_of_day_table(user_text, facts, periods)
+    )
+    if time_of_day_table:
+        return time_of_day_table
 
     # 外埠点位（如北京密云水库）滚动预报只回降水格点、无天气/气温/风 → 渲染降水表，
     # 直接回答"有降水吗"类问题，而不是出一张全 "—" 的天气/气温/风表。
@@ -1176,7 +1299,7 @@ _POI_CATEGORY_REMINDER_TEMPLATES: dict[str, list[tuple[str, tuple[str, ...] | No
         ("请留意降雨、大风等天气对课间操、体育课、运动会等户外活动的影响，合理安排行程。", ("rain", "wind")),
     ],
     "scenic": [
-        ("景区游览请注意防滑与游览安全。", None),
+        ("游览期间请遵守景区安全提示，注意游览安全，并结合现场开放安排合理规划路线。", None),
         ("雷雨时避免在空旷高地、树下停留。", ("storm", "rain")),
         ("降雨时道路湿滑，请关注景区安全提示并合理安排游览路线。", ("rain",)),
     ],
@@ -1197,10 +1320,11 @@ _POI_CATEGORY_REMINDER_TEMPLATES: dict[str, list[tuple[str, tuple[str, ...] | No
 
 
 def _poi_weather_conditions(facts: dict, periods: list[dict]) -> set[str]:
-    """从 facts/periods 判定实际出现的天气条件集合（{"rain","wind","visibility","storm"}）。
+    """从 facts/periods 判定实际出现的天气条件集合。
 
     纯代码判定、零编造：降雨看 has_rain_signal/total_rain_mm；大风/能见度只在非降水-only
-    点位（外埠点只回降水格点，EDA/VISMIN 是占位值，不可靠）解析；storm 看天气现象含雷/强对流。
+    点位（外埠点只回降水格点，EDA/VISMIN 是占位值，不可靠）解析；其它条件由天气现象
+    和温度阈值解析。返回值可含 rain/wind/visibility/storm/sun/heat/cold。
     """
     conditions: set[str] = set()
     if facts.get("has_rain_signal") is True:
@@ -1211,11 +1335,27 @@ def _poi_weather_conditions(facts: dict, periods: list[dict]) -> set[str]:
                 conditions.add("rain")
         except (TypeError, ValueError):
             pass
+    max_temperatures: list[float] = []
+    min_temperatures: list[float] = []
     for period in periods or []:
         weather_text = str(period.get("weather") or period.get("WEA") or "")
+        if "雨" in weather_text:
+            conditions.add("rain")
         if "雷" in weather_text or "强对流" in weather_text:
             conditions.add("storm")
-            break
+        if "晴" in weather_text:
+            conditions.add("sun")
+        for key, target in (("tmax", max_temperatures), ("tmin", min_temperatures)):
+            try:
+                value = period.get(key)
+                if value is not None:
+                    target.append(float(value))
+            except (TypeError, ValueError):
+                continue
+    if max_temperatures and max(max_temperatures) >= 35:
+        conditions.add("heat")
+    if min_temperatures and min(min_temperatures) <= 0:
+        conditions.add("cold")
     if not _decision_periods_rain_only(periods):
         max_wind = _decision_max_wind_level(periods)
         if max_wind is not None and max_wind >= 5:
@@ -1554,7 +1694,9 @@ def _decision_reservoir_risk_lines(facts: dict) -> list[str]:
             "下游河道警惕突发涨水与山洪风险。"]
 
 
-def _build_poi_reminder_section(facts: dict) -> str:
+def _build_poi_reminder_section(
+    facts: dict, model_weather_advice: list[str] | None = None
+) -> str:
     """根据点位类别 + 周边隐患点确定性生成“【注意事项】”段落（条目 1. 2. 3. 编号）。
 
     无可展示内容（既无类别模板、也无隐患点数据）时返回空串。
@@ -1640,6 +1782,12 @@ def _build_poi_reminder_section(facts: dict) -> str:
                 if clauses:
                     items.append(clauses[0])
 
+        # 模型只补充场景化行动建议，不得覆盖港口、山区、水库及隐患点的确定性安全规则。
+        if category != "reservoir":
+            for advice_item in model_weather_advice or []:
+                if advice_item not in items:
+                    items.append(advice_item)
+
         # 水库：追加 14所 接口实际水位 + 洪水/山洪风险研判
         # （水位/蓄水/出库数值来自 facts.water_level_info，余量与风险结论确定性推导，不编造）
         if category == "reservoir":
@@ -1712,6 +1860,72 @@ def _build_poi_reminder_section(facts: dict) -> str:
     return "\n\n".join(part.rstrip() for part in parts if str(part).strip()).strip()
 
 
+_MODEL_ADVICE_ACTIONS: dict[str, tuple[str | None, tuple[str, ...] | None, str]] = {
+    # 通用场景动作：不含天气、风险等级、水位或应急判断。
+    "check_updates": (None, None, "出行前关注场所最新通知和现场运行安排，预留必要的行程调整时间。"),
+    "plan_breaks": (None, None, "结合活动强度合理安排休息与补水，避免长时间连续户外活动。"),
+    "scenic_schedule": (
+        None, ("scenic",), "出发前核实景区开放、预约及重点项目运行安排，合理规划游览路线。",
+    ),
+    "stagger_visit": (None, ("scenic",), "建议错峰游览，结合客流与现场开放安排合理规划行程。"),
+    "school_arrival": (None, ("school",), "结合上下学时段合理安排接送，留意校门周边人车交织风险。"),
+    "airport_status": (None, ("airport",), "出发前核实航班动态，预留值机、安检及地面交通衔接时间。"),
+    "station_status": (None, ("station",), "出发前核实列车与站内广播信息，预留排队进站和换乘时间。"),
+    "port_schedule": (None, ("port",), "提前核实港区生产与船舶作业安排，做好岗位间信息联动。"),
+    "mountain_route": (None, ("mountain",), "提前核实景区开放和步道通行情况，选择与体力相匹配的路线。"),
+    # 天气动作：仅当 condition 已由 facts 确定性判定为 active 时才进入候选集。
+    "rain_protection": ("rain", None, "备好雨具并留意路面湿滑，户外行程预留避雨和调整时间。"),
+    "wind_protection": ("wind", None, "远离临时搭建物和高空坠物风险区域，妥善固定易受风物品。"),
+    "visibility_travel": ("visibility", None, "低能见度时降低交通速度、增大车距，并关注交通管制信息。"),
+    "storm_shelter": ("storm", None, "雷电或强对流影响时及时进入安全室内场所，暂停空旷区域活动。"),
+    "sun_protection": ("sun", None, "户外活动时做好防晒补水，并合理安排连续暴露时长。"),
+    "heat_protection": ("heat", None, "尽量避开高温时段开展高强度活动，注意防暑降温和补水。"),
+    "cold_protection": ("cold", None, "注意防寒保暖，户外活动前检查道路和设施是否存在结冰影响。"),
+}
+_MODEL_ADVICE_ACTION_RE = re.compile(r"^\[action:([a-z_]+)\]\s*$", re.IGNORECASE)
+
+
+def _decision_allowed_advice_actions(facts: dict) -> list[str]:
+    """返回模型可选择的受控 action_id；条件与场所类别均由代码校验。"""
+    periods = [p for p in (facts.get("periods") or []) if isinstance(p, dict)]
+    active = _poi_weather_conditions(facts, periods)
+    category = str(facts.get("poi_category") or "")
+    allowed: list[str] = []
+    for action_id, (condition, categories, _text) in _MODEL_ADVICE_ACTIONS.items():
+        if condition is not None and condition not in active:
+            continue
+        if categories is not None and category not in categories:
+            continue
+        allowed.append(action_id)
+    return allowed
+
+
+def _decision_model_weather_advice(answer: Any, facts: dict) -> list[str]:
+    """把模型选择的受控 action_id 渲染为代码维护的专业建议。"""
+    text = str(answer or "")
+    match = re.search(
+        r"【(?:注意事项|游玩建议|专业建议)】\s*(.*?)(?=\n\s*【[^】]+】|\Z)",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        return []
+    allowed = set(_decision_allowed_advice_actions(facts))
+    advice: list[str] = []
+    for raw_line in match.group(1).splitlines():
+        action_line = re.sub(r"^\s*(?:[-*•]|\d+[.、)])\s*", "", raw_line).strip()
+        action_match = _MODEL_ADVICE_ACTION_RE.match(action_line)
+        if not action_match:
+            continue
+        action_id = action_match.group(1).lower()
+        if action_id not in allowed:
+            continue
+        rendered = _MODEL_ADVICE_ACTIONS[action_id][2]
+        if rendered not in advice:
+            advice.append(rendered)
+    return advice[:4]
+
+
 async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_chain: Any, callbacks: dict) -> str:
     """由模型生成一句结论，再由代码生成点位天气表、注意事项和数据来源。"""
     # 单日问法（下周一/明天/8月22日）：把结论、表格、注意事项都聚焦到所问的那一天。
@@ -1736,12 +1950,32 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "预报时段": facts.get("periods") or [],
         "小时级降雨计算": facts.get("hourly_rain"),
         "数据来源": facts.get("data_source") or "天津市气象台滚动预报",
+        "实际天气条件": sorted(
+            _poi_weather_conditions(
+                facts,
+                [p for p in (facts.get("periods") or []) if isinstance(p, dict)],
+            )
+        ),
+        "可选注意事项动作": _decision_allowed_advice_actions(facts),
     }
+    has_advice_context = bool(facts.get("poi_category")) and not is_historical
+    output_instruction = (
+        "输出【核心结论】及其正文，并继续输出【注意事项】。从 JSON 的“可选注意事项动作”中选择"
+        "2～4 个 action_id，每行只输出一个编号和 [action:action_id]，不得自行撰写建议正文。"
+        "候选 action_id 均对应代码维护的气象专业建议，应结合该类场所的出行或生产场景选择；"
+        "只能依据 JSON 中实际返回的"
+        "天气现象、降水、气温、风力、能见度和实际天气条件，不得补充未出现的降雨、道路湿滑、"
+        "低能见度、大风、雷电或强对流。注意事项不得复述或新增任何气象数值，具体数值由代码表格展示；"
+        "不得自行判断水位、隐患、风险等级或应急响应。\n"
+        if has_advice_context
+        else "只输出【核心结论】及其正文。\n"
+    )
     prompt = (
         "请仅依据下面 JSON 中的业务天气事实回答用户问题。不要编造未返回的天气、雨量、温度、风力或能见度。\n"
         "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
         + historical_note
-        + "只输出【核心结论】及其正文。逐日（多日）预报且每天天气不同时，按天分述，每天一句"
+        + output_instruction
+        + "逐日（多日）预报且每天天气不同时，按天分述，每天一句"
         "（如“20日多云转阴，21日雷阵雨，22日雷阵雨转阴”），不要把多天的天气合并成“前期…后期…”一句；"
         "若多日天气相同或均为无降雨，一句话概括即可，不要逐日重复相同内容。单日预报正文一句即可。"
         "只围绕用户明确询问的"
@@ -1753,7 +1987,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "所有温度数值必须按四舍五入展示为整数，不得输出小数。\n"
         "未来N小时降雨问题必须使用代码给出的 rain_level 和 total_rain_text；当前是否下雨只能依据"
         "当前整点至下一整点预报判断，不得表述为降雨实况，也不得编造过去1/3/6小时累计雨量。\n"
-        "表格、逐时或逐日数据行和数据来源均由代码生成；不得输出表格、其它标题、数据来源或技术说明。\n\n"
+        "表格、逐时或逐日数据行和数据来源均由代码生成；不得输出表格、数据来源或技术说明。"
+        "除允许的【注意事项】外不得输出其它标题。\n\n"
         f"用户问题：{user_text}\n\n"
         f"业务天气事实 JSON：{json.dumps(business_facts, ensure_ascii=False, default=str)}"
     )
@@ -1764,8 +1999,9 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     max_sentences = (n_periods + 1) if n_periods > 1 else 1
     core = _decision_core_only(answer, user_text, max_sentences=max_sentences)
     table = _build_decision_weather_table(user_text, facts)
+    model_weather_advice = _decision_model_weather_advice(answer, facts)
     # 历史实况同样追加注意事项，但措辞走“当日实际/该时段实际”等历史式（见 _build_poi_reminder_section）。
-    reminder = _build_poi_reminder_section(facts)
+    reminder = _build_poi_reminder_section(facts, model_weather_advice=model_weather_advice)
     source = _decision_table_cell(facts.get("data_source"), "天津市气象台滚动预报")
     sections = [f"【核心结论】\n{core}".rstrip()]
     if table:

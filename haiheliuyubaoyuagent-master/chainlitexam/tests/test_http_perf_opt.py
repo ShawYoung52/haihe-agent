@@ -12,10 +12,14 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 # Skip SQLAlchemyDataLayer init at import time (avoid asyncpg dep), same as other tests
 os.environ["CHAINLIT_ENABLE_DB"] = "0"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+pytest.importorskip("chainlit.data", reason="chain_gzt tests require the real Chainlit package")
 
 # Mock only truly missing deps (don't clobber real chainlit)
 for _mod, _cls in (
@@ -62,8 +66,6 @@ if "chainlit.data.sql_alchemy" not in sys.modules:
     _cl_sql = types.ModuleType("chainlit.data.sql_alchemy")
     _cl_sql.SQLAlchemyDataLayer = type("SQLAlchemyDataLayer", (), {})
     sys.modules["chainlit.data.sql_alchemy"] = _cl_sql
-
-import pytest
 
 import chain_gzt
 import qa_http_api

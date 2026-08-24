@@ -30,6 +30,8 @@ for _mod, _cls in (
 
 import pytest
 
+pytest.importorskip("chainlit.data", reason="chain_gzt tests require the real Chainlit package")
+
 
 class _FakeChain:
     def __init__(self):

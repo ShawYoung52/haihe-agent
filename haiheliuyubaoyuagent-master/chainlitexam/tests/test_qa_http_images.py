@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 
+pytest.importorskip("chainlit.emitter", reason="qa_http_api tests require the real Chainlit package")
+
 import qa_http_api
 
 PROXY = "http://10.226.107.35:8001/hhly/img/2026/08/12/DYPQ/ECMF/a.png"

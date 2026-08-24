@@ -17,10 +17,14 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 # 跳过 SQLAlchemyDataLayer 初始化，避免 asyncpg 依赖（与 test_chain_timeout.py 一致）
 os.environ["CHAINLIT_ENABLE_DB"] = "0"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+pytest.importorskip("chainlit.data", reason="chain_gzt tests require the real Chainlit package")
 
 # 只 mock 真正缺失的依赖（不 clobber 真实 chainlit）
 for _mod, _cls in (
@@ -67,9 +71,6 @@ if "chainlit.data.sql_alchemy" not in sys.modules:
     _cl_sql = types.ModuleType("chainlit.data.sql_alchemy")
     _cl_sql.SQLAlchemyDataLayer = type("SQLAlchemyDataLayer", (), {})
     sys.modules["chainlit.data.sql_alchemy"] = _cl_sql
-
-import pytest
-
 
 class _CaptureChatOpenAI:
     """捕获构造 kwargs 的假 ChatOpenAI。"""

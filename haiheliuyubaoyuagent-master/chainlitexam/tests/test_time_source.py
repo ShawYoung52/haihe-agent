@@ -43,6 +43,7 @@ def test_now_with_tz(sim_file):
 
 def test_epoch_follows_override(sim_file):
     """HTTP 运行时 epoch 随覆盖日期变（system prompt 自动刷新）。"""
+    pytest.importorskip("chainlit.emitter", reason="qa_http_api requires the real Chainlit package")
     import qa_http_api
 
     assert qa_http_api._runtime_epoch() == datetime.now().strftime("%Y-%m-%d")
