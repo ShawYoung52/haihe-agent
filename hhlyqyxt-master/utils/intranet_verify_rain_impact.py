@@ -337,8 +337,8 @@ def verify_impact_topology_consistency(river_geojson: dict) -> bool:
     规则（用户确认，对齐 GPT 递推模型；时间语义映射现有字段）：
       - 每条 feature 都有 4 个新字段；affected 恒 True（输出即受影响）
       - direct feature：impact_sources == ["DIRECT"]
-      - downstream feature：impact_sources 非空且 ⊆ upstream_ids；
-        t0_source_time == 某上游 feature 的 estimated_arrival_time（最早到达）
+      - downstream feature：impact_sources 必须恰好等于所有 arrival_time == 本边
+        t0_source_time 的上游；并列最早来源必须全部保留，后到来源仅保留在 upstream_ids
       - 闭环：本边 downstream_id 指向的下游 feature，其 t0_source_time == 本边 estimated_arrival_time
       - upstream_ids / downstream_id 引用的 edge_key 必须存在于 features 集合
     """
@@ -391,12 +391,26 @@ def verify_impact_topology_consistency(river_geojson: dict) -> bool:
             elif not set(sources) <= set(props.get("upstream_ids") or []):
                 print(f"  ✗ {name}({key}): impact_sources 不在 upstream_ids 内: {sources}")
                 issues += 1
-            # 5) t0 == 某上游的 arrival（最早到达本边起点）
+            # 5) impact_sources == 所有 arrival == t0 的上游（并列最早必须全列）
             t0 = props.get("t0_source_time")
             if t0 is not None:
-                up_arrivals = [by_key[uk].get("estimated_arrival_time") for uk in (props.get("upstream_ids") or []) if uk in by_key]
+                upstream_ids = props.get("upstream_ids") or []
+                up_arrivals = [
+                    by_key[uk].get("estimated_arrival_time")
+                    for uk in upstream_ids if uk in by_key
+                ]
                 if t0 not in up_arrivals:
                     print(f"  ✗ {name}({key}): t0={t0} 不等于任何上游 arrival {up_arrivals}")
+                    issues += 1
+                expected_sources = sorted(
+                    uk for uk in upstream_ids
+                    if uk in by_key and by_key[uk].get("estimated_arrival_time") == t0
+                )
+                if sorted(sources) != expected_sources:
+                    print(
+                        f"  ✗ {name}({key}): impact_sources={sorted(sources)}，"
+                        f"应完整列出并列最早来源 {expected_sources}"
+                    )
                     issues += 1
         # 6) 闭环：下游 feature 的 t0 == 本边 arrival
         if did is not None and did in by_key:

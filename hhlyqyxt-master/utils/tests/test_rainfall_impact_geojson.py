@@ -1608,10 +1608,47 @@ def test_impact_topology_confluence_min_and_sources():
     props = {p["objectid"]: p for f in geojson["features"] for p in [f["properties"]]}
     c = props["300"]
     a = props["100"]
+    b = props["200"]
     expected = a["estimated_arrival_time"]  # A 到汇合点 = C 开始受影响
     assert c["t0_source_time"] == expected
     assert c["impact_sources"] == [a["edge_key"]]
+    # B 后到，不改变最早影响时间，但仍保留为拓扑上游来源。
+    assert sorted(c["upstream_ids"]) == sorted([a["edge_key"], b["edge_key"]])
     assert c["downstream_id"] is None
+
+
+def test_verify_topology_rejects_missing_tied_earliest_source():
+    """并列最早上游必须全部进入 impact_sources，验证器不能只检查子集关系。"""
+    import intranet_verify_rain_impact as verifier
+
+    features = [
+        {"properties": {
+            "edge_key": "A", "river_name": "甲河", "impact_type": "direct_buffer",
+            "upstream_ids": [], "downstream_id": "C", "affected": True,
+            "impact_sources": ["DIRECT"],
+            "t0_source_time": "2026-08-20T08:00:00Z",
+            "estimated_arrival_time": "2026-08-20T10:00:00Z",
+        }},
+        {"properties": {
+            "edge_key": "B", "river_name": "乙河", "impact_type": "direct_buffer",
+            "upstream_ids": [], "downstream_id": "C", "affected": True,
+            "impact_sources": ["DIRECT"],
+            "t0_source_time": "2026-08-20T09:00:00Z",
+            "estimated_arrival_time": "2026-08-20T10:00:00Z",
+        }},
+        {"properties": {
+            "edge_key": "C", "river_name": "丙河", "impact_type": "downstream_50km",
+            "upstream_ids": ["A", "B"], "downstream_id": None, "affected": True,
+            # 故意漏掉并列最早来源 B；旧验证器会错误放行。
+            "impact_sources": ["A"],
+            "t0_source_time": "2026-08-20T10:00:00Z",
+            "estimated_arrival_time": "2026-08-20T11:00:00Z",
+        }},
+    ]
+
+    assert verifier.verify_impact_topology_consistency({
+        "type": "FeatureCollection", "features": features,
+    }) is False
 
 
 def test_impact_topology_confluence_tie_sources():
