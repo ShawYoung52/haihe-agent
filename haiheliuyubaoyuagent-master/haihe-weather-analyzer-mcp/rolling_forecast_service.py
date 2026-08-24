@@ -97,6 +97,48 @@ REGION_DISPLAY_NAMES = {
     "滨海新区": "滨海新区",
 }
 
+# 海河流域主要地级市代表坐标（市政府驻地，lon_lat，WGS84）。
+# 口径（用户 2026-08-24）："除了天津用滚动预报，其它不都是用数据湖海河流域那个数据吗"——
+# 滚动预报网格（数据湖 GRID_TJQX_LYPUB，111-120°E/34-43°N）覆盖整个海河流域；问句点名
+# 流域内城市时按该市坐标采样网格，绝不静默退回天津市区代表点（"明天唐山的天气怎么样"
+# 曾错回【天津市区灾害风险】表）。注意：文字要素（天气现象/气温/风况）服务端只对天津
+# 11 代表站生成，外埠城市只能拿到降水格点 TP1H（2026-08-19 密云探针实锤），前端按
+# 降水-only 渲染逐日降水表。所有坐标必须落在网格范围内（有测试锁定）。
+BASIN_CITY_COORDS = {
+    "北京": "116.41_39.90",
+    "唐山": "118.18_39.63",
+    "秦皇岛": "119.60_39.94",
+    "承德": "117.96_40.95",
+    "张家口": "114.89_40.82",
+    "保定": "115.46_38.87",
+    "沧州": "116.84_38.30",
+    "廊坊": "116.68_39.54",
+    "衡水": "115.67_37.73",
+    "石家庄": "114.51_38.04",
+    "邢台": "114.50_37.07",
+    "邯郸": "114.54_36.61",
+    "太原": "112.55_37.87",
+    "大同": "113.30_40.08",
+    "朔州": "112.43_39.33",
+    "忻州": "112.73_38.42",
+    "阳泉": "113.58_37.86",
+    "长治": "113.12_36.19",
+    "晋城": "112.85_35.49",
+    "临汾": "111.52_36.09",
+    "运城": "111.01_35.03",
+    "吕梁": "111.14_37.52",
+    "安阳": "114.39_36.10",
+    "鹤壁": "114.30_35.75",
+    "新乡": "113.93_35.30",
+    "焦作": "113.24_35.22",
+    "濮阳": "115.03_35.76",
+    "德州": "116.36_37.45",
+    "滨州": "117.97_37.38",
+    "东营": "118.67_37.43",
+}
+
+REGION_DISPLAY_NAMES.update({name: f"{name}市" for name in BASIN_CITY_COORDS})
+
 RAINSTORM_24H_MM = 50.0
 SEVERE_RAINSTORM_24H_MM = 100.0
 EXTRAORDINARY_RAINSTORM_24H_MM = 250.0
@@ -624,6 +666,24 @@ def has_matched_rolling_region(text: str) -> bool:
     if any(alias in text for alias in ROLLING_FORECAST_REGION_ALIASES):
         return True
     return any(region in text for region in ROLLING_FORECAST_COORDS)
+
+
+def match_basin_cities(text: str) -> list[str]:
+    """匹配问句点名的海河流域外埠地级市（BASIN_CITY_COORDS），按表序去重返回。
+
+    只认城市名子串（"唐山市"含"唐山"）；不匹配返回 []。天津 11 区县不在此表
+    （走 ROLLING_FORECAST_COORDS）。供 query_rolling_forecast_core 把外埠城市
+    路由到数据湖海河网格按城市坐标采样，替代静默退回天津市区代表点。
+    """
+    text = str(text or "")
+    if not text:
+        return []
+    return [name for name in BASIN_CITY_COORDS if name in text]
+
+
+def _region_or_city_coord(name: str) -> str:
+    """区域/城市名 → "lon_lat" 坐标：先天津 11 区县表，再外埠城市表。"""
+    return ROLLING_FORECAST_COORDS.get(name) or BASIN_CITY_COORDS[name]
 
 
 def is_unresolved_poi_forecast_query(user_query: str, regions: str = "") -> bool:
@@ -1336,8 +1396,19 @@ def query_rolling_forecast_core(
         }]
         lons, lats = [lon_text], [lat_text]
     else:
-        region_names = parse_rolling_forecast_regions(regions or user_query)
-        coords = [ROLLING_FORECAST_COORDS[name] for name in region_names]
+        text = regions or user_query
+        city_names = match_basin_cities(text)
+        if city_names and has_matched_rolling_region(text):
+            # 天津区域 + 外埠城市混合（"蓟州和唐山明天天气"）：各自坐标都采样。
+            region_names = parse_rolling_forecast_regions(text)
+            region_names += [name for name in city_names if name not in region_names]
+        elif city_names:
+            # 纯外埠城市（"明天唐山的天气怎么样"）：按城市坐标采数据湖海河网格，
+            # 不再静默退回天津市区代表点（2026-08-24 用户口径：除天津外都用海河网格数据）。
+            region_names = city_names
+        else:
+            region_names = parse_rolling_forecast_regions(text)
+        coords = [_region_or_city_coord(name) for name in region_names]
         locations = [
             {
                 "name": name,

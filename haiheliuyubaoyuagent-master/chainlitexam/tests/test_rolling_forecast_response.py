@@ -310,3 +310,70 @@ class TestRegionHazardTableRiskLevels:
         section = bundle["code_section"]
         assert "| 地质灾害 | 2 处 | 接口暂不可用 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
+
+    def test_levels_kind_no_data_marker_shows_cycle_no_data(self):
+        """单灾种该起报时次无资料（risk_levels 中该 key 为 "no_data" 哨兵）→
+        该行"该时次暂无数据"，与"本次无风险""接口暂不可用"三态区分——
+        2026-08-24 curl 实证：无资料时次后端回 HTTP 200 + success=false
+        "资料在当前时刻下无数据"，不得误报"本次无风险"。"""
+        payload = self._with_levels({
+            "dzzh": "no_data",
+            "sh": {"label": "山洪", "kind": "mountain", "levels": {"三级": 2}, "total": 2},
+        })
+        bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "| 地质灾害 | 2 处 | 该时次暂无数据 |" in section
+        assert "| 山洪 | 1 处 | 三级 2 处 |" in section
+
+
+def _rain_only_daily():
+    """外埠城市（唐山等）滚动预报只回降水格点 TP1H，文字要素全空（2026-08-19 探针实锤）。"""
+    return [
+        {"date_label": "8月25日", "weather": None, "tmax_c": None, "tmin_c": None,
+         "tmax_display": None, "tmin_display": None, "EDA": None,
+         "rainfall_max_24h_mm": 12.3, "rainfall_max_24h_display": "12.3"},
+        {"date_label": "8月26日", "weather": None, "tmax_c": None, "tmin_c": None,
+         "tmax_display": None, "tmin_display": None, "EDA": None,
+         "rainfall_max_24h_mm": 0.0, "rainfall_max_24h_display": "0"},
+    ]
+
+
+class TestRainOnlyDailyTable:
+    """外埠城市降水-only 预报：渲染逐日降水表 + 覆盖范围说明，不出全"—"天气/气温/风表
+    （否则用户看到一整张"—"表误以为"没数据"——与决策天气 _decision_periods_rain_only 同口径）。"""
+
+    def test_rain_only_renders_rain_table(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天唐山的天气怎么样", {"daily_summary": _rain_only_daily()}
+        )
+        section = bundle["code_section"]
+        assert "降水" in section
+        assert "12.3" in section
+        assert "8月25日" in section
+        # 不出全"—"的天气现象/风力风向表（表头不出现在表格里；覆盖说明文字允许提及）
+        assert "| 天气现象 |" not in section
+        assert "风力风向" not in section
+        # 如实说明文字要素覆盖范围（不得让用户误以为没数据）
+        assert "降水" in section and "暂" in section
+
+    def test_full_elements_still_weather_table(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天天气怎么样", {"daily_summary": _daily("多云", 0.0)}
+        )
+        assert "天气现象" in bundle["code_section"]
+
+    def test_rain_only_instruction_forbids_fabricating_text_elements(self):
+        """降水-only 时 LLM 指令必须禁止编造天气现象/气温/风力（零编造约束）。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天唐山的天气怎么样", {"daily_summary": _rain_only_daily()}
+        )
+        assert bundle.get("rain_only") is True
+        instruction = rfr.rolling_forecast_llm_instruction(bundle)
+        assert "降水" in instruction
+        assert "不得" in instruction or "禁止" in instruction
+
+    def test_full_elements_not_rain_only(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "明天天气怎么样", {"daily_summary": _daily("多云", 0.0)}
+        )
+        assert not bundle.get("rain_only")

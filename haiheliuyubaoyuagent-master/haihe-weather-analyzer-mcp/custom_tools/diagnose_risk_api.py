@@ -91,6 +91,11 @@ def diagnose(tool, kind: str, offline: bool) -> int:
 
     try:
         payload = tool._fetch_risk_warning(kind, {})
+    except tool.RiskInterfaceNoDataError as exc:
+        # 该起报时次无资料（HTTP 200 + 业务 success=false）——不是取数失败
+        print("== 该起报时次暂无数据（业务层 success=false）==")
+        print(" ", exc)
+        return 0
     except Exception as exc:
         print("!! 取数失败:", exc)
         return 1

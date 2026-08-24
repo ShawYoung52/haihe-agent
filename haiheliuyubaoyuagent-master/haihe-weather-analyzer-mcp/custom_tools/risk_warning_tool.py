@@ -20,6 +20,7 @@ import requests
 from fastmcp import FastMCP
 
 from custom_tools._ttl_cache import make_ttl_cache
+import time_source
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,34 @@ BASE_ENV_KEYS = (
 )
 
 
+class RiskInterfaceNoDataError(RuntimeError):
+    """该起报时次无资料（HTTP 200 但业务层 success=false 且 msg 含"无数据"）。
+
+    2026-08-24 服务器 curl 实证：无资料的时次后端回
+    {"code":400,"success":false,"data":{},"msg":"资料在当前时刻下无数据"}。
+    这与"本次无风险"（success=true + 空 data）和"接口暂不可用"（HTTP 层失败）
+    是三态，必须区分——否则历史/模拟时次查询会被误报成"本次无风险"。
+    """
+
+
+# query_region_risk_levels 返回的 risk_levels 字典里，该灾种"该时次暂无数据"的哨兵值
+# （区别于 None=接口失败）。渲染层（chainlitexam rolling_forecast_response）按此字符串
+# 显示"该时次暂无数据"。跨进程经 JSON 透传，取值必须保持简单字符串。
+RISK_LEVELS_NO_DATA = "no_data"
+
+
+def _raise_for_business_failure(payload: Any) -> None:
+    """识别 HTTP 200 但业务层失败的响应：无数据抛 RiskInterfaceNoDataError，其它抛 RuntimeError。"""
+    if not isinstance(payload, dict):
+        return
+    if payload.get("success") is not False:
+        return
+    msg = str(payload.get("msg") or payload.get("message") or "").strip()
+    if "无数据" in msg:
+        raise RiskInterfaceNoDataError(msg or "该起报时次无数据")
+    raise RuntimeError(f"风险接口业务失败（code={payload.get('code')}）：{msg or '未知原因'}")
+
+
 def _normalize_risk_kind(risk_kind: str) -> str:
     raw = str(risk_kind or "").strip()
     kind = RISK_ALIASES.get(raw) or raw
@@ -136,16 +165,18 @@ def _latest_fcst_cycle(now: _dt.datetime) -> str:
 
 
 def _default_fcst_time() -> str:
-    """默认 fcstTime：真实北京时间的最近起报时次。
+    """默认 fcstTime：跟随系统时间（time_source）的最近起报时次。
 
     后端 findDataListByConfig 必传 fcstTime（yyyyMMddHHmmss）：不传 HTTP 500、
-    格式错误 400（2026-08-24 服务器 curl 三连证实）。风险预警是实时产品、
-    后端只有当前起报周期，所以用真实系统时间，不跟 time_source 模拟时间走
-    （模拟的历史日期在后端没有对应周期，同样 500——8-21 验收模拟 2026-07-10
-    时接口开发看到的"那个日期的报错"即此）。
+    格式错误 400（2026-08-24 服务器 curl 证实）。历史/模拟日期的起报时次后端同样
+    接受（HTTP 200）；无资料的时次回业务错误 success=false"资料在当前时刻下无数据"，
+    由 _fetch_risk_warning 识别为 RiskInterfaceNoDataError（该时次暂无数据 ≠ 本次无风险）。
+    因此默认 fcstTime 跟 time_source 走——验收切换系统时间（如 2026-07-10）时风险
+    研判必须按"当时"的起报时次取数，而不是真实时钟（用户 2026-08-24 口径：
+    "风险时间要按当时的时间判断"）。
     """
     beijing = _dt.timezone(_dt.timedelta(hours=8))
-    return _latest_fcst_cycle(_dt.datetime.now(beijing))
+    return _latest_fcst_cycle(time_source.now(beijing))
 
 
 def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, timeout_sec: int = 30) -> dict[str, Any]:
@@ -182,10 +213,14 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
             resp = requests.get(url, params=params, headers=headers, timeout=timeout_sec)
             if resp.ok:
                 try:
-                    return resp.json()
+                    payload = resp.json()
                 except Exception:
                     logger.warning("[risk_warning] non-json response url=%s status=%s body=%s", url, resp.status_code, resp.text[:500])
                     return {"raw": resp.text}
+                # HTTP 200 但业务层失败（success=false）：无资料时次单独识别，
+                # 不得当空结果（否则"该时次暂无数据"被误报成"本次无风险"）。
+                _raise_for_business_failure(payload)
+                return payload
             msg = f"{base}: HTTP {resp.status_code}"
             body = resp.text[:500]
             if body:
@@ -662,15 +697,19 @@ _region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_c
 def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict | None:
     """按区域代表坐标半径查风险接口当前各灾种风险等级分布。
 
-    返回 ``{hazard_key: {"label", "kind", "levels", "total", "level_advice"} | None}``：
+    返回 ``{hazard_key: {"label", "kind", "levels", "total", "level_advice"} | None | "no_data"}``：
     - hazard_key 与区域隐患表 categories 的 key 一致（dzzh/sh/zxhl），便于按灾种对齐；
     - 值为 None 表示该灾种接口调用失败（渲染层显示"接口暂不可用"，不得误报
       "本次无风险"——2026-08-24 SCMOC 地灾接口单独 500 时被静默吞掉的教训）；
+    - 值为 RISK_LEVELS_NO_DATA("no_data") 表示接口可达但该起报时次无资料
+      （渲染层显示"该时次暂无数据"——2026-08-24 curl 实证后端回 success=false
+      "资料在当前时刻下无数据"，与"本次无风险"严格区分）；
     - levels = {一级: n, ...}（只含本次实际出现的等级，_normalize_risk_level 归一）；
     - level_advice = 逐级防范建议（仅本次出现的等级，代码确定性生成）。
 
     口径：只统计"有风险"（_is_risky_level）且落在 radius_km 内的记录。接口可达但
     全域无风险 → {}；全部灾种接口失败/异常 → None（静默降级，绝不阻断天气回答）。
+    某灾种"该时次无资料"算接口可达（reachable=True），不致整体返回 None。
     """
     kinds: dict[str, dict | None] = {}
     reachable = False
@@ -678,6 +717,10 @@ def query_region_risk_levels(lon: float, lat: float, radius_km: float) -> dict |
         try:
             payload = _fetch_risk_warning(kind, timeout_sec=REGION_RISK_LEVELS_TIMEOUT_SEC)
             reachable = True
+        except RiskInterfaceNoDataError:
+            reachable = True  # 接口是通的，只是该起报时次无资料
+            kinds[key] = RISK_LEVELS_NO_DATA
+            continue
         except Exception:
             kinds[key] = None  # 单灾种失败打标，交给渲染层显示"接口暂不可用"
             continue  # 单灾种接口失败静默跳过
@@ -745,10 +788,12 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         """查询山洪、地质灾害或中小河流洪水风险预警。
 
-        fcst_time 格式为 YYYYMMDDHHmmss（北京时间），未传时自动取真实北京时间
-        最近一个起报时次（08:00 或 20:00）。start_time/end_time 入参仅兼容保留、
-        不直接使用：SCMOC 地质灾害需要的时间段由 fcstTime 自动推导
-        （startTime=fcstTime、endTime=+24h），EC 两类只发 fcstTime。
+        fcst_time 格式为 YYYYMMDDHHmmss（北京时间），未传时自动取系统时间
+        （time_source，验收切换系统时间时随"当时"走）最近一个起报时次（08:00 或 20:00）。
+        start_time/end_time 入参仅兼容保留、不直接使用：SCMOC 地质灾害需要的时间段
+        由 fcstTime 自动推导（startTime=fcstTime、endTime=+24h），EC 两类只发 fcstTime。
+        后端对无资料的起报时次返回"该时次暂无数据"（status=no_data），与"本次无风险"
+        （status=ok 且无风险记录）严格区分。
         """
         try:
             kind = _normalize_risk_kind(risk_kind)
@@ -766,8 +811,9 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
         # 后端 /hhfw/riskWarnNew/findDataListByConfig 口径（2026-08-24 服务器 curl
         # + 接口开发确认）：fcstTime 必填（缺 → 500，格式非 yyyyMMddHHmmss → 400）；
         # SCMOC 地灾另需 startTime/endTime（由 fetch 层按 fcstTime 推导）；region
-        # 不上接口，区域过滤由 LLM 侧基于返回结果筛选；fcstTime 默认取真实北京时间
-        # 的最近起报时次，不跟随 time_source 模拟时间。
+        # 不上接口，区域过滤由 LLM 侧基于返回结果筛选；fcstTime 默认取系统时间
+        # （time_source）的最近起报时次——验收切换系统时间时按"当时"取数；历史起报
+        # 时次后端同样接受（HTTP 200），无资料的时次回业务"无数据"（见下方 no_data 分支）。
         explicit_fcst = str(fcst_time or "").strip()
         if explicit_fcst:
             extra["fcstTime"] = explicit_fcst
@@ -783,6 +829,20 @@ def register_risk_warning_tool(mcp: FastMCP) -> None:
             result = _enrich_risk_result(result, kind, all_records)
             result["query"] = {"region": region, "start_time": start_time, "end_time": end_time, "fcst_time": effective_fcst}
             return result
+        except RiskInterfaceNoDataError as exc:
+            # 该起报时次无资料（HTTP 200 + success=false"…无数据"）——不是查询失败，
+            # 更不是"本次无风险"；如实告知，可换最近起报时次重试。
+            logger.warning("[risk_warning] no data kind=%s fcst=%s msg=%s", kind, effective_fcst, exc)
+            return {
+                "status": "no_data",
+                "risk_kind": kind,
+                "risk_label": RISK_CONFIGS[kind]["label"],
+                "message": (
+                    f"{RISK_CONFIGS[kind]['label']}在起报时次 {effective_fcst} 暂无数据"
+                    f"（接口返回：{exc}），可稍后或换最近起报时次重试。"
+                ),
+                "query": {"region": region, "start_time": start_time, "end_time": end_time, "fcst_time": effective_fcst},
+            }
         except Exception as exc:
             logger.warning("[risk_warning] failed kind=%s error=%s", kind, exc)
             text = str(exc)

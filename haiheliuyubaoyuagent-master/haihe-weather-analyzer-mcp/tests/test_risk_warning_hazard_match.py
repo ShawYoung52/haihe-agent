@@ -427,13 +427,15 @@ class TestRegionRiskLevels:
 class TestFcstTimeRequired:
     """后端 findDataListByConfig 必传 fcstTime（yyyyMMddHHmmss）。
 
-    2026-08-24 服务器 curl 三连证实：
+    2026-08-24 服务器 curl 证实：
       model+type 不带 fcstTime          → HTTP 500
       fcstTime=20260824080000           → 200
       fcstTime=2026-08-24 08:00:00      → 400
-    且同事前端只发 type/model/fcstTime，不发 startTime/endTime。风险预警是
-    实时产品（后端无历史起报周期），默认 fcstTime 必须取真实北京时间，
-    不得跟随 time_source 模拟时间（模拟的历史日期在后端没有周期，同样 500）。
+      历史日期 fcstTime（20260710…）    → HTTP 200（后端接受历史起报时次；
+        无数据的时次回业务错误 {"code":400,"success":false,"msg":"资料在当前时刻下无数据"}）
+    且同事前端只发 type/model/fcstTime，不发 startTime/endTime。默认 fcstTime
+    跟随 time_source 系统时间（验收切换系统时间时按"当时"的起报时次取数，
+    用户 2026-08-24 口径："风险时间要按当时的时间判断"）。
     """
 
     class _FakeResp:
@@ -527,13 +529,21 @@ class TestFcstTimeRequired:
         assert "startTime" not in params
         assert "endTime" not in params
 
-    def test_default_fcst_time_uses_real_now_not_sim_time(self, monkeypatch):
-        # 即使 time_source 被模拟到历史日期，默认 fcstTime 也必须跟随真实时间。
+    def test_default_fcst_time_follows_sim_time(self, monkeypatch):
+        # 验收切换系统时间（如模拟 2026-07-10 15:00）→ 默认 fcstTime 折到"当时"
+        # 的最近起报时次（该日 08 时次），而不是真实时钟——用户 2026-08-24 口径：
+        # "风险时间肯定也要按照当时的时间来判断"。后端已证实接受历史起报时次。
+        bjt = datetime.timezone(datetime.timedelta(hours=8))
+        sim = datetime.datetime(2026, 7, 10, 15, 0, tzinfo=bjt)
+        monkeypatch.setattr(rwt.time_source, "now", lambda tz=None: sim)
+        assert rwt._default_fcst_time() == "20260710080000"
+
+    def test_default_fcst_time_uses_real_now_without_override(self, monkeypatch):
+        # 无模拟覆盖时 time_source.now 即真实时间：与真实"现在"推算的最近起报时次一致
+        # （允许跨边界 1 个周期内的误差：直接断言与 _latest_fcst_cycle(real_now) 相同即可）
         real_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
         fcst = rwt._default_fcst_time()
         assert re.fullmatch(r"\d{14}", fcst)
-        # 与真实"现在"推算的最近起报时次一致（允许跨边界 1 个周期内的误差：
-        # 直接断言与 _latest_fcst_cycle(real_now) 相同即可，边界跨度的概率极低）
         assert fcst == rwt._latest_fcst_cycle(real_now)
 
 
@@ -634,9 +644,104 @@ class TestWiring:
         assert 'extra["startTime"]' not in src
         assert 'extra["endTime"]' not in src
 
-    def test_no_sim_time_dependency(self):
-        # 风险预警是实时产品，fcstTime 不得跟随 time_source 模拟时间
-        # （docstring 里允许出现 time_source 字样解释原因，只锁真实依赖/调用）
+    def test_fcst_time_follows_system_time_source(self):
+        # 风险 fcstTime 必须跟随系统时间（time_source）——验收切换系统时间时
+        # 风险研判按"当时"的起报时次取数，而不是真实时钟（2026-08-24 用户口径，
+        # 后端 curl 证实历史起报时次 HTTP 200 可用）。
         src = (MCP_DIR / "custom_tools" / "risk_warning_tool.py").read_text(encoding="utf-8")
-        assert "import time_source" not in src
-        assert "time_source.now" not in src
+        assert "import time_source" in src
+        assert "time_source.now" in src
+
+
+class TestBusinessNoData:
+    """无数据起报时次 ≠ 本次无风险（2026-08-24 服务器 curl 实证）。
+
+    后端对"该起报时次没有资料"返回 HTTP 200 + 业务错误：
+      {"code":400,"success":false,"data":{},"msg":"资料在当前时刻下无数据"}
+    若当普通空结果处理，区域风险表会把"该时次暂无数据"误显示为"本次无风险"
+    （与"接口暂不可用"、"本次无风险"是三态，必须区分）。
+    """
+
+    class _NoDataResp:
+        ok = True
+        status_code = 200
+        text = '{"code":400,"success":false,"data":{},"msg":"资料在当前时刻下无数据"}'
+
+        def json(self):
+            return {"code": 400, "success": False, "data": {}, "msg": "资料在当前时刻下无数据"}
+
+    class _OkEmptyResp:
+        ok = True
+        status_code = 200
+        text = '{"code":200,"success":true,"data":[]}'
+
+        def json(self):
+            return {"code": 200, "success": True, "data": []}
+
+    def test_fetch_raises_no_data_error(self, monkeypatch):
+        monkeypatch.setattr(rwt.requests, "get", lambda *a, **k: self._NoDataResp())
+        with pytest.raises(rwt.RiskInterfaceNoDataError):
+            rwt._fetch_risk_warning("river", {})
+
+    def test_fetch_ok_empty_does_not_raise(self, monkeypatch):
+        # 可达且无风险（success=true + 空 data）不抛错，走正常空结果路径
+        monkeypatch.setattr(rwt.requests, "get", lambda *a, **k: self._OkEmptyResp())
+        payload = rwt._fetch_risk_warning("river", {})
+        assert payload.get("success") is True
+
+    def test_fetch_other_business_failure_raises_runtime(self, monkeypatch):
+        # success=false 但非"无数据"（其它业务失败）→ 普通失败（接口暂不可用路径）
+        class _OtherFail:
+            ok = True
+            status_code = 200
+            text = '{"code":500,"success":false,"msg":"服务器内部错误"}'
+
+            def json(self):
+                return {"code": 500, "success": False, "msg": "服务器内部错误"}
+
+        monkeypatch.setattr(rwt.requests, "get", lambda *a, **k: _OtherFail())
+        with pytest.raises(RuntimeError) as excinfo:
+            rwt._fetch_risk_warning("river", {})
+        assert not isinstance(excinfo.value, rwt.RiskInterfaceNoDataError)
+
+    def test_tool_returns_no_data_status(self, monkeypatch):
+        mcp = _FakeMcp()
+        rwt.register_risk_warning_tool(mcp)
+
+        def no_data_fetch(kind, extra_params=None, timeout_sec=30):
+            raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", no_data_fetch)
+        tool = mcp.tools["query_risk_warning"]
+        result = tool("geologic", extra_params_json='{"_t": "nodata1"}')
+        assert result["status"] == "no_data"
+        assert "暂无数据" in result["message"]
+        # 绝不能出现"无风险"字样——无数据 ≠ 无风险
+        assert "无风险" not in result["message"]
+
+    def test_region_risk_levels_marks_no_data_sentinel(self, monkeypatch):
+        # geologic=该时次无数据、mountain=可达无风险、river=接口失败（三态并存）
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            if kind == "geologic":
+                raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+            if kind == "mountain":
+                return {"code": 200, "success": True, "data": []}
+            raise RuntimeError("HTTP 500")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        # 用本文件未用过的坐标，避免命中 REGION_RISK_LEVELS_CACHE
+        levels = rwt.query_region_risk_levels(112.34, 36.78, 25.0)
+        assert levels is not None  # 有灾种接口可达（无数据也算可达）→ 不是整体 None
+        assert levels["dzzh"] == rwt.RISK_LEVELS_NO_DATA  # 渲染层显示"该时次暂无数据"
+        assert "sh" not in levels  # 可达无风险 → 键缺席 → 渲染"本次无风险"
+        assert levels["zxhl"] is None  # 接口失败 → 渲染"接口暂不可用"
+
+    def test_region_risk_levels_all_no_data_is_reachable(self, monkeypatch):
+        # 全部灾种都是"该时次无数据"：接口是通的，不得返回 None（None=全挂）。
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+        levels = rwt.query_region_risk_levels(112.35, 36.79, 25.0)
+        assert levels is not None
+        assert all(v == rwt.RISK_LEVELS_NO_DATA for v in levels.values())

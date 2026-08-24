@@ -418,6 +418,47 @@ def _weather_table(daily: list[dict], user_text: str) -> str:
     return f"{title}\n{_markdown_table(['日期', '天气现象', '气温(℃)', '风力风向'], rows)}"
 
 
+def _daily_rain_only(daily: list[dict]) -> bool:
+    """逐日汇总仅有降水、无天气/气温/风（外埠城市滚动预报只回降水格点 TP1H）。
+
+    滚动预报的天气现象/气温/风况文字要素只对天津 11 代表站生成；海河网格内的外埠
+    城市（唐山/承德/北京等，2026-08-24 起按城市坐标采样）只能拿到降水。此时应渲染
+    逐日降水表，而不是全 "—" 的天气/气温/风表——否则用户误以为"没数据"。与决策天气
+    _decision_periods_rain_only 同口径。
+    """
+    if not daily:
+        return False
+    has_rain = any(item.get("rainfall_max_24h_mm") is not None for item in daily)
+    has_text = any(
+        (str(item.get("weather") or "").strip() not in ("", "--"))
+        or (item.get("tmax_c") is not None)
+        or (item.get("tmin_c") is not None)
+        or (str(item.get("EDA") or "").strip() not in ("", "--"))
+        for item in daily
+    )
+    return has_rain and not has_text
+
+
+def _rain_only_daily_table(daily: list[dict], user_text: str) -> str:
+    """外埠城市降水-only 预报：逐日降水表 + 文字要素覆盖范围说明（确定性生成，零编造）。"""
+    if len(daily) == 1:
+        title = "【明日降水预报】"
+    else:
+        title = "【逐日降水预报】"
+    rows = [
+        [
+            item.get("date_label"),
+            _cell(item.get("rainfall_max_24h_display") or item.get("rainfall_max_24h_mm")),
+        ]
+        for item in daily
+    ]
+    note = (
+        "注：该地位于天津代表站覆盖范围外，滚动预报暂只提供降水格点数据，"
+        "天气现象、气温、风力等文字要素暂不覆盖。"
+    )
+    return f"{title}\n{_markdown_table(['日期', '降水量(毫米)'], rows)}\n{note}"
+
+
 def _temperature_sections(daily: list[dict], analysis: dict) -> str:
     title = "【明日气温预报】" if len(daily) == 1 else "【未来一周气温预报】"
     rows = [
@@ -583,6 +624,12 @@ _REGION_HAZARD_RISK = {
 # 风险等级展示顺序（一级最重 → 四级最轻），与 risk_warning_tool._normalize_risk_level 同口径。
 _LEVEL_SEVERITY_ORDER = ("一级", "二级", "三级", "四级")
 
+# 区域风险等级"该起报时次暂无数据"哨兵（与 MCP 侧 risk_warning_tool.RISK_LEVELS_NO_DATA
+# 同值，跨进程经 JSON 透传）。区别于 None（接口失败→"接口暂不可用"）与缺键（可达无风险
+# →"本次无风险"）——2026-08-24 curl 实证：无资料时次后端回 HTTP 200 + success=false
+# "资料在当前时刻下无数据"。
+_RISK_LEVELS_NO_DATA = "no_data"
+
 
 def _format_risk_level_counts(levels: dict) -> str:
     """把 {一级: n, ...} 渲染成"一级 2 处、三级 5 处"（按严重度排序）；空 → "本次无风险"。"""
@@ -635,6 +682,9 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
                     if level_info is None and key in risk_levels:
                         # 该灾种接口单独失败（MCP 侧 None 打标）——区别于"可达但无风险"
                         row.append("接口暂不可用")
+                    elif level_info == _RISK_LEVELS_NO_DATA:
+                        # 该起报时次无资料（MCP 侧 no_data 哨兵）——区别于"本次无风险"
+                        row.append("该时次暂无数据")
                     else:
                         row.append(_format_risk_level_counts((level_info or {}).get("levels") or {}))
                 else:
@@ -679,6 +729,9 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
     daily = [item for item in (payload.get("daily_summary") or []) if isinstance(item, dict)]
     hourly = [item for item in (payload.get("hourly_summary") or []) if isinstance(item, dict)]
     category = _query_category(user_text)
+    # 外埠城市降水-only（滚动预报文字要素只覆盖天津代表站）：除暴雨过程分析（只需
+    # 降水量，rain-only 数据同样成立）外，一律渲染逐日降水表，不出全"—"天气/气温/风表。
+    rain_only = bool(daily) and not hourly and _daily_rain_only(daily)
     forced_core_conclusion = ""
     if hourly:
         code_section = _hourly_weather_table(hourly)
@@ -691,6 +744,8 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         ):
             forced_core_conclusion = "【核心结论】\n当前没有大暴雨过程发生。"
         code_section = _rainstorm_sections(payload.get("rainstorm_analysis") or {})
+    elif rain_only:
+        code_section = _rain_only_daily_table(daily, user_text)
     elif category == "visibility":
         code_section = _visibility_table(daily) if daily else ""
     elif category == "temperature":
@@ -716,6 +771,7 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         "code_section": code_section,
         "data_source": _cell(payload.get("data_source"), "天津市气象台滚动预报"),
         "forced_core_conclusion": forced_core_conclusion,
+        "rain_only": rain_only,
         "user_text": user_text,
     }
 
@@ -755,6 +811,13 @@ def rolling_forecast_llm_instruction(bundle: dict | None) -> str:
         extra = (
             "核心结论中的最高气温必须使用 temperature_analysis.highest.temperature_display，"
             "其日期必须使用 temperature_analysis.highest.date_label；温度已按四舍五入处理，禁止恢复小数。"
+        )
+    if bundle.get("rain_only"):
+        # 外埠城市降水-only：文字要素（天气现象/气温/风力）服务端未提供，
+        # 核心结论只能陈述降水事实，禁止编造任何天气现象/气温/风力描述。
+        extra += (
+            "该点位仅有降水格点预报：核心结论只能依据降水量陈述降水情况，"
+            "不得描述或推测天气现象、气温、风力、能见度等未提供的要素。"
         )
     return (
         "\n\n系统约束：数据表格、关键节点和过程详情将由代码根据本工具结果生成并插入。"
