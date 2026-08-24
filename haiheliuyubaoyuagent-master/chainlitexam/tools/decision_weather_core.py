@@ -1160,15 +1160,31 @@ def _decision_core_only(answer: Any, user_text: str = "", max_sentences: int = 1
     return _polish_decision_core(sanitize_forecast_core_summary(core, user_text))
 
 
-# 点位地理类型 → 注意事项模板（代码确定性生成，仅作为骨架，天气断言由 facts 数值派生）
-_POI_CATEGORY_REMINDER_TEMPLATES: dict[str, str] = {
-    "school": "学校区域师生与家长请注意出行安全，关注上下学时段路况与天气变化。",
-    "scenic": "景区游客较多，雨时道路湿滑，请注意防滑、防雷与游览安全。",
-    "mountain": "山区地形复杂，强降雨时易诱发地质灾害与山洪，请避免进入山谷、沟道等危险区域。",
-    "airport": "机场区域请注意降雨、大风、雷暴及低能见度对航班起降的影响。",
-    "station": "车站人流密集，请注意雨天路滑、乘车安全及列车运行调整信息。",
-    "port": "港口区域请注意大风、低能见度、强对流及降雨对船舶作业和航行安全的影响。",
-    "reservoir": "水库区域请注意降雨引起的水位上涨与泄洪调度，关注下游河道安全。",
+# 点位地理类型 → 注意事项模板（代码确定性生成，仅作为骨架，天气断言由 facts 数值派生）。
+# 每类是一组条目，逐条作为【注意事项】的编号项（2026-08-24 起学校等改多行，
+# 用户反馈"注意事项太少"）；降雨/大风/能见度动态从句与无雨风险状态另行追加。
+# mountain/port/reservoir 走下方专属分支（_decision_mountain/port_reminder_lines、
+# 水库水情），此处仅作类别→提示映射留存，不被通用模板分支消费。
+_POI_CATEGORY_REMINDER_TEMPLATES: dict[str, list[str]] = {
+    "school": [
+        "学校区域上下学时段校门口车流人流密集，师生与家长请注意出行安全，关注路况与天气变化。",
+        "请留意降雨、大风等天气对课间操、体育课、运动会等户外活动的影响，合理安排行程。",
+    ],
+    "scenic": [
+        "景区游览请注意防滑与游览安全，雷雨时避免在空旷高地、树下停留。",
+        "降雨时道路湿滑，请关注景区安全提示并合理安排游览路线。",
+    ],
+    "airport": [
+        "机场区域请注意降雨、大风、雷暴及低能见度对航班起降与出行计划的影响。",
+        "出行前请关注航班动态，预留充足的值机与安检时间。",
+    ],
+    "station": [
+        "车站人流密集，请注意雨天路滑、乘车安全与列车运行调整信息。",
+        "请留意广播与电子屏的班次动态，预留排队进站时间。",
+    ],
+    "mountain": ["山区地形复杂，强降雨时易诱发地质灾害与山洪，请避免进入山谷、沟道等危险区域。"],
+    "port": ["港口区域请注意大风、低能见度、强对流及降雨对船舶作业和航行安全的影响。"],
+    "reservoir": ["水库区域请注意降雨引起的水位上涨与泄洪调度，关注下游河道安全。"],
 }
 
 
@@ -1503,23 +1519,38 @@ def _decision_reservoir_risk_lines(facts: dict) -> list[str]:
 def _build_poi_reminder_section(facts: dict) -> str:
     """根据点位类别 + 周边隐患点确定性生成“【注意事项】”段落（条目 1. 2. 3. 编号）。
 
-    无可展示内容（既无类别模板、也无降雨期隐患点）时返回空串。
-    隐患点只在预报有降雨时提醒（有降雨才存在诱发风险），且只给类型+数量汇总表，
-    不逐条列举隐患点名称/位置。天气断言只来自 facts 实际数值，不编造。
-    历史实况用“当日实际/该时段实际”等过去措辞，预报用“预计/未来”措辞。
+    无可展示内容（既无类别模板、也无隐患点数据）时返回空串。
+    风险状态（2026-08-24 用户口径）：点位答案无论有无雨都带确定性风险结论——
+    有雨 → 降雨强度 × 隐患类型风险研判表；无雨 → “周边 X 处隐患点 + 本次预报无明显降雨，
+    诱发风险低”或“周边暂无已知隐患点，风险总体较低”。隐患点数据只有查询成功（status==ok）
+    才算数，查询失败/无工具不编造“无隐患点”。只给类型+数量汇总，不逐条列举隐患点名称/位置。
+    天气断言只来自 facts 实际数值，不编造。历史实况用“当日实际/该时段实际”等过去措辞。
     """
     category = facts.get("poi_category")
     hp_raw = facts.get("hazard_points")
     hazard_points = hp_raw if isinstance(hp_raw, dict) else None
-    has_hazard = (
-        hazard_points is not None
-        and hazard_points.get("status") == "ok"
-        and int(hazard_points.get("total_found") or 0) > 0
+    # 隐患点数据只有查询成功（status==ok）才算数；失败/无工具不编造“无隐患点”。
+    hazard_ok = hazard_points is not None and hazard_points.get("status") == "ok"
+    hazard_total = int(hazard_points.get("total_found") or 0) if hazard_ok else 0
+    hazard_radius = hazard_points.get("radius_km") if hazard_ok else None
+    hazard_categories = (
+        hazard_points.get("categories")
+        if hazard_ok and isinstance(hazard_points.get("categories"), list)
+        else []
     )
-    # 有降雨才展示隐患点风险研判；无雨时不打扰。
+    # 统计各隐患类型数量，供风险研判表/无雨风险状态使用（不逐条列举，只给类型+数量汇总）
+    hazard_counts: dict[str, tuple[str, int]] = {}
+    for category_item in hazard_categories:
+        if not isinstance(category_item, dict):
+            continue
+        key = str(category_item.get("key") or "")
+        label = str(category_item.get("label") or "")
+        count = int(category_item.get("count") or 0)
+        if key and label and count > 0:
+            hazard_counts[key] = (label, count)
     intensity, mm = _decision_rain_intensity(facts)
-    show_hazard = has_hazard and intensity > 0
-    if not category and not show_hazard:
+    is_rainy = intensity > 0
+    if not category and not hazard_ok:
         return ""
     is_historical = _decision_is_historical_facts(facts)
     day_label = _decision_historical_day_label(facts) if is_historical else ""
@@ -1528,17 +1559,19 @@ def _build_poi_reminder_section(facts: dict) -> str:
     tables: list[str] = []  # 独立表格（不编号）
     if category:
         periods = [p for p in (facts.get("periods") or []) if isinstance(p, dict)]
-        # 港口/山区走确定性分现象/分风险的多句注意事项（参照用户确认范例），不用单行模板。
+        # 港口/山区走确定性分现象/分风险的多句注意事项（参照用户确认范例），不用通用模板。
         if category == "port":
             items.extend(_decision_port_reminder_lines(periods, is_historical))
         elif category == "mountain":
             items.extend(_decision_mountain_reminder_lines(facts))
         elif category == "reservoir":
-            # 水库不走通用单行模板，改走专门的水情 + 洪水/山洪风险研判（见下方水库分支）
+            # 水库不走通用模板，改走专门的水情 + 洪水/山洪风险研判（见下方水库分支）
             pass
         else:
-            template = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
-            if template:
+            base_items = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
+            if base_items:
+                items.extend(base_items)
+                # 动态从句（最多一条）：降雨→雨具防滑优先，其次大风/低能见度。
                 clauses: list[str] = []
                 if facts.get("has_rain_signal") is True:
                     clauses.append(
@@ -1559,7 +1592,8 @@ def _build_poi_reminder_section(facts: dict) -> str:
                     min_vis = _decision_min_visibility_km(periods)
                     if not clauses and min_vis is not None and min_vis < 1.0:
                         clauses.append("能见度较低，出行请注意交通安全。")
-                items.append(template + (clauses[0] if clauses else ""))
+                if clauses:
+                    items.append(clauses[0])
 
         # 水库：追加 14所 接口实际水位 + 洪水/山洪风险研判
         # （水位/蓄水/出库数值来自 facts.water_level_info，余量与风险结论确定性推导，不编造）
@@ -1578,39 +1612,52 @@ def _build_poi_reminder_section(facts: dict) -> str:
                     items.append(f"出库流量约 {water_info['outflow_m3s']} 立方米/秒")
             items.extend(_decision_reservoir_risk_lines(facts))
 
-    if show_hazard:
-        categories = hazard_points.get("categories") if isinstance(hazard_points.get("categories"), list) else []
-        # 统计各隐患类型数量，供风险研判表使用（隐患点不逐条列举，只给类型+数量汇总）
-        hazard_counts: dict[str, tuple[str, int]] = {}
-        for category_item in categories:
-            if not isinstance(category_item, dict):
-                continue
-            key = str(category_item.get("key") or "")
-            label = str(category_item.get("label") or "")
-            count = int(category_item.get("count") or 0)
-            if key and label and count > 0:
-                hazard_counts[key] = (label, count)
-        if hazard_counts:
-            # 风险研判表：降雨强度 × 隐患类型 → 风险等级 + 专业建议（代码确定性生成）
-            intensity_label = _RAIN_INTENSITY_LEVELS.get(intensity, "无明显降雨")
-            if mm is not None and mm > 0:
-                items.append(
-                    f"{day_label}实际降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：" if is_historical
-                    else f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下："
+    # —— 风险状态结论（2026-08-24 用户口径：点位答案无论有无雨都带确定性风险结论）——
+    if hazard_ok:
+        if is_rainy:
+            # 有雨：降雨强度 × 隐患类型 → 风险研判表（只给类型+数量汇总，不逐条列举隐患点）
+            if hazard_counts:
+                intensity_label = _RAIN_INTENSITY_LEVELS.get(intensity, "无明显降雨")
+                if mm is not None and mm > 0:
+                    items.append(
+                        f"{day_label}实际降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下：" if is_historical
+                        else f"预计未来降雨约 {mm:.0f} 毫米（{intensity_label}），周边灾害风险研判如下："
+                    )
+                else:
+                    items.append(
+                        f"{day_label}实际为{intensity_label}，周边灾害风险研判如下：" if is_historical
+                        else f"预计未来为{intensity_label}，周边灾害风险研判如下："
+                    )
+                table_rows = ["| 隐患类型 | 数量 | 风险研判 | 防范建议 |", "| --- | --- | --- | --- |"]
+                for key in ("dzzh", "sh", "zxhl"):
+                    if key not in hazard_counts:
+                        continue
+                    label, count = hazard_counts[key]
+                    risk, advice = _HAZARD_RAIN_RISK[key][intensity]
+                    table_rows.append(f"| {label} | {count} 处 | {risk} | {advice} |")
+                tables.append("\n".join(table_rows))
+        else:
+            # 无雨：确定性风险状态——周边隐患点情况 + “诱发风险低/暂无已知隐患点”结论。
+            # 无雨≠没有风险上下文；只说从 facts 能推出的结论（隐患点数量+无雨），不编造。
+            radius_text = f"{hazard_radius:g} 公里" if hazard_radius else "周边"
+            if hazard_total > 0:
+                if hazard_counts:
+                    summary = "、".join(f"{label} {count} 处" for label, count in hazard_counts.values())
+                else:
+                    summary = f"{hazard_total} 处隐患"
+                conclusion = (
+                    "当日实际无明显降雨，诱发风险低，后续降雨时请提高警惕。" if is_historical
+                    else "本次预报无明显降雨，短期诱发风险低，降雨时请提高警惕。"
                 )
+                items.append(f"周边 {radius_text}内有 {summary}；{conclusion}")
             else:
-                items.append(
-                    f"{day_label}实际为{intensity_label}，周边灾害风险研判如下：" if is_historical
-                    else f"预计未来为{intensity_label}，周边灾害风险研判如下："
+                conclusion = (
+                    "当日实际无明显降雨，风险总体较低。" if is_historical
+                    else "本次预报无明显降雨，风险总体较低。"
                 )
-            table_rows = ["| 隐患类型 | 数量 | 风险研判 | 防范建议 |", "| --- | --- | --- | --- |"]
-            for key in ("dzzh", "sh", "zxhl"):
-                if key not in hazard_counts:
-                    continue
-                label, count = hazard_counts[key]
-                risk, advice = _HAZARD_RAIN_RISK[key][intensity]
-                table_rows.append(f"| {label} | {count} 处 | {risk} | {advice} |")
-            tables.append("\n".join(table_rows))
+                items.append(
+                    f"周边 {radius_text}内暂无已知地质灾害/山洪/中小河流隐患点，{conclusion}"
+                )
 
     if not items and not tables:
         return ""

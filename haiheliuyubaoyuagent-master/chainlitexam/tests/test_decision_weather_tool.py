@@ -531,7 +531,8 @@ def test_build_poi_reminder_section_rain_risk_matrix():
     assert "（暴雨）" in heavy
     assert "风险高" in heavy
     assert "暴雨极易诱发滑坡、崩塌、泥石流" in heavy
-    # 无雨（0mm）→ 不提醒隐患点（有降雨才提示），只保留类别模板
+    # 无雨（0mm）→ 不出风险研判表，但带确定性风险状态（2026-08-24 用户口径）：
+    # “周边 X 处隐患点 + 本次预报无明显降雨，诱发风险低”，不再是纯类别模板。
     dry = dw_core._build_poi_reminder_section({
         "poi_category": "mountain",
         "has_rain_signal": False,
@@ -541,7 +542,9 @@ def test_build_poi_reminder_section_rain_risk_matrix():
     })
     assert "【注意事项】" in dry
     assert "山区" in dry
-    assert "风险低" not in dry
+    assert "地质灾害 1 处" in dry
+    assert "短期诱发风险低" in dry
+    assert "降雨时请提高警惕" in dry
     assert "可正常出行" not in dry
     assert "| 隐患类型" not in dry
     # 缺 total_rain_mm，仅 has_rain_signal=True → 兜底为小雨
@@ -619,6 +622,89 @@ def test_decision_max_wind_level_compound_wind():
         "hazard_points": None,
     })
     assert "风力较大" in edge
+
+
+def test_build_poi_reminder_section_school_multi_item():
+    """学校类别注意事项为多行条目（2026-08-24 用户反馈"注意事项太少"，从单行扩多行）。"""
+    text = dw_core._build_poi_reminder_section({
+        "poi_category": "school",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{"EDA": "北风1-2级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+    assert "【注意事项】" in text
+    assert "1. " in text and "2. " in text
+    assert "学校区域" in text
+    assert "上下学时段" in text
+    assert "户外活动" in text
+    assert "诱发风险低" not in text  # 无隐患点数据不编造风险结论
+
+
+def test_build_poi_reminder_section_no_rain_with_hazard_state():
+    """无雨 + 周边有隐患点 → 确定性风险状态（隐患点数量 + 诱发风险低），不出风险研判表。"""
+    text = dw_core._build_poi_reminder_section({
+        "poi_category": "school",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [],
+        "hazard_points": {
+            "status": "ok", "total_found": 2, "radius_km": 5.0,
+            "categories": [
+                {"key": "dzzh", "label": "地质灾害", "count": 1, "records": []},
+                {"key": "sh", "label": "山洪", "count": 1, "records": []},
+            ],
+        },
+    })
+    assert "周边 5 公里内有 地质灾害 1 处、山洪 1 处" in text
+    assert "本次预报无明显降雨，短期诱发风险低" in text
+    assert "降雨时请提高警惕" in text
+    assert "| 隐患类型" not in text  # 无雨不出表
+
+
+def test_build_poi_reminder_section_no_rain_no_hazard_points():
+    """无雨 + 查询成功但周边无隐患点 → “暂无已知隐患点，风险总体较低”（确定性结论）。"""
+    text = dw_core._build_poi_reminder_section({
+        "poi_category": "school",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [],
+        "hazard_points": {"status": "ok", "total_found": 0, "radius_km": 5.0, "categories": []},
+    })
+    assert "周边 5 公里内暂无已知地质灾害/山洪/中小河流隐患点" in text
+    assert "本次预报无明显降雨，风险总体较低" in text
+
+
+def test_build_poi_reminder_section_no_rain_hazard_query_failed():
+    """隐患点查询失败（None/非 ok）→ 不编造“无隐患点”，也不出风险状态。"""
+    for hp in (None, {"status": "no_data", "total_found": 0}, {"status": "error"}):
+        text = dw_core._build_poi_reminder_section({
+            "poi_category": "school",
+            "has_rain_signal": False,
+            "total_rain_mm": 0.0,
+            "periods": [],
+            "hazard_points": hp,
+        })
+        assert "隐患点" not in text
+        assert "风险总体较低" not in text
+        assert "诱发风险低" not in text
+
+
+def test_build_poi_reminder_section_historical_no_rain_risk_state():
+    """历史实况无雨 → 风险状态用“当日实际”措辞（与预报措辞区分）。"""
+    text = dw_core._build_poi_reminder_section({
+        "poi_category": "school",
+        "query_mode": "historical_obs_request",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [],
+        "hazard_points": {
+            "status": "ok", "total_found": 1, "radius_km": 5.0,
+            "categories": [{"key": "dzzh", "label": "地质灾害", "count": 1, "records": []}],
+        },
+    })
+    assert "当日实际无明显降雨" in text
+    assert "后续降雨时请提高警惕" in text
 
 
 @pytest.mark.asyncio
