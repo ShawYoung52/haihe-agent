@@ -236,6 +236,7 @@ def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
         head = t[:idx]
         head = re.split(
             r"[，。？?！!、\s，]|今天|明天|后天|昨天|前天|昨日|周末|未来|现在|上午|下午|晚上|夜里|"
+            r"高考期间|中考期间|考试期间|"
             r"下周[一二三四五六日天]?|下星期[一二三四五六日天]?|本周[一二三四五六日天]?|"
             r"这周[一二三四五六日天]?|星期[一二三四五六日天]|周[一二三四五六日天]|"
             r"[一二三四五六七八九十\d]+(小时|天|日|周|月|号|年)",
@@ -253,9 +254,38 @@ def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
     if not location:
         return None
 
+    event_period = next(
+        (word for word in ("高考期间", "中考期间", "考试期间") if word in t),
+        None,
+    )
+    missing_event_date = bool(event_period) and not re.search(
+        r"\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)", t
+    )
+    ambiguous_event_location = bool(event_period) and bool(re.fullmatch(
+        r"(?:(?:第[一二三四五六七八九十\d]+|实验|高级|职业|外国语|重点)?"
+        r"(?:中学|小学|学校|考点|校区))",
+        location,
+    ))
+    if missing_event_date or ambiguous_event_location:
+        missing_parts = []
+        if missing_event_date:
+            missing_parts.append(f"{event_period}的具体日期")
+        if ambiguous_event_location:
+            missing_parts.append(f"“{location}”所在区县或完整校名")
+        return {
+            "is_decision_weather": True,
+            "location_name": location,
+            "question_type": "event_weather",
+            "need_clarification": True,
+            "clarification_question": "请补充" + "，并说明".join(missing_parts)
+            + "，以免使用错误时段或匹配到外地同名学校。",
+        }
+
     # 2) 问题类型
     qtype = "general_weather"
-    if any(w in t for w in ["适合", "活动", "户外", "露营", "出行"]):
+    if event_period:
+        qtype = "event_weather"
+    elif any(w in t for w in ["适合", "活动", "户外", "露营", "出行"]):
         qtype = "activity"
     elif any(w in t for w in ["未来", "小时", "接下来"]):
         qtype = "rain_next_hours"
@@ -517,6 +547,30 @@ def _decision_rain_value(period: dict) -> float | None:
         return None
 
 
+def _decision_visibility_km(value: Any) -> float | None:
+    """归一有效能见度（千米）；0/负数/非有限值均视为接口缺测占位。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _decision_period_visibility_km(period: dict) -> float | None:
+    """按优先级读取时段能见度；主字段缺测时继续尝试备用字段。"""
+    for key, divisor in (
+        ("visibility_min_km", 1.0),
+        ("visibility_min_m", 1000.0),
+        ("VISMIN", 1.0),
+    ):
+        value = _decision_visibility_km(period.get(key))
+        if value is not None:
+            return value / divisor
+    return None
+
+
 def _decision_rain_text(value: float | None) -> str:
     if value is None:
         return "暂无数据"
@@ -561,15 +615,7 @@ def _compact_decision_period(period: dict) -> dict:
         ),
         "EDA": period.get("EDA") if period.get("EDA") is not None else period.get("wind"),
         "wind": period.get("wind") if period.get("wind") is not None else period.get("EDA"),
-        "visibility_min_km": (
-            period.get("visibility_min_km")
-            if period.get("visibility_min_km") is not None
-            else (
-                period.get("visibility_min_m")
-                if period.get("visibility_min_m") is not None
-                else period.get("VISMIN")
-            )
-        ),
+        "visibility_min_km": _decision_period_visibility_km(period),
         "visibility_unit": "千米",
         "rain_1h": (
             period.get("rainfall_mm")
@@ -647,6 +693,9 @@ def _compact_decision_forecast_facts(
         "total_rain_mm": round(sum(rain_values), 2) if rain_values else None,
         "periods": compact_periods,
     }
+    for key in ("point_risk_levels", "point_risk_levels_available"):
+        if key in forecast_payload:
+            facts[key] = forecast_payload.get(key)
     hourly_facts = _build_decision_hourly_facts(forecast_payload, hourly)
     if hourly_facts:
         facts["hourly_rain"] = hourly_facts
@@ -1025,6 +1074,10 @@ def _decision_time_of_day_table(user_text: str, facts: dict, periods: list[dict]
         _decision_rain_cell(round(sum(rain_values), 1) if rain_values else None),
     ]
     headers = ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"]
+    min_visibility = _decision_min_visibility_km(hourly_periods)
+    if min_visibility is not None:
+        headers.append("最低能见度(千米)")
+        row.append(f"{min_visibility:g}")
     return "\n".join([
         f"【{location}{label}天气预报】",
         "| " + " | ".join(headers) + " |",
@@ -1167,16 +1220,22 @@ def _build_decision_weather_table(user_text: str, facts: dict) -> str:
     else:
         title = f"【{location}逐日预报】"
 
-    rows = [
-        [
+    show_visibility = _decision_min_visibility_km(periods) is not None
+    rows = []
+    for period in periods:
+        row = [
             _decision_period_label(period),
             period.get("weather"),
             _decision_temperature_text(period),
             period.get("EDA") if period.get("EDA") is not None else period.get("wind"),
         ]
-        for period in periods
-    ]
+        if show_visibility:
+            visibility = _decision_min_visibility_km([period])
+            row.append(f"{visibility:g}" if visibility is not None else "—")
+        rows.append(row)
     headers = ["日期/时段", "天气现象", "气温(℃)", "风力风向"]
+    if show_visibility:
+        headers.append("最低能见度(千米)")
     lines = [
         title,
         "| " + " | ".join(headers) + " |",
@@ -1393,22 +1452,11 @@ def _decision_max_wind_level(periods: list[dict]) -> int | None:
 
 
 def _decision_min_visibility_km(periods: list[dict]) -> float | None:
-    """从预报时段解析最小能见度（千米）；无法解析返回 None。"""
+    """从预报时段解析最小有效能见度（千米）；0/负数缺测占位不参与。"""
     minimum: float | None = None
     for period in periods or []:
-        value = period.get("visibility_min_km")
-        if value is None:
-            value = period.get("visibility_min_m")
-            if value is not None:
-                try:
-                    value = float(value) / 1000.0
-                except (TypeError, ValueError):
-                    value = None
-        if value is None:
-            continue
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
+        num = _decision_period_visibility_km(period)
+        if num is None:
             continue
         if minimum is None or num < minimum:
             minimum = num
@@ -1860,6 +1908,79 @@ def _build_poi_reminder_section(
     return "\n\n".join(part.rstrip() for part in parts if str(part).strip()).strip()
 
 
+_POINT_RISK_LABELS = {
+    "dzzh": "地质灾害",
+    "sh": "山洪",
+    "zxhl": "中小河流",
+}
+_POINT_RISK_LEVEL_ORDER = ("一级", "二级", "三级", "四级")
+_POINT_RISK_NO_DATA = "no_data"
+
+
+def _safe_risk_count(value: Any) -> int | None:
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return count if count >= 0 else None
+
+
+def _format_point_risk_level(value: Any, available: bool) -> str:
+    if not available or value is None:
+        return "接口暂不可用"
+    if value == _POINT_RISK_NO_DATA:
+        return "暂无对应时次风险资料"
+    if not isinstance(value, dict):
+        return "接口暂不可用"
+    levels = value.get("levels")
+    if not isinstance(levels, dict) or not levels:
+        return "本次无风险"
+    parts = []
+    invalid_count = False
+    for level in _POINT_RISK_LEVEL_ORDER:
+        if level not in levels:
+            continue
+        count = _safe_risk_count(levels.get(level))
+        if count is None:
+            invalid_count = True
+        elif count > 0:
+            parts.append(f"{level} {count} 处")
+    for level, raw_count in levels.items():
+        if level in _POINT_RISK_LEVEL_ORDER:
+            continue
+        count = _safe_risk_count(raw_count)
+        if count is None:
+            invalid_count = True
+        elif count > 0:
+            parts.append(f"{level} {count} 处")
+    if parts:
+        return "、".join(parts)
+    return "接口数据异常" if invalid_count else "本次无风险"
+
+
+def _build_point_risk_level_section(facts: dict) -> str:
+    """渲染点位天气的真实风险等级三态：有风险/无风险/无资料或接口失败。"""
+    if "point_risk_levels_available" not in facts and "point_risk_levels" not in facts:
+        return ""
+    available = facts.get("point_risk_levels_available") is True
+    levels = facts.get("point_risk_levels")
+    if not isinstance(levels, dict):
+        levels = {}
+    rows = []
+    for key, label in _POINT_RISK_LABELS.items():
+        if available and key not in levels:
+            display = "本次无风险"
+        else:
+            display = _format_point_risk_level(levels.get(key), available)
+        rows.append((label, display))
+    return "\n".join([
+        "【本次风险等级】",
+        "| 灾害类型 | 风险等级 |",
+        "| --- | --- |",
+        *(f"| {label} | {display} |" for label, display in rows),
+    ])
+
+
 _MODEL_ADVICE_ACTIONS: dict[str, tuple[str | None, tuple[str, ...] | None, str]] = {
     # 通用场景动作：不含天气、风险等级、水位或应急判断。
     "check_updates": (None, None, "出行前关注场所最新通知和现场运行安排，预留必要的行程调整时间。"),
@@ -1999,6 +2120,7 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     max_sentences = (n_periods + 1) if n_periods > 1 else 1
     core = _decision_core_only(answer, user_text, max_sentences=max_sentences)
     table = _build_decision_weather_table(user_text, facts)
+    risk_levels = _build_point_risk_level_section(facts)
     model_weather_advice = _decision_model_weather_advice(answer, facts)
     # 历史实况同样追加注意事项，但措辞走“当日实际/该时段实际”等历史式（见 _build_poi_reminder_section）。
     reminder = _build_poi_reminder_section(facts, model_weather_advice=model_weather_advice)
@@ -2006,6 +2128,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     sections = [f"【核心结论】\n{core}".rstrip()]
     if table:
         sections.append(table)
+    if risk_levels:
+        sections.append(risk_levels)
     if reminder:
         sections.append(reminder)
     sections.append(f"数据来源：{source}。")

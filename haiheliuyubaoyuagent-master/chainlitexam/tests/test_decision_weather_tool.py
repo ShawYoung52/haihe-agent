@@ -122,6 +122,54 @@ def test_full_text_point_still_renders_weather_table():
     assert "天气现象" in table and "多云" in table and "东南风3级" in table
 
 
+def test_point_weather_table_shows_valid_visibility_before_related_advice():
+    """有效能见度是建议依据，必须先在天气表中向用户展示。"""
+    facts = {
+        "poi": {"name": "泰达航母主题公园"},
+        "periods": [{
+            "period_label": "08月29日-08月30日",
+            "weather": "多云转晴",
+            "tmax": "28",
+            "tmin": "21",
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+            "visibility_min_km": 1.5,
+        }],
+    }
+
+    table = dw_core._build_decision_weather_table("本周末适合去泰达航母主题公园游玩吗", facts)
+
+    assert "最低能见度(千米)" in table
+    assert "1.5" in table
+
+
+def test_point_weather_ignores_zero_visibility_placeholder_everywhere():
+    """VISMIN=0 是缺测占位，既不进表格，也不得触发低能见度条件和提醒。"""
+    facts = {
+        "poi": {"name": "泰达航母主题公园"},
+        "poi_category": "scenic",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "hazard_points": None,
+        "periods": [{
+            "period_label": "08月29日-08月30日",
+            "weather": "多云转晴",
+            "tmax": "28",
+            "tmin": "21",
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+            "visibility_min_km": 0.0,
+        }],
+    }
+
+    table = dw_core._build_decision_weather_table("本周末适合去泰达航母主题公园游玩吗", facts)
+    reminder = dw_core._build_poi_reminder_section(facts)
+
+    assert "最低能见度" not in table
+    assert "visibility" not in dw_core._poi_weather_conditions(facts, facts["periods"])
+    assert "能见度" not in reminder
+
+
 def test_point_time_of_day_query_renders_one_afternoon_summary_row(monkeypatch):
     """点位“今天下午”问法只展示一个时段汇总，不铺 6 条逐小时记录。"""
     monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: datetime(2026, 8, 24, 8, 0))
@@ -147,6 +195,29 @@ def test_point_time_of_day_query_renders_one_afternoon_summary_row(monkeypatch):
     assert "| 今天下午 | 多云 | 30~31 | 东风1-2级转东南风1-2级 | 0.0 |" in table
     assert "12时" not in table and "17时" not in table
     assert table.count("\n|") == 3  # 表头、分隔行、唯一数据行
+
+
+def test_point_time_of_day_table_aggregates_valid_visibility(monkeypatch):
+    """下午汇总表存在有效能见度时，展示该时段最低值而不是藏到注意事项里。"""
+    monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: datetime(2026, 8, 24, 8, 0))
+    facts = {
+        "poi": {"name": "天津港"},
+        "periods": [{
+            "start_time": f"2026-08-24 {hour:02d}:00:00",
+            "end_time": f"2026-08-24 {hour + 1:02d}:00:00",
+            "weather": "多云",
+            "tmax": 30,
+            "tmin": 30,
+            "EDA": "东风2级",
+            "rain_1h": 0.0,
+            "visibility_min_km": 1.2 if hour == 14 else 8.0,
+        } for hour in range(12, 18)],
+    }
+
+    table = dw_core._build_decision_weather_table("今天下午天津港天气怎么样", facts)
+
+    assert "最低能见度(千米)" in table
+    assert "| 1.2 |" in table
 
 
 @pytest.mark.parametrize(
@@ -466,6 +537,36 @@ def test_rule_based_slot_extraction_falls_back_on_ambiguous():
     assert dw_core._extract_decision_slots_rule_based("天气怎么样") is None
 
 
+def test_exam_period_with_generic_school_requires_date_and_location_clarification():
+    """“高考期间+实验中学”不能默认当前一周，也不能任选全国重名学校。"""
+    slots = dw_core._extract_decision_slots_rule_based("高考期间实验中学附近天气如何？")
+
+    assert slots is not None
+    assert slots["is_decision_weather"] is True
+    assert slots["question_type"] == "event_weather"
+    assert slots["need_clarification"] is True
+    assert "日期" in slots["clarification_question"]
+    assert "区县" in slots["clarification_question"] or "完整校名" in slots["clarification_question"]
+
+
+def test_exam_period_with_date_still_clarifies_ambiguous_school():
+    slots = dw_core._extract_decision_slots_rule_based("6月7日高考期间实验中学附近天气如何？")
+
+    assert slots is not None
+    assert slots["need_clarification"] is True
+    assert "区县" in slots["clarification_question"] or "完整校名" in slots["clarification_question"]
+    assert "日期" not in slots["clarification_question"]
+
+
+def test_exam_period_with_full_school_only_clarifies_missing_date():
+    slots = dw_core._extract_decision_slots_rule_based("高考期间天津市实验中学附近天气如何？")
+
+    assert slots is not None
+    assert slots["need_clarification"] is True
+    assert "日期" in slots["clarification_question"]
+    assert "区县" not in slots["clarification_question"]
+
+
 def test_classify_poi_category_five_categories():
     """POI 地理类型分类能识别五类点位。"""
     assert dw_core.classify_poi_category("天津大学", "天津市南开区卫津路92号") == "school"
@@ -639,6 +740,73 @@ def test_build_poi_reminder_section_hazard_points():
     # 天气条件从句来自实际 facts 数值（“有降雨”不带“信号”二字）
     assert "当前预报时段内有降雨，请携带雨具" in text
     assert "降雨信号" not in text
+
+
+def test_point_risk_level_section_distinguishes_data_states():
+    """点位天气/游玩回答列出真实风险等级，并区分无风险、无资料和接口失败。"""
+    facts = {
+        "point_risk_levels": {
+            "dzzh": {"label": "地质灾害", "levels": {"四级": 2}, "total": 2},
+            "sh": "no_data",
+            "zxhl": None,
+        },
+        "point_risk_levels_available": True,
+    }
+
+    text = dw_core._build_point_risk_level_section(facts)
+
+    assert "【本次风险等级】" in text
+    assert "| 地质灾害 | 四级 2 处 |" in text
+    assert "| 山洪 | 暂无对应时次风险资料 |" in text
+    assert "| 中小河流 | 接口暂不可用 |" in text
+
+
+def test_point_risk_level_section_reports_confirmed_no_risk():
+    """风险接口成功且返回空集合才可以显示“本次无风险”。"""
+    text = dw_core._build_point_risk_level_section({
+        "point_risk_levels": {},
+        "point_risk_levels_available": True,
+    })
+
+    assert text.count("本次无风险") == 3
+
+
+def test_point_risk_level_invalid_count_does_not_break_weather_answer():
+    text = dw_core._build_point_risk_level_section({
+        "point_risk_levels": {
+            "dzzh": {"levels": {"一级": "--", "三级": "2"}},
+        },
+        "point_risk_levels_available": True,
+    })
+
+    assert "三级 2 处" in text
+    assert "| 地质灾害 | --" not in text
+
+
+def test_compact_forecast_facts_preserves_point_risk_levels_for_rendering():
+    payload = {
+        "periods": [{"weather": "多云", "visibility_min_km": 8.0}],
+        "point_risk_levels": {"sh": {"levels": {"二级": 1}}},
+        "point_risk_levels_available": True,
+    }
+
+    facts = dw_core._compact_decision_forecast_facts(payload)
+    section = dw_core._build_point_risk_level_section(facts)
+
+    assert "| 山洪 | 二级 1 处 |" in section
+
+
+def test_visibility_falls_back_from_invalid_primary_to_meter_field():
+    period = {
+        "weather": "多云",
+        "visibility_min_km": 0,
+        "visibility_min_m": 1500,
+        "VISMIN": 4,
+    }
+
+    compact = dw_core._compact_decision_period(period)
+
+    assert compact["visibility_min_km"] == 1.5
 
 
 def test_build_poi_reminder_section_empty():

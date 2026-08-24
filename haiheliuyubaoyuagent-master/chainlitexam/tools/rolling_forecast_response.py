@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from datetime import datetime
@@ -419,17 +420,23 @@ def _weather_table(daily: list[dict], user_text: str) -> str:
     # 降水量列（2026-08-24 甲方反馈矛盾修复）：天气现象可能为"阴转多云"但当
     # 日仍有降水（WEA 是天气现象、TP1H 是时段累计降水量，两者可并存），必须同表
     # 列出降水量，避免核心结论说阴、注意事项/风险表又提降雨的自相矛盾。
-    rows = [
-        [
+    show_visibility = any(_visibility_value_km(item) is not None for item in daily)
+    rows = []
+    for item in daily:
+        row = [
             item.get("date_label"),
             item.get("weather"),
             _temperature_range_display(item),
             item.get("EDA"),
             _cell(item.get("rainfall_max_24h_display") or item.get("rainfall_max_24h_mm")),
         ]
-        for item in daily
-    ]
-    return f"{title}\n{_markdown_table(['日期', '天气现象', '气温(℃)', '风力风向', '降水量(毫米)'], rows)}"
+        if show_visibility:
+            row.append(_visibility_display(item))
+        rows.append(row)
+    headers = ['日期', '天气现象', '气温(℃)', '风力风向', '降水量(毫米)']
+    if show_visibility:
+        headers.append('最低能见度(千米)')
+    return f"{title}\n{_markdown_table(headers, rows)}"
 
 
 def _daily_rain_only(daily: list[dict]) -> bool:
@@ -510,22 +517,30 @@ def _temperature_sections(daily: list[dict], analysis: dict) -> str:
 
 
 def _visibility_value_km(item: dict) -> Any:
-    """读取千米制能见度；兼容前后端分步部署期间的旧字段名。"""
-    if item.get("visibility_min_km") is not None:
-        return item.get("visibility_min_km")
-    return item.get("visibility_min_m")
+    """读取有效千米制能见度；0/负数/非有限值均视为缺测占位。"""
+    value = item.get("visibility_min_km")
+    if value is None and item.get("visibility_min_m") is not None:
+        try:
+            value = float(item.get("visibility_min_m")) / 1000.0
+        except (TypeError, ValueError):
+            value = None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _visibility_display(item: dict) -> str:
+    value = _visibility_value_km(item)
+    return f"{value:g}" if value is not None else "—"
 
 
 def _visibility_table(daily: list[dict]) -> str:
     rows = [
         [
             item.get("date_label"),
-            _with_unit(
-                item.get("visibility_min_display")
-                if item.get("visibility_min_display") is not None
-                else _visibility_value_km(item),
-                "千米",
-            ),
+            _with_unit(_visibility_display(item), "千米"),
         ]
         for item in daily
     ]
@@ -533,11 +548,12 @@ def _visibility_table(daily: list[dict]) -> str:
 
 
 def _hourly_weather_table(hourly: list[dict]) -> str:
+    show_visibility = any(_visibility_value_km(item) is not None for item in hourly)
     rows = []
     for item in hourly:
         if not isinstance(item, dict):
             continue
-        rows.append([
+        row = [
             item.get("period_label") or (
                 f"{_format_period_time(item.get('start_time'))}-"
                 f"{_format_period_time(item.get('end_time'))}"
@@ -552,10 +568,15 @@ def _hourly_weather_table(hourly: list[dict]) -> str:
             # 降水量列（2026-08-24 矛盾修复，同 _weather_table）：时段天气现象与时段
             # 累计降水量可并存，必须列出避免"阴转多云 vs 有降雨"自相矛盾。
             _cell(item.get("rainfall_mm")),
-        ])
+        ]
+        if show_visibility:
+            row.append(_visibility_display(item))
+        rows.append(row)
+    headers = ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"]
+    if show_visibility:
+        headers.append("最低能见度(千米)")
     return "【未来小时预报】\n" + _markdown_table(
-        ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"],
-        rows,
+        headers, rows,
     )
 
 
@@ -609,18 +630,24 @@ def _time_of_day_period_table(rows: list[dict], label: str) -> str:
     rows 由 MCP `_time_of_day_summary_rows` 聚合（每区域一条），本函数只负责排版。
     标题含"天气预报"关键词，属代码所有表头（防 LLM 重复生成）。
     """
-    table_rows = [
-        [
+    show_visibility = any(_visibility_value_km(item) is not None for item in rows)
+    table_rows = []
+    for item in rows:
+        row = [
             label,
             item.get("weather"),
             _tod_temp_range(item),
             item.get("EDA"),
             _cell(item.get("rainfall_mm")),
         ]
-        for item in rows
-    ]
+        if show_visibility:
+            row.append(_visibility_display(item))
+        table_rows.append(row)
+    headers = ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"]
+    if show_visibility:
+        headers.append("最低能见度(千米)")
     return f"【{label}天气预报】\n" + _markdown_table(
-        ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"], table_rows
+        headers, table_rows
     )
 
 
@@ -644,17 +671,24 @@ def _activity_advice(item: dict) -> str:
 
 def _activity_table(daily: list[dict], user_text: str) -> str:
     title = "【周末详细预报】" if "周末" in str(user_text or "") else "【逐日活动预报】"
-    rows = [
-        [
+    show_visibility = any(_visibility_value_km(item) is not None for item in daily)
+    rows = []
+    for item in daily:
+        row = [
             item.get("date_label"),
             item.get("weather"),
             _temperature_range_display(item),
             item.get("EDA"),
-            _activity_advice(item),
         ]
-        for item in daily
-    ]
-    return f"{title}\n{_markdown_table(['日期/时段', '天气', '气温(℃)', '风力风向', '活动建议'], rows)}"
+        if show_visibility:
+            row.append(_visibility_display(item))
+        row.append(_activity_advice(item))
+        rows.append(row)
+    headers = ['日期/时段', '天气', '气温(℃)', '风力风向']
+    if show_visibility:
+        headers.append('最低能见度(千米)')
+    headers.append('活动建议')
+    return f"{title}\n{_markdown_table(headers, rows)}"
 
 
 # 山区活动查询关键词（区域级，非 POI）：蓟州/蓟县/盘山/黄崖关等山地。
@@ -702,15 +736,18 @@ _REGION_HAZARD_RISK = {
     "sh": ("山洪灾害危险区", "沟谷、河道低洼区遇强降雨易发山洪，避免在河道、沟谷露营停留"),
     "zxhl": ("中小河流洪水风险区", "沿河低洼地段关注水位上涨与行洪安全，遇预警及时转移避险"),
 }
+_REGION_HAZARD_LABELS = {
+    "dzzh": "地质灾害",
+    "sh": "山洪",
+    "zxhl": "中小河流",
+}
 
 # 风险等级展示顺序（一级最重 → 四级最轻），与 risk_warning_tool._normalize_risk_level 同口径。
 _LEVEL_SEVERITY_ORDER = ("一级", "二级", "三级", "四级")
 
 # 区域风险等级"该起报时次无资料"哨兵（与 MCP 侧 risk_warning_tool.RISK_LEVELS_NO_DATA
-# 同值，跨进程经 JSON 透传）。渲染层按用户口径显示"无风险"（2026-08-24：
-# "本次风险等级，不要写该时次暂无数据，写无风险就行"）——区别于 None（接口失败
-# →"接口暂不可用"）与缺键（可达无风险 →"本次无风险"）。哨兵仍保留以区分
-# "接口是通的但该时次无资料"与"接口全挂"，避免把整体降级成"接口暂不可用"。
+# 同值，跨进程经 JSON 透传）。渲染层明确显示“暂无对应时次风险资料”，区别于
+# None（接口失败 →“接口暂不可用”）和缺键（接口成功且该灾种无风险 →“本次无风险”）。
 _RISK_LEVELS_NO_DATA = "no_data"
 
 
@@ -719,14 +756,34 @@ def _format_risk_level_counts(levels: dict) -> str:
     if not isinstance(levels, dict) or not levels:
         return "本次无风险"
     parts: list[str] = []
+    invalid_count = False
     for lv in _LEVEL_SEVERITY_ORDER:
-        n = int(levels.get(lv) or 0)
-        if n > 0:
+        if lv not in levels:
+            continue
+        n = _safe_nonnegative_int(levels.get(lv))
+        if n is None:
+            invalid_count = True
+        elif n > 0:
             parts.append(f"{lv} {n} 处")
-    for lv, n in levels.items():  # 兜底：非一~四级键也如实列出
-        if lv not in _LEVEL_SEVERITY_ORDER and int(n or 0) > 0:
-            parts.append(f"{lv} {int(n)} 处")
-    return "、".join(parts) if parts else "本次无风险"
+    for lv, raw_count in levels.items():  # 兜底：非一~四级键也如实列出
+        if lv in _LEVEL_SEVERITY_ORDER:
+            continue
+        n = _safe_nonnegative_int(raw_count)
+        if n is None:
+            invalid_count = True
+        elif n > 0:
+            parts.append(f"{lv} {n} 处")
+    if parts:
+        return "、".join(parts)
+    return "接口数据异常" if invalid_count else "本次无风险"
+
+
+def _safe_nonnegative_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if number >= 0 else None
 
 
 def _region_hazard_table(region_hazards: list[dict]) -> str:
@@ -748,17 +805,32 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
             continue
         risk_levels = entry.get("risk_levels")
         show_levels = "risk_levels_available" in entry
+        categories = {
+            item.get("key"): item
+            for item in (entry.get("categories") or [])
+            if isinstance(item, dict) and item.get("key")
+        }
+        row_keys = list(categories)
+        if show_levels:
+            for key in (*_REGION_HAZARD_LABELS, *((risk_levels or {}).keys() if isinstance(risk_levels, dict) else ())):
+                if key not in row_keys:
+                    row_keys.append(key)
         rows: list[list[str]] = []
-        for category in entry.get("categories") or []:
-            if not isinstance(category, dict):
+        hazards_available = entry.get("hazards_available", True) is True
+        for key in row_keys:
+            category = categories.get(key) or {}
+            count = _safe_nonnegative_int(category.get("count"))
+            if not show_levels and (count is None or count <= 0):
                 continue
-            key = category.get("key")
-            count = int(category.get("count") or 0)
-            if count <= 0:
-                continue
-            label = category.get("label") or key or "未知类型"
+            label = category.get("label") or (
+                (key or "未知类型") if category else (_REGION_HAZARD_LABELS.get(key) or key or "未知类型")
+            )
             risk, advice = _REGION_HAZARD_RISK.get(key, ("存在风险隐患", "注意防范相关灾害风险"))
-            row = [label, f"{count} 处"]
+            if count is not None:
+                count_text = f"{count} 处"
+            else:
+                count_text = "0 处" if hazards_available else "暂无数据"
+            row = [label, count_text]
             if show_levels:
                 if isinstance(risk_levels, dict):
                     level_info = risk_levels.get(key)
@@ -766,10 +838,14 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
                         # 该灾种接口单独失败（MCP 侧 None 打标）——区别于"可达但无风险"
                         row.append("接口暂不可用")
                     elif level_info == _RISK_LEVELS_NO_DATA:
-                        # 该起报时次无资料（MCP 侧 no_data 哨兵）→ 用户口径显示"无风险"
-                        row.append("无风险")
+                        # 对应起报时次无资料不等于无风险，必须明确区分。
+                        row.append("暂无对应时次风险资料")
+                    elif level_info is None:
+                        row.append("本次无风险")
+                    elif not isinstance(level_info, dict):
+                        row.append("接口数据异常")
                     else:
-                        row.append(_format_risk_level_counts((level_info or {}).get("levels") or {}))
+                        row.append(_format_risk_level_counts(level_info.get("levels") or {}))
                 else:
                     row.append("接口暂不可用")
             row.extend([risk, advice])

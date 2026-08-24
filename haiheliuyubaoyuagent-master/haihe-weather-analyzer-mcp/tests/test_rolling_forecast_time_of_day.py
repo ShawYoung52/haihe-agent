@@ -3,8 +3,8 @@
 覆盖三类修复（2026-08-24 甲方反馈）：
 1. "今天下午和今天晚上蓟州的天气"应真正按所问时段（逐小时）回答，而不是铺开整日。
    时段化后 query_mode 走 hourly（_time_of_day），hourly_summary 只含所问小时。
-2. 24 小时内（今天/当前）的区域天气查询必须带"本次风险等级"列；
-   24 小时之外（明天/未来N天/后天）不接等级列（整列隐藏，灾害表其余列照常）。
+2. 当天整日或当前起报 24h 覆盖的小时窗接"本次风险等级"；
+   其他窗口保留列并显示“暂无对应时次风险资料”，不冒充无风险。
 3. 时段化与"今天"窗口衔接："今天下午"→ 今天 12:00-18:00；"今天下午和晚上"→ 12:00-24:00。
 """
 from __future__ import annotations
@@ -181,8 +181,12 @@ class TestCoreTimeOfDayHourlyMode:
 class TestTimeOfDaySummaryAggregation:
     """time_of_day_summary 聚合口径：天气合并、气温区间、降水量求和、风力风向去重。"""
 
-    def _run(self, monkeypatch, weather_list, rain_list, tmax=30.0, tmin=22.0, query="今天下午蓟州天气怎么样"):
+    def _run(
+        self, monkeypatch, weather_list, rain_list, tmax=30.0, tmin=22.0,
+        query="今天下午蓟州天气怎么样", visibility_list=None,
+    ):
         n = len(weather_list)
+        visibility_list = list(visibility_list) if visibility_list is not None else [8.0] * n
 
         class Resp:
             def raise_for_status(self):
@@ -192,7 +196,7 @@ class TestTimeOfDaySummaryAggregation:
                 return {"resultData": {"117.45_40.05": {
                     "WEA": list(weather_list), "TP1H": list(rain_list),
                     "TMAX": [tmax] * n, "TMIN": [tmin] * n,
-                    "EDA": ["南风2级"] * n, "VISMIN": [8.0] * n,
+                    "EDA": ["南风2级"] * n, "VISMIN": visibility_list,
                 }}}
 
         def fake_get(*a, **k):
@@ -221,6 +225,20 @@ class TestTimeOfDaySummaryAggregation:
         assert row["tmax"] == "31"
         assert row["tmin"] == "23"
 
+    def test_visibility_uses_minimum_positive_value(self, monkeypatch):
+        result = self._run(
+            monkeypatch, ["多云"] * 6, [0.0] * 6,
+            visibility_list=[8.0, 0.0, 3.0, 1.2, 5.0, 6.0],
+        )
+        assert result["time_of_day_summary"][0]["visibility_min_km"] == 1.2
+
+    def test_visibility_zero_placeholder_becomes_missing(self, monkeypatch):
+        result = self._run(
+            monkeypatch, ["多云"] * 6, [0.0] * 6,
+            visibility_list=[0.0] * 6,
+        )
+        assert result["time_of_day_summary"][0]["visibility_min_km"] is None
+
     def test_single_afternoon_label(self, monkeypatch):
         result = self._run(monkeypatch, ["多云"] * 6, [0.0] * 6, query="今天下午蓟州天气怎么样")
         assert result["time_of_day_label"] == "今天下午"
@@ -243,8 +261,24 @@ class TestTimeOfDaySummaryAggregation:
         assert "time_of_day_summary" not in result
 
 
+def test_daily_summary_ignores_zero_visibility_placeholder():
+    """逐日汇总同样只消费正数能见度，避免 0 占位触发低能见度。"""
+    periods = [
+        {
+            "region": "蓟州", "start_time": "2026-08-25 08:00:00", "end_time": "2026-08-26 08:00:00",
+            "WEA": "多云", "TMAX": 30, "TMIN": 22, "EDA": "南风2级", "TP1H": 0.0,
+            "VISMIN": visibility,
+        }
+        for visibility in (0.0, 8.0)
+    ]
+
+    row = rfs.build_daily_summary(periods)[0]
+
+    assert row["visibility_min_km"] == 8.0
+
+
 class TestRiskFcstWindowApplies:
-    """"本次风险等级"列门控：仅 24h 内（窗口起始日=今天 或 普通当前查询）。"""
+    """"本次风险等级"查询门控：单日/小时窗按 08/20 时起报覆盖期判定。"""
 
     def test_today_calendar_window_applies(self):
         win = {"forecast_start_date": "2026-08-24", "forecast_days": 1}
@@ -253,9 +287,9 @@ class TestRiskFcstWindowApplies:
     def test_no_window_applies(self):
         assert rfs._risk_fcst_window_applies(None, None, NOW) is True
 
-    def test_tomorrow_window_not_applies(self):
+    def test_tomorrow_single_day_overlaps_current_cycle(self):
         win = {"forecast_start_date": "2026-08-25", "forecast_days": 1}
-        assert rfs._risk_fcst_window_applies(win, None, NOW) is False
+        assert rfs._risk_fcst_window_applies(win, None, NOW) is True
 
     def test_future_three_days_not_applies(self):
         win = {"forecast_start_date": "2026-08-25", "forecast_days": 3}
@@ -272,6 +306,14 @@ class TestRiskFcstWindowApplies:
     def test_tod_tomorrow_not_applies(self):
         hourly = {"target_start": rfs.datetime(2026, 8, 25, 12, 0, tzinfo=rfs.TIANJIN_TIMEZONE)}
         assert rfs._risk_fcst_window_applies(None, hourly, NOW) is False
+
+    def test_next_midnight_overlaps_evening_cycle(self):
+        now = rfs.datetime(2026, 8, 24, 20, 30, tzinfo=rfs.TIANJIN_TIMEZONE)
+        hourly = {
+            "target_start": rfs.datetime(2026, 8, 25, 0, 0, tzinfo=rfs.TIANJIN_TIMEZONE),
+            "target_end": rfs.datetime(2026, 8, 25, 1, 0, tzinfo=rfs.TIANJIN_TIMEZONE),
+        }
+        assert rfs._risk_fcst_window_applies(None, hourly, now) is True
 
 
 class TestCoreRiskAttachGating:
@@ -305,13 +347,13 @@ class TestCoreRiskAttachGating:
         captured = self._capture(monkeypatch, "蓟州未来三天天气怎么样")
         assert captured["attach_risk_levels"] is False
 
-    def test_tomorrow_not_attach(self, monkeypatch):
+    def test_tomorrow_single_day_attaches_current_cycle_risk(self, monkeypatch):
         captured = self._capture(monkeypatch, "明天蓟州天气怎么样")
-        assert captured["attach_risk_levels"] is False
+        assert captured["attach_risk_levels"] is True
 
 
 class TestQueryRegionHazardsRiskLevelsGating:
-    """_query_region_hazards：attach_risk_levels=False 时不调风险接口、不带 risk_levels 字段。"""
+    """attach_risk_levels=False 时不调风险接口，但透传 no_data 三态。"""
 
     def _hazards_ok(self):
         return {
@@ -334,7 +376,7 @@ class TestQueryRegionHazardsRiskLevelsGating:
         assert result["risk_levels_available"] is True
         assert "risk_levels" in result
 
-    def test_attach_false_skips_risk_but_marks_no_risk(self, monkeypatch):
+    def test_attach_false_skips_risk_and_marks_corresponding_time_as_no_data(self, monkeypatch):
         called = {"n": 0}
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: self._hazards_ok())
 
@@ -345,10 +387,11 @@ class TestQueryRegionHazardsRiskLevelsGating:
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", fake_levels)
         result = rfs._query_region_hazards(117.45, 40.05, attach_risk_levels=False)
         assert called["n"] == 0, "24h 外不应调用风险接口"
-        # 2026-08-24 甲方口径"别空出来，没风险写本次无风险"：列不隐藏，
-        # 带 risk_levels_available=True + 空 risk_levels（渲染层据此每行显示"本次无风险"）。
+        # 超出接口时效不是“无风险”：列保留，但逐灾种明确标记对应时次无资料。
         assert result["risk_levels_available"] is True
-        assert result["risk_levels"] == {}
+        assert result["risk_levels"] == {
+            "dzzh": "no_data", "sh": "no_data", "zxhl": "no_data",
+        }
         # 灾害表其余字段照常
         assert result["total_found"] == 3
         assert result["categories"]

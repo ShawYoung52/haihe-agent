@@ -100,36 +100,54 @@ class TestQueryRegionHazards:
         result = rfs._query_region_hazards(117.45, 40.05)
         assert [c["key"] for c in result["categories"]] == ["sh"]
 
-    def test_error_payload_returns_none(self, monkeypatch):
-        """status=error（DB 未配置/表加载失败）返回 None，静默降级。"""
+    def test_malformed_static_counts_degrade_without_breaking_weather(self, monkeypatch):
+        monkeypatch.setattr(
+            rfs, "_region_hazard_queryer",
+            lambda lon, lat, radius: _hazards_ok(
+                categories=[{"key": "dzzh", "label": "地质灾害", "count": "--"}],
+                total="--",
+            ),
+        )
+
+        result = rfs._query_region_hazards(117.45, 40.05)
+
+        assert result["total_found"] == 0
+        assert result["categories"] == []
+
+    def test_error_payload_preserves_risk_unavailable_state(self, monkeypatch):
+        """静态库失败时仍保留风险等级的降级状态。"""
         monkeypatch.setattr(
             rfs, "_region_hazard_queryer",
             lambda lon, lat, radius: {"status": "error", "total_found": 0, "categories": [], "message": "PostgreSQL 未配置"},
         )
-        assert rfs._query_region_hazards(117.45, 40.05) is None
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["hazards_available"] is False
+        assert result["risk_levels_available"] is False
 
-    def test_no_data_payload_returns_none(self, monkeypatch):
-        """status=no_data（周边无隐患点）返回 None，不出空表。"""
+    def test_no_data_payload_keeps_confirmed_static_availability(self, monkeypatch):
+        """status=no_data 表示静态库可达且周边无隐患点。"""
         monkeypatch.setattr(
             rfs, "_region_hazard_queryer",
             lambda lon, lat, radius: {"status": "no_data", "total_found": 0, "categories": [], "message": "周边 25 公里内暂无已知灾害隐患点。"},
         )
-        assert rfs._query_region_hazards(117.45, 40.05) is None
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["hazards_available"] is True
+        assert result["categories"] == []
 
-    def test_queryer_exception_returns_none(self, monkeypatch):
-        """查询器抛异常不扩散：返回 None 且不阻断调用方。"""
+    def test_queryer_exception_marks_static_data_unavailable(self, monkeypatch):
+        """查询器抛异常不扩散，但显式标记静态数据不可用。"""
         def boom(lon, lat, radius):
             raise RuntimeError("db down")
         monkeypatch.setattr(rfs, "_region_hazard_queryer", boom)
-        assert rfs._query_region_hazards(117.45, 40.05) is None
+        assert rfs._query_region_hazards(117.45, 40.05)["hazards_available"] is False
 
-    def test_lazy_load_failure_returns_none(self, monkeypatch):
-        """懒加载本身失败（tools.py 重依赖缺失等）也静默降级。"""
+    def test_lazy_load_failure_marks_static_data_unavailable(self, monkeypatch):
+        """懒加载失败不影响风险等级状态返回。"""
         def broken_load():
             raise ImportError("no networkx")
         monkeypatch.setattr(rfs, "_region_hazard_queryer", None)
         monkeypatch.setattr(rfs, "_load_region_hazard_queryer", broken_load)
-        assert rfs._query_region_hazards(117.45, 40.05) is None
+        assert rfs._query_region_hazards(117.45, 40.05)["hazards_available"] is False
 
 
 class TestQueryRegionHazardsRiskLevels:
@@ -172,8 +190,8 @@ class TestQueryRegionHazardsRiskLevels:
         assert result["risk_levels"] is None
         assert result["total_found"] == 3
 
-    def test_hazards_unavailable_skips_risk_levels(self, monkeypatch):
-        """静态隐患点表查询失败（返回 None）→ 整体 None，不再调风险接口。"""
+    def test_hazards_unavailable_still_queries_risk_levels(self, monkeypatch):
+        """静态隐患点表查询失败不得阻断实时风险等级。"""
         calls = {"n": 0}
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius, fcst_times=None: None)
 
@@ -181,8 +199,11 @@ class TestQueryRegionHazardsRiskLevels:
             calls["n"] += 1
             return _risk_levels_ok()
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", counting)
-        assert rfs._query_region_hazards(117.45, 40.05) is None
-        assert calls["n"] == 0
+        result = rfs._query_region_hazards(117.45, 40.05)
+        assert result["categories"] == []
+        assert result["risk_levels"]["dzzh"]["levels"] == {"一级": 1, "三级": 2}
+        assert result["hazards_available"] is False
+        assert calls["n"] == 1
 
 
 class TestCoreAttachesRegionHazards:
@@ -204,19 +225,41 @@ class TestCoreAttachesRegionHazards:
         assert entry["total_found"] == 3
         assert [c["key"] for c in entry["categories"]] == ["dzzh", "sh"]
 
-    def test_point_mode_no_hazards(self, monkeypatch):
-        """point_mode（已给 lon/lat）不附着区域风险表——点位由决策天气路径管。"""
+    def test_point_mode_attaches_actual_risk_levels_without_region_hazard_table(self, monkeypatch):
+        """点位天气把风险接口等级交给前端，但仍不混入区域静态隐患表。"""
         calls = {"n": 0}
         monkeypatch.setattr(
-            rfs, "_query_region_hazards",
-            lambda lon, lat, attach_risk_levels=True: calls.update(n=calls["n"] + 1) or _hazards_ok(),
+            rfs, "_query_region_risk_levels",
+            lambda lon, lat, fcst_times=None: calls.update(n=calls["n"] + 1) or {
+                "dzzh": {"label": "地质灾害", "levels": {"四级": 1}, "total": 1}
+            },
         )
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
         result = rfs.query_rolling_forecast_core(
-            user_query="密云水库未来天气", lon=116.8, lat=40.4, point_name="密云水库", now=NOW
+            user_query="今天天津港天气怎么样", lon=117.75, lat=39.0, point_name="天津港", now=NOW
         )
         assert "region_hazards" not in result
+        assert result["point_risk_levels"]["dzzh"]["levels"] == {"四级": 1}
+        assert result["point_risk_levels_available"] is True
+        assert calls["n"] == 1
+
+    def test_point_mode_future_window_marks_risk_as_no_data_without_calling_interface(self, monkeypatch):
+        """超出风险接口时效时明确标记无资料，不能无中生有写“本次无风险”。"""
+        calls = {"n": 0}
+        monkeypatch.setattr(
+            rfs, "_query_region_risk_levels",
+            lambda lon, lat, fcst_times=None: calls.update(n=calls["n"] + 1) or {},
+        )
+        monkeypatch.setattr(rfs.requests, "get", _fake_request)
+        rfs._rolling_forecast_cache.clear()
+
+        result = rfs.query_rolling_forecast_core(
+            user_query="本周末天津港天气怎么样", lon=117.75, lat=39.0, point_name="天津港", now=NOW
+        )
+
+        assert result["point_risk_levels_available"] is True
+        assert set(result["point_risk_levels"].values()) == {"no_data"}
         assert calls["n"] == 0
 
     def test_hazards_failure_degrades_weather_unchanged(self, monkeypatch):
@@ -257,7 +300,7 @@ class TestRiskLevelsGating:
     """
 
     def test_future_window_no_risk_levels_attached(self, monkeypatch):
-        """"未来三天"（起始日=明天，24h 外）→ attach_risk_levels=False，不接等级。"""
+        """"未来三天"超出单个起报覆盖期：不调等级接口，改传 no_data。"""
         captured = {}
 
         def fake_hazards(lon, lat, attach_risk_levels=True):

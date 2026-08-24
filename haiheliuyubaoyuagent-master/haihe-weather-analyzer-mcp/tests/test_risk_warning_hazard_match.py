@@ -13,6 +13,9 @@
 """
 from __future__ import annotations
 
+from collections import Counter
+from threading import Barrier
+
 import datetime
 import importlib.util
 import re
@@ -388,6 +391,17 @@ class TestRegionRiskLevels:
         }))
         assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) is None
 
+    def test_three_hazard_kinds_are_fetched_concurrently(self, monkeypatch):
+        barrier = Barrier(3)
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            barrier.wait(timeout=1)
+            return {"data": []}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+
+        assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) == {}
+
     def test_missing_coords_skipped(self, monkeypatch):
         monkeypatch.setattr(rwt, "_fetch_risk_warning", self._fetch({
             "geologic": [
@@ -513,7 +527,7 @@ class TestRegionRiskLevelsMultiDay:
         levels = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
         assert levels["dzzh"]["levels"] == {"一级": 1}
         # 未传 fcstTime → 每灾种单次默认调用（fcstTime 由 fetch 层补最近起报时次）
-        assert [k for k, _ in seen] == ["geologic", "mountain", "river"]
+        assert Counter(k for k, _ in seen) == Counter(["geologic", "mountain", "river"])
         assert all(extra in (None, {}) for _, extra in seen)
 
     def test_cache_key_includes_fcst_times(self, monkeypatch):
@@ -529,7 +543,7 @@ class TestRegionRiskLevelsMultiDay:
         rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=a)
         rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=b)  # 不同时次→重调
         rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=a)  # 同键→缓存命中
-        assert calls == ["20260825080000"] * 3 + ["20260826080000"] * 3
+        assert Counter(calls) == Counter(["20260825080000"] * 3 + ["20260826080000"] * 3)
 
 
 class TestRegionRiskLevelsFallback:
@@ -576,7 +590,19 @@ class TestRegionRiskLevelsFallback:
         monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
         result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R)
         assert result["dzzh"]["levels"] == {"一级": 1}
-        assert seen == [None, None, None]  # 每灾种只调一次默认，无回退
+        assert Counter(seen) == Counter([None, None, None])  # 每灾种只调一次默认，无回退
+
+    def test_fallback_success_with_no_risk_clears_earlier_no_data(self, monkeypatch):
+        monkeypatch.setattr(rwt, "_default_fcst_time", lambda: "20260824080000")
+
+        def fetch(kind, extra_params=None, timeout_sec=30):
+            if (extra_params or {}).get("fcstTime") is None:
+                raise rwt.RiskInterfaceNoDataError("资料在当前时刻下无数据")
+            return {"data": []}
+
+        monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+
+        assert rwt.query_region_risk_levels(self.LON, self.LAT, self.R) == {}
 
     def test_default_and_fallback_both_no_data_marks_sentinel(self, monkeypatch):
         monkeypatch.setattr(rwt, "_default_fcst_time", lambda: "20260824080000")
@@ -599,7 +625,7 @@ class TestRegionRiskLevelsFallback:
         monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
         result = rwt.query_region_risk_levels(self.LON, self.LAT, self.R, fcst_times=["20260825080000"])
         # 显式时次不做回退（保持逐日合并语义），每灾种只调该时次一次
-        assert seen == ["20260825080000"] * 3
+        assert Counter(seen) == Counter(["20260825080000"] * 3)
         assert all(v == rwt.RISK_LEVELS_NO_DATA for v in result.values())
 
 

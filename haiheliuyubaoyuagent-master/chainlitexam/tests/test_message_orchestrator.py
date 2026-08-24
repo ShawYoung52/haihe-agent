@@ -20,6 +20,25 @@ import chainlitexam.message_orchestrator as mo
 import external_skill_tools as est
 
 
+@pytest.mark.asyncio
+async def test_weekend_activity_fast_path_does_not_intercept_specific_poi(monkeypatch):
+    """具体景点周末游玩必须交给点位天气链路，不能降级成天津市降雨概览。"""
+    class ForecastTool:
+        name = "get_city_rainfall_time_range"
+
+    async def forbidden_reasoning(*args, **kwargs):
+        raise AssertionError("POI 问题不应进入周末区域快速路径")
+
+    monkeypatch.setattr(mo, "_find_tool", lambda *args, **kwargs: ForecastTool())
+    monkeypatch.setattr(mo, "_show_business_reasoning", forbidden_reasoning)
+
+    handled = await mo._try_weekend_activity_fast_path(
+        "本周末适合去泰达航母主题公园游玩吗？", None, [ForecastTool()], [], {}
+    )
+
+    assert handled is False
+
+
 def test_enable_fast_paths_defaults_to_false(monkeypatch):
     """ENABLE_FAST_PATHS reflects the ENABLE_FAST_PATHS environment variable at import time."""
     monkeypatch.setenv("ENABLE_FAST_PATHS", "false")

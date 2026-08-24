@@ -3609,6 +3609,11 @@ async def _try_weekend_activity_fast_path(user_text: str, thinking_chain, tools,
         return False
     t = user_text.strip()
 
+    # 具体景点/学校/场馆等 POI 需要点位经纬度、完整天气要素和风险等级，
+    # 不得被“周末”区域降雨概览提前截获。
+    if _decision_weather_prefilter(t):
+        return False
+
     # 周末关键词
     weekend_kw = ["周末", "周六", "周日", "星期日", "星期天", "周六日"]
     if not any(k in t for k in weekend_kw):

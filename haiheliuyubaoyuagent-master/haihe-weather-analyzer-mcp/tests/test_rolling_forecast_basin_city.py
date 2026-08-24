@@ -68,6 +68,7 @@ class TestCoreBasinCityRouting:
         rfs._rolling_forecast_cache.clear()
         # 隔离隐患点/风险等级增强（本类只测坐标路由口径）
         monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        monkeypatch.setattr(rfs, "_query_region_risk_levels", lambda lon, lat, fcst_times=None: {})
         result = rfs.query_rolling_forecast_core(user_query=user_query, now=NOW, **core_kwargs)
         return result, captured.get("params") or {}
 

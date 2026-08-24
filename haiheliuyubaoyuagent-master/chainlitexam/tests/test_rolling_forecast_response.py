@@ -98,6 +98,32 @@ def test_cycling_query_uses_activity_template_consistently_with_router():
     assert "【逐日活动预报】" in bundle["code_section"]
 
 
+@pytest.mark.parametrize("query", ["明天蓟州天气怎么样", "明天适合去蓟州游玩吗"])
+def test_weather_and_activity_tables_show_valid_visibility(query):
+    """综合天气和游玩建议若使用有效能见度事实，必须在上方表格中展示。"""
+    daily = _daily("轻雾转多云", 0.0)
+    daily[0]["visibility_min_km"] = 0.8
+    daily[0]["visibility_min_display"] = "0.8"
+
+    section = rfr.build_rolling_forecast_bundle(query, {"daily_summary": daily})["code_section"]
+
+    assert "最低能见度(千米)" in section
+    assert "0.8" in section
+
+
+@pytest.mark.parametrize("query", ["明天蓟州天气怎么样", "明天适合去蓟州游玩吗"])
+def test_weather_and_activity_tables_hide_zero_visibility_placeholder(query):
+    """0 千米占位值不是有效观测，不能进入表格或降低活动适宜性。"""
+    daily = _daily("多云转晴", 0.0)
+    daily[0]["visibility_min_km"] = 0.0
+    daily[0]["visibility_min_display"] = "0.0"
+
+    section = rfr.build_rolling_forecast_bundle(query, {"daily_summary": daily})["code_section"]
+
+    assert "最低能见度" not in section
+    assert "需谨慎安排" not in section
+
+
 @pytest.mark.parametrize(
     "decorated_header",
     ("### 【游玩建议】", "**【明日蓟州天气预报】**"),
@@ -311,29 +337,38 @@ class TestRegionHazardTableRiskLevels:
         assert "| 地质灾害 | 2 处 | 接口暂不可用 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
-    def test_levels_kind_no_data_marker_shows_no_risk(self):
+    def test_levels_kind_no_data_marker_shows_missing_corresponding_time(self):
         """单灾种该起报时次无资料（risk_levels 中该 key 为 "no_data" 哨兵）→
-        该行"无风险"（2026-08-24 用户口径：本次风险等级列不再写"该时次暂无数据"，
-        直接写无风险即可）；接口不可达(None)仍写"接口暂不可用"与无风险区分。"""
+        明确显示“暂无对应时次风险资料”；接口不可达(None)仍显示“接口暂不可用”。"""
         payload = self._with_levels({
             "dzzh": "no_data",
             "sh": {"label": "山洪", "kind": "mountain", "levels": {"三级": 2}, "total": 2},
         })
         bundle = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)
         section = bundle["code_section"]
-        assert "| 地质灾害 | 2 处 | 无风险 |" in section
+        assert "| 地质灾害 | 2 处 | 暂无对应时次风险资料 |" in section
         assert "| 山洪 | 1 处 | 三级 2 处 |" in section
 
-    def test_levels_column_beyond_24h_shows_no_risk_not_hidden(self):
-        """24h 外窗口（明天/未来N天）：MCP 不调风险接口、带 risk_levels_available=True +
-        空 risk_levels={} → 列不隐藏、每行显示"本次无风险"（2026-08-24 甲方口径：
-        "风险等级别空出来，没风险就写本次无风险"）。"""
-        payload = self._with_levels({}, available=True)
+    def test_levels_column_beyond_24h_shows_no_data_not_hidden(self):
+        """24h 外窗口保留等级列，但不能把没有对应时次资料冒充成无风险。"""
+        payload = self._with_levels({"dzzh": "no_data", "sh": "no_data"}, available=True)
         bundle = rfr.build_rolling_forecast_bundle("明天蓟州天气怎么样", payload)
         section = bundle["code_section"]
         assert "本次风险等级" in section
-        assert "| 地质灾害 | 2 处 | 本次无风险 |" in section
-        assert "| 山洪 | 1 处 | 本次无风险 |" in section
+        assert "| 地质灾害 | 2 处 | 暂无对应时次风险资料 |" in section
+        assert "| 山洪 | 1 处 | 暂无对应时次风险资料 |" in section
+
+    def test_risk_only_category_is_not_lost_when_static_category_missing(self):
+        payload = self._with_levels({
+            "sh": {"label": "山洪", "kind": "mountain", "levels": {"二级": 1}, "total": 1},
+        })
+        payload["region_hazards"][0]["categories"] = [
+            {"key": "dzzh", "label": "地质灾害", "kind": "地灾", "count": 2},
+        ]
+
+        section = rfr.build_rolling_forecast_bundle("蓟州天气怎么样", payload)["code_section"]
+
+        assert "| 山洪 | 0 处 | 二级 1 处 |" in section
 
 
 def _rain_only_daily():
@@ -489,9 +524,9 @@ class TestCoreConclusionRainMention:
         assert "必须" in instruction or "应当" in instruction
 
 
-def _tod_summary(weather="雷阵雨转多云", tmin="23", tmax="30", eda="南风2级", rain=8.0):
+def _tod_summary(weather="雷阵雨转多云", tmin="23", tmax="30", eda="南风2级", rain=8.0, visibility=None):
     return [{"region": "蓟州区", "weather": weather, "tmin": tmin, "tmax": tmax,
-             "EDA": eda, "rainfall_mm": rain}]
+             "EDA": eda, "rainfall_mm": rain, "visibility_min_km": visibility}]
 
 
 class TestTimeOfDayPeriodTable:
@@ -541,6 +576,24 @@ class TestTimeOfDayPeriodTable:
              "time_of_day_summary": _tod_summary(rain=None)},
         )
         assert "None" not in bundle["code_section"]
+
+    def test_valid_visibility_is_shown_in_period_table(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary(visibility=0.9)},
+        )
+        section = bundle["code_section"]
+        assert "最低能见度(千米)" in section
+        assert "0.9" in section
+
+    def test_zero_visibility_placeholder_is_not_shown(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary(visibility=0.0)},
+        )
+        assert "最低能见度" not in bundle["code_section"]
 
     def test_compact_facts_includes_tod_summary(self):
         """时段化查询的聚合事实必须进 compact_facts 供 LLM 使用。"""

@@ -173,6 +173,7 @@ def _display_region(region: str) -> str:
 REGION_HAZARD_RADIUS_KM = float(os.getenv("REGION_HAZARD_RADIUS_KM", "25"))
 if not (0 < REGION_HAZARD_RADIUS_KM <= 50):
     REGION_HAZARD_RADIUS_KM = 25.0
+_POINT_RISK_KEYS = ("dzzh", "sh", "zxhl")
 
 # 懒加载的 _query_poi_hazard_reminders_core（避免模块顶层触发 tools.py 的重依赖链）。
 _region_hazard_queryer = None
@@ -231,85 +232,114 @@ def _query_region_risk_levels(lon: float, lat: float, fcst_times: list[str] | No
         return None
 
 
-# 风险接口每个起报时次只覆盖 24h（08→次日 08、20→次日 20），"本次风险等级"只对
-# 24h 内的窗口有意义；未来 24h 之外（明天/未来N天/后天/下周…）没有该时段的风险资料，
-# 甲方口径（2026-08-24）：24h 外"本次风险等级"这一列整列去掉、24h 内必须出风险。
+# 风险接口每个起报时次覆盖 24h（08→次日 08、20→次日 20）。
+# 单日整日问法和精确小时窗均按与当前起报覆盖期是否交叉判定，
+# 因此晚间起报后查次日凌晨仍可用真实等级。不可用时保留列并标记 no_data。
 def _risk_fcst_window_applies(
     calendar_window: dict | None,
     hourly_window: dict | None,
     now: datetime,
 ) -> bool:
-    """是否给区域查询附"本次风险等级"列：仅 24h 内（窗口起始日=今天，或普通当前查询）。
-
-    时段化窗口（"今天下午/晚上"）按其 target_start 所在日判定；日历窗口按 forecast_start_date
-    判定；无窗口（普通"蓟州天气"当前查询）视为 24h 内。未来 24h 之外返回 False（不接等级列）。
-    """
+    """是否能为该整日/小时窗口调用当前起报的风险等级。"""
     if now.tzinfo is None:
         now = now.replace(tzinfo=TIANJIN_TIMEZONE)
-    today = now.date()
-    if hourly_window is not None:
-        target = hourly_window.get("target_start")
-        return bool(target is not None and target.date() == today)
+    now = now.astimezone(TIANJIN_TIMEZONE)
+    if hourly_window is None and calendar_window is None:
+        return True
+    if now.hour >= 20:
+        cycle_start = now.replace(hour=20, minute=0, second=0, microsecond=0)
+    elif now.hour >= 8:
+        cycle_start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    else:
+        cycle_start = (now - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+    cycle_end = cycle_start + timedelta(hours=24)
     if calendar_window is not None:
         try:
-            return _parse_date(calendar_window.get("forecast_start_date") or "") == today
+            days = max(1, int(calendar_window.get("forecast_days") or 1))
+            if days != 1:
+                return False
+            start_date = _parse_date(calendar_window.get("forecast_start_date") or "")
+            target_start = datetime.combine(start_date, time.min, tzinfo=TIANJIN_TIMEZONE)
+            target_end = target_start + timedelta(days=1)
+            return target_start < cycle_end and target_end > cycle_start
         except Exception:
             return True
-    return True
+    window = hourly_window or {}
+    target_start = window.get("target_start")
+    target_end = window.get("target_end")
+    if target_start is None:
+        return True
+    if target_start.tzinfo is None:
+        target_start = target_start.replace(tzinfo=TIANJIN_TIMEZONE)
+    if target_end is None:
+        target_end = target_start + timedelta(hours=1)
+    elif target_end.tzinfo is None:
+        target_end = target_end.replace(tzinfo=TIANJIN_TIMEZONE)
+
+    return target_start < cycle_end and target_end > cycle_start
 
 
-def _query_region_hazards(lon: float, lat: float, attach_risk_levels: bool = True) -> dict | None:
+def _query_region_hazards(lon: float, lat: float, attach_risk_levels: bool = True) -> dict:
     """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
 
-    只保留有数据的类型（status=="ok" 且 count>0）；无数据/接口失败/异常均返回
-    None（静默降级，风险表是增强）。categories 只带 key/label/kind/count，
-    不带 records 明细（区域级只报种类与数量，避免 payload 膨胀）。
-    attach_risk_levels=False 时（24h 外窗口）不调风险接口、不带 risk_levels/
-    risk_levels_available 字段，渲染层据此隐藏"本次风险等级"列（甲方口径）。
+    只保留有数据的静态隐患类型（status=="ok" 且 count>0）；静态查询
+    失败时仍返回结构化降级状态，不阻断独立的实时风险等级。categories 不带
+    records 明细（区域级只报种类与数量，避免 payload 膨胀）。
+    attach_risk_levels=False 时（24h 外窗口）不调风险接口，逐灾种返回 no_data，
+    让渲染层保留“本次风险等级”列并明确说明对应时次无资料。
     """
     global _region_hazard_queryer
+    payload: dict = {}
+    hazards_available = False
     try:
         if _region_hazard_queryer is None:
             _region_hazard_queryer = _load_region_hazard_queryer()
-        payload = _region_hazard_queryer(float(lon), float(lat), REGION_HAZARD_RADIUS_KM)
+        raw_payload = _region_hazard_queryer(float(lon), float(lat), REGION_HAZARD_RADIUS_KM)
+        if isinstance(raw_payload, dict):
+            payload = raw_payload
+            hazards_available = payload.get("status") in {"ok", "no_data"}
     except Exception as exc:
         print(f"[region_hazards] query failed: {exc}", flush=True)
-        return None
-    if not isinstance(payload, dict) or payload.get("status") != "ok":
-        return None
-    categories = payload.get("categories") or []
-    merged = [
-        {
-            "key": c.get("key"),
-            "label": c.get("label"),
-            "kind": c.get("kind"),
-            "count": int(c.get("count") or 0),
-        }
-        for c in categories
-        if isinstance(c, dict) and c.get("count")
-    ]
-    if not merged:
-        return None
+    categories = (payload.get("categories") or []) if payload.get("status") == "ok" else []
+    try:
+        total_found = max(0, int(payload.get("total_found") or 0))
+    except (TypeError, ValueError, OverflowError):
+        total_found = 0
+    merged = []
+    for category in categories:
+        if not isinstance(category, dict):
+            continue
+        try:
+            count = int(category.get("count") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if count <= 0:
+            continue
+        merged.append({
+            "key": category.get("key"),
+            "label": category.get("label"),
+            "kind": category.get("kind"),
+            "count": count,
+        })
     # 区域天气#8：叠加"本次各灾种风险等级"（风险接口 level，一~四级）。仅 24h 内窗口
     # （attach_risk_levels=True）才调风险接口；接口失败/异常返回 None →
     # risk_levels_available=False，前端显示"接口暂不可用"（静态隐患点表照常）。
-    # 24h 外窗口（attach_risk_levels=False）不调风险接口（风险接口只出最近 24h 起报预报，
-    # 没有该窗口的对应资料），但按 2026-08-24 甲方口径"别空出来，没风险就写本次无风险"，
-    # 仍带 risk_levels_available=True + 空 risk_levels={}，渲染层据此把每行显示为"本次无风险"
-    # （列不隐藏、不显示"该时次暂无数据"）。
+    # 24h 外窗口不调风险接口；没有对应时次资料不等于无风险，逐灾种用 no_data 标记。
     if not attach_risk_levels:
         return {
-            "total_found": int(payload.get("total_found") or 0),
+            "total_found": total_found,
             "radius_km": REGION_HAZARD_RADIUS_KM,
             "categories": merged,
-            "risk_levels": {},
+            "hazards_available": hazards_available,
+            "risk_levels": {key: "no_data" for key in _POINT_RISK_KEYS},
             "risk_levels_available": True,
         }
     risk_levels = _query_region_risk_levels(lon, lat)
     return {
-        "total_found": int(payload.get("total_found") or 0),
+        "total_found": total_found,
         "radius_km": REGION_HAZARD_RADIUS_KM,
         "categories": merged,
+        "hazards_available": hazards_available,
         "risk_levels": risk_levels,
         "risk_levels_available": risk_levels is not None,
     }
@@ -898,6 +928,9 @@ def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
         tmax_vals = [v for v in (_to_float(it.get("TMAX")) for it in items) if v is not None]
         tmin_vals = [v for v in (_to_float(it.get("TMIN")) for it in items) if v is not None]
         rain_vals = [v for v in (_to_float(it.get("TP1H")) for it in items) if v is not None]
+        visibility_vals = [
+            v for v in (_to_positive_float(it.get("VISMIN")) for it in items) if v is not None
+        ]
         rows.append({
             "region": region,
             "weather": weather,
@@ -905,6 +938,7 @@ def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
             "tmin": _temperature_display_text(min(tmin_vals)) if tmin_vals else None,
             "EDA": _summarize_tod_wind([it.get("EDA") for it in items]),
             "rainfall_mm": round(sum(rain_vals), 1) if rain_vals else None,
+            "visibility_min_km": round(min(visibility_vals), 1) if visibility_vals else None,
         })
     return rows
 
@@ -1024,6 +1058,12 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_positive_float(value: Any) -> float | None:
+    """只保留正数数值；滚动预报 VISMIN=0 按接口缺测占位处理。"""
+    number = _to_float(value)
+    return number if number is not None and number > 0 else None
 
 
 def format_rolling_forecast_coord(value: float | str) -> str:
@@ -1203,7 +1243,7 @@ def build_daily_summary(periods: list[dict]) -> list[dict]:
                 tmax_values.append((value, item.get("TMAX")))
             if (value := _to_float(item.get("TMIN"))) is not None:
                 tmin_values.append((value, item.get("TMIN")))
-            if (value := _to_float(item.get("VISMIN"))) is not None:
+            if (value := _to_positive_float(item.get("VISMIN"))) is not None:
                 visibility_values.append((region, value, item.get("VISMIN")))
             if (value := _to_float(item.get("TP1H"))) is not None:
                 rain_values.append((region, value, item.get("TP1H")))
@@ -1849,7 +1889,7 @@ def query_rolling_forecast_core(
                     "EDA": item.get("EDA"),
                     "wind": item.get("EDA"),
                     "rainfall_mm": item.get("TP1H"),
-                    "visibility_min_km": item.get("VISMIN"),
+                    "visibility_min_km": _to_positive_float(item.get("VISMIN")),
                     "visibility_unit": "千米",
                 }
                 for item in periods
@@ -1857,13 +1897,19 @@ def query_rolling_forecast_core(
             ]
     if calendar_window:
         result.update(analyze_rolling_forecast_periods(periods))
-    # 区域模式附带灾害风险表数据：按区域代表坐标查地质灾害/山洪/中小河流隐患点，
-    # 供前端渲染【区域】灾害风险表。点位模式与异常/历史/越界提前 return 分支不附着。
-    # "本次风险等级"列仅 24h 内窗口接（_risk_fcst_window_applies）：风险接口每起报时次
-    # 只出 24h，未来 24h 之外（明天/未来N天）没有对应时段的风险资料，甲方口径（2026-08-24）
-    # 24h 外整列去掉、24h 内必须出风险。
-    if not point_mode and region_names:
-        attach_risk = _risk_fcst_window_applies(calendar_window, hourly_window, now)
+    # 区域模式附带静态隐患点 + 风险等级；点位模式只附风险等级，供点位天气/游玩回答
+    # 单独渲染【本次风险等级】，不与 5km POI 静态隐患提醒混为一谈。
+    # 风险接口每起报时次只出 24h：窗口内查询真实等级；窗口外保留等级展示，
+    # 但明确标记“暂无对应时次风险资料”，不得冒充“本次无风险”。
+    attach_risk = _risk_fcst_window_applies(calendar_window, hourly_window, now)
+    if point_mode:
+        if attach_risk:
+            point_levels = _query_region_risk_levels(lons[0], lats[0])
+        else:
+            point_levels = {key: "no_data" for key in _POINT_RISK_KEYS}
+        result["point_risk_levels"] = point_levels
+        result["point_risk_levels_available"] = point_levels is not None
+    elif region_names:
         region_hazards = []
         for name, lon_t, lat_t in zip(region_names, lons, lats):
             hazards = _query_region_hazards(lon_t, lat_t, attach_risk_levels=attach_risk)

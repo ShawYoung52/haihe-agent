@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import requests
@@ -729,8 +730,8 @@ def query_region_risk_levels(
     fcst_times（2026-08-24 用户口径）：风险接口按起报时次只出 24h
     （08→次日 08、20→次日 20），问题窗口跨多日（如"未来三天"）时传各日
     08:00 起报时次列表（yyyyMMddHHmmss），逐日各调一次并把各时次返回的
-    记录等级统计合并（累计到同一"本次风险等级"列）；"无资料"时次跳过
-    （未来时次大概率无资料，渲染层按用户要求显示"无风险"）。为 None 时
+    记录等级统计合并（累计到同一"本次风险等级"列）；"无资料"时次跳过，
+    若全部时次均无资料则透传 no_data，渲染层不得冒充"无风险"。为 None 时
     只调最近起报时次单次，**该时次无资料则回退前一个起报时次再试一次**
     （_previous_fcst_cycle，甲方口径：24h 内的天气要出风险——上午问"今天下午/
     晚上"时最近 08:00 时次数据可能还没出，前一周期昨日 20:00 仍覆盖今日下午/
@@ -743,12 +744,14 @@ def query_region_risk_levels(
         times = [None, _previous_fcst_cycle(_default_fcst_time())]
     else:
         times = list(fcst_times)
-    kinds: dict[str, dict | None] = {}
-    reachable = False
-    for kind, key in HAZARD_KIND_TO_KEY.items():
+    missing = object()
+
+    def query_kind(kind: str) -> tuple[str, Any, bool]:
+        key = HAZARD_KIND_TO_KEY[kind]
         level_counts: dict[str, int] = {}
         saw_no_data = False
         failed = False
+        reachable = False
         for t in times:
             try:
                 extra = {} if t is None else {"fcstTime": t}
@@ -779,20 +782,36 @@ def query_region_risk_levels(
                 # 不再回退/合并更早时次。可达但零风险记录属"本次无风险"，不回退。
                 break
         if failed:
-            kinds[key] = None
-            continue
+            return key, None, reachable
+        only_no_data = saw_no_data and not reachable
         if saw_no_data:
-            reachable = True  # 接口是通的，只是该起报时次无资料
+            reachable = True  # 接口是通的，只是某个起报时次无资料
         if level_counts:
-            kinds[key] = {
+            value: Any = {
                 "label": RISK_CONFIGS[kind]["label"],
                 "kind": kind,
                 "levels": level_counts,
                 "total": sum(level_counts.values()),
                 "level_advice": _level_advice_for(kind, set(level_counts)),
             }
-        elif saw_no_data:
-            kinds[key] = RISK_LEVELS_NO_DATA
+        elif only_no_data:
+            value = RISK_LEVELS_NO_DATA
+        else:
+            value = missing
+        return key, value, reachable
+
+    # 三个灾种接口相互独立，并发后故障时总等待上限由“三份串行超时之和”
+    # 降为“最慢一份的超时”；同一灾种内的起报回退仍保持原顺序。
+    hazard_kinds = list(HAZARD_KIND_TO_KEY)
+    with ThreadPoolExecutor(max_workers=len(hazard_kinds), thread_name_prefix="region-risk") as pool:
+        outcomes = list(pool.map(query_kind, hazard_kinds))
+
+    kinds: dict[str, dict | None] = {}
+    reachable = False
+    for key, value, kind_reachable in outcomes:
+        reachable = reachable or kind_reachable
+        if value is not missing:
+            kinds[key] = value
     if not reachable:
         # 全部灾种接口失败 → None（不缓存以便重试；前端整列显示"接口暂不可用"）。
         return None
