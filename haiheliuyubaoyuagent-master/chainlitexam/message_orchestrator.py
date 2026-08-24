@@ -958,14 +958,25 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
 # 不靠 planner LLM 自觉（prompt 0.5 段引导可能漏接），也不走本地 rag_search。
 # 命中后强制调 query_tianhe_fixed_qa、跳过 planner；天河工具级失败时作为
 # 普通 ToolMessage 交回 planner 回退本地工具（_run_tool_round 天河特判不变）。
-_TIANHE_LEVEL_WORDS = ("等级", "颜色", "划分", "分级", "标准", "定义", "几级")
+# 2026-08-24 甲方提供三份天河目录文档（03 实况监测 / 04 防灾减灾 / 05 气候统计），
+# 要求"这些问题都要接入天河问答接口"：知识类（04）扩家族，数据类（03 实况 / 05 气候统计）
+# 新增目录规则确定性路由。
+_TIANHE_LEVEL_WORDS = ("等级", "颜色", "划分", "分级", "标准", "定义", "几级", "怎么分")
 _TIANHE_ADVICE_WORDS = (
     "防范建议", "防御指南", "防范措施", "防御措施", "注意事项",
     "如何防范", "怎么防范", "如何防御", "怎么防御", "如何应对", "怎么应对",
+    "怎么办", "该怎么办", "怎么做", "应对措施",
 )
 _TIANHE_RAIN_CONTEXT_WORDS = ("暴雨", "强降雨", "大暴雨", "特大暴雨")
+# 04 防灾减灾扩展：非降雨类灾害的防范/应对知识问法
+_TIANHE_HAZARD_CONTEXT_WORDS = ("大风", "高温", "强对流", "雷电", "台风", "寒潮", "大雾")
+# 04 等级/划分/定义类知识问的要素词（不含"预警"，预警由上面单独家族处理）
+_TIANHE_LEVEL_ELEMENT_WORDS = ("降雨量", "降雨", "降水", "暴雨", "台风", "大风", "高温", "大雾", "寒潮")
+# 04 形成/危害类知识问的要素词（不含"影响"——"暴雨影响哪些河流"是本地河网问题）
+_TIANHE_CAUSE_ELEMENT_WORDS = ("暴雨", "强对流", "台风", "高温", "大雾", "寒潮", "雷电")
+_TIANHE_CAUSE_WORDS = ("形成", "成因", "危害")
 # 查当前生效预警的问法绝不能去天河（本地预警工具）；带时间词/日期的决策类
-# 问法也不在本路由范围（"明天去盘山暴雨注意事项"是决策天气，不是知识问答）。
+# 问法也不在知识路由范围（"明天去盘山暴雨注意事项"是决策天气，不是知识问答）。
 _TIANHE_KNOWLEDGE_EXCLUDE_WORDS = (
     "现在", "当前", "最新", "生效", "发布",
     "今天", "今日", "明天", "明日", "后天", "昨天", "前天", "未来",
@@ -973,27 +984,121 @@ _TIANHE_KNOWLEDGE_EXCLUDE_WORDS = (
     "周一", "周二", "周三", "周四", "周五", "周六", "周日",
 )
 
+# 03 实况监测 / 05 气候统计是数据类问法——"现在/今天/昨天/去年/今年/近5年"等时间词
+# 是问法本身的一部分，不适用上面知识类的时间词排除。统一排除未来/预报/出行决策词，
+# 避免把预报（"明天风大吗"）与出行决策（"周末适合去哪"）误路由到天河。
+_TIANHE_DATA_EXCLUDE_WORDS = (
+    "明天", "明日", "后天", "未来", "下周", "周末", "预报", "预计", "将要",
+    "会不会", "适合", "适宜", "能去", "可以去", "应该去", "推荐",
+)
+# 03 实况监测类（全市/市区/现在/今天/昨天 范围固定）。外层 AND、内层 OR。
+_TIANHE_LIVE_CATALOG_RULES = (
+    (("全市",), ("下了多少雨", "多少雨", "降雨量", "下了多大雨", "雨量")),       # 全市现在下了多少雨
+    (("市区",), ("气温",), ("风",)),                                            # 市区现在气温和风的实况
+    (("雨",), ("下在哪儿", "下在哪", "哪里下", "哪儿下", "哪些地方")),           # 今天雨都下在哪儿了
+    (("雨",), ("多长时间", "下了多久", "多久", "下了几时")),                    # 今天雨下了多长时间
+    (("市区", "全市", "现在", "当前", "目前"), ("风大", "风力大")),             # 现在市区风大吗
+    (("昨天", "昨日"), ("雨",)),                                                # 昨天雨下得怎么样
+    (("能见度",), ("好不好", "好吗", "怎么样", "如何"), ("现在", "全市", "市区", "当前", "目前", "天津")),  # 现在能见度好不好
+)
+# 05 气候统计类（含 蓟州/宝坻/滨海/中心城区 等区县与 去年/今年/近5年 时段）。
+# 统计性词语 + 必选时段词 双约束，区分于"今天大风怎么样"这类今日实况/预报。
+_TIANHE_CLIMATE_ELEMENT_WORDS = (
+    "高温", "最高气温", "低温", "寒潮", "大风", "最大风力", "风力", "大雾",
+    "℃", "最冷", "最热", "最强", "零下",
+)
+_TIANHE_CLIMATE_STAT_WORDS = (
+    "几次", "多少次", "多少天", "几天", "天数", "最多", "最热", "最冷", "最强",
+    "多少度", "几度", "多高", "多少级", "几级", "哪一天", "哪天", "哪一次",
+    "达到多少", "幅度", "多大",
+)
+_TIANHE_CLIMATE_PERIOD_WORDS = (
+    "去年", "前年", "今年", "近", "近几年", "历史", "以来",
+    "夏季", "夏天", "冬季", "冬天", "春天", "春季", "秋季", "秋天", "月",
+    "平均", "常年",
+)
+_TIANHE_CLIMATE_CATALOG_RULES = (
+    # 统计数值类：要素 + 统计词 + 时段（"去年夏天最高气温多少度""近5年几次寒潮"）
+    (_TIANHE_CLIMATE_ELEMENT_WORDS, _TIANHE_CLIMATE_STAT_WORDS, _TIANHE_CLIMATE_PERIOD_WORDS),
+    # 情况类：要素 + 情况/怎么样 + 时段（"滨海新区今年6月的高温情况"）
+    (_TIANHE_CLIMATE_ELEMENT_WORDS, ("情况", "怎么样", "如何"), _TIANHE_CLIMATE_PERIOD_WORDS),
+    # 低温是否会出现（"滨海新区冬天会出现-10℃以下的低温吗"）
+    (("低温", "零下", "℃"), ("会出现", "会有", "有没有", "有吗", "会吗"), _TIANHE_CLIMATE_PERIOD_WORDS),
+    # 寒潮影响范围（"今年3月的寒潮影响了哪些区"）
+    (("寒潮",), ("影响",), _TIANHE_CLIMATE_PERIOD_WORDS),
+    # 冷热排名（"今年夏天哪个区最热""去年冬天哪个区最冷"）
+    (("哪个区", "哪个区县", "哪里", "哪儿"), ("最热", "最冷"), _TIANHE_CLIMATE_PERIOD_WORDS),
+    # 大雾排名（"哪个区的大雾天气最多"，无时段词）
+    (("哪个区", "哪个区县", "哪里", "哪儿"), ("大雾",), ("最多",)),
+)
+
 
 def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
-    """天河知识类问题规则路由：命中返回 ("query_tianhe_fixed_qa", {"query": 原文})，否则 None。
+    """天河目录问题规则路由：命中返回 ("query_tianhe_fixed_qa", {"query": 原文})，否则 None。
 
-    两个家族：① 预警 + 等级/颜色/划分/分级/标准/定义/几级；
-    ② 暴雨/强降雨/大暴雨/特大暴雨 + 防范建议/防御指南/注意事项/如何防范等。
-    收紧口径：含当前预警状态词（现在/当前/最新/生效/发布）、时间词，
-    或 POI 点位（_decision_weather_prefilter 命中）的一律不命中，交回原路由。
+    三类（2026-08-24 甲方三份天河目录文档：03 实况监测 / 04 防灾减灾 / 05 气候统计）：
+    ① 知识类（04）：预警等级、暴雨/大风/高温/强对流等防范应对、降雨量/暴雨/台风等级划分、
+       暴雨形成/危害。排除当前预警状态词（现在/当前/最新/生效/发布）、时间词与 POI 点位
+       （"明天去盘山暴雨注意事项"是决策天气、"现在有哪些暴雨预警"走本地预警工具）。
+    ② 03 实况监测类：全市现在下了多少雨/市区现在气温和风/今天雨下了多长时间/现在能见度等，
+       时间词是问法一部分，不排除；仍排除 POI 点位防误伤决策天气。
+    ③ 05 气候统计类：去年/近5年/今年X月 的高温/低温/寒潮/大风/大雾统计与排名，
+       含区县不按 POI 排除；统计词+时段词双约束区分今日实况。
+    query 原样透传用户问题（天河 /api/qa 不限 Fixed QA，目录外走其普通问答链路，文档 §6）。
     """
     text = str(user_text or "").strip()
     if not text:
         return None
-    if any(w in text for w in _TIANHE_KNOWLEDGE_EXCLUDE_WORDS):
+
+    def _hit(rule_table) -> bool:
+        return any(
+            all(any(kw in text for kw in group) for group in groups)
+            for groups in rule_table
+        )
+
+    # —— ① 知识类家族：排除实况/时间词与 POI 点位 ——
+    knowledge_blocked = (
+        any(w in text for w in _TIANHE_KNOWLEDGE_EXCLUDE_WORDS)
+        or _decision_weather_prefilter(text)
+    )
+    if not knowledge_blocked:
+        # 预警 + 等级/颜色/划分/标准/定义（"暴雨预警四个等级是什么"）
+        if "预警" in text and any(w in text for w in _TIANHE_LEVEL_WORDS):
+            return ("query_tianhe_fixed_qa", {"query": text})
+        # 预警 + 怎么办/应对措施（"暴雨预警发出后公众该怎么办"）
+        if "预警" in text and any(
+            w in text for w in ("怎么办", "该怎么办", "怎么做", "应对措施", "如何应对", "怎么应对")
+        ):
+            return ("query_tianhe_fixed_qa", {"query": text})
+        # 暴雨/大风/高温/强对流等 + 防范/应对/怎么办（"大风天气的防范建议""强对流天气怎么应对"）
+        if any(w in text for w in _TIANHE_RAIN_CONTEXT_WORDS + _TIANHE_HAZARD_CONTEXT_WORDS) and any(
+            w in text for w in _TIANHE_ADVICE_WORDS
+        ):
+            return ("query_tianhe_fixed_qa", {"query": text})
+        # 降雨量/暴雨/台风等 + 等级/划分/定义（"降雨量怎么分等级""台风等级""暴雨等级如何划分"）
+        if any(w in text for w in _TIANHE_LEVEL_ELEMENT_WORDS) and any(
+            w in text for w in _TIANHE_LEVEL_WORDS
+        ):
+            return ("query_tianhe_fixed_qa", {"query": text})
+        # 高温定义（"高温怎么定义""气温多高算是高温""多少度算高温"）
+        if "高温" in text and any(
+            w in text for w in ("算是", "多高", "多少度", "几摄氏度", "多少摄氏度", "达到多少", "是多少")
+        ):
+            return ("query_tianhe_fixed_qa", {"query": text})
+        # 暴雨/强对流等 + 形成/成因/危害（"暴雨是如何形成的""暴雨的主要危害有哪些"）
+        if any(w in text for w in _TIANHE_CAUSE_ELEMENT_WORDS) and any(
+            w in text for w in _TIANHE_CAUSE_WORDS
+        ):
+            return ("query_tianhe_fixed_qa", {"query": text})
+
+    # —— ②③ 数据类目录：未来/预报/决策词排除 ——
+    if any(w in text for w in _TIANHE_DATA_EXCLUDE_WORDS):
         return None
-    if _decision_weather_prefilter(text):
-        return None
-    if "预警" in text and any(w in text for w in _TIANHE_LEVEL_WORDS):
+    # ② 03 实况监测（排除 POI 点位）
+    if not _decision_weather_prefilter(text) and _hit(_TIANHE_LIVE_CATALOG_RULES):
         return ("query_tianhe_fixed_qa", {"query": text})
-    if any(w in text for w in _TIANHE_RAIN_CONTEXT_WORDS) and any(
-        w in text for w in _TIANHE_ADVICE_WORDS
-    ):
+    # ③ 05 气候统计（含区县，不按 POI 排除）
+    if _hit(_TIANHE_CLIMATE_CATALOG_RULES):
         return ("query_tianhe_fixed_qa", {"query": text})
     return None
 

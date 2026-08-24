@@ -45,9 +45,6 @@ RISK_CONFIGS: dict[str, dict[str, Any]] = {
         "type": 3,
         "label": "地质灾害风险",
         "question": "有没有地质灾害风险？",
-        # SCMOC 地灾接口除 fcstTime 外还要求 startTime/endTime 时间段（缺任一 →
-        # HTTP 500，2026-08-24 接口开发给的可用调法证实）；EC 两类只认 fcstTime。
-        "needs_time_range": True,
     },
 }
 
@@ -208,15 +205,16 @@ def _fetch_risk_warning(kind: str, extra_params: dict[str, Any] | None = None, t
     params["type"] = cfg["type"]
     # fcstTime 必填（缺省补最近起报时次），否则后端 HTTP 500。
     params.setdefault("fcstTime", _default_fcst_time())
-    if cfg.get("needs_time_range"):
-        # SCMOC 地灾：fcstTime + startTime + endTime 三者缺一不可（缺 → 500），
-        # 接口开发确认的口径：startTime=fcstTime、endTime=fcstTime+24h。
-        try:
-            fcst_dt = _dt.datetime.strptime(str(params["fcstTime"]), "%Y%m%d%H%M%S")
-            params["startTime"] = fcst_dt.strftime("%Y%m%d%H%M%S")
-            params["endTime"] = (fcst_dt + _dt.timedelta(hours=24)).strftime("%Y%m%d%H%M%S")
-        except ValueError:
-            logger.warning("[risk_warning] fcstTime %r 无法解析，跳过 startTime/endTime 推导", params["fcstTime"])
+    # 三类（EC 山洪/中小河流 + SCMOC 地灾）统一由 fcstTime 推导 startTime/endTime
+    # （startTime=fcstTime、endTime=fcstTime+24h）——2026-08-24 甲方反馈风险接口
+    # "接口不可用"，确认三类都需带该时间段（原先只 SCMOC 地带）。fcstTime 无法解析时
+    # 跳过推导、不编造（原样发出，由后端 400/500、调用方负责）。
+    try:
+        fcst_dt = _dt.datetime.strptime(str(params["fcstTime"]), "%Y%m%d%H%M%S")
+        params["startTime"] = fcst_dt.strftime("%Y%m%d%H%M%S")
+        params["endTime"] = (fcst_dt + _dt.timedelta(hours=24)).strftime("%Y%m%d%H%M%S")
+    except ValueError:
+        logger.warning("[risk_warning] fcstTime %r 无法解析，跳过 startTime/endTime 推导", params["fcstTime"])
     headers = {"Accept": "application/json", "User-Agent": "haihe-weather-analyzer/1.0"}
 
     errors: list[str] = []

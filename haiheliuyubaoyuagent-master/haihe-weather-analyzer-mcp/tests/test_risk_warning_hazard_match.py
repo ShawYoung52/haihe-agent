@@ -612,9 +612,10 @@ class TestFcstTimeRequired:
       fcstTime=2026-08-24 08:00:00      → 400
       历史日期 fcstTime（20260710…）    → HTTP 200（后端接受历史起报时次；
         无数据的时次回业务错误 {"code":400,"success":false,"msg":"资料在当前时刻下无数据"}）
-    且同事前端只发 type/model/fcstTime，不发 startTime/endTime。默认 fcstTime
-    跟随 time_source 系统时间（验收切换系统时间时按"当时"的起报时次取数，
-    用户 2026-08-24 口径："风险时间要按当时的时间判断"）。
+    三类（EC 山洪/中小河流 + SCMOC 地灾）统一由 fcstTime 推导 startTime/endTime
+    （startTime=fcstTime、endTime=+24h；2026-08-24 甲方反馈"接口不可用"后确认三类
+    都需带该时间段）。默认 fcstTime 跟随 time_source 系统时间（验收切换系统时间时
+    按"当时"的起报时次取数，用户 2026-08-24 口径："风险时间要按当时的时间判断"）。
     """
 
     class _FakeResp:
@@ -652,17 +653,29 @@ class TestFcstTimeRequired:
         assert captured["params"]["type"] == 2
 
     def test_fetch_strips_start_end_time(self, monkeypatch):
-        # EC 两类（山洪/中小河流）只认 fcstTime：调用方给的 startTime/endTime 剥离
+        # 调用方传入的 startTime/endTime 一律剥离、改由 fcstTime 推导（防与 fcstTime
+        # 不一致）。2026-08-24 起三类（含 EC 山洪/中小河流）都按 fcstTime 推导并发送。
         captured = self._capture_get(monkeypatch)
         rwt._fetch_risk_warning("river", {
             "startTime": "20260101080000",
             "endTime": "20260102080000",
-            "fcstTime": "20260101080000",
+            "fcstTime": "20260103080000",
         })
         params = captured["params"]
-        assert "startTime" not in params
-        assert "endTime" not in params
-        assert params["fcstTime"] == "20260101080000"
+        assert params["fcstTime"] == "20260103080000"
+        assert params["startTime"] == "20260103080000"  # 推导值覆盖调用方值
+        assert params["endTime"] == "20260104080000"
+
+    def test_ec_types_also_derive_time_range(self, monkeypatch):
+        # 2026-08-24 甲方反馈"接口不可用"：EC 两类（山洪/中小河流）同样要带
+        # startTime/endTime（startTime=fcstTime、endTime=+24h），不再只发 fcstTime。
+        for kind, mtype in (("river", 1), ("mountain", 2)):
+            captured = self._capture_get(monkeypatch)
+            rwt._fetch_risk_warning(kind, {"fcstTime": "20260824080000"})
+            params = captured["params"]
+            assert params["model"] == "EC" and params["type"] == mtype
+            assert params["startTime"] == "20260824080000"
+            assert params["endTime"] == "20260825080000"
 
     def test_scmoc_derives_time_range_from_fcst_time(self, monkeypatch):
         # SCMOC 地灾：fcstTime + startTime + endTime 缺一不可（缺 → 500），

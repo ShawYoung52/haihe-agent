@@ -559,6 +559,71 @@ def _hourly_weather_table(hourly: list[dict]) -> str:
     )
 
 
+# 显著天气词（触发模型输出【温馨提示】）：降水/强对流/大风/剧烈降温/沙尘等。
+# 不含"雾/霾"等几乎天天出现的词，避免平稳天气也硬塞建议。
+_NOTABLE_WEATHER_WORDS = ("雨", "雪", "雹", "雷", "暴雨", "大风", "沙尘", "寒潮", "降温")
+
+
+def _has_notable_weather(daily: list[dict], hourly: list[dict], tod_summary: list[dict]) -> bool:
+    """是否存在值得提示的显著天气（降雨/强对流/大风≥5级等）。纯代码判定，供
+    rolling_forecast_llm_instruction 决定是否让模型输出【温馨提示】（甲方口径：
+    有显著天气才给丰富建议，平稳天气不硬塞）。"""
+
+    def rain_hit(value: Any) -> bool:
+        try:
+            return float(value or 0) > 0.1
+        except (TypeError, ValueError):
+            return False
+
+    def notable(item: dict, rain_key: str) -> bool:
+        if rain_hit(item.get(rain_key)):
+            return True
+        if any(w in str(item.get("weather") or "") for w in _NOTABLE_WEATHER_WORDS):
+            return True
+        return _max_wind_level(item.get("wind_force") or item.get("EDA")) >= 5
+
+    return (
+        any(notable(item, "rainfall_max_24h_mm") for item in daily)
+        or any(notable(item, "rainfall_mm") for item in hourly)
+        or any(notable(item, "rainfall_mm") for item in tod_summary)
+    )
+
+
+def _tod_temp_range(item: dict) -> str:
+    """时段气温区间：tmin~tmax；只一边给单边；都无 → —。"""
+    tmin = item.get("tmin")
+    tmax = item.get("tmax")
+    if tmin is not None and tmax is not None:
+        return f"{tmin}~{tmax}"
+    if tmax is not None:
+        return str(tmax)
+    if tmin is not None:
+        return str(tmin)
+    return "—"
+
+
+def _time_of_day_period_table(rows: list[dict], label: str) -> str:
+    """时段化查询（"今天下午/晚上"）的单条时段汇总表（甲方 2026-08-24 口径：
+    不要逐小时，时段写"今天下午"，列=时段/天气现象/气温/风力风向/降水量）。
+
+    rows 由 MCP `_time_of_day_summary_rows` 聚合（每区域一条），本函数只负责排版。
+    标题含"天气预报"关键词，属代码所有表头（防 LLM 重复生成）。
+    """
+    table_rows = [
+        [
+            label,
+            item.get("weather"),
+            _tod_temp_range(item),
+            item.get("EDA"),
+            _cell(item.get("rainfall_mm")),
+        ]
+        for item in rows
+    ]
+    return f"【{label}天气预报】\n" + _markdown_table(
+        ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"], table_rows
+    )
+
+
 def _max_wind_level(value: Any) -> int:
     levels = [int(item) for item in re.findall(r"\d+", str(value or ""))]
     return max(levels, default=0)
@@ -746,12 +811,16 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         return None
     daily = [item for item in (payload.get("daily_summary") or []) if isinstance(item, dict)]
     hourly = [item for item in (payload.get("hourly_summary") or []) if isinstance(item, dict)]
+    tod_summary = [item for item in (payload.get("time_of_day_summary") or []) if isinstance(item, dict)]
     category = _query_category(user_text)
     # 外埠城市降水-only（滚动预报文字要素只覆盖天津代表站）：除暴雨过程分析（只需
     # 降水量，rain-only 数据同样成立）外，一律渲染逐日降水表，不出全"—"天气/气温/风表。
-    rain_only = bool(daily) and not hourly and _daily_rain_only(daily)
+    rain_only = bool(daily) and not hourly and not tod_summary and _daily_rain_only(daily)
     forced_core_conclusion = ""
-    if hourly:
+    if tod_summary:
+        # 时段化查询（"今天下午/晚上"）：单条时段汇总表，不铺逐小时。
+        code_section = _time_of_day_period_table(tod_summary, payload.get("time_of_day_label") or "该时段")
+    elif hourly:
         code_section = _hourly_weather_table(hourly)
     elif category == "rainstorm":
         analysis = payload.get("rainstorm_analysis") or {}
@@ -790,6 +859,7 @@ def build_rolling_forecast_bundle(user_text: str, payload: Any) -> dict | None:
         "data_source": _cell(payload.get("data_source"), "天津市气象台滚动预报"),
         "forced_core_conclusion": forced_core_conclusion,
         "rain_only": rain_only,
+        "notable_weather": _has_notable_weather(daily, hourly, tod_summary),
         "user_text": user_text,
     }
 
@@ -816,6 +886,8 @@ def compact_rolling_forecast_facts(payload: Any) -> Any:
         "rainstorm_analysis",
         "weather_focus",
         "hourly_summary",
+        "time_of_day_label",
+        "time_of_day_summary",
     )
     return {key: payload.get(key) for key in keys if key in payload}
 
@@ -837,11 +909,26 @@ def rolling_forecast_llm_instruction(bundle: dict | None) -> str:
             "该点位仅有降水格点预报：核心结论只能依据降水量陈述降水情况，"
             "不得描述或推测天气现象、气温、风力、能见度等未提供的要素。"
         )
+    # 显著天气时让模型补一段丰富专业的【温馨提示】（甲方 2026-08-24 口径：建议/注意事项
+    # 让模型发挥、写得更丰富专业）；平稳天气不硬塞。内容由模型基于权威事实组织，不编造数值。
+    notable = bool(bundle.get("notable_weather"))
+    if notable:
+        extra += (
+            "本次权威事实含显著天气（降雨/雷阵雨/强对流/大风/明显降温等）。你必须在【核心结论】之后"
+            "另起一段输出【温馨提示】，用丰富、专业、贴近公众出行与生产生活的语言，给出与本次天气直接"
+            "相关的防范和出行建议（如降雨量级对应的携带雨具、道路湿滑减速、山区沟谷/河道避险、强对流"
+            "防雷防风、降温添衣等，按实际天气取舍）。【温馨提示】只能基于已给出的权威事实（天气现象、"
+            "降水量、气温、风力风向、风险等级）展开，不得编造任何数值、时段、地点或未提供的天气现象；"
+            "代码已生成的山区注意事项、灾害风险防范建议由代码负责，你不要重复其字面内容，可从出行、"
+            "健康、农业、城市运行等角度补充。"
+        )
     return (
         "\n\n系统约束：数据表格、关键节点和过程详情将由代码根据本工具结果生成并插入。"
         "你必须生成【核心结论】，其正文严格且只能有一句，句号、问号或感叹号均视为一句结束；"
         "该句只回答用户最关心的问题，不得追加背景、原因、建议、风险或表格内容。"
         "除非数据存在与用户问题直接相关且核心结论未覆盖的显著风险，否则不要生成【重点关注】。"
+        "核心结论应以时段内最显著、最强的天气现象为主，不得把雷阵雨、暴雨、大风、强对流等"
+        "天气淡化表述为“以多云/阴为主”；含雷阵雨、暴雨时核心结论必须点明。"
         "核心结论不要机械补充“无降水/无降雨”或“风力为X级”等泛化描述；只有用户明确询问降水或风力时才回答对应要素。"
         "但当权威事实中降水量大于0或天气现象含雨（小雨/中雨/大雨/暴雨/阵雨/雷阵雨等）时，"
         "核心结论必须提及降雨（如“有中雨”），即使天气现象写的是阴转多云——天气现象与时段"

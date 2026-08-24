@@ -1161,31 +1161,69 @@ def _decision_core_only(answer: Any, user_text: str = "", max_sentences: int = 1
 
 
 # 点位地理类型 → 注意事项模板（代码确定性生成，仅作为骨架，天气断言由 facts 数值派生）。
+# 每条为 (文本, 条件)：
+#   条件 None   → 与天气无关的通用安全提示，恒给；
+#   条件 (..)   → 天气相关提示，仅当对应天气在预报中实际出现时才给（2026-08-24 甲方反馈：
+#                 "周末全是晴天没降雨，还提示降雨/道路湿滑/能见度低，不合理"）。条件取集合
+#                 {"rain","wind","visibility","storm"}，任一命中即给（由 _poi_weather_conditions 判定）。
 # 每类是一组条目，逐条作为【注意事项】的编号项（2026-08-24 起学校等改多行，
 # 用户反馈"注意事项太少"）；降雨/大风/能见度动态从句与无雨风险状态另行追加。
 # mountain/port/reservoir 走下方专属分支（_decision_mountain/port_reminder_lines、
 # 水库水情），此处仅作类别→提示映射留存，不被通用模板分支消费。
-_POI_CATEGORY_REMINDER_TEMPLATES: dict[str, list[str]] = {
+_POI_CATEGORY_REMINDER_TEMPLATES: dict[str, list[tuple[str, tuple[str, ...] | None]]] = {
     "school": [
-        "学校区域上下学时段校门口车流人流密集，师生与家长请注意出行安全，关注路况与天气变化。",
-        "请留意降雨、大风等天气对课间操、体育课、运动会等户外活动的影响，合理安排行程。",
+        ("学校区域上下学时段校门口车流人流密集，师生与家长请注意出行安全。", None),
+        ("请留意降雨、大风等天气对课间操、体育课、运动会等户外活动的影响，合理安排行程。", ("rain", "wind")),
     ],
     "scenic": [
-        "景区游览请注意防滑与游览安全，雷雨时避免在空旷高地、树下停留。",
-        "降雨时道路湿滑，请关注景区安全提示并合理安排游览路线。",
+        ("景区游览请注意防滑与游览安全。", None),
+        ("雷雨时避免在空旷高地、树下停留。", ("storm", "rain")),
+        ("降雨时道路湿滑，请关注景区安全提示并合理安排游览路线。", ("rain",)),
     ],
     "airport": [
-        "机场区域请注意降雨、大风、雷暴及低能见度对航班起降与出行计划的影响。",
-        "出行前请关注航班动态，预留充足的值机与安检时间。",
+        ("出行前请关注航班动态，预留充足的值机与安检时间。", None),
+        ("降雨、雷暴及大风天气可能影响航班起降与出行计划，请提前关注。", ("rain", "wind", "storm")),
+        ("低能见度天气可能影响航班起降与高速行车，请留意天气变化。", ("visibility",)),
     ],
     "station": [
-        "车站人流密集，请注意雨天路滑、乘车安全与列车运行调整信息。",
-        "请留意广播与电子屏的班次动态，预留排队进站时间。",
+        ("车站人流密集，请注意乘车安全与列车运行调整信息。", None),
+        ("雨天路滑，请注意防滑与出行安全。", ("rain",)),
+        ("请留意广播与电子屏的班次动态，预留排队进站时间。", None),
     ],
-    "mountain": ["山区地形复杂，强降雨时易诱发地质灾害与山洪，请避免进入山谷、沟道等危险区域。"],
-    "port": ["港口区域请注意大风、低能见度、强对流及降雨对船舶作业和航行安全的影响。"],
-    "reservoir": ["水库区域请注意降雨引起的水位上涨与泄洪调度，关注下游河道安全。"],
+    "mountain": [("山区地形复杂，强降雨时易诱发地质灾害与山洪，请避免进入山谷、沟道等危险区域。", ("rain", "storm"))],
+    "port": [("港口区域请注意大风、低能见度、强对流及降雨对船舶作业和航行安全的影响。", ("rain", "wind", "storm", "visibility"))],
+    "reservoir": [("水库区域请注意降雨引起的水位上涨与泄洪调度，关注下游河道安全。", ("rain",))],
 }
+
+
+def _poi_weather_conditions(facts: dict, periods: list[dict]) -> set[str]:
+    """从 facts/periods 判定实际出现的天气条件集合（{"rain","wind","visibility","storm"}）。
+
+    纯代码判定、零编造：降雨看 has_rain_signal/total_rain_mm；大风/能见度只在非降水-only
+    点位（外埠点只回降水格点，EDA/VISMIN 是占位值，不可靠）解析；storm 看天气现象含雷/强对流。
+    """
+    conditions: set[str] = set()
+    if facts.get("has_rain_signal") is True:
+        conditions.add("rain")
+    else:
+        try:
+            if float(facts.get("total_rain_mm") or 0) >= 0.1:
+                conditions.add("rain")
+        except (TypeError, ValueError):
+            pass
+    for period in periods or []:
+        weather_text = str(period.get("weather") or period.get("WEA") or "")
+        if "雷" in weather_text or "强对流" in weather_text:
+            conditions.add("storm")
+            break
+    if not _decision_periods_rain_only(periods):
+        max_wind = _decision_max_wind_level(periods)
+        if max_wind is not None and max_wind >= 5:
+            conditions.add("wind")
+        min_vis = _decision_min_visibility_km(periods)
+        if min_vis is not None and min_vis < 2.0:
+            conditions.add("visibility")
+    return conditions
 
 
 def _decision_max_wind_level(periods: list[dict]) -> int | None:
@@ -1570,7 +1608,14 @@ def _build_poi_reminder_section(facts: dict) -> str:
         else:
             base_items = _POI_CATEGORY_REMINDER_TEMPLATES.get(category)
             if base_items:
-                items.extend(base_items)
+                # 2026-08-24 甲方反馈："晴天周末没降雨还提示降雨/道路湿滑/能见度低不合理"。
+                # 模板条目带条件标签：条件 None 恒给（通用安全）；否则仅当对应天气在预报中
+                # 实际出现时才给（由 _poi_weather_conditions 纯代码判定，零编造）。
+                active_conditions = _poi_weather_conditions(facts, periods)
+                items.extend(
+                    text for text, cond in base_items
+                    if cond is None or any(c in active_conditions for c in cond)
+                )
                 # 动态从句（最多一条）：降雨→雨具防滑优先，其次大风/低能见度。
                 clauses: list[str] = []
                 if facts.get("has_rain_signal") is True:

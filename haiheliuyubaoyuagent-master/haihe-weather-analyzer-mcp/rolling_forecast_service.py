@@ -781,6 +781,83 @@ def _narrow_calendar_window_to_time_of_day(
     }
 
 
+# 时段标签规范序（同时段词别名归并：早上/清晨→早晨，夜间/深夜→夜里）。
+_TOD_LABEL_NORMALIZE = {"清晨": "早晨", "早上": "早晨", "夜间": "夜里", "深夜": "夜里"}
+_TOD_CANONICAL_ORDER = ("凌晨", "早晨", "上午", "中午", "下午", "傍晚", "晚上", "夜里")
+
+
+def _time_of_day_label(user_query: str, target_start: datetime, now: datetime) -> str:
+    """生成时段标签（"今天下午""今天下午到晚上""明天上午"），用于时段汇总表的"时段"列。
+
+    时段词取用户问法中出现的规范词（按日内先后排序）；多个不相邻取首尾用"到"连接
+    （"下午和晚上"→"下午到晚上"）；日期前缀按目标日与 now 的差（今天/明天/后天/具体日期）。
+    """
+    text = re.sub(r"\s+", "", str(user_query or ""))
+    present = {
+        _TOD_LABEL_NORMALIZE.get(word, word)
+        for word in _TOD_RANGES
+        if word in text
+    }
+    words = [w for w in _TOD_CANONICAL_ORDER if w in present]
+    if len(words) == 1:
+        phrase = words[0]
+    elif len(words) > 1:
+        phrase = f"{words[0]}到{words[-1]}"
+    else:
+        phrase = ""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TIANJIN_TIMEZONE)
+    day = target_start.date()
+    delta = (day - now.date()).days
+    day_word = {0: "今天", 1: "明天", 2: "后天"}.get(delta) or f"{day.month}月{day.day}日"
+    return f"{day_word}{phrase}" if phrase else day_word
+
+
+def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
+    """时段化查询：把逐小时 periods 按区域聚合为单条时段汇总（甲方 2026-08-24 口径：
+    "今天下午有雨吗"不要逐小时，给该时段整体天气——时段/天气现象/气温/风力风向/降水量）。
+
+    聚合口径（纯代码确定性，零编造）：天气现象按出现顺序去重、相邻不同用"转"连接；
+    气温取时段内 tmin 最小~tmax 最大；风力风向取 EDA 原文去重拼接；降水量为各小时求和。
+    """
+    by_region: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for item in periods:
+        if not isinstance(item, dict):
+            continue
+        region = item.get("region_display") or item.get("region") or "该区域"
+        if region not in by_region:
+            by_region[region] = []
+            order.append(region)
+        by_region[region].append(item)
+    rows: list[dict] = []
+    for region in order:
+        items = by_region[region]
+        weathers: list[str] = []
+        for it in items:
+            w = str(it.get("WEA") or "").strip()
+            if w and w != "--" and (not weathers or weathers[-1] != w):
+                weathers.append(w)
+        weather = weathers[0] if len(weathers) == 1 else ("转".join(weathers) if weathers else None)
+        tmax_vals = [v for v in (_to_float(it.get("TMAX")) for it in items) if v is not None]
+        tmin_vals = [v for v in (_to_float(it.get("TMIN")) for it in items) if v is not None]
+        eda_parts: list[str] = []
+        for it in items:
+            e = str(it.get("EDA") or "").strip()
+            if e and e != "--" and e not in eda_parts:
+                eda_parts.append(e)
+        rain_vals = [v for v in (_to_float(it.get("TP1H")) for it in items) if v is not None]
+        rows.append({
+            "region": region,
+            "weather": weather,
+            "tmax": _temperature_display_text(max(tmax_vals)) if tmax_vals else None,
+            "tmin": _temperature_display_text(min(tmin_vals)) if tmin_vals else None,
+            "EDA": "；".join(eda_parts) if eda_parts else None,
+            "rainfall_mm": round(sum(rain_vals), 1) if rain_vals else None,
+        })
+    return rows
+
+
 _BASIN_STRONG_KEYWORDS = ("海河流域", "流域", "河系")
 # 裸河名只在无 POI 语境时视为流域问题；关键词清单不求穷尽，
 # 运行时守卫只是 prompt 规则之外的兜底。
@@ -1704,24 +1781,29 @@ def query_rolling_forecast_core(
         "periods": periods,
     }
     if hourly_window:
-        result["hourly_summary"] = [
-            {
-                "region": item.get("region_display") or item.get("region"),
-                "start_time": item.get("start_time"),
-                "end_time": item.get("end_time"),
-                "period_label": item.get("period_label"),
-                "weather": item.get("WEA"),
-                "tmax": _temperature_display_text(item.get("TMAX")),
-                "tmin": _temperature_display_text(item.get("TMIN")),
-                "EDA": item.get("EDA"),
-                "wind": item.get("EDA"),
-                "rainfall_mm": item.get("TP1H"),
-                "visibility_min_km": item.get("VISMIN"),
-                "visibility_unit": "千米",
-            }
-            for item in periods
-            if isinstance(item, dict)
-        ]
+        if hourly_window.get("mode") == "time_of_day":
+            # 时段化查询（"今天下午/晚上"）：聚合为该时段单条汇总，不产逐小时行。
+            result["time_of_day_label"] = _time_of_day_label(user_query, hourly_window["target_start"], now)
+            result["time_of_day_summary"] = _time_of_day_summary_rows(periods)
+        else:
+            result["hourly_summary"] = [
+                {
+                    "region": item.get("region_display") or item.get("region"),
+                    "start_time": item.get("start_time"),
+                    "end_time": item.get("end_time"),
+                    "period_label": item.get("period_label"),
+                    "weather": item.get("WEA"),
+                    "tmax": _temperature_display_text(item.get("TMAX")),
+                    "tmin": _temperature_display_text(item.get("TMIN")),
+                    "EDA": item.get("EDA"),
+                    "wind": item.get("EDA"),
+                    "rainfall_mm": item.get("TP1H"),
+                    "visibility_min_km": item.get("VISMIN"),
+                    "visibility_unit": "千米",
+                }
+                for item in periods
+                if isinstance(item, dict)
+            ]
     if calendar_window:
         result.update(analyze_rolling_forecast_periods(periods))
     # 区域模式附带灾害风险表数据：按区域代表坐标查地质灾害/山洪/中小河流隐患点，

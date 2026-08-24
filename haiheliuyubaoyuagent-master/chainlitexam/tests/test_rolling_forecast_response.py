@@ -476,3 +476,116 @@ class TestCoreConclusionRainMention:
         # 必须含"降水量>0 或天气现象含雨时核心结论要提及降雨"的强制口径
         assert "降水" in instruction
         assert "必须" in instruction or "应当" in instruction
+
+
+def _tod_summary(weather="雷阵雨转多云", tmin="23", tmax="30", eda="南风2级", rain=8.0):
+    return [{"region": "蓟州区", "weather": weather, "tmin": tmin, "tmax": tmax,
+             "EDA": eda, "rainfall_mm": rain}]
+
+
+class TestTimeOfDayPeriodTable:
+    """时段化查询（"今天下午/晚上"）：渲染单条时段汇总表，不出逐小时行（甲方口径）。
+
+    列为 时段/天气现象/气温(℃)/风力风向/降水量(毫米)，时段写"今天下午"等。"""
+
+    def test_single_period_row(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary()},
+        )
+        section = bundle["code_section"]
+        assert "今天下午" in section
+        assert "雷阵雨转多云" in section
+        assert "23~30" in section
+        assert "降水量" in section and "8.0" in section
+        # 只有一行数据（时段列出现一次）
+        assert section.count("今天下午") >= 1
+
+    def test_not_hourly_table(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary()},
+        )
+        section = bundle["code_section"]
+        # 不出现逐小时表头/逐小时时段
+        assert "未来小时预报" not in section
+        assert "12:00-13:00" not in section
+
+    def test_afternoon_evening_label(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午和今天晚上蓟州的天气",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午到晚上",
+             "time_of_day_summary": _tod_summary(rain=12.0)},
+        )
+        section = bundle["code_section"]
+        assert "今天下午到晚上" in section
+        assert "12.0" in section
+
+    def test_rain_none_shows_dash(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary(rain=None)},
+        )
+        assert "None" not in bundle["code_section"]
+
+    def test_compact_facts_includes_tod_summary(self):
+        """时段化查询的聚合事实必须进 compact_facts 供 LLM 使用。"""
+        payload = {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+                   "time_of_day_summary": _tod_summary(), "daily_summary": []}
+        facts = rfr.compact_rolling_forecast_facts(payload)
+        assert facts.get("time_of_day_label") == "今天下午"
+        assert facts.get("time_of_day_summary")
+
+
+class TestWarmTipInstruction:
+    """【温馨提示】（甲方 2026-08-24：建议/注意事项让模型发挥、更丰富专业，有显著天气才给）。"""
+
+    def test_notable_weather_triggers_warm_tip(self):
+        """有降雨（显著天气）→ 指令要求输出【温馨提示】。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("雷阵雨", 15.0, "15.0")}
+        )
+        assert bundle["notable_weather"] is True
+        instruction = rfr.rolling_forecast_llm_instruction(bundle)
+        assert "【温馨提示】" in instruction
+
+    def test_calm_weather_no_warm_tip(self):
+        """晴好平稳 → 不要求【温馨提示】（不硬塞建议）。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("晴", 0.0, "0")}
+        )
+        assert bundle["notable_weather"] is False
+        instruction = rfr.rolling_forecast_llm_instruction(bundle)
+        assert "【温馨提示】" not in instruction
+
+    def test_warm_tip_grounded_no_fabrication(self):
+        """【温馨提示】指令必须要求基于权威事实、禁止编造数值/天气。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("中雨", 20.0, "20.0")}
+        )
+        instruction = rfr.rolling_forecast_llm_instruction(bundle)
+        assert "不得编造" in instruction or "禁止编造" in instruction
+
+    def test_tod_summary_rain_triggers_notable(self):
+        """时段化查询（今天下午有雷阵雨）也判定为显著天气。"""
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天下午蓟州天气怎么样",
+            {"query_mode": "time_of_day_region", "time_of_day_label": "今天下午",
+             "time_of_day_summary": _tod_summary(weather="雷阵雨", rain=8.0)},
+        )
+        assert bundle["notable_weather"] is True
+
+
+class TestNoDownplaySevereWeather:
+    """核心结论不得把雷阵雨/暴雨淡化为"以多云/阴为主"（甲方 2026-08-24）。"""
+
+    def test_instruction_forbids_downplaying(self):
+        bundle = rfr.build_rolling_forecast_bundle(
+            "今天蓟州天气怎么样", {"daily_summary": _daily_full("雷阵雨转多云", 8.0, "8.0")}
+        )
+        instruction = rfr.rolling_forecast_llm_instruction(bundle)
+        assert "以多云" in instruction  # 规则点明不得淡化为此类表述
+        assert "雷阵雨" in instruction

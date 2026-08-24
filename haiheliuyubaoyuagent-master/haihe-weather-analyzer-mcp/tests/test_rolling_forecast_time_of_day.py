@@ -141,7 +141,12 @@ class TestNarrowCalendarToTimeOfDay:
 
 
 class TestCoreTimeOfDayHourlyMode:
-    """"今天下午和今天晚上"等时段化查询在区域模式走 hourly（逐小时），只含所问小时。"""
+    """"今天下午和今天晚上"等时段化查询在区域模式走 time_of_day，聚合为该时段单条汇总。
+
+    甲方口径（2026-08-24）："今天下午有雨吗"这类问题不要逐小时，给出该时段的整体
+    天气即可（时段写"今天下午"，含天气现象、气温、风力风向、降水量）。因此时段化
+    查询产出 time_of_day_summary（单条/单区域），不再产 hourly_summary 逐小时行。
+    """
 
     def _run(self, monkeypatch, weather="小雨"):
         monkeypatch.setattr(rfs.requests, "get", _fake_get_for("117.45_40.05", weather))
@@ -156,19 +161,86 @@ class TestCoreTimeOfDayHourlyMode:
         assert result["query_mode"].endswith("_region")
         assert "time_of_day" in result["query_mode"]
 
-    def test_hourly_summary_only_covered_hours(self, monkeypatch):
+    def test_produces_period_summary_not_hourly(self, monkeypatch):
         result = self._run(monkeypatch)
-        hourly = result.get("hourly_summary") or []
-        assert hourly, "时段化查询应产出 hourly_summary"
-        starts = [h["start_time"] for h in hourly]
-        # 12:00 起、含 23:00-24:00 时段（end 24:00）
-        assert starts[0].endswith("12:00")
-        assert hourly[-1]["end_time"].endswith("00:00")
+        assert "hourly_summary" not in result, "时段化查询不应再产逐小时行"
+        summary = result.get("time_of_day_summary") or []
+        assert len(summary) == 1  # 单区域聚合成一条
+        assert summary[0]["region"] == "蓟州区"
+
+    def test_time_of_day_label(self, monkeypatch):
+        result = self._run(monkeypatch)
+        assert result.get("time_of_day_label") == "今天下午到晚上"
 
     def test_no_daily_calendar_fields(self, monkeypatch):
         result = self._run(monkeypatch)
         # 时段化后不再走整日日历窗口
         assert "daily_summary" not in result
+
+
+class TestTimeOfDaySummaryAggregation:
+    """time_of_day_summary 聚合口径：天气合并、气温区间、降水量求和、风力风向去重。"""
+
+    def _run(self, monkeypatch, weather_list, rain_list, tmax=30.0, tmin=22.0, query="今天下午蓟州天气怎么样"):
+        n = len(weather_list)
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"resultData": {"117.45_40.05": {
+                    "WEA": list(weather_list), "TP1H": list(rain_list),
+                    "TMAX": [tmax] * n, "TMIN": [tmin] * n,
+                    "EDA": ["南风2级"] * n, "VISMIN": [8.0] * n,
+                }}}
+
+        def fake_get(*a, **k):
+            return Resp()
+
+        monkeypatch.setattr(rfs.requests, "get", fake_get)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        rfs._rolling_forecast_cache.clear()
+        return rfs.query_rolling_forecast_core(user_query=query, now=NOW)
+
+    def test_uniform_weather_kept_single(self, monkeypatch):
+        result = self._run(monkeypatch, ["雷阵雨"] * 6, [2.0] * 6)
+        row = result["time_of_day_summary"][0]
+        assert row["weather"] == "雷阵雨"
+        assert row["rainfall_mm"] == 12.0  # 6 小时 × 2.0 求和
+
+    def test_varied_weather_joined_with_zhuan(self, monkeypatch):
+        result = self._run(monkeypatch, ["阴", "阴", "阴", "雷阵雨", "雷阵雨", "多云"], [0.0, 0.0, 0.0, 5.0, 3.0, 0.0])
+        row = result["time_of_day_summary"][0]
+        assert row["weather"] == "阴转雷阵雨转多云"
+        assert row["rainfall_mm"] == 8.0
+
+    def test_temperature_is_period_range(self, monkeypatch):
+        result = self._run(monkeypatch, ["多云"] * 6, [0.0] * 6, tmax=31.0, tmin=23.0)
+        row = result["time_of_day_summary"][0]
+        assert row["tmax"] == "31"
+        assert row["tmin"] == "23"
+
+    def test_single_afternoon_label(self, monkeypatch):
+        result = self._run(monkeypatch, ["多云"] * 6, [0.0] * 6, query="今天下午蓟州天气怎么样")
+        assert result["time_of_day_label"] == "今天下午"
+
+    def test_evening_label(self, monkeypatch):
+        result = self._run(monkeypatch, ["多云"] * 6, [0.0] * 6, query="今天晚上蓟州天气怎么样")
+        assert result["time_of_day_label"] == "今天晚上"
+
+    def test_tomorrow_afternoon_label(self, monkeypatch):
+        result = self._run(monkeypatch, ["多云"] * 6, [0.0] * 6, query="明天下午蓟州天气怎么样")
+        assert result["time_of_day_label"] == "明天下午"
+
+    def test_future_n_hours_still_hourly(self, monkeypatch):
+        """"未来6小时"这类逐小时问法不受影响，仍产 hourly_summary。"""
+        monkeypatch.setattr(rfs.requests, "get", _fake_get_for("117.45_40.05", "小雨"))
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        rfs._rolling_forecast_cache.clear()
+        result = rfs.query_rolling_forecast_core(user_query="蓟州未来6小时天气怎么样", now=NOW)
+        assert result.get("hourly_summary"), "逐小时问法仍应产 hourly_summary"
+        assert "time_of_day_summary" not in result
 
 
 class TestRiskFcstWindowApplies:

@@ -579,7 +579,7 @@ def test_build_poi_reminder_section_wind_and_visibility():
         "hazard_points": None,
     })
     assert "能见度较低" in foggy
-    # 无风无雾无雨 → 只有类型模板
+    # 无风无雾无雨 → 只有通用提示，不含天气灾害条目（2026-08-24 天气自适应：晴天不提示降雨/大风/低能见度）
     plain = dw_core._build_poi_reminder_section({
         "poi_category": "airport",
         "has_rain_signal": False,
@@ -587,9 +587,10 @@ def test_build_poi_reminder_section_wind_and_visibility():
         "periods": [{"EDA": "东南风2级", "visibility_min_km": 10.0}],
         "hazard_points": None,
     })
-    assert plain.count("机场") == 1
     assert "风力较大" not in plain
     assert "能见度较低" not in plain
+    assert "降雨" not in plain
+    assert "低能见度" not in plain
 
 
 def test_decision_max_wind_level_compound_wind():
@@ -625,12 +626,15 @@ def test_decision_max_wind_level_compound_wind():
 
 
 def test_build_poi_reminder_section_school_multi_item():
-    """学校类别注意事项为多行条目（2026-08-24 用户反馈"注意事项太少"，从单行扩多行）。"""
+    """学校类别注意事项为多行条目（2026-08-24 用户反馈"注意事项太少"，从单行扩多行）。
+
+    有降雨时：通用上下学条目 + 降雨/大风对户外活动影响条目都给出（多行）。
+    """
     text = dw_core._build_poi_reminder_section({
         "poi_category": "school",
-        "has_rain_signal": False,
-        "total_rain_mm": 0.0,
-        "periods": [{"EDA": "北风1-2级", "visibility_min_km": 10.0}],
+        "has_rain_signal": True,
+        "total_rain_mm": 5.0,
+        "periods": [{"weather": "小雨", "EDA": "北风1-2级", "visibility_min_km": 10.0}],
         "hazard_points": None,
     })
     assert "【注意事项】" in text
@@ -639,6 +643,77 @@ def test_build_poi_reminder_section_school_multi_item():
     assert "上下学时段" in text
     assert "户外活动" in text
     assert "诱发风险低" not in text  # 无隐患点数据不编造风险结论
+
+
+def test_build_poi_reminder_section_weather_adaptive():
+    """天气自适应（2026-08-24 甲方反馈）：晴天/无雨不提示降雨、道路湿滑、低能见度；
+    有雨/大风/低能见度时才给对应条目。通用安全提示（上下学/航班动态/班次动态）恒给。"""
+    # 晴天周末景区（用户原话场景：没降雨全是晴天）→ 不出现降雨/道路湿滑/雷雨/能见度
+    sunny_scenic = dw_core._build_poi_reminder_section({
+        "poi_category": "scenic",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{"weather": "晴", "EDA": "南风2级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+    assert "降雨" not in sunny_scenic
+    assert "道路湿滑" not in sunny_scenic
+    assert "雷雨" not in sunny_scenic
+    assert "能见度" not in sunny_scenic
+    assert "游览安全" in sunny_scenic  # 通用防滑/安全提示恒给
+
+    # 有雨景区 → 降雨/道路湿滑条目出现
+    rainy_scenic = dw_core._build_poi_reminder_section({
+        "poi_category": "scenic",
+        "has_rain_signal": True,
+        "total_rain_mm": 8.0,
+        "periods": [{"weather": "小雨", "EDA": "南风2级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+    assert "道路湿滑" in rainy_scenic
+
+    # 雷雨景区 → 雷雨避让条目出现
+    storm_scenic = dw_core._build_poi_reminder_section({
+        "poi_category": "scenic",
+        "has_rain_signal": True,
+        "total_rain_mm": 12.0,
+        "periods": [{"weather": "雷阵雨", "EDA": "南风3级", "visibility_min_km": 8.0}],
+        "hazard_points": None,
+    })
+    assert "空旷高地" in storm_scenic
+
+    # 无雨学校 → 不出现降雨/大风对户外活动的影响条目，但通用上下学条目恒给
+    calm_school = dw_core._build_poi_reminder_section({
+        "poi_category": "school",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{"weather": "晴", "EDA": "北风1-2级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+    assert "上下学时段" in calm_school
+    assert "户外活动" not in calm_school
+    assert "降雨" not in calm_school
+
+    # 大风机场 → 大风相关条目出现
+    windy_airport = dw_core._build_poi_reminder_section({
+        "poi_category": "airport",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{"weather": "晴", "EDA": "西北风6-7级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+    assert "大风" in windy_airport
+
+    # 无雨车站 → 不出现"雨天路滑"，但班次动态通用提示恒给
+    calm_station = dw_core._build_poi_reminder_section({
+        "poi_category": "station",
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{"weather": "晴", "EDA": "东风2级", "visibility_min_km": 10.0}],
+        "hazard_points": None,
+    })
+    assert "雨天路滑" not in calm_station
+    assert "班次动态" in calm_station
 
 
 def test_build_poi_reminder_section_no_rain_with_hazard_state():
