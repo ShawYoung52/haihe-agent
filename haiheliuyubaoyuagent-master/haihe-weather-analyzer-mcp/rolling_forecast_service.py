@@ -823,6 +823,8 @@ def _time_of_day_label(user_query: str, target_start: datetime, now: datetime) -
 
 
 _TOD_WIND_DIR_RE = re.compile(r"^([东南西北偏]+风)")
+_TOD_THUNDER_QUALIFIER_RE = re.compile(r"^(?P<base>.+?)(?:并)?伴(?:随|有)?雷电$")
+_TOD_COMPOUND_WEATHER_RE = re.compile(r"[转到、,，/]")
 
 
 def _summarize_tod_wind(eda_values: list) -> str | None:
@@ -872,11 +874,74 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
     return "转".join(parts) if parts else None
 
 
+def _summarize_tod_weather(weather_values: list) -> str | None:
+    """把逐小时天气标签归并为专业、简洁的时段天气演变。
+
+    接口可能把同一雷雨过程逐小时标成“雨伴随雷电、雨、雨伴随雷电”，
+    直接拼接会形成无意义的往返描述。这里仅合并这种语义包含关系；雨势变化
+    （如“小雨、中雨伴随雷电、小雨”）及阴晴转变仍按原顺序完整保留。
+    """
+    raw_values = [
+        str(value or "").strip()
+        for value in weather_values
+        if str(value or "").strip() not in ("", "--")
+    ]
+    if not raw_values:
+        return None
+
+    groups: list[dict[str, object]] = []
+    for raw in raw_values:
+        if _TOD_COMPOUND_WEATHER_RE.search(raw):
+            part = {"base": raw, "display": raw, "thunder": False, "simple": False}
+        elif raw == "雷阵雨":
+            part = {"base": "雨", "display": raw, "thunder": True, "simple": True}
+        else:
+            match = _TOD_THUNDER_QUALIFIER_RE.fullmatch(raw)
+            base = match.group("base").strip(" ，、") if match else raw
+            has_thunder = bool(match)
+            display = "雷阵雨" if has_thunder and base == "雨" else raw
+            part = {
+                "base": base,
+                "display": display,
+                "thunder": has_thunder,
+                "simple": True,
+            }
+
+        previous = groups[-1] if groups else None
+        if (
+            previous
+            and previous["simple"]
+            and part["simple"]
+            and previous["base"] == part["base"]
+        ):
+            # 同一基底（雨/雨伴随雷电、小雨/小雨伴随雷电）属于连续天气过程；
+            # 保留带雷电的更具体标签，不受 A-B-A 次数和方向限制。
+            if part["thunder"] and not previous["thunder"]:
+                previous["display"] = part["display"]
+                previous["thunder"] = True
+            continue
+        groups.append(part)
+
+    # 已确认的源标签组合：“雷雨过程”紧接“阴有轻雾伴随雷电”。雷电已由前一阶段
+    # 表达，局部去掉后一矛盾修饰；若中间隔有其他天气，则完整保留后段雷电信息。
+    for previous, current in zip(groups, groups[1:]):
+        if (
+            previous["thunder"]
+            and "雨" in str(previous["base"])
+            and current["base"] == "阴有轻雾"
+            and current["thunder"]
+        ):
+            current["display"] = current["base"]
+
+    return "转".join(str(group["display"]) for group in groups)
+
+
 def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
     """时段化查询：把逐小时 periods 按区域聚合为单条时段汇总（甲方 2026-08-24 口径：
     "今天下午有雨吗"不要逐小时，给该时段整体天气——时段/天气现象/气温/风力风向/降水量）。
 
-    聚合口径（纯代码确定性，零编造）：天气现象按出现顺序去重、相邻不同用"转"连接；
+    聚合口径（纯代码确定性，零编造）：天气现象按出现顺序归并，同一雷雨过程的
+    泛化标签抖动会被压缩，真实天气变化用"转"连接；
     气温取时段内 tmin 最小~tmax 最大；风力风向按风向分组合并区间、风向变化用"转"连接
     （`_summarize_tod_wind`，避免逐小时 EDA 拼接出自相矛盾的长列表）；降水量为各小时求和。
     """
@@ -893,12 +958,7 @@ def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for region in order:
         items = by_region[region]
-        weathers: list[str] = []
-        for it in items:
-            w = str(it.get("WEA") or "").strip()
-            if w and w != "--" and (not weathers or weathers[-1] != w):
-                weathers.append(w)
-        weather = weathers[0] if len(weathers) == 1 else ("转".join(weathers) if weathers else None)
+        weather = _summarize_tod_weather([it.get("WEA") for it in items])
         tmax_vals = [v for v in (_to_float(it.get("TMAX")) for it in items) if v is not None]
         tmin_vals = [v for v in (_to_float(it.get("TMIN")) for it in items) if v is not None]
         rain_vals = [v for v in (_to_float(it.get("TP1H")) for it in items) if v is not None]

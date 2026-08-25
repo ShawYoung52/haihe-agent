@@ -218,6 +218,56 @@ class TestTimeOfDaySummaryAggregation:
         assert row["weather"] == "阴转雷阵雨转多云"
         assert row["rainfall_mm"] == 8.0
 
+    def test_thunder_rain_process_is_not_mechanically_repeated(self, monkeypatch):
+        """同一雷雨过程的逐小时标签不应拼成“雨伴雷电转雨转雨伴雷电”。"""
+        result = self._run(
+            monkeypatch,
+            ["雨伴随雷电", "雨", "雨伴随雷电", "阴有轻雾伴随雷电"],
+            [1.0, 1.0, 1.0, 0.4],
+            query="今天晚上蓟州天气怎么样",
+        )
+        row = result["time_of_day_summary"][0]
+        assert row["weather"] == "雷阵雨转阴有轻雾"
+
+    def test_meaningful_weather_changes_are_preserved(self, monkeypatch):
+        """只压缩同一过程的冗余标签，不吞掉真实的天气演变。"""
+        result = self._run(
+            monkeypatch,
+            ["小雨", "中雨伴随雷电", "小雨", "多云"],
+            [0.5, 5.0, 0.5, 0.0],
+        )
+        row = result["time_of_day_summary"][0]
+        assert row["weather"] == "小雨转中雨伴随雷电转小雨转多云"
+
+    @pytest.mark.parametrize(
+        ("weather_list", "expected"),
+        [
+            (["雨", "雨伴随雷电", "雨"], "雷阵雨"),
+            (["雨伴随雷电", "雨", "雨伴随雷电", "雨", "雨伴随雷电"], "雷阵雨"),
+            (["小雨", "小雨伴随雷电", "小雨"], "小雨伴随雷电"),
+        ],
+    )
+    def test_same_rain_base_keeps_the_more_specific_thunder_label(
+        self, monkeypatch, weather_list, expected,
+    ):
+        result = self._run(monkeypatch, weather_list, [1.0] * len(weather_list))
+        assert result["time_of_day_summary"][0]["weather"] == expected
+
+    def test_unrelated_phase_does_not_hide_later_thunder(self, monkeypatch):
+        result = self._run(
+            monkeypatch,
+            ["雨伴随雷电", "多云", "阴有轻雾伴随雷电"],
+            [1.0, 0.0, 0.0],
+        )
+        assert (
+            result["time_of_day_summary"][0]["weather"]
+            == "雷阵雨转多云转阴有轻雾伴随雷电"
+        )
+
+    def test_compound_source_weather_is_preserved_verbatim(self, monkeypatch):
+        result = self._run(monkeypatch, ["雨伴随雷电转阴"], [1.0])
+        assert result["time_of_day_summary"][0]["weather"] == "雨伴随雷电转阴"
+
     def test_temperature_is_period_range(self, monkeypatch):
         result = self._run(monkeypatch, ["多云"] * 6, [0.0] * 6, tmax=31.0, tmin=23.0)
         row = result["time_of_day_summary"][0]
