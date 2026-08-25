@@ -469,6 +469,35 @@ class TestSummarizeTodWind:
         ])
         assert out == "西北风1~2级转南风1~2级转西南风1~2级"
 
+    def test_adjacent_directions_with_same_force_form_compact_stages(self):
+        """相同弱风力下相邻方位归为一个阶段，风力改变时再分段。"""
+        out = rfs._summarize_tod_wind([
+            "西风0-1级", "西北风0-1级", "东北风1-2级", "北风1-2级",
+        ])
+        assert out == "西到西北风0~1级转东北到北风1~2级"
+
+    @pytest.mark.parametrize(
+        ("eda_values", "expected"),
+        [
+            (
+                ["西北风0-1级", "北风0-1级", "东北风0-1级", "东风1-2级"],
+                "西北到东北风0~1级转东风1~2级",
+            ),
+            (
+                ["东北风0-1级", "北风0-1级", "西北风0-1级", "西风1-2级"],
+                "东北到西北风0~1级转西风1~2级",
+            ),
+        ],
+    )
+    def test_adjacent_direction_stage_handles_north_boundary(self, eda_values, expected):
+        assert rfs._summarize_tod_wind(eda_values) == expected
+
+    def test_non_adjacent_directions_are_not_compacted(self):
+        out = rfs._summarize_tod_wind([
+            "西风0-1级", "东北风0-1级", "北风1-2级",
+        ])
+        assert out == "西风0~1级转东北风0~1级转北风1~2级"
+
     def test_longer_direction_return_keeps_all_phases(self):
         out = rfs._summarize_tod_wind([
             "北风1-2级", "南风1-2级", "北风1-2级", "西风1-2级",

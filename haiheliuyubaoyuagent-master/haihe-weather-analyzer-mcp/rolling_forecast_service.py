@@ -824,6 +824,10 @@ def _time_of_day_label(user_query: str, target_start: datetime, now: datetime) -
 
 _TOD_WIND_DIR_RE = re.compile(r"^([东南西北偏]+风)")
 _TOD_WIND_DIR_TOKEN_RE = re.compile(r"[东南西北偏]+风")
+_TOD_WIND_DIRECTION_ANGLE = {
+    "北风": 0, "东北风": 45, "东风": 90, "东南风": 135,
+    "南风": 180, "西南风": 225, "西风": 270, "西北风": 315,
+}
 _TOD_THUNDER_QUALIFIER_RE = re.compile(r"^(?P<base>.+?)(?:并)?伴(?:随|有)?雷电$")
 _TOD_COMPOUND_WEATHER_RE = re.compile(r"[转到、,，/]")
 
@@ -866,8 +870,16 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
             phase = entries[-1]
             phase["lo"] = min(int(phase["lo"]), lo)
             phase["hi"] = max(int(phase["hi"]), hi)
+            samples = phase["force_samples"]
+            if (lo, hi) not in samples:
+                samples.append((lo, hi))
         else:
-            entries.append({"direction": direction, "lo": lo, "hi": hi})
+            entries.append({
+                "direction": direction,
+                "lo": lo,
+                "hi": hi,
+                "force_samples": [(lo, hi)],
+            })
 
     phases = [entry for entry in entries if "direction" in entry]
 
@@ -884,14 +896,55 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
         force = f"{lo}级" if lo == hi else f"{lo}~{hi}级"
         return f"{phases[0]['direction']}转{phases[-1]['direction']}{force}"
 
-    parts: list[str] = []
-    for entry in entries:
-        if "raw" in entry:
-            parts.append(str(entry["raw"]))
-            continue
+    def format_phase(entry: dict[str, object]) -> str:
         direction = str(entry["direction"])
         lo, hi = int(entry["lo"]), int(entry["hi"])
-        parts.append(f"{direction}{lo}级" if lo == hi else f"{direction}{lo}~{hi}级")
+        return f"{direction}{lo}级" if lo == hi else f"{direction}{lo}~{hi}级"
+
+    def is_gradual_adjacent_turn(group: list[dict[str, object]]) -> bool:
+        angles = [_TOD_WIND_DIRECTION_ANGLE.get(str(entry["direction"])) for entry in group]
+        if any(angle is None for angle in angles):
+            return False
+        deltas = [
+            (int(current) - int(previous) + 180) % 360 - 180
+            for previous, current in zip(angles, angles[1:])
+        ]
+        return bool(deltas) and all(abs(delta) == 45 for delta in deltas) and (
+            all(delta > 0 for delta in deltas) or all(delta < 0 for delta in deltas)
+        )
+
+    parts: list[str] = []
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        if "raw" in entry:
+            parts.append(str(entry["raw"]))
+            index += 1
+            continue
+
+        samples = entry["force_samples"]
+        stable_force = samples[0] if len(samples) == 1 else None
+        group = [entry]
+        next_index = index + 1
+        while stable_force is not None and next_index < len(entries):
+            candidate = entries[next_index]
+            if "raw" in candidate:
+                break
+            candidate_samples = candidate["force_samples"]
+            if len(candidate_samples) != 1 or candidate_samples[0] != stable_force:
+                break
+            group.append(candidate)
+            next_index += 1
+
+        if stable_force is not None and stable_force[1] <= 2 and is_gradual_adjacent_turn(group):
+            start = str(group[0]["direction"]).removesuffix("风")
+            end = str(group[-1]["direction"])
+            lo, hi = stable_force
+            force = f"{lo}级" if lo == hi else f"{lo}~{hi}级"
+            parts.append(f"{start}到{end}{force}")
+        else:
+            parts.extend(format_phase(phase) for phase in group)
+        index = next_index
     return "转".join(parts) if parts else None
 
 
