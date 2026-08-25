@@ -105,6 +105,18 @@ def test_planner_prompt_has_tool_rules():
     assert "单维度" in p  # 停止条件
 
 
+def test_dynamic_event_dates_are_model_resolved_without_hardcoding_or_clarification():
+    """节假日/高考日期会逐年变化，模型应解析明确日期窗口而不是使用固定日历或追问。"""
+    import prompts
+
+    for prompt in (prompts.PLANNER_SYSTEM_PROMPT, prompts.WEATHER_ASSISTANT_PROMPT):
+        assert "节假日、高考等活动日期" in prompt
+        assert "结合当前年份" in prompt
+        assert "forecast_start_date" in prompt and "forecast_days" in prompt
+        assert "不得硬编码" in prompt
+        assert "无需向用户澄清" in prompt
+
+
 def test_answer_prompt_has_expression_rules():
     """METEO_ANSWER_SYSTEM_PROMPT 含气象表达/格式/结论结构。"""
     import prompts

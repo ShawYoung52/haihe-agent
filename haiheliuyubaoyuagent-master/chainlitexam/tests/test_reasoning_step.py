@@ -5,6 +5,7 @@ with a lightweight ``MockStep`` before importing ``message_orchestrator``.
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -308,6 +309,36 @@ async def test_reasoning_step_falls_back_without_auto_collapse():
         assert reasoning.step.default_open is False
     finally:
         chainlit.Step = original_step
+
+
+async def test_old_chainlit_emits_frontend_collapse_signal():
+    """Chainlit 2.9.x 更新 default_open 不会控制已挂载组件，需通知兼容脚本折叠。"""
+    OldMockStep.reset()
+    sent: list[dict] = []
+    original_step = chainlit.Step
+    had_send_window_message = hasattr(chainlit, "send_window_message")
+    original_send_window_message = getattr(chainlit, "send_window_message", None)
+
+    async def capture_window_message(payload):
+        sent.append(json.loads(payload))
+
+    chainlit.Step = OldMockStep
+    chainlit.send_window_message = capture_window_message
+    try:
+        reasoning = ReasoningStep()
+        await reasoning.__aenter__()
+        await reasoning.close()
+        assert reasoning.step is not None
+        assert sent == [{
+            "type": "chainlit_reasoning_complete",
+            "step_id": reasoning.step.id,
+        }]
+    finally:
+        chainlit.Step = original_step
+        if had_send_window_message:
+            chainlit.send_window_message = original_send_window_message
+        else:
+            delattr(chainlit, "send_window_message")
 
 
 if __name__ == "__main__":

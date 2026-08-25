@@ -39,15 +39,25 @@ async def test_weekend_activity_fast_path_does_not_intercept_specific_poi(monkey
     assert handled is False
 
 
-def test_enable_fast_paths_defaults_to_false(monkeypatch):
-    """ENABLE_FAST_PATHS reflects the ENABLE_FAST_PATHS environment variable at import time."""
+def test_enable_fast_paths_is_permanently_disabled(monkeypatch):
+    """快速路径属于禁用业务边界，环境变量不得重新开启。"""
     monkeypatch.setenv("ENABLE_FAST_PATHS", "false")
     importlib.reload(mo)
     assert mo.ENABLE_FAST_PATHS is False
 
+
+def test_db_bootstrap_cannot_enable_fast_paths_from_environment():
+    """数据库初始化模块也不得根据环境变量安装快速路径。"""
+    db_source = (
+        Path(__file__).resolve().parents[1] / "utils" / "db.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ENABLE_FAST_PATHS = False" in db_source
+    assert 'os.environ.get("ENABLE_FAST_PATHS"' not in db_source
+
     monkeypatch.setenv("ENABLE_FAST_PATHS", "true")
     importlib.reload(mo)
-    assert mo.ENABLE_FAST_PATHS is True
+    assert mo.ENABLE_FAST_PATHS is False
 
 
 @pytest.mark.asyncio

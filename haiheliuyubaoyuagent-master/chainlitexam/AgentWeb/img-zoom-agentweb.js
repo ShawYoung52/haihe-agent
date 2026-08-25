@@ -10,6 +10,116 @@
 //       <script src="./img-zoom-agentweb.js"></script>
 // =====================================================================
 (function () {
+  var EVENT_TYPE = "chainlit_reasoning_complete";
+  var requests = {};
+  var observer = null;
+
+  function parsePayload(data) {
+    if (typeof data !== "string") return data;
+    try {
+      return JSON.parse(data);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function completedFollowingAnswer(stepId) {
+    // 主回答使用 Message.update() 分块输出，未必带 loading-cursor。
+    // stop-button 只在 Chainlit 任务运行期间存在，消失后才能判定最终回答完成。
+    if (document.getElementById("stop-button")) return null;
+    var root = document.getElementById("step-" + stepId);
+    if (!root || typeof root.compareDocumentPosition !== "function") return null;
+    var nodes = document.querySelectorAll('[data-step-type="assistant_message"]');
+    var followingFlag = window.Node ? window.Node.DOCUMENT_POSITION_FOLLOWING : 4;
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (
+        (nodes[i].textContent || "").trim() &&
+        (root.compareDocumentPosition(nodes[i]) & followingFlag)
+      ) {
+        // Chainlit 最终消息的流式光标消失后才视为回答完成。
+        return nodes[i].querySelector(".loading-cursor") ? null : nodes[i];
+      }
+    }
+    return null;
+  }
+
+  function processRequest(stepId) {
+    if (!requests[stepId] || !completedFollowingAnswer(stepId)) return false;
+    var root = document.getElementById("step-" + stepId);
+    if (!root) return false;
+    var trigger = root.querySelector('button[aria-expanded="true"]');
+    if (trigger) trigger.click();
+    if (typeof root.setAttribute === "function") {
+      root.setAttribute("data-reasoning-auto-collapsed", "1");
+    }
+    clearTimeout(requests[stepId].maxTimer);
+    delete requests[stepId];
+    return true;
+  }
+
+  function schedule(stepId) {
+    if (!stepId || requests[stepId]) return;
+    requests[stepId] = {
+      maxTimer: setTimeout(function () {
+        delete requests[stepId];
+      }, 90000),
+    };
+    processRequest(stepId);
+  }
+
+  function scanOpenReasoningSteps() {
+    // 仅登记当前运行任务的思考步骤，不强制关闭用户手动展开的历史步骤。
+    if (!document.getElementById("stop-button")) return;
+    var titles = document.querySelectorAll('[id="step-🤔 思考过程"]');
+    for (var i = 0; i < titles.length; i += 1) {
+      var container = titles[i].closest('[data-step-type]');
+      var root = container ? container.querySelector('[id^="step-"]') : null;
+      var trigger = root ? root.querySelector('button[aria-expanded="true"]') : null;
+      var alreadyHandled = root && typeof root.getAttribute === "function"
+        ? root.getAttribute("data-reasoning-auto-collapsed") === "1"
+        : false;
+      if (root && trigger && !alreadyHandled && root.id.indexOf("step-") === 0) {
+        schedule(root.id.slice(5));
+      }
+    }
+  }
+
+  function processRequests() {
+    scanOpenReasoningSteps();
+    Object.keys(requests).forEach(processRequest);
+  }
+
+  function onWindowMessage(event) {
+    var payload = parsePayload(event.data);
+    if (payload && payload.type === EVENT_TYPE) schedule(payload.step_id);
+  }
+
+  function start() {
+    if (observer || !document.body) return;
+    observer = new MutationObserver(processRequests);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    processRequests();
+  }
+
+  window.addEventListener("message", onWindowMessage);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+
+  // 仅供 Node 行为测试；生产页面不设置该标志，不暴露内部 API。
+  if (window.__CHAINLIT_REASONING_TEST_MODE__) {
+    window.__CHAINLIT_REASONING_TEST_API__ = {
+      schedule: schedule,
+      processRequest: processRequest,
+      scanOpenReasoningSteps: scanOpenReasoningSteps,
+      requests: requests,
+    };
+  }
+})();
+
+(function () {
   var PREFIX = "[IMG_ZOOM_AW]";
   var MIN_NATURAL = 90; // 实际渲染尺寸小于该像素的图（头像/图标）不启用
   var MAX_ZOOM = 8;

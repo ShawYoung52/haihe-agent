@@ -529,6 +529,39 @@ async def test_query_decision_weather_for_poi_need_clarification():
 
 
 @pytest.mark.asyncio
+async def test_dynamic_exam_event_uses_model_location_and_date_without_clarification():
+    """高考等动态活动由模型解析天津点位和本年度日期，并原样传给预报后端。"""
+    answer_chain = FakeChain(overrides={
+        "location_name": "天津市实验中学",
+        "question_type": "event_weather",
+        "forecast_start_date": "2026-06-07",
+        "forecast_days": 3,
+        "need_clarification": False,
+        "clarification_question": "",
+    })
+
+    class CapturingForecastTool(FakeForecastTool):
+        def __init__(self):
+            self.last_args = None
+
+        async def ainvoke(self, args):
+            self.last_args = dict(args)
+            return await super().ainvoke(args)
+
+    forecast_tool = CapturingForecastTool()
+    tools = [FakePoiTool(), forecast_tool]
+    callbacks = {"ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke()}
+
+    tool = dw.build_decision_weather_tools(answer_chain, tools, callbacks)[0]
+    result = await tool.ainvoke({"user_text": "高考期间实验中学附近天气如何？"})
+
+    assert forecast_tool.last_args is not None
+    assert forecast_tool.last_args["forecast_start_date"] == "2026-06-07"
+    assert forecast_tool.last_args["forecast_days"] == 3
+    assert "请补充" not in result
+
+
+@pytest.mark.asyncio
 async def test_query_decision_weather_for_poi_not_decision_weather():
     answer_chain = FakeChain(overrides={"is_decision_weather": False})
     tools = [FakePoiTool(), FakeForecastTool()]
@@ -565,34 +598,14 @@ def test_rule_based_slot_extraction_falls_back_on_ambiguous():
     assert dw_core._extract_decision_slots_rule_based("天气怎么样") is None
 
 
-def test_exam_period_with_generic_school_requires_date_and_location_clarification():
-    """“高考期间+实验中学”不能默认当前一周，也不能任选全国重名学校。"""
-    slots = dw_core._extract_decision_slots_rule_based("高考期间实验中学附近天气如何？")
-
-    assert slots is not None
-    assert slots["is_decision_weather"] is True
-    assert slots["question_type"] == "event_weather"
-    assert slots["need_clarification"] is True
-    assert "日期" in slots["clarification_question"]
-    assert "区县" in slots["clarification_question"] or "完整校名" in slots["clarification_question"]
-
-
-def test_exam_period_with_date_still_clarifies_ambiguous_school():
-    slots = dw_core._extract_decision_slots_rule_based("6月7日高考期间实验中学附近天气如何？")
-
-    assert slots is not None
-    assert slots["need_clarification"] is True
-    assert "区县" in slots["clarification_question"] or "完整校名" in slots["clarification_question"]
-    assert "日期" not in slots["clarification_question"]
-
-
-def test_exam_period_with_full_school_only_clarifies_missing_date():
-    slots = dw_core._extract_decision_slots_rule_based("高考期间天津市实验中学附近天气如何？")
-
-    assert slots is not None
-    assert slots["need_clarification"] is True
-    assert "日期" in slots["clarification_question"]
-    assert "区县" not in slots["clarification_question"]
+@pytest.mark.parametrize("query", [
+    "高考期间实验中学附近天气如何？",
+    "6月7日高考期间实验中学附近天气如何？",
+    "高考期间天津市实验中学附近天气如何？",
+])
+def test_exam_period_is_delegated_to_model(query):
+    """高考日期和同名学校由模型按当前年份及天津上下文解析，规则层不再要求澄清。"""
+    assert dw_core._extract_decision_slots_rule_based(query) is None
 
 
 def test_classify_poi_category_five_categories():

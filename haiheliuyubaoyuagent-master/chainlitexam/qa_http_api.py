@@ -445,7 +445,11 @@ class CapturingEmitter(BaseChainlitEmitter):
     async def send_window_message(self, data):
         # GIS 联动包是 JSON 字符串；非 JSON 内容忽略而不是让请求崩掉
         try:
-            self.gis_packets.append(json.loads(data) if isinstance(data, str) else data)
+            packet = json.loads(data) if isinstance(data, str) else data
+            # Chainlit 2.9.x 的思考过程折叠通知只服务浏览器 UI，不属于 GIS 联动数据。
+            if isinstance(packet, dict) and packet.get("type") == "chainlit_reasoning_complete":
+                return
+            self.gis_packets.append(packet)
         except (TypeError, ValueError):
             logger.debug("window message 非 JSON，已忽略")
 

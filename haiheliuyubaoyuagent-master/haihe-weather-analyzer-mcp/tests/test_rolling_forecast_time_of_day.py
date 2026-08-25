@@ -432,16 +432,16 @@ class TestQueryRegionHazardsRiskLevels:
 
 
 class TestSummarizeTodWind:
-    """时段汇总风力风向：按风向分组合并风力区间、风向按出现顺序"转"连接。
+    """时段汇总风力风向：稳定演变按阶段合并，弱风跳变概括为风向多变。
 
     修复甲方反馈的可读性问题——逐小时 EDA 原文去重拼接会出
     "西北风0-1级；东南风0-1级；东风0-1级；东风1-2级"这种既长又自相矛盾的列表。
     """
 
     def test_same_direction_merges_force_range(self):
-        # 东风 0-1 与 1-2 合并为 0~2，风向变化用"转"连接
-        out = rfs._summarize_tod_wind(["西北风0-1级", "东南风0-1级", "东风0-1级", "东风1-2级"])
-        assert out == "西北风0~1级转东南风0~1级转东风0~2级"
+        # 同一连续风向的 0-1 与 1-2 合并为 0~2
+        out = rfs._summarize_tod_wind(["东风0-1级", "东风1-2级"])
+        assert out == "东风0~2级"
 
     def test_single_uniform_wind(self):
         assert rfs._summarize_tod_wind(["南风2级", "南风2级"]) == "南风2级"
@@ -450,31 +450,31 @@ class TestSummarizeTodWind:
         out = rfs._summarize_tod_wind(["北风3级", "南风2级"])
         assert out == "北风3级转南风2级"
 
-    def test_same_force_gradual_turn_keeps_start_and_end_directions(self):
-        """整晚同风力连续转向只展示起止风向，不机械罗列过渡小时。"""
+    def test_non_gradual_weak_wind_is_reported_as_variable(self):
+        """弱风发生大角度跳变时，不机械罗列或伪装成单向渐转。"""
         out = rfs._summarize_tod_wind([
             "西北风1-2级", "南风1-2级", "西南风1-2级", "西南风1-2级",
         ])
-        assert out == "西北风转西南风1~2级"
+        assert out == "风向多变，风力1~2级"
 
-    def test_direction_return_is_not_misreported_as_one_way_turn(self):
-        """风向回转不是连续单向变化，必须保留完整的阶段顺序。"""
+    def test_weak_direction_return_is_reported_as_variable(self):
+        """弱风来回摆动用“风向多变”概括，不拼接冗长阶段。"""
         out = rfs._summarize_tod_wind(["北风1-2级", "南风1-2级", "北风1-2级"])
-        assert out == "北风1~2级转南风1~2级转北风1~2级"
+        assert out == "风向多变，风力1~2级"
 
     def test_hourly_force_changes_are_not_hidden_by_phase_ranges(self):
         """各阶段聚合后区间相同，不代表逐小时风力始终相同。"""
         out = rfs._summarize_tod_wind([
             "西北风1级", "西北风2级", "南风1级", "南风2级", "西南风1级", "西南风2级",
         ])
-        assert out == "西北风1~2级转南风1~2级转西南风1~2级"
+        assert out == "风向多变，风力1~2级"
 
     def test_adjacent_directions_with_same_force_form_compact_stages(self):
         """相同弱风力下相邻方位归为一个阶段，风力改变时再分段。"""
         out = rfs._summarize_tod_wind([
-            "西风0-1级", "西北风0-1级", "东北风1-2级", "北风1-2级",
+            "西风0-1级", "西北风0-1级", "北风1-2级", "东北风1-2级",
         ])
-        assert out == "西到西北风0~1级转东北到北风1~2级"
+        assert out == "西到西北风0~1级转北到东北风1~2级"
 
     @pytest.mark.parametrize(
         ("eda_values", "expected"),
@@ -492,22 +492,34 @@ class TestSummarizeTodWind:
     def test_adjacent_direction_stage_handles_north_boundary(self, eda_values, expected):
         assert rfs._summarize_tod_wind(eda_values) == expected
 
-    def test_non_adjacent_directions_are_not_compacted(self):
+    def test_non_adjacent_weak_directions_are_reported_as_variable(self):
         out = rfs._summarize_tod_wind([
             "西风0-1级", "东北风0-1级", "北风1-2级",
         ])
-        assert out == "西风0~1级转东北风0~1级转北风1~2级"
+        assert out == "风向多变，风力0~2级"
 
-    def test_longer_direction_return_keeps_all_phases(self):
+    def test_customer_reported_east_to_northwest_jump_is_variable(self):
+        out = rfs._summarize_tod_wind([
+            "东风0-1级", "西北风0-1级", "东北风1-2级", "北风1-2级",
+        ])
+        assert out == "风向多变，风力0~2级"
+
+    def test_longer_weak_direction_return_is_variable(self):
         out = rfs._summarize_tod_wind([
             "北风1-2级", "南风1-2级", "北风1-2级", "西风1-2级",
         ])
-        assert out == "北风1~2级转南风1~2级转北风1~2级转西风1~2级"
+        assert out == "风向多变，风力1~2级"
 
-    def test_compound_wind_range_taken(self):
-        # 复合风况取全部数字的区间（阵风并入）
+    def test_compound_wind_is_preserved_verbatim(self):
+        # 阵风是独立的气象要素，不能压成普通平均风力区间。
         out = rfs._summarize_tod_wind(["东南风3～4级阵风6级"])
-        assert out == "东南风3~6级"
+        assert out == "东南风3～4级阵风6级"
+
+    def test_weak_compound_wind_is_not_swallowed_by_variable_summary(self):
+        out = rfs._summarize_tod_wind([
+            "东风1-2级阵风2级", "西北风0-1级", "北风0-1级",
+        ])
+        assert out == "东风1-2级阵风2级转西北到北风0~1级"
 
     def test_empty_and_placeholder_skipped(self):
         assert rfs._summarize_tod_wind([]) is None
@@ -548,4 +560,4 @@ class TestSummarizeTodWind:
         result = rfs.query_rolling_forecast_core(user_query="今天下午蓟州天气怎么样", now=NOW)
         row = result["time_of_day_summary"][0]
         assert "；" not in row["EDA"]
-        assert row["EDA"] == "西北风0~1级转东南风0~1级转东风0~2级"
+        assert row["EDA"] == "风向多变，风力0~2级"

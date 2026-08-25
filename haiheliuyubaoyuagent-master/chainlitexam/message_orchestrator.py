@@ -246,7 +246,7 @@ class ReasoningStep:
             version = getattr(cl, "__version__", "unknown")
             print(
                 f"[ReasoningStep] 当前 Chainlit {version} 不支持 auto_collapse，"
-                f"思考过程在回答结束后不会自动折叠；建议升级到 >= 2.10.0"
+                f"将使用 2.9.x 前端兼容事件折叠思考过程"
             )
             ReasoningStep._warned_low_version = True
 
@@ -329,10 +329,21 @@ class ReasoningStep:
         if not self._step_accepts_auto_collapse:
             self.step.default_open = False
         await self.step.update()
+        if not self._step_accepts_auto_collapse:
+            sender = getattr(cl, "send_window_message", None)
+            if callable(sender):
+                try:
+                    await sender(json.dumps({
+                        "type": "chainlit_reasoning_complete",
+                        "step_id": self.step.id,
+                    }, ensure_ascii=False))
+                except Exception as exc:
+                    # UI 兼容通知失败不能影响最终回答；后端 default_open=False 仍保留。
+                    print(f"[ReasoningStep] 发送折叠通知失败：{type(exc).__name__}")
 
 
 async def _maybe_close_reasoning(reasoning: ReasoningStep | None):
-    """在发送最终答案前关闭思考步骤，确保思考先折叠再展示答案。"""
+    """结束思考步骤；2.9.x 前端会等最终答案完成后再自动折叠。"""
     if reasoning is not None and not reasoning._closed:
         await reasoning.close()
 
@@ -1423,7 +1434,7 @@ async def _emit_fast_path_result(
     has_chart: bool = False,
     reasoning: ReasoningStep | None = None,
 ):
-    """统一 fast path 结果出口：先折叠思考步骤，再发送最终结果，追加到对话历史。
+    """统一 fast path 结果出口：先结束思考步骤，再发送最终结果，追加到对话历史。
     Fast path 自己生成规范文本，不再经过 _sanitize_display_text，避免表格等格式被误修复。"""
     if has_chart:
         cl.user_session.set("has_chart_generated", True)

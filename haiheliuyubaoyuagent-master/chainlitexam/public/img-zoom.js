@@ -1,5 +1,8 @@
 (function () {
   const PREFIX = "[GIS_FRONTEND]";
+  const REASONING_COMPLETE_EVENT = "chainlit_reasoning_complete";
+  const reasoningCollapseRequests = {};
+  let reasoningObserver = null;
 
   function safeParse(jsonStr) {
     try {
@@ -7,6 +10,107 @@
     } catch (e) {
       return null;
     }
+  }
+
+  function collapseReasoningStep(stepId) {
+    var root = document.getElementById("step-" + stepId);
+    if (!root) return false;
+    var trigger = root.querySelector('button[aria-expanded="true"]');
+    if (trigger) trigger.click();
+    if (typeof root.setAttribute === "function") {
+      root.setAttribute("data-reasoning-auto-collapsed", "1");
+    }
+    return true;
+  }
+
+  function completedFollowingAnswer(stepId) {
+    // 项目主回答通过 Message.update() 分块更新，不一定显示流式光标。
+    // Chainlit 任务运行期间固定显示 stop-button；它消失才表示 on_message 已完成。
+    if (document.getElementById("stop-button")) return null;
+    var root = document.getElementById("step-" + stepId);
+    if (!root || typeof root.compareDocumentPosition !== "function") return null;
+    var nodes = document.querySelectorAll('[data-step-type="assistant_message"]');
+    var followingFlag = window.Node ? window.Node.DOCUMENT_POSITION_FOLLOWING : 4;
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (
+        (nodes[i].textContent || "").trim() &&
+        (root.compareDocumentPosition(nodes[i]) & followingFlag)
+      ) {
+        // Chainlit 流式消息在完成前保留 loading-cursor，不用“静默N秒”猜测结束。
+        return nodes[i].querySelector(".loading-cursor") ? null : nodes[i];
+      }
+    }
+    return null;
+  }
+
+  function processReasoningCollapse(stepId) {
+    if (!reasoningCollapseRequests[stepId] || !completedFollowingAnswer(stepId)) return false;
+    if (!collapseReasoningStep(stepId)) return false;
+    clearTimeout(reasoningCollapseRequests[stepId].maxTimer);
+    delete reasoningCollapseRequests[stepId];
+    return true;
+  }
+
+  function scheduleReasoningCollapse(stepId) {
+    if (!stepId || reasoningCollapseRequests[stepId]) return;
+    reasoningCollapseRequests[stepId] = {
+      maxTimer: setTimeout(function () {
+        delete reasoningCollapseRequests[stepId];
+      }, 90000),
+    };
+    processReasoningCollapse(stepId);
+  }
+
+  function scanOpenReasoningSteps() {
+    // 只在本轮任务运行期间登记；页面空闲时用户手动展开历史思考不干预。
+    if (!document.getElementById("stop-button")) return;
+    var titles = document.querySelectorAll('[id="step-🤔 思考过程"]');
+    for (var i = 0; i < titles.length; i += 1) {
+      var container = titles[i].closest('[data-step-type]');
+      var root = container ? container.querySelector('[id^="step-"]') : null;
+      var trigger = root ? root.querySelector('button[aria-expanded="true"]') : null;
+      var alreadyHandled = root && typeof root.getAttribute === "function"
+        ? root.getAttribute("data-reasoning-auto-collapsed") === "1"
+        : false;
+      if (root && trigger && !alreadyHandled && root.id.indexOf("step-") === 0) {
+        scheduleReasoningCollapse(root.id.slice(5));
+      }
+    }
+  }
+
+  function processReasoningRequests() {
+    scanOpenReasoningSteps();
+    Object.keys(reasoningCollapseRequests).forEach(processReasoningCollapse);
+  }
+
+  function handleReasoningWindowMessage(event) {
+    var payload = typeof event.data === "string" ? safeParse(event.data) : event.data;
+    if (payload && payload.type === REASONING_COMPLETE_EVENT) {
+      scheduleReasoningCollapse(payload.step_id);
+    }
+  }
+
+  function startReasoningObserver() {
+    if (reasoningObserver || !document.body) return;
+    reasoningObserver = new MutationObserver(processReasoningRequests);
+    reasoningObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+    processReasoningRequests();
+  }
+
+  window.addEventListener("message", handleReasoningWindowMessage);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startReasoningObserver, { once: true });
+  } else {
+    startReasoningObserver();
+  }
+
+  if (window.__CHAINLIT_REASONING_TEST_MODE__) {
+    window.__CHAINLIT_REASONING_TEST_API__ = {
+      schedule: scheduleReasoningCollapse,
+      processRequest: processReasoningCollapse,
+      scanOpenReasoningSteps: scanOpenReasoningSteps,
+      requests: reasoningCollapseRequests,
+    };
   }
 
   function patchSocketEmit() {
@@ -27,30 +131,36 @@
           event === "gis_linkage" ||
           event === "gis_linkage_broadcast"
         ) {
-          const msg = payload ? payload.message : undefined;
+          const msg = payload && typeof payload === "object" && "message" in payload
+            ? payload.message
+            : payload;
           console.log(PREFIX + " event=" + event + " payload=", payload);
-          console.log(PREFIX + " typeof payload.message =", typeof msg);
+          console.log(PREFIX + " typeof message =", typeof msg);
 
           if (typeof msg === "string") {
             const parsed = safeParse(msg);
             console.log(PREFIX + " parsed json =", parsed !== null ? parsed : msg);
 
-            // 转发给 iframe 外层页面（父页面可以直接 window.addEventListener('message') 接收）
-            try {
-              if (window.parent) {
-                window.parent.postMessage(
-                  {
-                    type: "gis_linkage",
-                    source: "chainlit",
-                    event: event,
-                    payload: parsed !== null ? parsed : msg,
-                    raw: msg,
-                  },
-                  "*"
-                );
+            if (parsed && parsed.type === REASONING_COMPLETE_EVENT) {
+              scheduleReasoningCollapse(parsed.step_id);
+            } else {
+              // 转发给 iframe 外层页面（父页面可以直接 window.addEventListener('message') 接收）
+              try {
+                if (window.parent) {
+                  window.parent.postMessage(
+                    {
+                      type: "gis_linkage",
+                      source: "chainlit",
+                      event: event,
+                      payload: parsed !== null ? parsed : msg,
+                      raw: msg,
+                    },
+                    "*"
+                  );
+                }
+              } catch (e) {
+                console.warn(PREFIX + " postMessage failed", e);
               }
-            } catch (e) {
-              console.warn(PREFIX + " postMessage failed", e);
             }
           }
         }

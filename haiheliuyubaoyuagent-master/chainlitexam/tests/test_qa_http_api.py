@@ -674,6 +674,25 @@ async def test_capturing_emitter_ignores_non_json_window_message():
     assert cap.gis_packets == []
 
 
+async def test_capturing_emitter_ignores_reasoning_collapse_ui_message():
+    """前端折叠控制包不是 GIS 数据，不能污染 HTTP API 的 gis 字段。"""
+    import json
+
+    import chainlit as cl
+    from chainlit.context import context_var, init_http_context
+
+    ctx = init_http_context(thread_id=str(uuid.uuid4()))
+    cap = qa.CapturingEmitter(ctx.session)
+    ctx.emitter = cap
+    context_var.set(ctx)
+
+    await cl.send_window_message(json.dumps({
+        "type": "chainlit_reasoning_complete",
+        "step_id": "reasoning-step-id",
+    }))
+    assert cap.gis_packets == []
+
+
 # ---------------------------------------------------------------- 并发隔离
 
 
