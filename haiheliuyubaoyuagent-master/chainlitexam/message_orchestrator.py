@@ -84,8 +84,9 @@ from tools.request_intent_policy import (
 )
 from external_skill_tools import TIANHE_ERROR_TEXTS, TIANHE_UNAVAILABLE_TEXT
 
-# Feature flag: when false (default), all fast-path pre-routing is disabled and every query flows through the planner LLM.
-ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
+# 业务边界：快速路径永久停用，所有问题统一走 Planner/工具编排链路。
+# 不读取环境变量，避免部署配置意外恢复旧快速路径并改变既有问答行为。
+ENABLE_FAST_PATHS = False
 # Feature flag: when false (default), skip the thinking_chain LLM call in the planner path (saves one 5-17s LLM call).
 ENABLE_LLM_THINKING = os.environ.get("ENABLE_LLM_THINKING", "false").strip().lower() in ("1", "true", "yes")
 

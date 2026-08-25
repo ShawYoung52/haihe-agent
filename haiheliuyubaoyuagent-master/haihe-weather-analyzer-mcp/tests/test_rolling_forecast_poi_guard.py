@@ -43,6 +43,43 @@ class TestIsUnresolvedPoiForecastQuery:
         assert rfs.is_unresolved_poi_forecast_query("明天天气", regions="密云水库") is True
 
 
+class TestDynamicEventDateOverrideGuard:
+    def test_only_dynamic_events_allow_model_date_window(self):
+        assert rfs.is_dynamic_event_date_query("端午节假日天气怎么样") is True
+        assert rfs.is_dynamic_event_date_query("高考期间实验中学附近天气如何") is True
+        assert rfs.is_dynamic_event_date_query("端午天津天气") is True
+        assert rfs.is_dynamic_event_date_query("国庆天津天气") is True
+        assert rfs.is_dynamic_event_date_query("五一天津天气") is True
+        assert rfs.is_dynamic_event_date_query("国庆五大道天气") is True
+        assert rfs.is_dynamic_event_date_query("国庆天津市实验中学天气") is True
+        assert rfs.is_dynamic_event_date_query("五一古文化街天气") is True
+        assert rfs.is_dynamic_event_date_query("明天天气怎么样") is False
+        assert rfs.is_dynamic_event_date_query("五一阳光小区明天天气") is False
+        assert rfs.is_dynamic_event_date_query("国庆路小学明天天气") is False
+
+    def test_public_tool_applies_runtime_date_guard(self):
+        source = HMT.read_text(encoding="utf-8")
+        marker = "def query_rolling_forecast("
+        start = source.index(marker)
+        end = source.index("return query_rolling_forecast_core(", start)
+        section = source[start:end]
+        assert "is_dynamic_event_date_query(user_query)" in section
+        assert 'forecast_start_date = ""' in section
+        assert "forecast_days = 0" in section
+
+    def test_public_tool_resets_all_model_owned_low_level_window_params(self):
+        source = HMT.read_text(encoding="utf-8")
+        marker = "def query_rolling_forecast("
+        start = source.index(marker)
+        end = source.index("return query_rolling_forecast_core(", start)
+        section = source[start:end]
+        assert 'fcst_time = None' in section
+        assert "start_period = 0" in section
+        assert "end_period = 240" in section
+        assert "interval = 12" in section
+        assert 'query_window = ""' in section
+
+
 class TestQueryRollingForecastPoiGuardWiring:
     def test_guard_wired_after_basin_guard(self):
         src = HMT.read_text(encoding="utf-8")

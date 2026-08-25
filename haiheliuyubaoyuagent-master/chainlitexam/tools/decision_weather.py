@@ -23,6 +23,7 @@ from tools.decision_weather_core import (
     _extract_decision_weather_slots,
     _generate_decision_historical_answer_from_raw,
     _generate_decision_weather_answer,
+    _is_dynamic_event_query,
     _is_ec_rain_fallback_payload,
     _is_past_date_forecast_payload,
     _nearest_decision_station,
@@ -82,13 +83,16 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 print(f"[DecisionWeatherTool] LLM 抽取失败：{exc}")
                 return "问题理解失败，请尝试换一种更明确的说法。"
 
+            if slots.get("resolution_error"):
+                return str(slots["resolution_error"])
+
             if not slots.get("is_decision_weather"):
                 return "该问题看起来不是具体点位的天气问题，请补充具体地点。"
 
             if slots.get("need_clarification"):
                 return str(slots.get("clarification_question") or "请补充具体位置。").strip()
 
-            normalized = _normalize_decision_weather_slots(slots)
+            normalized = _normalize_decision_weather_slots(slots, user_text=user_text)
             if normalized.get("error"):
                 return normalized["error"]
 
@@ -98,6 +102,11 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
             poi_payload = _unwrap_tool_result(poi_raw)
             poi = _decision_pick_first_poi(poi_payload, location_name)
             if not poi:
+                if _is_dynamic_event_query(user_text):
+                    return (
+                        f"暂时无法可靠定位当前活动对应地点“{_clean_table_cell(location_name)}”，"
+                        "无法据此查询天气，请稍后重试。"
+                    )
                 return f"未检索到“{_clean_table_cell(location_name)}”的可用经纬度信息，请换一个更明确的位置名称。"
 
             poi_lon = float(poi["longitude"])
@@ -140,6 +149,9 @@ def build_decision_weather_tools(answer_chain: Any, tools: list, callbacks: dict
                 "lat": poi_lat,
                 "point_name": point_name,
             }
+            if normalized.get("forecast_start_date") and normalized.get("forecast_days"):
+                forecast_args["forecast_start_date"] = normalized["forecast_start_date"]
+                forecast_args["forecast_days"] = normalized["forecast_days"]
             print(f"[DecisionWeatherTool] query_rolling_forecast args: {json.dumps(forecast_args, ensure_ascii=False)}")
 
             forecast_raw = await forecast_tool.ainvoke(forecast_args)

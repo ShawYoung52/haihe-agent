@@ -536,8 +536,9 @@ async def test_dynamic_exam_event_uses_model_location_and_date_without_clarifica
         "question_type": "event_weather",
         "forecast_start_date": "2026-06-07",
         "forecast_days": 3,
-        "need_clarification": False,
-        "clarification_question": "",
+        # 即使模型附带澄清标记，动态活动的既定业务口径也必须直接查询。
+        "need_clarification": True,
+        "clarification_question": "请补充学校和日期。",
     })
 
     class CapturingForecastTool(FakeForecastTool):
@@ -558,6 +559,125 @@ async def test_dynamic_exam_event_uses_model_location_and_date_without_clarifica
     assert forecast_tool.last_args is not None
     assert forecast_tool.last_args["forecast_start_date"] == "2026-06-07"
     assert forecast_tool.last_args["forecast_days"] == 3
+    assert result.strip() != "请补充学校和日期。"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_event_retries_invalid_model_slots_without_clarifying():
+    """动态活动首轮漏填日期/地点时重试模型，不得直接反问或误查默认窗口。"""
+    responses = [
+        {
+            "is_decision_weather": False,
+            "location_name": "",
+            "forecast_start_date": "",
+            "forecast_days": 0,
+            "need_clarification": True,
+        },
+        {
+            "is_decision_weather": True,
+            "location_name": "天津市实验中学",
+            "question_type": "event_weather",
+            "forecast_start_date": "2026-06-07",
+            "forecast_days": 3,
+            "need_clarification": False,
+        },
+    ]
+    calls = []
+
+    async def invoke(_chain, inputs):
+        calls.append(inputs)
+        if not responses:
+            class AnswerResult:
+                content = "【核心结论】活动期间天气信息已获取。"
+
+            return AnswerResult()
+        payload = responses.pop(0)
+
+        class Result:
+            content = json.dumps(payload, ensure_ascii=False)
+
+        return Result()
+
+    class CapturingForecastTool(FakeForecastTool):
+        def __init__(self):
+            self.last_args = None
+
+        async def ainvoke(self, args):
+            self.last_args = dict(args)
+            return await super().ainvoke(args)
+
+    forecast_tool = CapturingForecastTool()
+    tool = dw.build_decision_weather_tools(
+        object(), [FakePoiTool(), forecast_tool], {"ainvoke_chain": invoke}
+    )[0]
+    result = await tool.ainvoke({"user_text": "高考期间实验中学附近天气如何？"})
+
+    assert len(calls) == 3  # 两轮槽位抽取 + 一轮回答生成
+    assert forecast_tool.last_args["forecast_start_date"] == "2026-06-07"
+    assert forecast_tool.last_args["forecast_days"] == 3
+    assert "请补充" not in result
+
+
+@pytest.mark.asyncio
+async def test_dynamic_event_invalid_after_retry_fails_closed_without_clarifying():
+    """连续两次无法可靠解析活动范围时明确失败，不得猜日期或回退默认预报。"""
+    calls = 0
+
+    async def invoke(_chain, _inputs):
+        nonlocal calls
+        calls += 1
+
+        class Result:
+            content = json.dumps({
+                "is_decision_weather": True,
+                "location_name": "",
+                "forecast_start_date": "not-a-date",
+                "forecast_days": 0,
+                "need_clarification": True,
+            }, ensure_ascii=False)
+
+        return Result()
+
+    class NeverForecastTool(FakeForecastTool):
+        async def ainvoke(self, args):
+            raise AssertionError(f"invalid dynamic slots must not query forecast: {args}")
+
+    tool = dw.build_decision_weather_tools(
+        object(), [FakePoiTool(), NeverForecastTool()], {"ainvoke_chain": invoke}
+    )[0]
+    result = await tool.ainvoke({"user_text": "高考期间实验中学附近天气如何？"})
+
+    assert calls == 2
+    assert "暂时无法可靠确定" in result
+    assert "请补充" not in result
+
+
+@pytest.mark.asyncio
+async def test_dynamic_event_poi_miss_fails_closed_without_clarifying():
+    """模型已选定动态活动地点但 POI 无结果时，不得要求用户再次澄清。"""
+    answer_chain = FakeChain(overrides={
+        "location_name": "天津市实验中学",
+        "question_type": "event_weather",
+        "forecast_start_date": "2026-06-07",
+        "forecast_days": 3,
+    })
+
+    class EmptyPoiTool(FakePoiTool):
+        async def ainvoke(self, args):
+            return [{"text": json.dumps({"pois": []}, ensure_ascii=False)}]
+
+    class NeverForecastTool(FakeForecastTool):
+        async def ainvoke(self, args):
+            raise AssertionError(f"POI miss must not query forecast: {args}")
+
+    callbacks = {"ainvoke_chain": lambda chain, inputs: answer_chain.ainvoke()}
+    tool = dw.build_decision_weather_tools(
+        answer_chain, [EmptyPoiTool(), NeverForecastTool()], callbacks
+    )[0]
+    result = await tool.ainvoke({"user_text": "高考期间实验中学附近天气如何？"})
+
+    assert "暂时无法可靠定位" in result
+    assert "更明确" not in result
     assert "请补充" not in result
 
 
@@ -606,6 +726,64 @@ def test_rule_based_slot_extraction_falls_back_on_ambiguous():
 def test_exam_period_is_delegated_to_model(query):
     """高考日期和同名学校由模型按当前年份及天津上下文解析，规则层不再要求澄清。"""
     assert dw_core._extract_decision_slots_rule_based(query) is None
+
+
+def test_dynamic_event_detection_does_not_misclassify_poi_names():
+    assert dw_core._is_dynamic_event_query("五一假期天津天气") is True
+    assert dw_core._is_dynamic_event_query("国庆节期间天津天气") is True
+    assert dw_core._is_dynamic_event_query("端午天津天气") is True
+    assert dw_core._is_dynamic_event_query("国庆天津天气") is True
+    assert dw_core._is_dynamic_event_query("五一天津天气") is True
+    assert dw_core._is_dynamic_event_query("国庆五大道天气") is True
+    assert dw_core._is_dynamic_event_query("国庆天津市实验中学天气") is True
+    assert dw_core._is_dynamic_event_query("五一古文化街天气") is True
+    assert dw_core._is_dynamic_event_query("五一阳光小区明天天气") is False
+    assert dw_core._is_dynamic_event_query("国庆路小学明天天气") is False
+
+
+@pytest.mark.asyncio
+async def test_dynamic_event_keeps_explicit_non_tianjin_region():
+    """用户已明确外埠城市时模型抽取结果必须保留，不得强制改选天津同名地点。"""
+    captured_prompts = []
+
+    async def invoke(_chain, inputs):
+        captured_prompts.append(inputs["messages"][0].content)
+
+        class Result:
+            content = json.dumps({
+                "is_decision_weather": True,
+                "location_name": "石家庄市实验中学",
+                "question_type": "event_weather",
+                "forecast_start_date": "2027-06-07",
+                "forecast_days": 3,
+                "need_clarification": False,
+            }, ensure_ascii=False)
+
+        return Result()
+
+    slots = await dw_core._extract_decision_weather_slots(
+        "高考期间石家庄市实验中学天气如何？", object(), {"ainvoke_chain": invoke}
+    )
+
+    assert slots["location_name"] == "石家庄市实验中学"
+    assert "用户明确给出省市时必须保留该地域" in captured_prompts[0]
+
+
+def test_model_date_window_is_ignored_for_non_dynamic_poi_query():
+    """普通 POI 问题即使抽取模型附带日期参数，也必须继续由后端解析用户原问。"""
+    slots = {
+        "location_name": "天津大学",
+        "question_type": "general_weather",
+        "forecast_start_date": "2030-01-01",
+        "forecast_days": 7,
+    }
+
+    normalized = dw_core._normalize_decision_weather_slots(
+        slots, user_text="天津大学明天天气怎么样"
+    )
+
+    assert "forecast_start_date" not in normalized
+    assert "forecast_days" not in normalized
 
 
 def test_classify_poi_category_five_categories():

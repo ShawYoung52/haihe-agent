@@ -23,6 +23,7 @@ from constants import DEFAULT_BASIN_CODES, DEFAULT_DATA_CODE, DEFAULT_OBS_ELEMEN
 from current_weather_observation_service import query_current_weather_observation_core
 from rolling_forecast_service import (
     is_basin_weather_query,
+    is_dynamic_event_date_query,
     is_unresolved_poi_forecast_query,
     query_rolling_forecast_core,
 )
@@ -3128,6 +3129,9 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         其他“最近会……/近期会……/未来一周/未来七天/未来几天”必须从明天 00:00 开始查 7 个自然日；
         “未来N天”明确了数量时从明天开始查 N 天。预警过程的动态预报值未说明日期时也按明天起 7 天处理。
         普通问答只需传 user_query 和可选地区/点位信息，不得由模型计算或传入底层时效参数。
+        唯一例外是节假日、高考等逐年变化的动态活动日期：模型结合当前年份解析后，可以传入
+        forecast_start_date 和 forecast_days；fcst_time/start_period/end_period/interval/query_window
+        仍禁止由模型填写。
 
         Args:
             user_query: 用户原始问题，用于解析区域；只说“我市/全市/天津”或未说明地区时默认查询天津市区代表点。
@@ -3140,8 +3144,8 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             start_period: 兼容专用内部流程的底层起始时效；普通问答不得由模型填写。
             end_period: 兼容专用内部流程的底层结束时效；普通问答不得由模型填写。
             interval: 兼容专用内部流程的底层时间步长；普通问答不得由模型填写。
-            forecast_start_date: 兼容旧调用方的自然日开始日期；普通问答由后端从 user_query 解析。
-            forecast_days: 兼容旧调用方的自然日天数；普通问答由后端从 user_query 解析。
+            forecast_start_date: 自然日开始日期；普通问答由后端解析，仅动态活动日期允许模型填写。
+            forecast_days: 自然日天数；普通问答由后端解析，仅动态活动日期允许模型填写。
             query_window: 兼容内部滚动预报窗口的参数，模型不得填写；当前气象实况问题
                 已改用 query_current_weather_observation，不再通过本参数查询。
 
@@ -3175,6 +3179,18 @@ def register_haihe_tools(mcp: FastMCP) -> None:
                 "该地点为具体点位，本工具仅按天津市区及区级代表点查询、无法按名称定位；"
                 "请改用 query_decision_weather_for_poi（先 search_poi 定位经纬度、再按点位查询）。"
             )
+        # 运行时边界：普通天气即使模型误传日期，也必须继续由 user_query 的确定性
+        # 日历解析负责；只有节假日/高考等动态活动允许模型提供自然日窗口。
+        if not is_dynamic_event_date_query(user_query):
+            forecast_start_date = ""
+            forecast_days = 0
+        # 公开 MCP 工具的低层时效参数只为签名兼容保留。Planner 即使误填也必须
+        # 在运行时清空；需要精确窗口的内部流程应直接调用 query_rolling_forecast_core。
+        fcst_time = None
+        start_period = 0
+        end_period = 240
+        interval = 12
+        query_window = ""
         return query_rolling_forecast_core(
             user_query=user_query,
             regions=regions,

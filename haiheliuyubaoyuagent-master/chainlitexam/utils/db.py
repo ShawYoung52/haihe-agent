@@ -1,22 +1,12 @@
-import os
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from utils.config import DB_CONFIG
 
-# Keep in sync with message_orchestrator.py. Defined locally to avoid importing that heavy module at db init time.
-ENABLE_FAST_PATHS = os.environ.get("ENABLE_FAST_PATHS", "false").strip().lower() in ("1", "true", "yes")
-
-if ENABLE_FAST_PATHS:
-    try:
-        from fast_paths import install_all_fast_paths
-
-        install_all_fast_paths()
-    except Exception as exc:
-        print(f"[utils.db] fast path routes init failed: {exc}")
-else:
-    print("[utils.db] fast paths are disabled (ENABLE_FAST_PATHS is not set)")
+# 与 message_orchestrator.py 保持一致：快速路径是永久禁用的业务边界，
+# 数据库初始化阶段也不得因部署环境变量而安装旧路由。
+ENABLE_FAST_PATHS = False
+print("[utils.db] fast paths are permanently disabled")
 
 engine = create_engine(
     f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}"

@@ -45,6 +45,10 @@ def test_enable_fast_paths_is_permanently_disabled(monkeypatch):
     importlib.reload(mo)
     assert mo.ENABLE_FAST_PATHS is False
 
+    monkeypatch.setenv("ENABLE_FAST_PATHS", "true")
+    importlib.reload(mo)
+    assert mo.ENABLE_FAST_PATHS is False
+
 
 def test_db_bootstrap_cannot_enable_fast_paths_from_environment():
     """数据库初始化模块也不得根据环境变量安装快速路径。"""
@@ -54,10 +58,6 @@ def test_db_bootstrap_cannot_enable_fast_paths_from_environment():
 
     assert "ENABLE_FAST_PATHS = False" in db_source
     assert 'os.environ.get("ENABLE_FAST_PATHS"' not in db_source
-
-    monkeypatch.setenv("ENABLE_FAST_PATHS", "true")
-    importlib.reload(mo)
-    assert mo.ENABLE_FAST_PATHS is False
 
 
 @pytest.mark.asyncio

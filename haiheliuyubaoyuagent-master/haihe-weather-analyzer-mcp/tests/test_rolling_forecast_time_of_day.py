@@ -432,7 +432,7 @@ class TestQueryRegionHazardsRiskLevels:
 
 
 class TestSummarizeTodWind:
-    """时段汇总风力风向：稳定演变按阶段合并，弱风跳变概括为风向多变。
+    """时段汇总风力风向：稳定演变按阶段合并，弱风跳变保留实际主导或首尾风向。
 
     修复甲方反馈的可读性问题——逐小时 EDA 原文去重拼接会出
     "西北风0-1级；东南风0-1级；东风0-1级；东风1-2级"这种既长又自相矛盾的列表。
@@ -450,24 +450,31 @@ class TestSummarizeTodWind:
         out = rfs._summarize_tod_wind(["北风3级", "南风2级"])
         assert out == "北风3级转南风2级"
 
-    def test_non_gradual_weak_wind_is_reported_as_variable(self):
-        """弱风发生大角度跳变时，不机械罗列或伪装成单向渐转。"""
+    def test_non_gradual_weak_wind_uses_predominant_direction(self):
+        """弱风发生大角度跳变时，用出现次数最多的实际风向概括。"""
         out = rfs._summarize_tod_wind([
             "西北风1-2级", "南风1-2级", "西南风1-2级", "西南风1-2级",
         ])
-        assert out == "风向多变，风力1~2级"
+        assert out == "以西南风为主，风力1~2级"
 
-    def test_weak_direction_return_is_reported_as_variable(self):
-        """弱风来回摆动用“风向多变”概括，不拼接冗长阶段。"""
+    def test_weak_direction_return_uses_predominant_direction(self):
+        """弱风来回摆动时保留出现次数最多的实际风向。"""
         out = rfs._summarize_tod_wind(["北风1-2级", "南风1-2级", "北风1-2级"])
-        assert out == "风向多变，风力1~2级"
+        assert out == "以北风为主，风力1~2级"
+
+    def test_tied_directions_with_same_endpoints_keep_actual_phase_path(self):
+        """频次并列且首尾相同时不得虚构主导风向，应保留实际阶段路径。"""
+        out = rfs._summarize_tod_wind([
+            "北风1-2级", "南风1-2级", "南风1-2级", "北风1-2级",
+        ])
+        assert out == "北风转南风转北风，风力1~2级"
 
     def test_hourly_force_changes_are_not_hidden_by_phase_ranges(self):
         """各阶段聚合后区间相同，不代表逐小时风力始终相同。"""
         out = rfs._summarize_tod_wind([
             "西北风1级", "西北风2级", "南风1级", "南风2级", "西南风1级", "西南风2级",
         ])
-        assert out == "风向多变，风力1~2级"
+        assert out == "西北风转西南风，风力1~2级"
 
     def test_adjacent_directions_with_same_force_form_compact_stages(self):
         """相同弱风力下相邻方位归为一个阶段，风力改变时再分段。"""
@@ -492,23 +499,23 @@ class TestSummarizeTodWind:
     def test_adjacent_direction_stage_handles_north_boundary(self, eda_values, expected):
         assert rfs._summarize_tod_wind(eda_values) == expected
 
-    def test_non_adjacent_weak_directions_are_reported_as_variable(self):
+    def test_non_adjacent_weak_directions_keep_actual_start_and_end(self):
         out = rfs._summarize_tod_wind([
             "西风0-1级", "东北风0-1级", "北风1-2级",
         ])
-        assert out == "风向多变，风力0~2级"
+        assert out == "西风转北风，风力0~2级"
 
-    def test_customer_reported_east_to_northwest_jump_is_variable(self):
+    def test_customer_reported_afternoon_wind_keeps_actual_start_and_end(self):
         out = rfs._summarize_tod_wind([
             "东风0-1级", "西北风0-1级", "东北风1-2级", "北风1-2级",
         ])
-        assert out == "风向多变，风力0~2级"
+        assert out == "东风转北风，风力0~2级"
 
-    def test_longer_weak_direction_return_is_variable(self):
+    def test_longer_weak_direction_return_uses_predominant_direction(self):
         out = rfs._summarize_tod_wind([
             "北风1-2级", "南风1-2级", "北风1-2级", "西风1-2级",
         ])
-        assert out == "风向多变，风力1~2级"
+        assert out == "以北风为主，风力1~2级"
 
     def test_compound_wind_is_preserved_verbatim(self):
         # 阵风是独立的气象要素，不能压成普通平均风力区间。
@@ -560,4 +567,4 @@ class TestSummarizeTodWind:
         result = rfs.query_rolling_forecast_core(user_query="今天下午蓟州天气怎么样", now=NOW)
         row = result["time_of_day_summary"][0]
         assert "；" not in row["EDA"]
-        assert row["EDA"] == "风向多变，风力0~2级"
+        assert row["EDA"] == "以东风为主，风力0~2级"

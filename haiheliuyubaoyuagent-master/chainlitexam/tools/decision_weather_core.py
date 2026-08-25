@@ -218,12 +218,43 @@ _DECISION_WEATHER_SUFFIXES = [
     "体育馆", "体育场", "博物馆", "展览馆", "开发区", "工业园", "度假区", "古镇",
 ]
 _DECISION_RAIN_WORDS = ["下雨", "有雨", "降雨", "降水", "暴雨", "雷阵雨", "雨"]
+_DYNAMIC_EVENT_EXPLICIT_WORDS = ("高考", "中考", "考试期间", "节假日", "假期")
+_DYNAMIC_HOLIDAY_NAME_PATTERN = re.compile(r"元旦|春节|清明|劳动节|五一|端午|中秋|国庆")
+_DYNAMIC_HOLIDAY_WEATHER_WORDS = ("天气", "气象", "预报", "出游", "出行", "适合")
+_DYNAMIC_HOLIDAY_EXPLICIT_SUFFIX_PATTERN = re.compile(r"^(?:节|假期|期间|放假)")
+_DYNAMIC_COMPETING_TIME_PATTERN = re.compile(
+    r"今天|今日|明天|后天|大后天|本周|下周|周[一二三四五六日天]|"
+    r"未来\s*(?:\d+|[一二三四五六七八九十]+)\s*(?:天|日|小时)"
+)
+
+
+def _is_dynamic_event_query(user_text: str) -> bool:
+    """是否需要由模型结合当前年份解析活动地点与日期。"""
+    text = str(user_text or "")
+    if any(word in text for word in _DYNAMIC_EVENT_EXPLICIT_WORDS):
+        return True
+    holiday = _DYNAMIC_HOLIDAY_NAME_PATTERN.search(text)
+    if holiday is None:
+        return False
+    tail = text[holiday.end():]
+    if _DYNAMIC_HOLIDAY_EXPLICIT_SUFFIX_PATTERN.match(tail):
+        return True
+    if not any(word in tail for word in _DYNAMIC_HOLIDAY_WEATHER_WORDS):
+        return False
+    # “五一阳光小区明天天气”等是在问同名地点的明确相对日，不把“五一”误作节日；
+    # 无竞争时间时（如“国庆五大道天气”）则交给模型结合年份与地点理解。
+    return _DYNAMIC_COMPETING_TIME_PATTERN.search(tail) is None
 
 
 def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
     """纯规则抽取点位决策天气槽位；无法可靠抽取时返回 None（调用方回退 LLM）。"""
     t = (user_text or "").strip()
     if not t:
+        return None
+
+    # 节假日、高考等日期和同名场所会随年份、上下文变化，交给模型统一解析；
+    # 规则层不得返回澄清问题，也不得维护易过期的固定日期表。
+    if _is_dynamic_event_query(t):
         return None
 
     # 1) 位置名：匹配机构后缀前的最长名词短语
@@ -255,38 +286,9 @@ def _extract_decision_slots_rule_based(user_text: str) -> dict | None:
     if not location:
         return None
 
-    event_period = next(
-        (word for word in ("高考期间", "中考期间", "考试期间") if word in t),
-        None,
-    )
-    missing_event_date = bool(event_period) and not re.search(
-        r"\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)", t
-    )
-    ambiguous_event_location = bool(event_period) and bool(re.fullmatch(
-        r"(?:(?:第[一二三四五六七八九十\d]+|实验|高级|职业|外国语|重点)?"
-        r"(?:中学|小学|学校|考点|校区))",
-        location,
-    ))
-    if missing_event_date or ambiguous_event_location:
-        missing_parts = []
-        if missing_event_date:
-            missing_parts.append(f"{event_period}的具体日期")
-        if ambiguous_event_location:
-            missing_parts.append(f"“{location}”所在区县或完整校名")
-        return {
-            "is_decision_weather": True,
-            "location_name": location,
-            "question_type": "event_weather",
-            "need_clarification": True,
-            "clarification_question": "请补充" + "，并说明".join(missing_parts)
-            + "，以免使用错误时段或匹配到外地同名学校。",
-        }
-
     # 2) 问题类型
     qtype = "general_weather"
-    if event_period:
-        qtype = "event_weather"
-    elif any(w in t for w in ["适合", "活动", "户外", "露营", "出行"]):
+    if any(w in t for w in ["适合", "活动", "户外", "露营", "出行"]):
         qtype = "activity"
     elif any(w in t for w in ["未来", "小时", "接下来"]):
         qtype = "rain_next_hours"
@@ -860,37 +862,95 @@ async def _extract_decision_weather_slots(user_text: str, answer_chain: Any, cal
     if rule_slots:
         return rule_slots
     # 回退：现有 LLM 抽取
+    current_date = time_source.now().strftime("%Y-%m-%d")
     prompt = (
         "你是天津气象决策服务问答的结构化抽取器。请判断用户问题是否属于"
         "“具体地点/单位/场馆/学校/医院/设施附近的未来或当前天气决策服务”。\n"
         "普通区域预报（如天津、全市、西青、滨海新区、未来一周天气）不属于本类，返回 is_decision_weather=false。\n"
-        "如果属于本类，只抽取位置名称和问题类型；不得计算、推断或输出当前时间、起报时间、"
-        "目标开始时间、目标结束时间、时间步长或时效参数，这些全部由滚动预报服务依据用户原问处理。\n"
-        "只有位置名称缺失或无法确定时才设置 need_clarification=true；不要因为相对时间或活动日期而在本层计算时间。\n"
+        "普通相对时间仍只抽取位置名称和问题类型，不计算底层起报时次或时效参数。\n"
+        f"当前日期是 {current_date}。遇到节假日、高考、中考等动态活动日期时，必须结合当前年份和用户原问解析活动日期。"
+        "用户明确给出省市时必须保留该地域；只有用户未说明城市或地点同名有歧义时，才按天津业务上下文选择"
+        "天津本地最匹配项，无需向用户澄清。把日期输出为 forecast_start_date（YYYY-MM-DD）和"
+        "forecast_days（1至10），不得维护或套用固定年份日期。\n"
+        "非动态活动问题只有位置名称完全缺失时才设置 need_clarification=true。\n"
         "只返回 JSON，不要输出解释。格式：\n"
         "{\n"
         '  "is_decision_weather": true,\n'
         '  "location_name": "梅江会展中心",\n'
         '  "question_type": "general_weather|rain_now|rain_next_hours|event_weather|visibility|temperature|wind|activity",\n'
+        '  "forecast_start_date": "",\n'
+        '  "forecast_days": 0,\n'
         '  "need_clarification": false,\n'
         '  "clarification_question": ""\n'
         "}\n\n"
         f"用户问题：{user_text}"
     )
-    result = await _ainvoke_chain(callbacks)(answer_chain, {"messages": [HumanMessage(content=prompt)]})
-    content = getattr(result, "content", None) or str(result)
-    return _extract_first_json_object(content)
+    dynamic_event = _is_dynamic_event_query(user_text)
+    invocation = _ainvoke_chain(callbacks)
+    for attempt in range(2):
+        active_prompt = prompt
+        if attempt:
+            active_prompt += (
+                "\n\n上一次结构化结果缺少有效地点或活动日期。请重新核对当前年份、用户明确地域和活动日历，"
+                "必须返回非空 location_name、YYYY-MM-DD 格式 forecast_start_date 以及 1 至 10 的 forecast_days；"
+                "不要询问用户，也不要退回默认天气窗口。"
+            )
+        result = await invocation(answer_chain, {"messages": [HumanMessage(content=active_prompt)]})
+        content = getattr(result, "content", None) or str(result)
+        slots = _extract_first_json_object(content)
+        if not dynamic_event:
+            return slots
+        if _dynamic_event_slots_are_complete(slots):
+            slots["need_clarification"] = False
+            slots["clarification_question"] = ""
+            return slots
+    return {
+        "is_decision_weather": True,
+        "need_clarification": False,
+        "clarification_question": "",
+        "resolution_error": "暂时无法可靠确定当前年份的活动日期或对应地点，无法据此查询天气，请稍后重试。",
+    }
 
 
-def _normalize_decision_weather_slots(slots: dict) -> dict:
-    """只校验点位识别结果；预报时间和窗口由滚动预报服务统一处理。"""
+def _dynamic_event_slots_are_complete(slots: dict) -> bool:
+    """动态活动必须同时具备地点和合法自然日窗口，避免静默回退默认 240 小时。"""
+    if not isinstance(slots, dict) or not bool(slots.get("is_decision_weather")):
+        return False
+    if not str(slots.get("location_name") or "").strip():
+        return False
+    start_date = str(slots.get("forecast_start_date") or "").strip()
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        forecast_days = int(slots.get("forecast_days") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 1 <= forecast_days <= 10
+
+
+def _normalize_decision_weather_slots(slots: dict, user_text: str = "") -> dict:
+    """校验点位槽位；仅动态活动允许携带模型解析的自然日窗口。"""
     location_name = str(slots.get("location_name") or "").strip()
     if not location_name:
         return {"error": "请补充要查询天气的位置名称，例如学校、场馆、医院或具体单位。"}
-    return {
+    normalized = {
         "location_name": location_name,
         "question_type": str(slots.get("question_type") or "general_weather"),
     }
+    if not _is_dynamic_event_query(user_text):
+        return normalized
+
+    start_date = str(slots.get("forecast_start_date") or "").strip()
+    try:
+        forecast_days = int(slots.get("forecast_days") or 0)
+        if start_date:
+            datetime.strptime(start_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        start_date = ""
+        forecast_days = 0
+    if start_date and 1 <= forecast_days <= 10:
+        normalized["forecast_start_date"] = start_date
+        normalized["forecast_days"] = forecast_days
+    return normalized
 
 
 def _decision_table_cell(value: Any, default: str = "—") -> str:

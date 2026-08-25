@@ -65,6 +65,9 @@ class DecisionWeatherQAService:
         except Exception as exc:
             print(f"[DecisionWeather] LLM 抽取失败：{exc}")
             return False
+        if slots.get("resolution_error"):
+            await self._emit(str(slots["resolution_error"]), user_text, messages)
+            return True
         if not bool(slots.get("is_decision_weather")):
             return False
 
@@ -73,7 +76,7 @@ class DecisionWeatherQAService:
             await self._emit(question, user_text, messages)
             return True
 
-        normalized = _normalize_decision_weather_slots(slots)
+        normalized = _normalize_decision_weather_slots(slots, user_text=user_text)
         if normalized.get("error"):
             await self._emit(str(normalized["error"]), user_text, messages)
             return True

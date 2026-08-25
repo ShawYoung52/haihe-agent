@@ -826,6 +826,33 @@ _TOD_SIMPLE_WIND_RE = re.compile(
     r"^(?P<direction>[东南西北偏]+风)\s*"
     r"(?P<lo>\d+)\s*(?:[-~～]\s*(?P<hi>\d+)\s*)?级$"
 )
+
+DYNAMIC_EVENT_DATE_EXPLICIT_KEYWORDS = ("高考", "中考", "考试期间", "节假日", "假期")
+DYNAMIC_EVENT_DATE_HOLIDAY_NAME_PATTERN = re.compile(r"元旦|春节|清明|劳动节|五一|端午|中秋|国庆")
+DYNAMIC_EVENT_DATE_WEATHER_WORDS = ("天气", "气象", "预报", "出游", "出行", "适合")
+DYNAMIC_EVENT_DATE_EXPLICIT_SUFFIX_PATTERN = re.compile(r"^(?:节|假期|期间|放假)")
+DYNAMIC_EVENT_DATE_COMPETING_TIME_PATTERN = re.compile(
+    r"今天|今日|明天|后天|大后天|本周|下周|周[一二三四五六日天]|"
+    r"未来\s*(?:\d+|[一二三四五六七八九十]+)\s*(?:天|日|小时)"
+)
+
+
+def is_dynamic_event_date_query(user_query: str) -> bool:
+    """仅这些逐年变化的活动允许模型提供自然日日期窗口。"""
+    text = str(user_query or "")
+    if any(keyword in text for keyword in DYNAMIC_EVENT_DATE_EXPLICIT_KEYWORDS):
+        return True
+    holiday = DYNAMIC_EVENT_DATE_HOLIDAY_NAME_PATTERN.search(text)
+    if holiday is None:
+        return False
+    tail = text[holiday.end():]
+    if DYNAMIC_EVENT_DATE_EXPLICIT_SUFFIX_PATTERN.match(tail):
+        return True
+    if not any(word in tail for word in DYNAMIC_EVENT_DATE_WEATHER_WORDS):
+        return False
+    return DYNAMIC_EVENT_DATE_COMPETING_TIME_PATTERN.search(tail) is None
+
+
 _TOD_WIND_DIRECTION_ANGLE = {
     "北风": 0, "东北风": 45, "东风": 90, "东南风": 135,
     "南风": 180, "西南风": 225, "西风": 270, "西北风": 315,
@@ -841,12 +868,15 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
     "西北风0-1级；东南风0-1级；东风0-1级；东风1-2级"这种既长又自相矛盾的列表。
     连续同风向的多条合并风力区间（东风0-1级 + 东风1-2级 → 东风0~2级）；带
     “阵风”等附加语义的复合风况及无风向词的原文（如“静风”）原样保留。
-    0~2级弱风只在相邻方位持续单向演变时表达具体转向；大角度跳变或来回
-    摆动概括为“风向多变”。较强风和复合原文不进入该弱风压缩分支。
+    0~2级弱风只在相邻方位持续单向演变时表达具体阶段；大角度跳变或来回
+    摆动时保留出现次数最多的实际风向；无唯一主导风向时保留首尾转向，
+    首尾相同则保留连续去重后的完整阶段路径。
+    较强风和复合原文不进入该弱风压缩分支。
     纯代码确定性、零编造：只重组工具返回的 EDA 文本，不引入任何新数值。
     """
     entries: list[dict[str, object]] = []  # 可解析风况与兜底原文共用同一时间顺序
     observed_forces: list[tuple[int, int]] = []  # 每条逐小时原始风力，供压缩资格判断
+    observed_directions: list[str] = []  # 保留逐小时方向频次，不能用阶段去重结果判断主导风向
     for raw in eda_values:
         e = str(raw or "").strip()
         if not e or e == "--":
@@ -860,6 +890,7 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
         lo = int(match.group("lo"))
         hi = int(match.group("hi") or lo)
         observed_forces.append((lo, hi))
+        observed_directions.append(direction)
         if entries and entries[-1].get("direction") == direction:
             phase = entries[-1]
             phase["lo"] = min(int(phase["lo"]), lo)
@@ -878,8 +909,9 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
     phases = [entry for entry in entries if "direction" in entry]
 
     # 0~2 级弱风下，逐小时风向容易摆动。只有每次按同一方向连续跨越相邻方位
-    # （每步 45°）才表述具体转向；大角度跳变或来回回转统一概括为“风向多变”。
-    # 这样既不把模式数据噪声机械罗列，也不虚构一条并不存在的单向转变路径。
+    # （每步 45°）才表述完整转向；其余情况使用原始逐小时频次概括主导风向，
+    # 频次并列时保留实际首尾转向；首尾相同则保留连续去重后的阶段路径。
+    # 这样避免机械罗列，且不再输出笼统的“风向多变”。
     if len(phases) > 1 and len(phases) == len(entries) and observed_forces:
         directions = [str(phase["direction"]) for phase in phases]
         angles = [_TOD_WIND_DIRECTION_ANGLE.get(direction) for direction in directions]
@@ -897,7 +929,20 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
                 lo = min(force[0] for force in observed_forces)
                 hi = max(force[1] for force in observed_forces)
                 force = f"{lo}级" if lo == hi else f"{lo}~{hi}级"
-                return f"风向多变，风力{force}"
+                counts = Counter(observed_directions)
+                highest = max(counts.values())
+                leaders = [direction for direction, count in counts.items() if count == highest]
+                if len(leaders) == 1:
+                    direction_summary = f"以{leaders[0]}为主"
+                elif observed_directions[0] == observed_directions[-1]:
+                    phase_path: list[str] = []
+                    for direction in observed_directions:
+                        if not phase_path or phase_path[-1] != direction:
+                            phase_path.append(direction)
+                    direction_summary = "转".join(phase_path)
+                else:
+                    direction_summary = f"{observed_directions[0]}转{observed_directions[-1]}"
+                return f"{direction_summary}，风力{force}"
 
     def format_phase(entry: dict[str, object]) -> str:
         direction = str(entry["direction"])

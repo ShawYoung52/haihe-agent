@@ -128,14 +128,9 @@ This project uses the superpowers plugin for disciplined development:
 
 ### `ENABLE_FAST_PATHS`
 
-- **Default:** `false`
-- **Behavior when `false`:** All fast-path pre-routing is disabled. Every user query flows through the planner LLM + tool loop.
-- **Behavior when `true`:** Legacy behavior. The 18 hard-coded fast paths and the monkeypatch installers in `fast_paths/` are active.
-- **How to enable:** Start the server with the environment variable set:
-  ```bash
-  ENABLE_FAST_PATHS=true chainlit run chain_gzt.py
-  ```
-- **Why it exists:** The fast paths use keyword matching that causes frequent mis-routing. This flag lets the team gradually validate planner-only behavior before permanently removing the fast-path code.
+- **状态：永久关闭。** `message_orchestrator.py` 与 `utils/db.py` 均固定为 `False`，不再读取环境变量。
+- 设置 `ENABLE_FAST_PATHS=true` 不会重新开启旧快速路径；所有问答统一走 Planner/工具编排链路。
+- 旧 `fast_paths/` 代码仅为兼容和历史参考保留，不得通过部署配置恢复。
 
 ## HTTP 问答接口
 
