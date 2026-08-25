@@ -823,30 +823,32 @@ def _time_of_day_label(user_query: str, target_start: datetime, now: datetime) -
 
 
 _TOD_WIND_DIR_RE = re.compile(r"^([东南西北偏]+风)")
+_TOD_WIND_DIR_TOKEN_RE = re.compile(r"[东南西北偏]+风")
 _TOD_THUNDER_QUALIFIER_RE = re.compile(r"^(?P<base>.+?)(?:并)?伴(?:随|有)?雷电$")
 _TOD_COMPOUND_WEATHER_RE = re.compile(r"[转到、,，/]")
 
 
 def _summarize_tod_wind(eda_values: list) -> str | None:
-    """时段汇总风力风向：按风向分组、合并该风向的风力区间，风向按出现顺序用"转"连接。
+    """时段汇总风力风向：按连续风向阶段合并风力区间，风向变化用"转"连接。
 
     修复甲方 2026-08-24 反馈的可读性问题——把逐小时 EDA 原文简单去重拼接会出
     "西北风0-1级；东南风0-1级；东风0-1级；东风1-2级"这种既长又自相矛盾的列表。
-    同风向的多条合并风力区间（东风0-1级 + 东风1-2级 → 东风0~2级）；复合风况
+    连续同风向的多条合并风力区间（东风0-1级 + 东风1-2级 → 东风0~2级）；复合风况
     （X～Y级阵风Z级）取全部数字的区间；无风向词的原文（如"静风"）原样保留不丢信息。
+    对风力始终相同且不超过2级的多次弱风转向，仅展示起止风向，避免把逐小时
+    轻风摆动机械罗列；风力变化、较强风或风向回转仍保留完整阶段。
     纯代码确定性、零编造：只重组工具返回的 EDA 文本，不引入任何新数值。
     """
-    groups: list[list] = []  # [direction, min_level, max_level]，保持出现顺序
-    dir_index: dict[str, int] = {}
-    fallback: list[str] = []  # 无风向词的原文
+    entries: list[dict[str, object]] = []  # 可解析风况与兜底原文共用同一时间顺序
+    observed_forces: list[tuple[int, int]] = []  # 每条逐小时原始风力，供压缩资格判断
     for raw in eda_values:
         e = str(raw or "").strip()
         if not e or e == "--":
             continue
         match = _TOD_WIND_DIR_RE.match(e)
-        if not match:
-            if e not in fallback:
-                fallback.append(e)
+        if not match or len(_TOD_WIND_DIR_TOKEN_RE.findall(e)) != 1:
+            if not entries or entries[-1].get("raw") != e:
+                entries.append({"raw": e})
             continue
         direction = match.group(1)
         levels: list[int] = []
@@ -855,22 +857,41 @@ def _summarize_tod_wind(eda_values: list) -> str | None:
         for m in re.finditer(r"(\d+)\s*级", e):
             levels.append(int(m.group(1)))
         if not levels:
-            if e not in fallback:
-                fallback.append(e)
+            if not entries or entries[-1].get("raw") != e:
+                entries.append({"raw": e})
             continue
         lo, hi = min(levels), max(levels)
-        if direction in dir_index:
-            g = groups[dir_index[direction]]
-            g[1] = min(g[1], lo)
-            g[2] = max(g[2], hi)
+        observed_forces.append((lo, hi))
+        if entries and entries[-1].get("direction") == direction:
+            phase = entries[-1]
+            phase["lo"] = min(int(phase["lo"]), lo)
+            phase["hi"] = max(int(phase["hi"]), hi)
         else:
-            dir_index[direction] = len(groups)
-            groups.append([direction, lo, hi])
-    parts = [
-        f"{direction}{lo}级" if lo == hi else f"{direction}{lo}~{hi}级"
-        for direction, lo, hi in groups
-    ]
-    parts.extend(fallback)
+            entries.append({"direction": direction, "lo": lo, "hi": hi})
+
+    phases = [entry for entry in entries if "direction" in entry]
+
+    same_weak_force = (
+        len(phases) > 2
+        and len(phases) == len(entries)
+        and phases[0]["direction"] != phases[-1]["direction"]
+        and len({phase["direction"] for phase in phases}) == len(phases)
+        and len(set(observed_forces)) == 1
+        and observed_forces[0][1] <= 2
+    )
+    if same_weak_force:
+        lo, hi = observed_forces[0]
+        force = f"{lo}级" if lo == hi else f"{lo}~{hi}级"
+        return f"{phases[0]['direction']}转{phases[-1]['direction']}{force}"
+
+    parts: list[str] = []
+    for entry in entries:
+        if "raw" in entry:
+            parts.append(str(entry["raw"]))
+            continue
+        direction = str(entry["direction"])
+        lo, hi = int(entry["lo"]), int(entry["hi"])
+        parts.append(f"{direction}{lo}级" if lo == hi else f"{direction}{lo}~{hi}级")
     return "转".join(parts) if parts else None
 
 

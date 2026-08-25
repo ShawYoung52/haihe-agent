@@ -450,6 +450,31 @@ class TestSummarizeTodWind:
         out = rfs._summarize_tod_wind(["北风3级", "南风2级"])
         assert out == "北风3级转南风2级"
 
+    def test_same_force_gradual_turn_keeps_start_and_end_directions(self):
+        """整晚同风力连续转向只展示起止风向，不机械罗列过渡小时。"""
+        out = rfs._summarize_tod_wind([
+            "西北风1-2级", "南风1-2级", "西南风1-2级", "西南风1-2级",
+        ])
+        assert out == "西北风转西南风1~2级"
+
+    def test_direction_return_is_not_misreported_as_one_way_turn(self):
+        """风向回转不是连续单向变化，必须保留完整的阶段顺序。"""
+        out = rfs._summarize_tod_wind(["北风1-2级", "南风1-2级", "北风1-2级"])
+        assert out == "北风1~2级转南风1~2级转北风1~2级"
+
+    def test_hourly_force_changes_are_not_hidden_by_phase_ranges(self):
+        """各阶段聚合后区间相同，不代表逐小时风力始终相同。"""
+        out = rfs._summarize_tod_wind([
+            "西北风1级", "西北风2级", "南风1级", "南风2级", "西南风1级", "西南风2级",
+        ])
+        assert out == "西北风1~2级转南风1~2级转西南风1~2级"
+
+    def test_longer_direction_return_keeps_all_phases(self):
+        out = rfs._summarize_tod_wind([
+            "北风1-2级", "南风1-2级", "北风1-2级", "西风1-2级",
+        ])
+        assert out == "北风1~2级转南风1~2级转北风1~2级转西风1~2级"
+
     def test_compound_wind_range_taken(self):
         # 复合风况取全部数字的区间（阵风并入）
         out = rfs._summarize_tod_wind(["东南风3～4级阵风6级"])
@@ -463,6 +488,15 @@ class TestSummarizeTodWind:
         # 无风向词的原文原样保留，不丢信息
         out = rfs._summarize_tod_wind(["静风"])
         assert out == "静风"
+
+    def test_compound_direction_source_is_kept_verbatim(self):
+        """单条原文已包含转向时不可只解析第一个风向。"""
+        out = rfs._summarize_tod_wind(["西北风转西南风1-2级"])
+        assert out == "西北风转西南风1-2级"
+
+    def test_unparseable_phase_keeps_its_original_position(self):
+        out = rfs._summarize_tod_wind(["北风1级", "静风", "南风1级"])
+        assert out == "北风1级转静风转南风1级"
 
     def test_summary_rows_uses_wind_summarizer(self, monkeypatch):
         """集成：time_of_day_summary 的风力风向走 _summarize_tod_wind，不再逐小时"；"拼接。"""
