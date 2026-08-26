@@ -463,15 +463,58 @@ def _build_warning_code_fallback(bundles: list[dict[str, Any]], user_text: str, 
     return "\n\n".join(sections)
 
 
-def _is_high_temperature_warning_value_query(user_text: str) -> bool:
-    text = user_text or ""
-    knowledge_words = ("发布标准", "预警标准", "阈值", "分几级", "颜色等级", "定义", "区别", "达到多少度发布")
-    if any(word in text for word in knowledge_words):
-        return False
+def _has_high_temperature_warning_subject(text: str) -> bool:
+    """识别“高温预警”和“高温红色预警”等同一业务主题。"""
     return (
         "高温预警" in text
-        and any(word in text for word in ("最高会到", "最高气温", "最高温度", "多少度"))
+        or (
+            "高温" in text
+            and any(f"{color}预警" in text for color in ("蓝色", "黄色", "橙色", "红色"))
+        )
     )
+
+
+def is_high_temperature_warning_threshold_query(user_text: str) -> bool:
+    """是否为高温预警的静态标准/阈值知识问法。"""
+    text = user_text or ""
+    if not _has_high_temperature_warning_subject(text):
+        return False
+
+    # “达到/满足发布标准了吗”本身已表达状态判断，不要求显式出现“现在”。
+    is_current_status_check = (
+        any(word in text for word in ("达到", "满足", "符合"))
+        and any(word in text for word in ("了吗", "是否", "吗", "没有", "没达到", "没满足"))
+    )
+    if is_current_status_check:
+        return False
+
+    knowledge_words = (
+        "标准", "阈值", "分几级", "颜色等级", "定义", "区别",
+        "发布条件", "达到多少度发布", "达到几度发布",
+    )
+    return any(word in text for word in knowledge_words)
+
+
+def _is_high_temperature_warning_value_query(user_text: str) -> bool:
+    text = user_text or ""
+    if is_high_temperature_warning_threshold_query(text):
+        return False
+    if not _has_high_temperature_warning_subject(text):
+        return False
+
+    # “最高会到/最高气温/最高温度”明确询问预警正文中的过程最高气温（预报值）；
+    # 单独的“高温预警多少度/达到多少度”则是静态阈值知识，仍由天河 04 目录回答。
+    process_peak_words = ("最高会到", "最高气温", "最高温度")
+    if any(word in text for word in process_peak_words):
+        return True
+    process_words = ("期间", "这次", "本次", "本轮", "过程")
+    value_words = ("多少度", "几度", "会到多少", "会到几")
+    return any(word in text for word in process_words) and any(word in text for word in value_words)
+
+
+def is_high_temperature_warning_value_query(user_text: str) -> bool:
+    """供编排边界复用：高温预警过程实际温度由本地生效预警正文回答。"""
+    return _is_high_temperature_warning_value_query(user_text)
 
 
 def _is_warning_fact_query(user_text: str) -> bool:

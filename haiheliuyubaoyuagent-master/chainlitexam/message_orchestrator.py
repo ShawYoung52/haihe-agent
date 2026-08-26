@@ -1063,7 +1063,17 @@ def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
     if not text:
         return None
 
+    # “高温预警期间最高会到多少度”等询问的是当前预警过程实际值，不是“多少度算高温”
+    # 这类静态定义。该问法已由本地预警链路依据生效预警 content 回答，严禁转交天河。
+    if warning_workflow.is_high_temperature_warning_value_query(text):
+        return None
+
     tianhe_route = ("query_tianhe_fixed_qa", {"query": text})
+
+    # “发布”通常表示当前预警状态，因此知识路由会整体排除；但明确询问发布标准、
+    # 阈值或发布条件属于天河 04 静态知识目录，需要在状态词排除前识别。
+    if warning_workflow.is_high_temperature_warning_threshold_query(text):
+        return tianhe_route
 
     def _hit(rule_table) -> bool:
         return any(
@@ -1126,6 +1136,24 @@ def _enforce_tianhe_catalog_boundary(planner_msg, user_text: str):
     普通天气预报、点位决策或其它本地业务问题补调到天河。
     """
     calls = list(getattr(planner_msg, "tool_calls", None) or [])
+
+    # 该问法需要读取当前生效高温预警正文中的过程最高气温（预报值）。即使 Planner 只选了天河，
+    # 或同时误选滚动预报，也统一收敛为本地预警工具，避免拦截天河后没有有效数据源。
+    if warning_workflow.is_high_temperature_warning_value_query(user_text):
+        warning_call = next(
+            (dict(call) for call in calls if call.get("name") == "get_effective_warning_info"),
+            {
+                "name": "get_effective_warning_info",
+                "args": {},
+                "id": "forced-high-temperature-warning",
+            },
+        )
+        warning_call["args"] = {}
+        _set_tool_calls(planner_msg, [warning_call])
+        if [call.get("name") for call in calls] != ["get_effective_warning_info"]:
+            print("[高温预警路由] 已强制使用本地生效预警工具")
+        return planner_msg
+
     if not any(call.get("name") == "query_tianhe_fixed_qa" for call in calls):
         return planner_msg
 

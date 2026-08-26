@@ -1,6 +1,9 @@
 """预警表格按问法作用域裁剪测试。"""
 import sys
 from pathlib import Path
+
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from chainlitexam.tests.stubs import ensure_stubs
 ensure_stubs()
@@ -172,3 +175,44 @@ class TestIsWarningFactQueryKnowledgeExclusion:
         # 高温数值问法由 _is_high_temperature_warning_value_query 显式命中（走预警接口），
         # 仍算预警事实查询——与既有行为一致，勿改
         assert wf._is_warning_fact_query("高温预警期间最高会到多少度") is True
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "高温预警期间最高会到多少度",
+            "高温预警期间最高气温多少",
+            "这次高温预警最高温度是多少",
+            "本轮高温预警最高会到几度",
+            "高温预警过程最高温度是多少",
+            "高温红色预警期间最高会到多少度",
+            "这次高温红色预警最高温度是多少",
+        ],
+    )
+    def test_high_temperature_warning_process_value_uses_local_warning(self, question):
+        assert wf.is_high_temperature_warning_value_query(question) is True
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "高温预警多少度",
+            "高温预警达到多少度",
+            "高温预警达到多少度发布",
+            "高温预警发布标准是什么",
+            "高温预警最高温度标准是多少",
+            "多少度算高温",
+        ],
+    )
+    def test_high_temperature_static_threshold_is_not_process_value(self, question):
+        assert wf.is_high_temperature_warning_value_query(question) is False
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "现在达到高温预警发布标准了吗",
+            "目前满足高温预警发布条件了吗",
+            "达到高温预警发布标准了吗",
+            "天津高温预警达到发布标准了吗",
+        ],
+    )
+    def test_current_threshold_status_is_not_static_knowledge(self, question):
+        assert wf.is_high_temperature_warning_threshold_query(question) is False

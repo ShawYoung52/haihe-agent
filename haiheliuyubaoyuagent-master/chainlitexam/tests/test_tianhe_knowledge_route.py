@@ -29,6 +29,41 @@ ensure_stubs()
 import chainlitexam.message_orchestrator as mo  # noqa: E402
 
 
+class TestTianheCustomerAcceptanceCatalog:
+    """甲方确认的天河接入清单：每条都必须固定走供应方问答且原文透传。"""
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "今年7月蓟州区有多少天超过35℃",
+            "今年以来我市40℃以上高温出现过几次？",
+            "现在市区风大吗？",
+            "市区现在气温和风的实况",
+            "全市现在下了多少雨",
+            "今天雨都下在哪了",
+            "暴雨天气的防范建议",
+            "大风天气的防范建议",
+            "高温天气的防范建议",
+            "强对流天气怎么应对",
+            "暴雨预警四个等级是什么",
+            "高温怎么定义",
+            "气温多高算是高温",
+            "高温来了公众应该怎么办",
+            "高温预警信号及应对措施",
+            "降雨量怎么分等级",
+            "台风等级",
+            "暴雨预警发出后公众该怎么办",
+            "暴雨是如何形成的",
+            "暴雨等级是如何划分的",
+            "暴雨的主要危害有哪些",
+        ],
+    )
+    def test_confirmed_question_routes_to_tianhe_verbatim(self, question):
+        route = mo._route_tianhe_knowledge_query(question)
+
+        assert route == ("query_tianhe_fixed_qa", {"query": question})
+
+
 class TestTianheKnowledgeRouteHit:
     @pytest.mark.parametrize(
         "question",
@@ -89,6 +124,22 @@ class TestTianheDisasterPreventionCatalog:
     def test_catalog_hit(self, question):
         route = mo._route_tianhe_knowledge_query(question)
         assert route == ("query_tianhe_fixed_qa", {"query": question}), f"04 目录未命中：{question}"
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "高温预警多少度",
+            "高温预警达到多少度",
+            "高温预警发布标准是什么",
+            "高温预警达到多少度发布",
+            "高温预警最高温度标准是多少",
+            "高温红色预警发布标准是什么",
+            "多少度算高温",
+        ],
+    )
+    def test_static_high_temperature_threshold_stays_in_tianhe_catalog(self, question):
+        route = mo._route_tianhe_knowledge_query(question)
+        assert route == ("query_tianhe_fixed_qa", {"query": question})
 
 
 class TestTianheLiveCatalog:
@@ -153,6 +204,11 @@ class TestTianheKnowledgeRouteMiss:
             "当前暴雨预警",
             "最新暴雨预警信息",
             "天津发布暴雨预警了吗",
+            "天津发布高温预警了吗",
+            "现在达到高温预警发布标准了吗",
+            "目前满足高温预警发布条件了吗",
+            "达到高温预警发布标准了吗",
+            "天津高温预警达到发布标准了吗",
             "今天有什么预警",
             # 带时间词/POI 的决策天气 → 原路由不变
             "明天去盘山暴雨注意事项",
@@ -168,6 +224,12 @@ class TestTianheKnowledgeRouteMiss:
             "明天风大吗",
             "未来三天的天气怎么样？",
             "这个周末适合去哪玩",
+            # 预警过程实际数值由本地生效预警正文回答，不属于“高温定义”目录
+            "高温预警期间最高会到多少度？",
+            "高温预警期间最高气温多少？",
+            "这次高温预警最高温度是多少？",
+            "高温红色预警期间最高会到多少度？",
+            "这次高温红色预警最高温度是多少？",
             # 今日实况/预报缺 05 时段词，不命中气候统计
             "今天大风怎么样",
             "今天气温多少度",
@@ -238,6 +300,90 @@ class TestTianheCatalogBoundaryGuard:
         guarded = mo._enforce_tianhe_catalog_boundary(msg, "未来三天的天气怎么样？")
 
         assert [call["name"] for call in guarded.tool_calls] == ["query_rolling_forecast"]
+
+    def test_removes_tianhe_call_for_high_temperature_warning_value(self):
+        """高温预警实际温度由本地预警工具负责，Planner 无权补调天河。"""
+        from langchain_core.messages import AIMessage
+
+        user_text = "高温预警期间最高会到多少度？"
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "get_effective_warning_info",
+                    "args": {},
+                    "id": "warning-1",
+                },
+                {
+                    "name": "query_tianhe_fixed_qa",
+                    "args": {"query": user_text},
+                    "id": "tianhe-1",
+                },
+            ],
+        )
+
+        guarded = mo._enforce_tianhe_catalog_boundary(msg, user_text)
+
+        assert [call["name"] for call in guarded.tool_calls] == ["get_effective_warning_info"]
+
+    def test_replaces_tianhe_only_call_with_local_warning_for_high_temperature_value(self):
+        from langchain_core.messages import AIMessage
+
+        user_text = "高温预警期间最高会到多少度？"
+        msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "query_tianhe_fixed_qa",
+                "args": {"query": user_text},
+                "id": "tianhe-1",
+            }],
+        )
+
+        guarded = mo._enforce_tianhe_catalog_boundary(msg, user_text)
+
+        assert [call["name"] for call in guarded.tool_calls] == ["get_effective_warning_info"]
+        assert guarded.tool_calls[0]["args"] == {}
+
+    def test_replaces_mixed_planner_calls_with_local_warning_for_high_temperature_value(self):
+        from langchain_core.messages import AIMessage
+
+        user_text = "这次高温预警最高温度是多少？"
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "query_rolling_forecast",
+                    "args": {"user_query": user_text, "regions": ""},
+                    "id": "rolling-1",
+                },
+                {
+                    "name": "query_tianhe_fixed_qa",
+                    "args": {"query": user_text},
+                    "id": "tianhe-1",
+                },
+            ],
+        )
+
+        guarded = mo._enforce_tianhe_catalog_boundary(msg, user_text)
+
+        assert [call["name"] for call in guarded.tool_calls] == ["get_effective_warning_info"]
+
+    def test_color_warning_process_value_forces_local_warning(self):
+        from langchain_core.messages import AIMessage
+
+        user_text = "高温红色预警期间最高会到多少度？"
+        msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "query_tianhe_fixed_qa",
+                "args": {"query": user_text},
+                "id": "tianhe-1",
+            }],
+        )
+
+        guarded = mo._enforce_tianhe_catalog_boundary(msg, user_text)
+
+        assert [call["name"] for call in guarded.tool_calls] == ["get_effective_warning_info"]
 
     def test_keeps_catalog_call_and_forces_original_user_query(self):
         from langchain_core.messages import AIMessage
