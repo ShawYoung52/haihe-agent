@@ -4,8 +4,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
+import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import RealDictCursor
+
+from constants import RIVER_TABLE_FULL
 import time_source
 
 TIANJIN_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -54,6 +60,115 @@ class ForecastPeriod:
     label: str
     target_start: datetime
     target_end: datetime
+
+
+class RiverNotFoundError(Exception):
+    """请求的河流在河网数据中不存在有效几何。"""
+
+
+class RiverDatabaseError(Exception):
+    """加载河流走廊时发生数据库或几何解析错误。"""
+
+
+@dataclass(frozen=True)
+class RiverCorridor:
+    """用于降雨预报空间统计的河道缓冲区。"""
+
+    river_name: str
+    matched_name: str
+    srid: int
+    geometry: Any
+    buffer_km: float
+
+
+def load_river_corridor(
+    river_name: str,
+    pg_conf: dict,
+    buffer_km: float = 5.0,
+) -> RiverCorridor:
+    """从 full_v6 河网加载按米制坐标计算的河道缓冲区。"""
+    requested_name = str(river_name or "").strip()
+    schema = str(pg_conf.get("schema", "public") or "public").strip()
+    table = str(pg_conf.get("river_table_full", RIVER_TABLE_FULL) or RIVER_TABLE_FULL).strip()
+    source_srid = int(pg_conf.get("source_srid", 4326) or 4326)
+    buffer_km = float(buffer_km)
+    buffer_m = buffer_km * 1000.0
+    statement = sql.SQL(
+        """
+        WITH candidates AS (
+            SELECT river_name, src_name, geom,
+                   CASE
+                     WHEN river_name = %(river_name)s OR src_name = %(river_name)s THEN 0
+                     ELSE 1
+                   END AS match_rank
+            FROM {}.{}
+            WHERE river_name = %(river_name)s
+               OR src_name = %(river_name)s
+               OR river_name ILIKE %(contains)s
+               OR src_name ILIKE %(contains)s
+        ), best AS (
+            SELECT * FROM candidates
+            WHERE match_rank = (SELECT MIN(match_rank) FROM candidates)
+        ), merged AS (
+            SELECT COALESCE(MIN(NULLIF(river_name, '')), MIN(src_name)) AS matched_name,
+                   ST_UnaryUnion(ST_Collect(ST_MakeValid(geom))) AS geom
+            FROM best
+        )
+        SELECT matched_name, 4326 AS srid,
+               ST_AsBinary(
+                 ST_Transform(
+                   ST_Buffer(ST_Transform(ST_SetSRID(geom, %(source_srid)s), 3857), %(buffer_m)s),
+                   4326
+                 )
+               ) AS geom_wkb
+        FROM merged
+        WHERE geom IS NOT NULL;
+        """
+    ).format(sql.Identifier(schema), sql.Identifier(table))
+    connection_kwargs = {
+        "host": pg_conf.get("host"),
+        "port": pg_conf.get("port"),
+        "dbname": pg_conf.get("dbname"),
+        "user": pg_conf.get("user"),
+        "password": pg_conf.get("password"),
+        "sslmode": pg_conf.get("sslmode", "prefer"),
+        "connect_timeout": int(pg_conf.get("connect_timeout", "5") or "5"),
+    }
+    params = {
+        "river_name": requested_name,
+        "contains": f"%{requested_name}%",
+        "source_srid": source_srid,
+        "buffer_m": buffer_m,
+    }
+
+    try:
+        with psycopg2.connect(**connection_kwargs) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(statement, params)
+                row = cur.fetchone()
+        if not row or not row.get("geom_wkb"):
+            raise RiverNotFoundError(f"未找到河流 {requested_name} 的有效河道几何")
+        return RiverCorridor(
+            river_name=requested_name,
+            matched_name=str(row.get("matched_name") or requested_name),
+            srid=int(row.get("srid") or 4326),
+            geometry=_geometry_from_wkb(bytes(row["geom_wkb"])),
+            buffer_km=buffer_km,
+        )
+    except RiverNotFoundError:
+        raise
+    except Exception as exc:
+        raise RiverDatabaseError(f"加载河道缓冲区失败: {exc}") from exc
+
+
+def _geometry_from_wkb(value: bytes) -> Any:
+    """从 WKB 物化独立的 OGR 几何对象。"""
+    from osgeo import ogr
+
+    geometry = ogr.CreateGeometryFromWkb(value)
+    if geometry is None or geometry.IsEmpty():
+        raise ValueError("河道缓冲区 WKB 无效")
+    return geometry
 
 
 def extract_river_target(user_query: str) -> str:

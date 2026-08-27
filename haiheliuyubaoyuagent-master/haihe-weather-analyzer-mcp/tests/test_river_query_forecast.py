@@ -82,3 +82,107 @@ def test_invalid_future_day_count_raises_instead_of_falling_back_to_today():
         rqf.resolve_river_forecast_periods(
             "未来十几天泃河有雨吗？", datetime(2026, 8, 27, 8, 0, tzinfo=TZ)
         )
+
+
+class FakeCursor:
+    def __init__(self, executed):
+        self.executed = executed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, statement, params):
+        self.executed["sql"] = repr(statement)
+        self.executed["params"] = params
+
+    def fetchone(self):
+        return {
+            "matched_name": "泃河",
+            "srid": 4326,
+            "geom_wkb": b"valid-wkb",
+        }
+
+
+class FakeConnection:
+    def __init__(self, executed):
+        self.executed = executed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def cursor(self, **kwargs):
+        return FakeCursor(self.executed)
+
+
+class EmptyCursor(FakeCursor):
+    def fetchone(self):
+        return None
+
+
+class EmptyConnection(FakeConnection):
+    def __init__(self):
+        super().__init__({})
+
+    def cursor(self, **kwargs):
+        return EmptyCursor(self.executed)
+
+
+def test_corridor_query_uses_full_table_exact_match_and_5000_metre_buffer(monkeypatch):
+    """Catches a regression to a non-full table, degree buffering, or fuzzy-only merge."""
+    executed = {}
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: FakeConnection(executed))
+    monkeypatch.setattr(rqf, "_geometry_from_wkb", lambda value: object())
+
+    corridor = rqf.load_river_corridor(
+        "泃河",
+        {"schema": "public", "river_table_full": "haihe_river_directed_full_v6"},
+    )
+
+    assert "haihe_river_directed_full_v6" in executed["sql"]
+    assert "match_rank" in executed["sql"]
+    assert "MIN(match_rank)" in executed["sql"]
+    assert "ST_Buffer" in executed["sql"]
+    assert "3857" in executed["sql"]
+    assert executed["params"] == {
+        "river_name": "泃河",
+        "contains": "%泃河%",
+        "source_srid": 4326,
+        "buffer_m": 5000.0,
+    }
+    assert corridor.buffer_km == 5.0
+
+
+def test_corridor_query_defaults_to_full_v6_table(monkeypatch):
+    """Catches an outdated river-table default when the config omits its table name."""
+    executed = {}
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: FakeConnection(executed))
+    monkeypatch.setattr(rqf, "_geometry_from_wkb", lambda value: object())
+
+    rqf.load_river_corridor("泃河", {"schema": "public"})
+
+    assert "haihe_river_directed_full_v6" in executed["sql"]
+
+
+def test_missing_river_raises_a_distinct_not_found_error(monkeypatch):
+    """Catches treating missing river geometry as a successful no-rain result."""
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: EmptyConnection())
+
+    with pytest.raises(rqf.RiverNotFoundError):
+        rqf.load_river_corridor("不存在河", {"river_table_full": "haihe_river_directed_full_v6"})
+
+
+def test_database_failure_raises_a_distinct_database_error(monkeypatch):
+    """Catches database failures being misreported as a river-name miss."""
+    def raise_connection_error(**kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(rqf.psycopg2, "connect", raise_connection_error)
+
+    with pytest.raises(rqf.RiverDatabaseError, match="加载河道缓冲区失败"):
+        rqf.load_river_corridor("泃河", {"river_table_full": "haihe_river_directed_full_v6"})
