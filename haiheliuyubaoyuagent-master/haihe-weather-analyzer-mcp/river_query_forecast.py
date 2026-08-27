@@ -23,7 +23,7 @@ KNOWN_RIVER_SYSTEMS: frozenset[str] = frozenset({
     "海河流域",
 })
 
-_RIVER_CORRIDOR_RE = re.compile(r"([\u4e00-\u9fff]{1,8}?)河道")
+_RIVER_CORRIDOR_RE = re.compile(r"([\u4e00-\u9fff]{1,8}?)(?:的)?河道")
 _RIVER_NAME_RE = re.compile(r"([\u4e00-\u9fff]{1,8}河)")
 _RAIN_OR_WEATHER_PREDICATE_RE = re.compile(r"有雨|下雨|降雨|降水|雨量|天气")
 _FUTURE_DAYS_RE = re.compile(r"未来\s*([^\s，。！？?、]{1,8}?)\s*天")

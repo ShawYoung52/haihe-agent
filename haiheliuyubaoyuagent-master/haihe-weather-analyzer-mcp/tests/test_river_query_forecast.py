@@ -27,6 +27,14 @@ def test_extract_river_ignores_leading_query_modifiers_and_corridor_words(query)
     assert rqf.extract_river_target(query) == "泃河"
 
 
+@pytest.mark.parametrize(
+    "query",
+    ("泃河河道明天有雨吗？", "明天泃河的河道有雨吗？", "明天泃河有雨吗？"),
+)
+def test_extract_river_treats_corridor_phrases_as_structural_suffixes(query):
+    assert rqf.extract_river_target(query) == "泃河"
+
+
 def test_tomorrow_is_a_natural_day():
     periods = rqf.resolve_river_forecast_periods(
         "明天泃河有雨吗？", datetime(2026, 8, 27, 10, 15, tzinfo=TZ)
