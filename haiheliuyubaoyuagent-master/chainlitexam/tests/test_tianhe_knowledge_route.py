@@ -26,6 +26,7 @@ from chainlitexam.tests.stubs import ensure_stubs  # noqa: E402
 
 ensure_stubs()
 
+from langchain_core.messages import AIMessage  # noqa: E402
 import chainlitexam.message_orchestrator as mo  # noqa: E402
 from chainlitexam.tools.tianhe_fixed_qa_catalog import TIANHE_FIXED_QA_QUESTIONS  # noqa: E402
 
@@ -60,6 +61,37 @@ class TestTianheFixedCatalogRoute:
     )
     def test_previously_accepted_tianhe_questions_remain_supported(self, question):
         assert mo._route_tianhe_knowledge_query(question) is not None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "未来三天天气怎么样？",
+        "明天蓟州天气怎么样？",
+        "高温预警期间最高会到多少度？",
+        "今天蓟州可能有哪些风险？",
+        "明天泃河有雨吗？",
+    ],
+)
+def test_new_catalog_does_not_capture_local_business_questions(question):
+    assert mo._route_tianhe_fixed_catalog_query(question) is None
+
+
+def test_planner_cannot_inject_tianhe_for_non_catalog_question():
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "query_tianhe_fixed_qa",
+                "args": {"query": "未来三天天气怎么样？"},
+                "id": "bad-tianhe",
+            }
+        ],
+    )
+
+    guarded = mo._enforce_tianhe_catalog_boundary(msg, "未来三天天气怎么样？")
+
+    assert guarded.tool_calls == []
 
 
 class TestTianheCustomerAcceptanceCatalog:
