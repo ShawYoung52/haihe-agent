@@ -15,9 +15,15 @@ def test_extracts_river_after_leading_time_words():
 
 @pytest.mark.parametrize(
     "query",
-    ("请问明天泃河有雨吗？", "明天下午泃河有雨吗？", "泃河河道明天有雨吗？"),
+    (
+        "请问明天泃河有雨吗？",
+        "请问一下明天泃河有雨吗？",
+        "明天下午泃河有雨吗？",
+        "明天早上泃河有雨吗？",
+        "泃河河道明天有雨吗？",
+    ),
 )
-def test_extract_river_ignores_question_time_and_corridor_words(query):
+def test_extract_river_ignores_leading_query_modifiers_and_corridor_words(query):
     assert rqf.extract_river_target(query) == "泃河"
 
 
