@@ -454,33 +454,45 @@ def _build_system_period(
     zones: list[dict],
 ) -> dict:
     covered_stats = []
-    has_unknown_zone = False
+    incomplete_zone_count = 0
+    confirmed_zero_coverage_count = 0
     for zone in zones:
-        valid_count = _as_positive_int(zone.get("valid_count"))
+        raw_valid_count = zone.get("valid_count")
+        valid_count = _as_positive_int(raw_valid_count)
         average = zone.get("average_rainfall_mm")
         maximum = zone.get("max_rainfall_mm")
         minimum = zone.get("min_rainfall_mm")
+        if valid_count is None:
+            if _as_nonnegative_int(raw_valid_count) == 0:
+                confirmed_zero_coverage_count += 1
+            else:
+                incomplete_zone_count += 1
+            continue
         if (
-            valid_count is None
-            or not _is_number(average)
+            not _is_number(average)
             or not _is_number(maximum)
             or not _is_number(minimum)
         ):
-            has_unknown_zone = True
+            incomplete_zone_count += 1
             continue
         covered_stats.append((valid_count, average, maximum, minimum))
 
     valid_count = sum(item[0] for item in covered_stats)
     if not covered_stats:
-        has_rain, status = None, "no_coverage"
-    elif has_unknown_zone:
+        has_rain = None
+        status = (
+            "no_coverage"
+            if zones and confirmed_zero_coverage_count == len(zones)
+            else "unknown_coverage"
+        )
+    elif incomplete_zone_count or confirmed_zero_coverage_count:
         has_rain = True if any(item[2] > 0 for item in covered_stats) else None
         status = "partial"
     else:
         has_rain = any(item[2] > 0 for item in covered_stats)
         status = "ok"
 
-    if has_unknown_zone:
+    if incomplete_zone_count or confirmed_zero_coverage_count:
         average = maximum = minimum = None
     elif covered_stats:
         average = sum(item[0] * item[1] for item in covered_stats) / valid_count
@@ -524,14 +536,6 @@ def _forecast_hours(period: ForecastPeriod) -> int:
 
 
 def _as_nonnegative_int(value: Any) -> int | None:
-    try:
-        result = int(value)
-    except (TypeError, ValueError):
-        return None
-    return result if result >= 0 else None
-
-
-def _as_positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     try:
@@ -539,6 +543,13 @@ def _as_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError, OverflowError):
         return None
     if isinstance(value, float) and not value.is_integer():
+        return None
+    return result if result >= 0 else None
+
+
+def _as_positive_int(value: Any) -> int | None:
+    result = _as_nonnegative_int(value)
+    if result is None:
         return None
     return result if result > 0 else None
 

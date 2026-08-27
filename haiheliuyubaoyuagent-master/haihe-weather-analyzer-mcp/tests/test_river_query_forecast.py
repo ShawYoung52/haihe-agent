@@ -586,10 +586,11 @@ def test_valid_rain_with_an_uncovered_zone_reports_rain_and_partial_coverage(mon
     assert period["average_rainfall_mm"] is None
 
 
-def test_missing_zone_valid_count_is_not_evidence_of_no_rain(monkeypatch):
-    """Catches legacy or failed zone payloads without valid_count being treated as dry coverage."""
+def test_all_missing_zone_valid_counts_are_unknown_coverage(monkeypatch):
+    """Catches legacy zone payloads without valid_count being mislabeled as confirmed no coverage."""
     monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
         {"zone_name": "滦河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0},
+        {"zone_name": "海河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0},
     ]))
 
     result = rqf.query_river_rainfall_forecast_core(
@@ -597,9 +598,39 @@ def test_missing_zone_valid_count_is_not_evidence_of_no_rain(monkeypatch):
     )
 
     period = result["periods"][0]
-    assert period["status"] == "no_coverage"
+    assert period["status"] == "unknown_coverage"
     assert period["has_rain"] is None
     assert period["average_rainfall_mm"] is None
+
+
+def test_illegal_zone_valid_count_is_unknown_coverage(monkeypatch):
+    """Catches an invalid pixel count being mislabeled as confirmed no coverage."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": -1},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "unknown_coverage"
+    assert period["has_rain"] is None
+
+
+def test_missing_zone_statistic_is_unknown_coverage(monkeypatch):
+    """Catches a positive pixel count with incomplete rainfall statistics being treated as coverage."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": 12},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "unknown_coverage"
+    assert period["has_rain"] is None
 
 
 def test_complete_river_system_coverage_uses_valid_count_weighted_average(monkeypatch):
