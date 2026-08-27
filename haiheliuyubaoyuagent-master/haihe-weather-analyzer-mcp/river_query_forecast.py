@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -452,24 +453,49 @@ def _build_system_period(
     data_source: str,
     zones: list[dict],
 ) -> dict:
-    averages = [z.get("average_rainfall_mm") for z in zones if _is_number(z.get("average_rainfall_mm"))]
-    maximums = [z.get("max_rainfall_mm") for z in zones if _is_number(z.get("max_rainfall_mm"))]
-    minimums = [z.get("min_rainfall_mm") for z in zones if _is_number(z.get("min_rainfall_mm"))]
-    all_maximums_known = bool(zones) and len(maximums) == len(zones)
-    if any(value > 0 for value in maximums):
-        has_rain, status = True, "ok"
-    elif all_maximums_known:
-        has_rain, status = False, "ok"
+    covered_stats = []
+    has_unknown_zone = False
+    for zone in zones:
+        valid_count = _as_positive_int(zone.get("valid_count"))
+        average = zone.get("average_rainfall_mm")
+        maximum = zone.get("max_rainfall_mm")
+        minimum = zone.get("min_rainfall_mm")
+        if (
+            valid_count is None
+            or not _is_number(average)
+            or not _is_number(maximum)
+            or not _is_number(minimum)
+        ):
+            has_unknown_zone = True
+            continue
+        covered_stats.append((valid_count, average, maximum, minimum))
+
+    valid_count = sum(item[0] for item in covered_stats)
+    if not covered_stats:
+        has_rain, status = None, "no_coverage"
+    elif has_unknown_zone:
+        has_rain = True if any(item[2] > 0 for item in covered_stats) else None
+        status = "partial"
     else:
-        has_rain, status = None, "unknown_coverage"
+        has_rain = any(item[2] > 0 for item in covered_stats)
+        status = "ok"
+
+    if has_unknown_zone:
+        average = maximum = minimum = None
+    elif covered_stats:
+        average = sum(item[0] * item[1] for item in covered_stats) / valid_count
+        maximum = max(item[2] for item in covered_stats)
+        minimum = min(item[3] for item in covered_stats)
+    else:
+        average = maximum = minimum = None
     return {
         **_period_metadata(period, data_source),
         "status": status,
         "has_rain": has_rain,
-        "average_rainfall_mm": sum(averages) / len(averages) if averages else None,
-        "max_rainfall_mm": max(maximums) if maximums else None,
-        "min_rainfall_mm": min(minimums) if minimums else None,
-        "valid_count": None,
+        "average_rainfall_mm": average,
+        "max_rainfall_mm": maximum,
+        "min_rainfall_mm": minimum,
+        "valid_count": valid_count,
         "zones": zones,
     }
 
@@ -505,8 +531,24 @@ def _as_nonnegative_int(value: Any) -> int | None:
     return result if result >= 0 else None
 
 
+def _as_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return result if result > 0 else None
+
+
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def _format_buffer_km(value: float) -> str:

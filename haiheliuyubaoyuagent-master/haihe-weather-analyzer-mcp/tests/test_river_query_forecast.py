@@ -529,3 +529,91 @@ def test_empty_river_system_zones_are_not_reported_as_no_rain(monkeypatch):
     )
 
     assert result["status"] == "system_unavailable"
+
+
+def _river_system_result(zones):
+    return {"data_source": "滚动预报网格", "zones": zones}
+
+
+def test_all_no_coverage_river_system_zones_are_not_reported_as_no_rain(monkeypatch):
+    """Catches RainfallAnalyzer's valid_count=0 zero-value shape being treated as dry weather."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": 0},
+        {"zone_name": "海河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": 0},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "no_coverage"
+    assert period["has_rain"] is None
+    assert period["average_rainfall_mm"] is None
+
+
+def test_zero_rain_with_an_uncovered_zone_is_not_reported_as_no_rain(monkeypatch):
+    """Catches a covered dry zone masking a second zone with no valid raster pixels."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": 12},
+        {"zone_name": "海河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": 0},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "partial"
+    assert period["has_rain"] is None
+    assert period["average_rainfall_mm"] is None
+
+
+def test_valid_rain_with_an_uncovered_zone_reports_rain_and_partial_coverage(monkeypatch):
+    """Catches a confirmed rainy zone losing its rain indication when another zone lacks coverage."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "average_rainfall_mm": 1.2, "max_rainfall_mm": 6.0, "min_rainfall_mm": 0.0, "valid_count": 12},
+        {"zone_name": "海河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0, "valid_count": 0},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "partial"
+    assert period["has_rain"] is True
+    assert period["average_rainfall_mm"] is None
+
+
+def test_missing_zone_valid_count_is_not_evidence_of_no_rain(monkeypatch):
+    """Catches legacy or failed zone payloads without valid_count being treated as dry coverage."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "no_coverage"
+    assert period["has_rain"] is None
+    assert period["average_rainfall_mm"] is None
+
+
+def test_complete_river_system_coverage_uses_valid_count_weighted_average(monkeypatch):
+    """Catches a plain mean of zone averages when zones contain different numbers of valid pixels."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: _river_system_result([
+        {"zone_name": "滦河", "average_rainfall_mm": 1.0, "max_rainfall_mm": 2.0, "min_rainfall_mm": 0.0, "valid_count": 10},
+        {"zone_name": "海河", "average_rainfall_mm": 3.0, "max_rainfall_mm": 4.0, "min_rainfall_mm": 1.0, "valid_count": 30},
+    ]))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    period = result["periods"][0]
+    assert period["status"] == "ok"
+    assert period["average_rainfall_mm"] == pytest.approx(2.5)
+    assert period["valid_count"] == 40
