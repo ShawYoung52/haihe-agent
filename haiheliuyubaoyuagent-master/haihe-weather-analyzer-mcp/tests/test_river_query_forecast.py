@@ -162,7 +162,9 @@ def test_corridor_query_uses_full_table_exact_match_and_5000_metre_buffer(monkey
     assert "match_rank" in executed["sql"]
     assert "MIN(match_rank)" in executed["sql"]
     assert "ST_Buffer" in executed["sql"]
-    assert "3857" in executed["sql"]
+    assert "ST_SRID(geom) = 0" in executed["sql"]
+    assert "::geography" in executed["sql"]
+    assert "3857" not in executed["sql"]
     assert "), best AS (" in executed["sql"]
     assert "merged AS" in executed["sql"]
     assert "FROM best" in executed["sql"].split("merged AS", maxsplit=1)[1]
@@ -272,3 +274,258 @@ def test_geometry_error_closes_connection_before_raising_database_error(monkeypa
         rqf.load_river_corridor("泃河", {"river_table_full": "haihe_river_directed_full_v6"})
 
     assert connection.close_calls == 1
+
+
+FIXED_NOW = datetime(2026, 8, 27, 15, 20, tzinfo=TZ)
+TEST_CONFIG = {
+    "postgres": {
+        "schema": "public",
+        "river_table_full": "haihe_river_directed_full_v6",
+        "srid": "4326",
+    }
+}
+
+
+def fake_juhe_corridor(*args, **kwargs):
+    return rqf.RiverCorridor("泃河", "泃河", 4326, object(), 5.0)
+
+
+def fake_stats(*args, **kwargs):
+    return {
+        "average_rainfall_mm": 2.4,
+        "max_rainfall_mm": 8.1,
+        "min_rainfall_mm": 0.0,
+        "valid_count": 12,
+    }
+
+
+def test_juhe_uses_corridor_and_reports_scope(monkeypatch):
+    """Catches a concrete river query being routed through a nine-zone aggregate."""
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "滚动预报网格"))
+    monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "ok"
+    assert result["scope_type"] == "river_corridor"
+    assert result["scope_description"] == "泃河河道两侧约5公里沿线范围"
+    assert result["periods"][0]["has_rain"] is True
+
+
+def test_bare_luanhe_uses_corridor_when_found(monkeypatch):
+    """Catches bare 滦河 being pre-emptively broadened to the river-system scope."""
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: rqf.RiverCorridor("滦河", "滦河", 4326, object(), 5.0),
+    )
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "TEST"))
+    monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
+    monkeypatch.setattr(
+        rqf.rsf,
+        "get_river_system_rainfall_forecast",
+        lambda **kwargs: calls.append(kwargs) or {"zones": []},
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "今天晚上滦河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["scope_type"] == "river_corridor"
+    assert calls == []
+
+
+def test_bare_luanhe_falls_back_to_existing_nine_zone_tool_only_when_not_found(monkeypatch):
+    """Catches fallback to a broader scope on database errors or successful corridor matches."""
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: (_ for _ in ()).throw(rqf.RiverNotFoundError("not found")),
+    )
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: calls.append(kwargs) or {
+        "data_source": "滚动预报网格",
+        "zones": [{"zone_name": "滦河", "average_rainfall_mm": 1.0, "max_rainfall_mm": 4.0, "min_rainfall_mm": 0.0}],
+    })
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "今天晚上滦河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["scope_type"] == "river_system"
+    assert calls[0]["river_system"] == "滦河"
+    assert calls[0]["forecast_hours"] == 6
+
+
+def test_explicit_river_system_uses_nine_zone_tool(monkeypatch):
+    """Catches an explicit 河系/流域 request being narrowed to a river corridor."""
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: pytest.fail("explicit river-system request must not load a corridor"),
+    )
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: calls.append(kwargs) or {
+        "data_source": "滚动预报网格",
+        "zones": [{"zone_name": "滦河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0}],
+    })
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["scope_type"] == "river_system"
+    assert calls[0]["river_system"] == "滦河"
+
+
+def test_named_basin_request_uses_nine_zone_tool(monkeypatch):
+    """Catches 海河流域 being treated as a bare river name because it is itself a known target."""
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: pytest.fail("a named basin request must not load a corridor"),
+    )
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: calls.append(kwargs) or {
+        "data_source": "滚动预报网格",
+        "zones": [{"zone_name": "海河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0}],
+    })
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天海河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["scope_type"] == "river_system"
+    assert calls[0]["river_system"] == "海河流域"
+
+
+def test_three_days_are_computed_independently(monkeypatch):
+    """Catches reuse of one daily raster window for every requested day."""
+    resolved_starts = []
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(
+        rqf.rsf,
+        "_resolve_forecast_file",
+        lambda hours, start, path: resolved_starts.append(start) or ("rain.tif", "TEST"),
+    )
+    monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "泃河未来三天降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert len(result["periods"]) == 3
+    assert len(set(resolved_starts)) == 3
+
+
+def test_no_coverage_is_not_reported_as_no_rain(monkeypatch):
+    """Catches missing raster coverage being mislabeled as a dry period."""
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "TEST"))
+    monkeypatch.setattr(
+        rqf.rsf,
+        "_compute_rainfall_stats_for_geometry",
+        lambda *a, **k: {"average_rainfall_mm": None, "max_rainfall_mm": None, "min_rainfall_mm": None, "valid_count": 0},
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["periods"][0]["status"] == "no_coverage"
+    assert result["periods"][0]["has_rain"] is None
+
+
+def test_database_error_does_not_fall_back_to_a_broader_scope(monkeypatch):
+    """Catches a database outage silently changing a concrete river query to a river system."""
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: (_ for _ in ()).throw(rqf.RiverDatabaseError("database unavailable")),
+    )
+    monkeypatch.setattr(
+        rqf.rsf,
+        "get_river_system_rainfall_forecast",
+        lambda **kwargs: pytest.fail("database errors must not trigger river-system fallback"),
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "database_error"
+
+
+def test_missing_non_system_river_is_reported_as_not_found(monkeypatch):
+    """Catches a missing concrete river being reported as a dry forecast."""
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: (_ for _ in ()).throw(rqf.RiverNotFoundError("not found")),
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "river_not_found"
+
+
+def test_missing_forecast_file_is_reported_as_unavailable(monkeypatch):
+    """Catches a missing forecast raster being represented as zero rainfall."""
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: (None, "无可用预报文件"))
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "forecast_unavailable"
+
+
+def test_raster_statistics_failure_is_reported_as_calculation_error(monkeypatch):
+    """Catches raster processing failures being represented as a dry forecast."""
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "TEST"))
+    monkeypatch.setattr(
+        rqf.rsf,
+        "_compute_rainfall_stats_for_geometry",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("raster corrupt")),
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "calculation_error"
+
+
+def test_generic_river_system_error_is_preserved_without_guessing_its_cause(monkeypatch):
+    """Catches a generic helper error being falsely labeled as a database or raster failure."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: {
+        "error": "暂时无法获取河系预报数据，请稍后重试。"
+    })
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "system_unavailable"
+    assert result["error"] == "暂时无法获取河系预报数据，请稍后重试。"
+
+
+def test_empty_river_system_zones_are_not_reported_as_no_rain(monkeypatch):
+    """Catches an empty helper result being turned into a dry nine-zone forecast."""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: {
+        "data_source": "滚动预报网格", "zones": []
+    })
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["status"] == "system_unavailable"

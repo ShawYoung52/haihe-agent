@@ -13,6 +13,7 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 from constants import RIVER_TABLE_FULL
+import river_system_forecast as rsf
 import time_source
 
 TIANJIN_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -87,11 +88,13 @@ def load_river_corridor(
     pg_conf: dict,
     buffer_km: float = 5.0,
 ) -> RiverCorridor:
-    """从 full_v6 河网加载按米制坐标计算的河道缓冲区。"""
+    """从 full_v6 河网加载 WGS84 geography 缓冲后的河道走廊。"""
     requested_name = str(river_name or "").strip()
     schema = str(pg_conf.get("schema", "public") or "public").strip()
     table = str(pg_conf.get("river_table_full", RIVER_TABLE_FULL) or RIVER_TABLE_FULL).strip()
-    source_srid = int(pg_conf.get("source_srid", 4326) or 4326)
+    source_srid = int(
+        pg_conf.get("source_srid", pg_conf.get("srid", 4326)) or 4326
+    )
     buffer_km = float(buffer_km)
     buffer_m = buffer_km * 1000.0
     statement = sql.SQL(
@@ -117,10 +120,16 @@ def load_river_corridor(
         )
         SELECT matched_name, 4326 AS srid,
                ST_AsBinary(
-                 ST_Transform(
-                   ST_Buffer(ST_Transform(ST_SetSRID(geom, %(source_srid)s), 3857), %(buffer_m)s),
-                   4326
-                 )
+                 ST_Buffer(
+                   ST_Transform(
+                     CASE
+                       WHEN ST_SRID(geom) = 0 THEN ST_SetSRID(geom, %(source_srid)s)
+                       ELSE geom
+                     END,
+                     4326
+                   )::geography,
+                   %(buffer_m)s
+                 )::geometry
                ) AS geom_wkb
         FROM merged
         WHERE geom IS NOT NULL;
@@ -287,3 +296,218 @@ def _extract_nearest_river(text: str) -> str | None:
         if candidate:
             return candidate
     return None
+
+
+def query_river_rainfall_forecast_core(
+    user_query: str,
+    config: dict,
+    ec_output_path: str = "",
+    now: datetime | None = None,
+) -> dict:
+    """按河道走廊或九分区河系聚合用户请求的逐时段降雨预报。"""
+    try:
+        target = extract_river_target(user_query)
+        periods = resolve_river_forecast_periods(user_query, now=now)
+    except ValueError as exc:
+        return {"status": "invalid_request", "message": str(exc), "periods": []}
+
+    if _is_explicit_river_system_request(user_query, target):
+        return _query_river_system_periods(target, periods, config, ec_output_path)
+
+    pg_conf = config.get("postgres", {}) if isinstance(config, dict) else {}
+    try:
+        corridor = load_river_corridor(target, pg_conf)
+    except RiverNotFoundError as exc:
+        if target in KNOWN_RIVER_SYSTEMS:
+            return _query_river_system_periods(target, periods, config, ec_output_path)
+        return _query_error("river_not_found", target, str(exc))
+    except RiverDatabaseError as exc:
+        return _query_error("database_error", target, str(exc))
+
+    return _query_corridor_periods(corridor, periods, ec_output_path)
+
+
+def _is_explicit_river_system_request(user_query: str, target: str) -> bool:
+    """判断请求是否明确要求河系/流域，而非只出现一个河名。"""
+    query = str(user_query or "")
+    return target in KNOWN_RIVER_SYSTEMS and (
+        target.endswith(("流域", "河系"))
+        or f"{target}流域" in query
+        or f"{target}河系" in query
+    )
+
+
+def _query_corridor_periods(
+    corridor: RiverCorridor,
+    periods: list[ForecastPeriod],
+    ec_output_path: str,
+) -> dict:
+    period_results = []
+    for period in periods:
+        hours = _forecast_hours(period)
+        try:
+            raster_path, data_source = rsf._resolve_forecast_file(
+                hours, period.target_start, ec_output_path
+            )
+        except Exception as exc:
+            return _query_error("forecast_unavailable", corridor.river_name, str(exc))
+        if not raster_path:
+            return _query_error("forecast_unavailable", corridor.river_name, data_source)
+
+        try:
+            stats = rsf._compute_rainfall_stats_for_geometry(
+                corridor.geometry,
+                raster_path,
+                data_source,
+                source_srid=corridor.srid,
+            )
+        except Exception as exc:
+            return _query_error("calculation_error", corridor.river_name, str(exc))
+        period_results.append(_build_corridor_period(period, data_source, stats))
+
+    return {
+        "status": "ok",
+        "river_name": corridor.river_name,
+        "scope_type": "river_corridor",
+        "scope_description": f"{corridor.matched_name}河道两侧约{_format_buffer_km(corridor.buffer_km)}公里沿线范围",
+        "buffer_km": corridor.buffer_km,
+        "periods": period_results,
+    }
+
+
+def _query_river_system_periods(
+    target: str,
+    periods: list[ForecastPeriod],
+    config: dict,
+    ec_output_path: str,
+) -> dict:
+    period_results = []
+    for period in periods:
+        hours = _forecast_hours(period)
+        try:
+            forecast = rsf.get_river_system_rainfall_forecast(
+                river_system=target,
+                start_time=period.target_start.strftime("%Y-%m-%d %H:%M:%S"),
+                forecast_hours=hours,
+                zone_type="9",
+                config=config,
+                ec_output_path=ec_output_path,
+            )
+        except Exception as exc:
+            return _query_error("calculation_error", target, str(exc))
+
+        if not isinstance(forecast, dict):
+            return _query_error("system_unavailable", target, "河系预报返回格式无效")
+        if forecast.get("error"):
+            return _query_error("system_unavailable", target, str(forecast["error"]))
+
+        data_source = str(forecast.get("data_source") or "")
+        zones = forecast.get("zones")
+        if not isinstance(zones, list):
+            return _query_error("system_unavailable", target, "河系预报缺少分区结果")
+        if not zones and "无可用预报文件" in data_source:
+            return _query_error("forecast_unavailable", target, data_source)
+        if not zones:
+            return _query_error("system_unavailable", target, "河系预报未返回分区结果")
+        period_results.append(_build_system_period(period, data_source, zones))
+
+    return {
+        "status": "ok",
+        "river_name": target,
+        "scope_type": "river_system",
+        "scope_description": f"{target}九分区河系范围",
+        "buffer_km": None,
+        "periods": period_results,
+    }
+
+
+def _build_corridor_period(
+    period: ForecastPeriod,
+    data_source: str,
+    stats: dict,
+) -> dict:
+    valid_count = _as_nonnegative_int(stats.get("valid_count"))
+    values = {
+        "average_rainfall_mm": stats.get("average_rainfall_mm"),
+        "max_rainfall_mm": stats.get("max_rainfall_mm"),
+        "min_rainfall_mm": stats.get("min_rainfall_mm"),
+    }
+    if valid_count == 0:
+        has_rain, status = None, "no_coverage"
+    elif valid_count is None or not _is_number(values["max_rainfall_mm"]):
+        has_rain, status = None, "unknown_coverage"
+    else:
+        has_rain, status = values["max_rainfall_mm"] > 0, "ok"
+    return {
+        **_period_metadata(period, data_source),
+        "status": status,
+        "has_rain": has_rain,
+        **values,
+        "valid_count": valid_count,
+    }
+
+
+def _build_system_period(
+    period: ForecastPeriod,
+    data_source: str,
+    zones: list[dict],
+) -> dict:
+    averages = [z.get("average_rainfall_mm") for z in zones if _is_number(z.get("average_rainfall_mm"))]
+    maximums = [z.get("max_rainfall_mm") for z in zones if _is_number(z.get("max_rainfall_mm"))]
+    minimums = [z.get("min_rainfall_mm") for z in zones if _is_number(z.get("min_rainfall_mm"))]
+    all_maximums_known = bool(zones) and len(maximums) == len(zones)
+    if any(value > 0 for value in maximums):
+        has_rain, status = True, "ok"
+    elif all_maximums_known:
+        has_rain, status = False, "ok"
+    else:
+        has_rain, status = None, "unknown_coverage"
+    return {
+        **_period_metadata(period, data_source),
+        "status": status,
+        "has_rain": has_rain,
+        "average_rainfall_mm": sum(averages) / len(averages) if averages else None,
+        "max_rainfall_mm": max(maximums) if maximums else None,
+        "min_rainfall_mm": min(minimums) if minimums else None,
+        "valid_count": None,
+        "zones": zones,
+    }
+
+
+def _period_metadata(period: ForecastPeriod, data_source: str) -> dict:
+    return {
+        "label": period.label,
+        "start_time": period.target_start.isoformat(),
+        "end_time": period.target_end.isoformat(),
+        "data_source": data_source,
+    }
+
+
+def _query_error(status: str, target: str, message: str) -> dict:
+    return {
+        "status": status,
+        "river_name": target,
+        "message": message,
+        "error": message,
+        "periods": [],
+    }
+
+
+def _forecast_hours(period: ForecastPeriod) -> int:
+    return int((period.target_end - period.target_start).total_seconds() // 3600)
+
+
+def _as_nonnegative_int(value: Any) -> int | None:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result >= 0 else None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _format_buffer_km(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
