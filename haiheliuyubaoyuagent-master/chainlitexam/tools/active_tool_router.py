@@ -19,6 +19,8 @@ from tools.request_intent_policy import (
     CURRENT_TIME_MARKERS,
     FUTURE_TIME_MARKERS,
     is_areal_rainfall_query,
+    is_rainfall_impact_intent,
+    is_river_network_relation_intent,
     is_supported_current_observation_scope,
     is_unsafe_for_active_tool_filter,
 )
@@ -39,7 +41,16 @@ _KNOWN_RIVER_NAMES = (
     "徒骇马颊河", "黑龙港", "滦河", "潮白河", "蓟运河", "海河干流", "海河",
 )
 _RIVER_QUERY_RE = re.compile(
-    r"[\u4e00-\u9fff]{1,8}河(?=流域|河系|今天|明天|后天|未来|当前|现在|目前|天气|降雨|降水|气温|温度|$|[，。！？?\s])"
+    r"[\u4e00-\u9fff]{1,8}河(?=流域|河系|今天|今日|今晚|今夜|明天|明日|后天|未来|当前|现在|目前|天气|降雨|降水|有雨|会下雨|是否下雨|气温|温度|$|[，。！？?\s])"
+)
+_RIVER_FORECAST_TIME_MARKERS = ("今天", "今日", "今晚", "今夜", "明天", "明日", "后天", "未来")
+_RIVER_FORECAST_EXCLUDE_MARKERS = (
+    "水位", "水势", "库容", "闸上", "闸下", "蓄水量",
+    "历史", "过去", "去年", "前年", "实况", "观测", "累计",
+    "对比", "比较", "分别", "各自", "哪个", "哪条",
+)
+_RIVER_FORECAST_POI_MARKERS = (
+    "公园", "湿地", "附近", "沿线", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
 )
 
 _DOMAIN_TOOLS: dict[str, tuple[str, ...]] = {
@@ -49,6 +60,7 @@ _DOMAIN_TOOLS: dict[str, tuple[str, ...]] = {
     "forecast": ("query_rolling_forecast",),
     "decision_poi": ("query_decision_weather_for_poi",),
     "basin_forecast": ("get_river_system_rainfall_forecast",),
+    "river_forecast": ("query_river_rainfall_forecast",),
     "warning_effective": ("get_effective_warning_info",),
     "warning_history": ("get_history_warning_info", "get_effective_warning_info"),
     "warning_national": ("get_national_warning_info",),
@@ -103,6 +115,24 @@ def _looks_like_river_scope(text: str) -> bool:
     return any(name in text for name in _KNOWN_RIVER_NAMES) or bool(_RIVER_QUERY_RE.search(text))
 
 
+def is_conservative_river_forecast_query(user_text: str) -> bool:
+    """仅识别纯河流当日/未来降雨预报，无法确定时交完整 Planner。"""
+    text = str(user_text or "").strip()
+    if not text or not _looks_like_river_scope(text):
+        return False
+    if not any(marker in text for marker in _RIVER_FORECAST_TIME_MARKERS):
+        return False
+    if not any(word in text for word in _WEATHER_WORDS):
+        return False
+    if has_decision_weather_poi_marker(text) or any(marker in text for marker in _RIVER_FORECAST_POI_MARKERS):
+        return False
+    if any(marker in text for marker in _RIVER_FORECAST_EXCLUDE_MARKERS):
+        return False
+    if is_areal_rainfall_query(text) or is_river_network_relation_intent(text) or is_rainfall_impact_intent(text):
+        return False
+    return not re.search(r"(?:与|和)[\u4e00-\u9fff]{1,8}河", text)
+
+
 class ActiveToolRouter:
     """选择过滤工具集并缓存对应 Planner chain。"""
 
@@ -148,6 +178,13 @@ class ActiveToolRouter:
             return self._full("unsafe", "unsafe_domain")
         if has_mixed_regional_and_poi_scope(text):
             return self._full("mixed", "regional_and_poi_scope")
+        if is_conservative_river_forecast_query(text):
+            required = _DOMAIN_TOOLS["river_forecast"]
+            if any(name not in self._tools_by_name for name in required):
+                return self._full("river_forecast", "required_tool_missing")
+            return ToolRouteDecision(
+                "filtered", "river_forecast", required, True, "single_domain:river_forecast"
+            )
 
         domains = _classify_domains(text)
         if len(domains) != 1:
@@ -167,7 +204,9 @@ class ActiveToolRouter:
             else:
                 policy_key = "warning_effective"
         elif domain == "current":
-            if has_decision_weather_poi_marker(text):
+            if has_decision_weather_poi_marker(text) or any(
+                marker in text for marker in _RIVER_FORECAST_POI_MARKERS
+            ):
                 policy_key = "decision_poi"
                 query_type = "decision_poi"
             elif _looks_like_river_scope(text):
@@ -179,7 +218,9 @@ class ActiveToolRouter:
         elif domain == "forecast":
             # 点位名可能自带河名（如“海河教育园区”），必须先按点位识别，
             # 避免误路由为整个河系预报。
-            if has_decision_weather_poi_marker(text):
+            if has_decision_weather_poi_marker(text) or any(
+                marker in text for marker in _RIVER_FORECAST_POI_MARKERS
+            ):
                 policy_key = "decision_poi"
                 query_type = "decision_poi"
             elif "流域" in text or "河系" in text or _looks_like_river_scope(text):

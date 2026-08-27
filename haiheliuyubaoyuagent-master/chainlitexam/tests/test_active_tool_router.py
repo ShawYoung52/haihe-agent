@@ -113,7 +113,30 @@ def test_bare_river_forecast_never_uses_tianjin_rolling_forecast():
         assert decision.mode in {"filtered", "full"}
         assert "query_rolling_forecast" not in decision.tool_names
         if decision.mode == "filtered":
-            assert decision.tool_names == ("get_river_system_rainfall_forecast",)
+            assert decision.tool_names == ("query_river_rainfall_forecast",)
+
+
+def test_highlighted_river_questions_use_unified_river_tool():
+    router, _ = _router()
+    for question in ("明天泃河有雨吗？", "今天晚上滦河有雨吗？"):
+        decision = router.select(question)
+        assert decision.mode == "filtered"
+        assert decision.query_type == "river_forecast"
+        assert decision.tool_names == ("query_river_rainfall_forecast",)
+        assert "query_rolling_forecast" not in decision.tool_names
+
+
+def test_river_forecast_filter_keeps_poi_and_mixed_questions_for_existing_routes():
+    router, _ = _router()
+    assert router.select("海河教育园区明天天气怎么样").query_type == "decision_poi"
+    for question in (
+        "泃河明天水位多少",
+        "泃河下游明天有雨吗",
+        "泃河历史降雨多少",
+        "泃河与滦河明天降雨对比",
+        "泃河暴雨会影响哪些河流",
+    ):
+        assert router.select(question).query_type != "river_forecast", question
 
 
 def test_unsafe_and_mixed_questions_always_use_full_planner():

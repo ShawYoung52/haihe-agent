@@ -279,8 +279,8 @@
       "category": "流域未来天气",
       "question": "海河流域明天天气如何",
       "expected_tools": {
-        "allowed": ["get_river_system_rainfall_forecast", "get_city_rainfall_time_range"],
-        "required": ["get_river_system_rainfall_forecast"],
+        "allowed": ["query_river_rainfall_forecast"],
+        "required": ["query_river_rainfall_forecast"],
         "forbidden": ["query_rolling_forecast"]
       },
       "key_facts": ["流域", "河系"],
@@ -442,6 +442,40 @@
       "units": ["mm"],
       "forbidden_phrases": [],
       "should_image": true,
+      "should_gis": false
+    },
+    {
+      "id": "river_forecast_jvhe",
+      "category": "河流未来降雨",
+      "question": "明天泃河有雨吗？",
+      "expected_tools": {
+        "allowed": ["query_river_rainfall_forecast"],
+        "required": ["query_river_rainfall_forecast"],
+        "forbidden": ["query_rolling_forecast"]
+      },
+      "key_facts": ["降雨", "data_source"],
+      "time_scope": "tomorrow",
+      "spatial_scope": "泃河",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
+      "id": "river_forecast_luanhe_tonight",
+      "category": "河流未来降雨",
+      "question": "今天晚上滦河有雨吗？",
+      "expected_tools": {
+        "allowed": ["query_river_rainfall_forecast"],
+        "required": ["query_river_rainfall_forecast"],
+        "forbidden": ["query_rolling_forecast"]
+      },
+      "key_facts": ["降雨", "data_source"],
+      "time_scope": "tonight",
+      "spatial_scope": "滦河",
+      "units": ["mm"],
+      "forbidden_phrases": [],
+      "should_image": false,
       "should_gis": false
     },
     {

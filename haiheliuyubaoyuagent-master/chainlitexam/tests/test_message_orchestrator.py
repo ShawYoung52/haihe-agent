@@ -44,11 +44,33 @@ def test_enable_fast_paths_is_permanently_disabled(monkeypatch):
     monkeypatch.setenv("ENABLE_FAST_PATHS", "false")
     importlib.reload(mo)
     assert mo.ENABLE_FAST_PATHS is False
-
     monkeypatch.setenv("ENABLE_FAST_PATHS", "true")
     importlib.reload(mo)
     assert mo.ENABLE_FAST_PATHS is False
 
+
+def test_simple_weather_route_rejects_generic_river_names():
+    assert mo._route_simple_weather_query("明天泃河有雨吗？") is None
+
+
+def test_river_forecast_boundary_replaces_later_planner_overreach():
+    """补充 Planner 轮也只能执行统一河流预报工具。"""
+    planner_msg = type("PlannerMessage", (), {
+        "tool_calls": [
+            {"id": "late-1", "name": "query_rolling_forecast", "args": {"user_query": "改写问题"}},
+            {"id": "late-2", "name": "query_tianhe_fixed_qa", "args": {"query": "改写问题"}},
+        ],
+        "content": "",
+    })()
+
+    guarded = mo._enforce_river_forecast_tool_boundary(planner_msg, "明天泃河有雨吗？")
+
+    assert guarded.tool_calls == [{
+        "id": "river_forecast_boundary",
+        "name": "query_river_rainfall_forecast",
+        "args": {"user_query": "明天泃河有雨吗？"},
+        "type": "tool_call",
+    }]
 
 def test_db_bootstrap_cannot_enable_fast_paths_from_environment():
     """数据库初始化模块也不得根据环境变量安装快速路径。"""

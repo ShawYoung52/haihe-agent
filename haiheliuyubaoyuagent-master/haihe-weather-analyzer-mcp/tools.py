@@ -31,6 +31,7 @@ from haihe_mcp_tools import register_haihe_tools
 from constants import DEFAULT_BASIN_CODES, DIRECTED_GRAPH_FILENAME, RIVER_TABLE_FULL
 from emergency_scenario_client import emergency_http_base_url, fetch_scenario_get
 import river_system_forecast as rsf
+import river_query_forecast as rqf
 
 config = configparser.ConfigParser()
 config.read('config.ini', encoding='utf-8-sig')
@@ -2705,6 +2706,17 @@ def register_tools(mcp: FastMCP):
             raise
         except Exception as e:
             raise BusinessException(f"河系降雨预报查询失败: {e}")
+
+    @mcp.tool()
+    def query_river_rainfall_forecast(user_query: str) -> dict:
+        """查询具体河流沿线或九分区河系的未来降雨；参数必须传用户原始问题。"""
+        ec_output_path = config.get("paths", "ecOutput") if config.has_option("paths", "ecOutput") else ""
+        normalized_config = {section: dict(config[section]) for section in config.sections()}
+        return rqf.query_river_rainfall_forecast_core(
+            user_query=user_query,
+            config=normalized_config,
+            ec_output_path=ec_output_path,
+        )
 
     @mcp.tool()
     def get_server_time() -> str:
