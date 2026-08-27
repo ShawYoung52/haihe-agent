@@ -23,14 +23,18 @@ KNOWN_RIVER_SYSTEMS: frozenset[str] = frozenset({
     "海河流域",
 })
 
+_RIVER_CORRIDOR_RE = re.compile(r"([\u4e00-\u9fff]{1,8}?)河道")
 _RIVER_NAME_RE = re.compile(r"([\u4e00-\u9fff]{1,8}河)")
-_FUTURE_DAYS_RE = re.compile(r"未来\s*([0-9一二三四五六七八九十]+)\s*天")
-_LEADING_TIME_RE = re.compile(
-    r"^(?:今天晚上|今天|今日|明天|明日|后天|今晚|未来(?:[0-9一二三四五六七八九十]+天)?)"
+_FUTURE_DAYS_RE = re.compile(r"未来\s*([^\s，。！？?、]{1,8}?)\s*天")
+_LEADING_NOISE_RE = re.compile(
+    r"^(?:(?:请问|想问一下|想问|麻烦问下|麻烦|咨询一下|咨询)"
+    r"|(?:今天晚上|今天|今日|明天|明日|后天|今晚|未来(?:[0-9一二两三四五六七八九十]+天)?)"
+    r"|(?:上午|中午|下午|傍晚|晚上|夜里|夜晚|凌晨))+"
 )
 _CHINESE_DIGITS = {
     "一": 1,
     "二": 2,
+    "两": 2,
     "三": 3,
     "四": 4,
     "五": 5,
@@ -56,8 +60,14 @@ def extract_river_target(user_query: str) -> str:
         if river_system in query:
             return river_system
 
+    corridor_match = _RIVER_CORRIDOR_RE.search(query)
+    if corridor_match:
+        candidate = _clean_river_candidate(corridor_match.group(1) + "河")
+        if candidate:
+            return candidate
+
     for match in _RIVER_NAME_RE.finditer(query):
-        candidate = _LEADING_TIME_RE.sub("", match.group(1))
+        candidate = _clean_river_candidate(match.group(1))
         if candidate:
             return candidate
     raise ValueError("未识别到河流或河系名称")
@@ -104,8 +114,27 @@ def _as_tianjin_time(value: datetime) -> datetime:
 
 
 def _parse_day_count(value: str) -> int:
-    try:
-        count = int(value)
-    except ValueError:
-        count = _CHINESE_DIGITS.get(value, 1)
-    return max(1, count)
+    text = str(value or "").strip()
+    if text.isdecimal():
+        count = int(text)
+    elif text in _CHINESE_DIGITS:
+        count = _CHINESE_DIGITS[text]
+    elif text.count("十") == 1:
+        tens_text, ones_text = text.split("十")
+        if tens_text and tens_text not in _CHINESE_DIGITS:
+            raise ValueError(f"无法解析未来天数: {text}")
+        if ones_text and ones_text not in _CHINESE_DIGITS:
+            raise ValueError(f"无法解析未来天数: {text}")
+        tens = _CHINESE_DIGITS[tens_text] if tens_text else 1
+        ones = _CHINESE_DIGITS[ones_text] if ones_text else 0
+        count = tens * 10 + ones
+    else:
+        raise ValueError(f"无法解析未来天数: {text}")
+    if not 1 <= count <= 99:
+        raise ValueError(f"无法解析未来天数: {text}")
+    return count
+
+
+def _clean_river_candidate(candidate: str) -> str:
+    candidate = _LEADING_NOISE_RE.sub("", candidate)
+    return re.sub(r"河(?:河|道)+$", "河", candidate)
