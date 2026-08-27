@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -142,10 +143,11 @@ def load_river_corridor(
     }
 
     try:
-        with psycopg2.connect(**connection_kwargs) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(statement, params)
-                row = cur.fetchone()
+        with closing(psycopg2.connect(**connection_kwargs)) as conn:
+            with conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(statement, params)
+                    row = cur.fetchone()
         if not row or not row.get("geom_wkb"):
             raise RiverNotFoundError(f"未找到河流 {requested_name} 的有效河道几何")
         return RiverCorridor(

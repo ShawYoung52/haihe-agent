@@ -95,6 +95,7 @@ class FakeCursor:
         return False
 
     def execute(self, statement, params):
+        self.executed["statement"] = statement
         self.executed["sql"] = repr(statement)
         self.executed["params"] = params
 
@@ -109,6 +110,8 @@ class FakeCursor:
 class FakeConnection:
     def __init__(self, executed):
         self.executed = executed
+        self.close_calls = 0
+        self.executed["connection"] = self
 
     def __enter__(self):
         return self
@@ -119,6 +122,9 @@ class FakeConnection:
     def cursor(self, **kwargs):
         return FakeCursor(self.executed)
 
+    def close(self):
+        self.close_calls += 1
+
 
 class EmptyCursor(FakeCursor):
     def fetchone(self):
@@ -126,11 +132,19 @@ class EmptyCursor(FakeCursor):
 
 
 class EmptyConnection(FakeConnection):
-    def __init__(self):
-        super().__init__({})
-
     def cursor(self, **kwargs):
         return EmptyCursor(self.executed)
+
+
+class RaisingCursor(FakeCursor):
+    def execute(self, statement, params):
+        super().execute(statement, params)
+        raise RuntimeError("query failed")
+
+
+class RaisingConnection(FakeConnection):
+    def cursor(self, **kwargs):
+        return RaisingCursor(self.executed)
 
 
 def test_corridor_query_uses_full_table_exact_match_and_5000_metre_buffer(monkeypatch):
@@ -149,6 +163,9 @@ def test_corridor_query_uses_full_table_exact_match_and_5000_metre_buffer(monkey
     assert "MIN(match_rank)" in executed["sql"]
     assert "ST_Buffer" in executed["sql"]
     assert "3857" in executed["sql"]
+    assert "), best AS (" in executed["sql"]
+    assert "merged AS" in executed["sql"]
+    assert "FROM best" in executed["sql"].split("merged AS", maxsplit=1)[1]
     assert executed["params"] == {
         "river_name": "泃河",
         "contains": "%泃河%",
@@ -156,6 +173,29 @@ def test_corridor_query_uses_full_table_exact_match_and_5000_metre_buffer(monkey
         "buffer_m": 5000.0,
     }
     assert corridor.buffer_km == 5.0
+    assert executed["connection"].close_calls == 1
+
+
+def test_corridor_query_uses_composed_identifiers_and_keeps_river_name_out_of_sql(monkeypatch):
+    """Catches unsafe identifier/value interpolation in the PostGIS query boundary."""
+    executed = {}
+    river_name = "泃河'%; DROP TABLE rivers; --"
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: FakeConnection(executed))
+    monkeypatch.setattr(rqf, "_geometry_from_wkb", lambda value: object())
+
+    rqf.load_river_corridor(
+        river_name,
+        {"schema": "safe_schema", "river_table_full": "safe_river_table"},
+    )
+
+    statement = executed["statement"]
+    assert isinstance(statement, rqf.sql.Composed)
+    identifiers = [part._wrapped for part in statement._wrapped if isinstance(part, rqf.sql.Identifier)]
+    assert identifiers == [("safe_schema",), ("safe_river_table",)]
+    assert river_name not in executed["sql"]
+    assert all(f"%({key})s" in executed["sql"] for key in ("river_name", "contains", "source_srid", "buffer_m"))
+    assert executed["params"]["river_name"] == river_name
+    assert executed["params"]["contains"] == f"%{river_name}%"
 
 
 def test_corridor_query_defaults_to_full_v6_table(monkeypatch):
@@ -171,10 +211,31 @@ def test_corridor_query_defaults_to_full_v6_table(monkeypatch):
 
 def test_missing_river_raises_a_distinct_not_found_error(monkeypatch):
     """Catches treating missing river geometry as a successful no-rain result."""
-    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: EmptyConnection())
+    executed = {}
+    connection = EmptyConnection(executed)
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: connection)
 
     with pytest.raises(rqf.RiverNotFoundError):
         rqf.load_river_corridor("不存在河", {"river_table_full": "haihe_river_directed_full_v6"})
+
+    assert connection.close_calls == 1
+
+
+def test_empty_corridor_wkb_raises_not_found_and_closes_connection(monkeypatch):
+    """Catches a null spatial result being treated as a valid corridor."""
+    executed = {}
+    connection = FakeConnection(executed)
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        FakeCursor,
+        "fetchone",
+        lambda self: {"matched_name": "泃河", "srid": 4326, "geom_wkb": b""},
+    )
+
+    with pytest.raises(rqf.RiverNotFoundError):
+        rqf.load_river_corridor("泃河", {"river_table_full": "haihe_river_directed_full_v6"})
+
+    assert connection.close_calls == 1
 
 
 def test_database_failure_raises_a_distinct_database_error(monkeypatch):
@@ -186,3 +247,28 @@ def test_database_failure_raises_a_distinct_database_error(monkeypatch):
 
     with pytest.raises(rqf.RiverDatabaseError, match="加载河道缓冲区失败"):
         rqf.load_river_corridor("泃河", {"river_table_full": "haihe_river_directed_full_v6"})
+
+
+def test_query_error_closes_connection_before_raising_database_error(monkeypatch):
+    """Catches a SQL error leaking its connection."""
+    executed = {}
+    connection = RaisingConnection(executed)
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: connection)
+
+    with pytest.raises(rqf.RiverDatabaseError, match="加载河道缓冲区失败"):
+        rqf.load_river_corridor("泃河", {"river_table_full": "haihe_river_directed_full_v6"})
+
+    assert connection.close_calls == 1
+
+
+def test_geometry_error_closes_connection_before_raising_database_error(monkeypatch):
+    """Catches a WKB parse error leaking the already-used database connection."""
+    executed = {}
+    connection = FakeConnection(executed)
+    monkeypatch.setattr(rqf.psycopg2, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(rqf, "_geometry_from_wkb", lambda value: (_ for _ in ()).throw(ValueError("bad wkb")))
+
+    with pytest.raises(rqf.RiverDatabaseError, match="加载河道缓冲区失败"):
+        rqf.load_river_corridor("泃河", {"river_table_full": "haihe_river_directed_full_v6"})
+
+    assert connection.close_calls == 1
