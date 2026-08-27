@@ -27,6 +27,39 @@ from chainlitexam.tests.stubs import ensure_stubs  # noqa: E402
 ensure_stubs()
 
 import chainlitexam.message_orchestrator as mo  # noqa: E402
+from chainlitexam.tools.tianhe_fixed_qa_catalog import TIANHE_FIXED_QA_QUESTIONS  # noqa: E402
+
+
+class TestTianheFixedCatalogRoute:
+    """新增精确目录优先于本地天气和旧天河兼容规则。"""
+
+    @pytest.mark.parametrize("question", TIANHE_FIXED_QA_QUESTIONS)
+    def test_all_new_questions_route_verbatim(self, question):
+        assert mo._route_tianhe_fixed_catalog_query(question) == (
+            "query_tianhe_fixed_qa",
+            {"query": question},
+        )
+
+    def test_original_text_is_not_trimmed_before_tool_call(self):
+        raw = "  当前湿度大不大？  "
+        assert mo._route_tianhe_fixed_catalog_query(raw)[1] == {"query": raw}
+
+    def test_catalog_wins_before_simple_weather_and_legacy_routes(self):
+        route, label = mo._select_pre_planner_route("今天适合洗车吗？")
+
+        assert route == ("query_tianhe_fixed_qa", {"query": "今天适合洗车吗？"})
+        assert label == "天河固定目录路由"
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "昨天雨下得怎么样",
+            "今天雨下了多长时间",
+            "去年夏天全市最高气温达到多少度",
+        ],
+    )
+    def test_previously_accepted_tianhe_questions_remain_supported(self, question):
+        assert mo._route_tianhe_knowledge_query(question) is not None
 
 
 class TestTianheCustomerAcceptanceCatalog:
@@ -254,11 +287,11 @@ class TestTianheKnowledgeRouteWiring:
     """process_message 接线：命中时作为 simple_route 跳过 thinking/planner。"""
 
     def test_wired_into_process_message(self):
-        """process_message 源码里必须在 simple_route 为空时补查天河知识路由。"""
+        """process_message 必须通过统一选择器执行天河目录优先级。"""
         import inspect
 
         src = inspect.getsource(mo.process_message)
-        assert "_route_tianhe_knowledge_query" in src
+        assert "_select_pre_planner_route" in src
         assert src.count("_enforce_tianhe_catalog_boundary") >= 2
 
     def test_enforce_route_label(self):
@@ -388,7 +421,7 @@ class TestTianheCatalogBoundaryGuard:
     def test_keeps_catalog_call_and_forces_original_user_query(self):
         from langchain_core.messages import AIMessage
 
-        user_text = "今天雨下了多长时间？"
+        user_text = "  今天雨下了多长时间？  "
         msg = AIMessage(
             content="",
             tool_calls=[{

@@ -73,6 +73,7 @@ from tools.rolling_forecast_response import (
     rolling_forecast_llm_instruction,
 )
 from tools import decision_weather_fast_path, warning_workflow
+from tools.tianhe_fixed_qa_catalog import is_tianhe_fixed_qa_question
 from tools.meteo_evidence import is_evidence_complete
 from tools.tool_round_evidence import TOOL_QUERY_TYPES, ToolRoundEvidence
 from tools.request_intent_policy import (
@@ -1063,6 +1064,10 @@ def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
     if not text:
         return None
 
+    fixed_catalog_route = _route_tianhe_fixed_catalog_query(user_text)
+    if fixed_catalog_route is not None:
+        return fixed_catalog_route
+
     # “高温预警期间最高会到多少度”等询问的是当前预警过程实际值，不是“多少度算高温”
     # 这类静态定义。该问法已由本地预警链路依据生效预警 content 回答，严禁转交天河。
     if warning_workflow.is_high_temperature_warning_value_query(text):
@@ -1128,6 +1133,27 @@ def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
     return None
 
 
+def _route_tianhe_fixed_catalog_query(user_text: str) -> tuple[str, dict] | None:
+    """精确目录命中时固定走天河，并保留工具调用的用户原文。"""
+    raw = str(user_text or "")
+    if not is_tianhe_fixed_qa_question(raw):
+        return None
+    return "query_tianhe_fixed_qa", {"query": raw}
+
+
+def _select_pre_planner_route(user_text: str) -> tuple[tuple[str, dict] | None, str]:
+    """选择 Planner 前的确定性路由，维持既有未来小时和兼容目录优先级。"""
+    simple_route = _route_tianhe_fixed_catalog_query(user_text)
+    simple_route_label = "天河固定目录路由" if simple_route else "简单天气路由"
+    if simple_route is None and not _is_future_hour_weather_query(user_text):
+        simple_route = _route_simple_weather_query(user_text)
+    if simple_route is None:
+        simple_route = _route_tianhe_knowledge_query(user_text)
+        if simple_route is not None:
+            simple_route_label = "天河兼容目录路由"
+    return simple_route, simple_route_label
+
+
 def _enforce_tianhe_catalog_boundary(planner_msg, user_text: str):
     """拦截 Planner 越权选择天河工具，并固定透传用户原问题。
 
@@ -1167,7 +1193,7 @@ def _enforce_tianhe_catalog_boundary(planner_msg, user_text: str):
         if not allowed or kept_tianhe:
             continue
         normalized = dict(call)
-        normalized["args"] = {"query": str(user_text or "").strip()}
+        normalized["args"] = {"query": str(user_text or "")}
         guarded_calls.append(normalized)
         kept_tianhe = True
 
@@ -5337,15 +5363,7 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
     # THINKING_PLANNER 也是一次 LLM 调用（耗时 5-17s），如果问题已被规则
     # 路由命中（如"明天天气"），跳过 thinking 直接进入工具查询。
     _compressed_already = False
-    if not _is_future_hour_weather_query(message.content):
-        simple_route = _route_simple_weather_query(message.content)
-    else:
-        simple_route = None
-    simple_route_label = "简单天气路由"
-    if simple_route is None:
-        simple_route = _route_tianhe_knowledge_query(message.content)
-        if simple_route is not None:
-            simple_route_label = "天河知识路由"
+    simple_route, simple_route_label = _select_pre_planner_route(message.content)
 
     # 生成并展示深度思考（规则路由命中时跳过，省一次 5-17s 的 LLM 调用）
     if ENABLE_LLM_THINKING and not simple_route:
