@@ -41,7 +41,7 @@ _KNOWN_RIVER_NAMES = (
     "徒骇马颊河", "黑龙港", "滦河", "潮白河", "蓟运河", "海河干流", "海河",
 )
 _RIVER_QUERY_RE = re.compile(
-    r"[\u4e00-\u9fff]{1,8}河(?=流域|河系|今天|今日|今晚|今夜|明天|明日|后天|未来|当前|现在|目前|天气|降雨|降水|有雨|会下雨|是否下雨|气温|温度|$|[，。！？?\s])"
+    r"[\u4e00-\u9fff]{1,8}河(?=流域|河系|沿线|今天|今日|今晚|今夜|明天|明日|后天|未来|当前|现在|目前|天气|降雨|降水|有雨|会下雨|是否下雨|气温|温度|$|[，。！？?\s])"
 )
 _RIVER_FORECAST_TIME_MARKERS = ("今天", "今日", "今晚", "今夜", "明天", "明日", "后天", "未来")
 _RIVER_FORECAST_EXCLUDE_MARKERS = (
@@ -49,8 +49,11 @@ _RIVER_FORECAST_EXCLUDE_MARKERS = (
     "历史", "过去", "去年", "前年", "实况", "观测", "累计",
     "对比", "比较", "分别", "各自", "哪个", "哪条",
 )
+_RIVER_FORECAST_NON_RAIN_WEATHER_MARKERS = (
+    "气温", "温度", "风力", "风向", "阵风", "能见度", "雾", "霾", "湿度", "云量",
+)
 _RIVER_FORECAST_POI_MARKERS = (
-    "公园", "湿地", "附近", "沿线", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
+    "公园", "湿地", "附近", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
 )
 
 _DOMAIN_TOOLS: dict[str, tuple[str, ...]] = {
@@ -124,9 +127,15 @@ def is_conservative_river_forecast_query(user_text: str) -> bool:
         return False
     if not any(word in text for word in _WEATHER_WORDS):
         return False
+    if is_unsafe_for_active_tool_filter(text):
+        return False
     if has_decision_weather_poi_marker(text) or any(marker in text for marker in _RIVER_FORECAST_POI_MARKERS):
         return False
     if any(marker in text for marker in _RIVER_FORECAST_EXCLUDE_MARKERS):
+        return False
+    if any(marker in text for marker in _RIVER_FORECAST_NON_RAIN_WEATHER_MARKERS):
+        return False
+    if "下了" in text:
         return False
     if is_areal_rainfall_query(text) or is_river_network_relation_intent(text) or is_rainfall_impact_intent(text):
         return False

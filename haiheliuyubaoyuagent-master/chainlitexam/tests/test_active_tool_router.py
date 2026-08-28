@@ -129,6 +129,9 @@ def test_highlighted_river_questions_use_unified_river_tool():
 def test_river_forecast_filter_keeps_poi_and_mixed_questions_for_existing_routes():
     router, _ = _router()
     assert router.select("海河教育园区明天天气怎么样").query_type == "decision_poi"
+    along_river = router.select("泃河沿线明天降雨如何")
+    assert along_river.query_type == "river_forecast"
+    assert along_river.tool_names == ("query_river_rainfall_forecast",)
     for question in (
         "泃河明天水位多少",
         "泃河下游明天有雨吗",
@@ -137,6 +140,19 @@ def test_river_forecast_filter_keeps_poi_and_mixed_questions_for_existing_routes
         "泃河暴雨会影响哪些河流",
     ):
         assert router.select(question).query_type != "river_forecast", question
+
+
+def test_river_forecast_predicate_rejects_unsafe_mixed_observation_and_non_rain_queries():
+    router, _ = _router()
+    for question in (
+        "海河明天有雨吗，是否启动应急响应",
+        "明天泃河有雨吗，天津气温多少",
+        "海河今天下了多少雨",
+        "海河明天风力多大",
+    ):
+        decision = router.select(question)
+        assert decision.query_type != "river_forecast", question
+        assert "query_river_rainfall_forecast" not in decision.tool_names, question
 
 
 def test_unsafe_and_mixed_questions_always_use_full_planner():

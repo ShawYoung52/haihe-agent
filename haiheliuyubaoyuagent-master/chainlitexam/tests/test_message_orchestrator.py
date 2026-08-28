@@ -51,6 +51,7 @@ def test_enable_fast_paths_is_permanently_disabled(monkeypatch):
 
 def test_simple_weather_route_rejects_generic_river_names():
     assert mo._route_simple_weather_query("明天泃河有雨吗？") is None
+    assert mo._route_simple_weather_query("泃河沿线明天降雨如何") is None
 
 
 def test_river_forecast_boundary_replaces_later_planner_overreach():
@@ -71,6 +72,118 @@ def test_river_forecast_boundary_replaces_later_planner_overreach():
         "args": {"user_query": "明天泃河有雨吗？"},
         "type": "tool_call",
     }]
+
+
+@pytest.mark.asyncio
+async def test_river_forecast_second_planner_answer_does_not_repeat_tool_or_drop_content(monkeypatch):
+    """首轮已查河流预报后，补充 Planner 的完整答案必须原样保留。"""
+    monkeypatch.setattr(mo, "ENABLE_FAST_PATHS", False)
+    monkeypatch.setattr(mo, "ENABLE_LLM_THINKING", False)
+    calls = {"planner": 0, "tool": 0, "answer": 0}
+    stream_contents = []
+    messages = []
+
+    def planner_message(tool_calls=None, content=""):
+        msg = type("PlannerMessage", (), {})()
+        msg.tool_calls = tool_calls or []
+        msg.content = content
+        return msg
+
+    async def fake_planner(*args, **kwargs):
+        calls["planner"] += 1
+        if calls["planner"] == 1:
+            return planner_message()
+        return planner_message(content="泃河明天有小雨，数据来源：测试网格。")
+
+    async def noop_async(*args, **kwargs):
+        return None
+
+    async def stream_text(text, stream_msg=None, **kwargs):
+        stream_contents.append(text)
+
+    class FakeStreamMessage:
+        def __init__(self, **kwargs):
+            self.content = ""
+
+        async def send(self):
+            return None
+
+        async def update(self):
+            stream_contents.append(self.content)
+
+        async def remove(self):
+            return None
+
+    class FakeReasoning:
+        _closed = False
+        step = type("Step", (), {"id": "reasoning"})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def stage(self, *args, **kwargs):
+            return None
+
+        async def line(self, *args, **kwargs):
+            return None
+
+        async def append(self, *args, **kwargs):
+            return None
+
+        async def close(self):
+            self._closed = True
+
+    class RiverTool:
+        name = "query_river_rainfall_forecast"
+
+        async def ainvoke(self, args):
+            calls["tool"] += 1
+            assert args == {"user_query": "明天泃河有雨吗？"}
+            return {"rainfall_mm": 2.0, "data_source": "测试网格"}
+
+    async def unexpected_answer(*args, **kwargs):
+        calls["answer"] += 1
+        return "不应调用 Answer fallback"
+
+    callbacks = {
+        "astream_planner_think": fake_planner,
+        "need_river_plot": lambda text: False,
+        "astream_thinking_to_reasoning": noop_async,
+        "append_followup_if_needed": lambda text, query: text,
+        "stream_text_to_message": stream_text,
+        "astream_answer_chain_to_message": unexpected_answer,
+        "tool_observation_to_text": lambda obs: str(obs),
+        "enrich_with_impact_time_tool": lambda **kwargs: kwargs.get("observation"),
+        "should_force_admin_units_reply": lambda text: False,
+        "build_admin_units_only_reply": lambda obs: obs,
+        "should_force_partition_table_reply": lambda text: False,
+        "build_partition_only_reply": lambda obs: obs,
+        "should_force_structured_impact_reply": lambda text: False,
+        "build_structured_impact_reply": lambda obs: obs,
+    }
+    monkeypatch.setattr(mo, "ReasoningStep", lambda name="": FakeReasoning())
+    monkeypatch.setattr(mo.cl, "Message", FakeStreamMessage)
+
+    await mo.process_message(
+        type("Incoming", (), {"content": "明天泃河有雨吗？"})(),
+        planner_chain=object(), answer_chain=object(), thinking_chain=None,
+        tools=[RiverTool()], messages=messages, callbacks=callbacks,
+    )
+
+    assert calls == {"planner": 2, "tool": 1, "answer": 0}
+    assert any("泃河明天有小雨" in text for text in stream_contents)
+    tool_responses = [m for m in messages if isinstance(m, mo.ToolMessage)]
+    assert [m.tool_call_id for m in tool_responses] == ["river_forecast_boundary"]
+    planner_calls = [
+        call["id"]
+        for message in messages
+        for call in (getattr(message, "tool_calls", None) or [])
+        if call["name"] == "query_river_rainfall_forecast"
+    ]
+    assert planner_calls == ["river_forecast_boundary"]
 
 def test_db_bootstrap_cannot_enable_fast_paths_from_environment():
     """数据库初始化模块也不得根据环境变量安装快速路径。"""

@@ -916,7 +916,7 @@ _BASIN_RIVER_NAMES = (
     "海河",
 )
 _POI_CONTEXT_MARKERS = (
-    "公园", "湿地", "附近", "沿线", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
+    "公园", "湿地", "附近", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
 )
 
 
@@ -1223,9 +1223,45 @@ def _enforce_simple_weather_route(
     return planner_msg
 
 
-def _enforce_river_forecast_tool_boundary(planner_msg, user_text: str):
-    """纯河流预报在任一 Planner 轮次均只能执行统一空间降雨工具。"""
+def _has_current_turn_river_forecast_response(messages) -> bool:
+    """判断当前用户回合是否已收到统一河流预报的工具响应。"""
+    current_turn = list(messages or [])
+    for index in range(len(current_turn) - 1, -1, -1):
+        if isinstance(current_turn[index], HumanMessage):
+            current_turn = current_turn[index + 1:]
+            break
+    call_ids = {
+        call.get("id")
+        for item in current_turn
+        for call in (getattr(item, "tool_calls", None) or [])
+        if isinstance(call, dict) and call.get("name") == "query_river_rainfall_forecast"
+    }
+    response_ids = {
+        getattr(item, "tool_call_id", None)
+        for item in current_turn
+        if isinstance(item, ToolMessage)
+    }
+    return bool(call_ids & response_ids)
+
+
+def _enforce_river_forecast_tool_boundary(
+    planner_msg,
+    user_text: str,
+    *,
+    messages=None,
+    require_query: bool = False,
+):
+    """纯河流预报只在尚未查询时固定统一工具，保留后续完整答案。"""
     if not is_conservative_river_forecast_query(user_text):
+        return planner_msg
+    calls = list(getattr(planner_msg, "tool_calls", None) or [])
+    already_queried = _has_current_turn_river_forecast_response(messages)
+    if already_queried:
+        if calls:
+            _set_tool_calls(planner_msg, [])
+            print("[河流预报边界] 已有本轮结果，拦截重复或越界工具调用")
+        return planner_msg
+    if not calls and not require_query:
         return planner_msg
     calls = [{
         "id": "river_forecast_boundary",
@@ -2557,7 +2593,9 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     rolling_forecast_bundles = []
     had_tool_calls = bool(getattr(planner_msg, "tool_calls", None))
     planner_msg = _enforce_tianhe_catalog_boundary(planner_msg, user_text)
-    planner_msg = _enforce_river_forecast_tool_boundary(planner_msg, user_text)
+    planner_msg = _enforce_river_forecast_tool_boundary(
+        planner_msg, user_text, messages=messages
+    )
     if had_tool_calls and not planner_msg.tool_calls:
         return (
             forced_final_text,
@@ -5455,7 +5493,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
             except Exception:
                 pass
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
-            planner_msg = _enforce_river_forecast_tool_boundary(planner_msg, message.content)
+            planner_msg = _enforce_river_forecast_tool_boundary(
+                planner_msg, message.content, messages=messages, require_query=True
+            )
             fallback_reason = _needs_full_planner_fallback(route_decision, planner_msg)
             if fallback_reason:
                 _mark_full_planner_transition(timing, route_decision, fallback_reason)
@@ -5472,7 +5512,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                     timing,
                 )
                 planner_msg = _ensure_tool_calls_from_content(planner_msg)
-                planner_msg = _enforce_river_forecast_tool_boundary(planner_msg, message.content)
+                planner_msg = _enforce_river_forecast_tool_boundary(
+                    planner_msg, message.content, messages=messages, require_query=True
+                )
     except Exception as e:
         await reasoning.line(f"❌ 规划失败：{str(e)[:200]}")
         await reasoning.__aexit__(None, None, None)
@@ -5485,7 +5527,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
         return
 
     planner_msg = _enforce_tianhe_catalog_boundary(planner_msg, message.content)
-    planner_msg = _enforce_river_forecast_tool_boundary(planner_msg, message.content)
+    planner_msg = _enforce_river_forecast_tool_boundary(
+        planner_msg, message.content, messages=messages, require_query=True
+    )
     timing.mark("planner_round_1")
 
     # 影子模式：记录候选工具是否召回 Planner 实际调用工具。只打日志，不改 Planner 绑定。
@@ -5828,7 +5872,9 @@ async def process_message(message: cl.Message, planner_chain, answer_chain, thin
                 pass
             planner_msg = _ensure_tool_calls_from_content(planner_msg)
             planner_msg = _enforce_tianhe_catalog_boundary(planner_msg, message.content)
-            planner_msg = _enforce_river_forecast_tool_boundary(planner_msg, message.content)
+            planner_msg = _enforce_river_forecast_tool_boundary(
+                planner_msg, message.content, messages=messages
+            )
             if _is_future_hour_weather_query(message.content) and planner_msg.tool_calls:
                 print("[未来小时天气路由] 已取得滚动预报，忽略后续重复工具调用并进入回答生成。")
                 _set_tool_calls(planner_msg, [])
