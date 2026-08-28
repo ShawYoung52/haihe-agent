@@ -235,6 +235,14 @@ def _query_region_risk_levels(lon: float, lat: float, fcst_times: list[str] | No
 # 必须按目标日逐日起报查询并合并，不能因窗口超过 24h 就跳过接口、伪造 no_data。
 RISK_FCST_MAX_DAYS = int(os.getenv("RISK_FCST_MAX_DAYS", "3"))
 
+# 区域综合风险固定输出这三类。即使静态隐患点或风险接口缺失，调用方也能
+# 稳定渲染三行并准确区分无风险和资料不可用。
+REGION_RISK_CATEGORIES = (
+    ("dzzh", "地质灾害"),
+    ("sh", "山洪"),
+    ("zxhl", "中小河流"),
+)
+
 
 def _risk_fcst_times_from_window(
     calendar_window: dict | None,
@@ -316,6 +324,225 @@ def _query_region_hazards(
         "hazards_available": hazards_available,
         "risk_levels": risk_levels,
         "risk_levels_available": risk_levels is not None,
+    }
+
+
+def _risk_window_payload(
+    calendar_window: dict | None,
+    risk_fcst_times: list[str] | None,
+) -> dict:
+    """返回风险接口实际覆盖的时间范围，不把被截断的请求说成完整覆盖。"""
+    payload = {
+        "forecast_start_time": None,
+        "forecast_end_time": None,
+        "forecast_days": None,
+        "fcst_times": risk_fcst_times,
+        "time_mode": "latest_cycle_with_same_day_fallback",
+    }
+    if risk_fcst_times:
+        try:
+            start = datetime.strptime(risk_fcst_times[0], "%Y%m%d%H%M%S")
+            end = datetime.strptime(risk_fcst_times[-1], "%Y%m%d%H%M%S") + timedelta(days=1)
+        except (TypeError, ValueError):
+            return payload
+        payload.update({
+            "forecast_start_time": start.strftime("%Y-%m-%d %H:%M"),
+            "forecast_end_time": end.strftime("%Y-%m-%d %H:%M"),
+            "forecast_days": len(risk_fcst_times),
+            "time_mode": "explicit_daily_cycles",
+        })
+        return payload
+    if isinstance(calendar_window, dict):
+        start = calendar_window.get("target_start")
+        end = calendar_window.get("target_end")
+        if isinstance(start, datetime) and isinstance(end, datetime):
+            payload.update({
+                "forecast_start_time": start.strftime("%Y-%m-%d %H:%M"),
+                "forecast_end_time": end.strftime("%Y-%m-%d %H:%M"),
+                "forecast_days": calendar_window.get("forecast_days"),
+            })
+    return payload
+
+
+def _coerce_nonnegative_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0, number)
+
+
+def _region_static_counts(hazards: dict) -> dict[str, int | None]:
+    """标准化静态隐患点数量；查询失败/格式错误不能伪造成零。"""
+    if hazards.get("hazards_available") is not True:
+        return {key: None for key, _label in REGION_RISK_CATEGORIES}
+    categories = hazards.get("categories")
+    if not isinstance(categories, list):
+        return {key: None for key, _label in REGION_RISK_CATEGORIES}
+    counts = {key: 0 for key, _label in REGION_RISK_CATEGORIES}
+    for category in categories:
+        if not isinstance(category, dict) or category.get("key") not in counts:
+            continue
+        count = _coerce_nonnegative_int(category.get("count"))
+        if count is None:
+            counts[category["key"]] = None
+        elif counts[category["key"]] is not None:
+            counts[category["key"]] += count
+    return counts
+
+
+def _normalize_region_risk(
+    key: str,
+    label: str,
+    hidden_point_count: int | None,
+    risk_levels: Any,
+    risk_levels_available: Any,
+) -> dict:
+    """把风险接口的三态及异常载荷归一化为单一灾种输出。"""
+    result = {
+        "key": key,
+        "label": label,
+        "hidden_point_count": hidden_point_count,
+        "risk_status": "unavailable",
+        "levels": {},
+        "risk_point_count": None,
+        "advice": [],
+    }
+    if risk_levels_available is not True:
+        result["unavailable_reason"] = "risk_service_unavailable"
+        return result
+    if not isinstance(risk_levels, dict):
+        result["unavailable_reason"] = "malformed_risk_payload"
+        return result
+    if key not in risk_levels:
+        result.update({"risk_status": "no_risk", "risk_point_count": 0})
+        return result
+    raw = risk_levels.get(key)
+    # risk_warning_tool 的 no_data 表示这个起报时次缺少预报资料，绝非无风险。
+    if raw == "no_data":
+        result["unavailable_reason"] = "risk_forecast_no_data"
+        return result
+    if raw is None:
+        result["unavailable_reason"] = "risk_kind_unavailable"
+        return result
+    if not isinstance(raw, dict) or not isinstance(raw.get("levels"), dict):
+        result["unavailable_reason"] = "malformed_risk_payload"
+        return result
+    levels = raw["levels"]
+    normalized_levels: dict[str, int] = {}
+    for level, count in levels.items():
+        number = _coerce_nonnegative_int(count)
+        if number is None:
+            result["unavailable_reason"] = "malformed_risk_payload"
+            return result
+        if number:
+            normalized_levels[str(level)] = number
+    advice = raw.get("level_advice") or []
+    if not isinstance(advice, list):
+        result["unavailable_reason"] = "malformed_risk_payload"
+        return result
+    if not normalized_levels:
+        result.update({"risk_status": "no_risk", "risk_point_count": 0})
+        return result
+    total = _coerce_nonnegative_int(raw.get("total"))
+    result.update({
+        "risk_status": "risk",
+        "levels": normalized_levels,
+        "risk_point_count": total if total is not None else sum(normalized_levels.values()),
+        "advice": advice,
+    })
+    return result
+
+
+def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[str], bool]:
+    """为独立风险入口校验范围，避免旧解析器把明确未知地点默认为天津市区。"""
+    text = (regions or user_query or "").strip()
+    if not text:
+        return [DEFAULT_ROLLING_FORECAST_REGION], False
+    matched_regions: list[str] = []
+    if has_matched_rolling_region(text):
+        matched_regions.extend(parse_rolling_forecast_regions(text))
+    for city in match_basin_cities(text):
+        if city not in matched_regions:
+            matched_regions.append(city)
+    # "天津/全市/我市"是明确支持的全市范围，且保持旧天气入口的默认语义。
+    if not matched_regions and any(scope in text for scope in ("天津", "全市", "我市", "本市", "市区", "中心城区")):
+        matched_regions.append(DEFAULT_ROLLING_FORECAST_REGION)
+    if matched_regions:
+        return matched_regions, False
+    # 显式 regions 参数必定是调用方指定的范围，不能回退；常见行政区后缀也作为
+    # 问句中的显式地点处理。无地点的泛问句仍保留天津市区默认范围。
+    explicit_region = bool(regions.strip()) or bool(re.search(r"[\u4e00-\u9fff]{2,}(?:新区|市|区|县|镇|乡|旗|省)", text))
+    if explicit_region:
+        return [], True
+    return [DEFAULT_ROLLING_FORECAST_REGION], False
+
+
+def query_region_weather_risks_core(
+    user_query: str,
+    regions: str = "",
+    now: datetime | None = None,
+) -> dict:
+    """查询区域代表点的地质灾害、山洪和中小河流综合风险。
+
+    每个已验证区域只调用一次 _query_region_hazards，保留其中静态隐患点和
+    三类风险预报各自的可用性，供上层按业务状态而非文案猜测结果。
+    """
+    current = now or time_source.now(TIANJIN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+    region_names, unsupported = _resolve_region_risk_regions(user_query, regions)
+    if unsupported:
+        return {
+            "status": "unsupported_region",
+            "message": "暂不支持该区域的综合风险查询。",
+            "query_time": current.strftime("%Y-%m-%d %H:%M:%S"),
+            "regions": [],
+            "risk_window": _risk_window_payload(None, None),
+        }
+    calendar_window = resolve_requested_calendar_window(user_query, now=current)
+    risk_fcst_times = _risk_fcst_times_from_window(calendar_window, current)
+    risk_window = _risk_window_payload(calendar_window, risk_fcst_times)
+    entries: list[dict] = []
+    all_risk_statuses: list[str] = []
+    for name in region_names:
+        try:
+            lon_text, lat_text = _region_or_city_coord(name).split("_", 1)
+            hazards = _query_region_hazards(float(lon_text), float(lat_text), risk_fcst_times)
+        except Exception:
+            hazards = None
+            lon_text, lat_text = "", ""
+        if not isinstance(hazards, dict):
+            hazards = {}
+        counts = _region_static_counts(hazards)
+        risks = [
+            _normalize_region_risk(
+                key, label, counts[key], hazards.get("risk_levels"), hazards.get("risk_levels_available")
+            )
+            for key, label in REGION_RISK_CATEGORIES
+        ]
+        all_risk_statuses.extend(item["risk_status"] for item in risks)
+        radius = _to_float(hazards.get("radius_km"))
+        entries.append({
+            "region": name,
+            "region_display": _display_region(name),
+            "longitude": _to_float(lon_text),
+            "latitude": _to_float(lat_text),
+            "radius_km": radius if radius is not None and radius > 0 else REGION_HAZARD_RADIUS_KM,
+            "hazards_available": hazards.get("hazards_available") is True,
+            "risks": risks,
+        })
+    if all_risk_statuses and all(status == "unavailable" for status in all_risk_statuses):
+        status = "risk_service_unavailable"
+    elif any(status == "unavailable" for status in all_risk_statuses):
+        status = "partial"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "query_time": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "risk_window": risk_window,
+        "regions": entries,
     }
 
 
