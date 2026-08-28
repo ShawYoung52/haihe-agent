@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from chainlitexam.tests.stubs import ensure_stubs
 
 ensure_stubs()
@@ -22,7 +24,8 @@ class _FakeTool:
 
 def _fixture_tool_names() -> list[str]:
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    names = {"rag_search"}
+    # 河系预报工具在真实运行时也会注册，不能靠缺失它来使排除用例回退 full。
+    names = {"rag_search", "get_river_system_rainfall_forecast"}
     for case in payload["cases"]:
         expected = case["expected_tools"]
         names.update(expected["allowed"])
@@ -142,17 +145,22 @@ def test_river_forecast_filter_keeps_poi_and_mixed_questions_for_existing_routes
         assert router.select(question).query_type != "river_forecast", question
 
 
-def test_river_forecast_predicate_rejects_unsafe_mixed_observation_and_non_rain_queries():
+@pytest.mark.parametrize("question", (
+    "海河明天有雨吗，是否启动应急响应",
+    "明天泃河有雨吗，天津气温多少",
+    "海河今天下了多少雨",
+    "海河明天风力多大",
+    "海河河系今天已经下雨了吗，明天还会下吗",
+    "海河流域明天风力多大",
+))
+def test_river_forecast_predicate_rejects_unsafe_mixed_observation_and_non_rain_queries(question):
     router, _ = _router()
-    for question in (
-        "海河明天有雨吗，是否启动应急响应",
-        "明天泃河有雨吗，天津气温多少",
-        "海河今天下了多少雨",
-        "海河明天风力多大",
-    ):
-        decision = router.select(question)
-        assert decision.query_type != "river_forecast", question
-        assert "query_river_rainfall_forecast" not in decision.tool_names, question
+    decision = router.select(question)
+    assert decision.mode == "full"
+    assert decision.query_type != "river_forecast"
+    assert decision.tool_names == ()
+    assert not decision.requires_tool
+    assert router.chain_for(decision) is router.full_chain
 
 
 def test_river_forecast_filter_rejects_retrospective_rain_observation_forms():
@@ -170,11 +178,29 @@ def test_river_forecast_filter_rejects_retrospective_rain_observation_forms():
 
 def test_river_forecast_filter_keeps_observation_and_future_followup_mixed():
     """实况加明天追问是混合问题，不能被单一未来河流工具抢占。"""
-    decision = _router()[0].select("海河今天已经下雨了吗，明天还会下吗")
+    router, _ = _router()
+    decision = router.select("海河今天已经下雨了吗，明天还会下吗")
 
     assert decision.mode == "full"
     assert decision.query_type != "river_forecast"
-    assert "query_river_rainfall_forecast" not in decision.tool_names
+    assert decision.tool_names == ()
+    assert not decision.requires_tool
+    assert router.chain_for(decision) is router.full_chain
+
+
+@pytest.mark.parametrize("question, query_type, tool_name", (
+    ("海河河系未来三天降水预报", "river_forecast", "query_river_rainfall_forecast"),
+    ("大清河流域未来三天天气", "river_forecast", "query_river_rainfall_forecast"),
+    ("海河河系降水预报", "basin_forecast", "get_river_system_rainfall_forecast"),
+    ("海河流域一周天气", "basin_forecast", "get_river_system_rainfall_forecast"),
+))
+def test_pure_river_system_forecasts_keep_existing_routes(question, query_type, tool_name):
+    router, _ = _router()
+    decision = router.select(question)
+
+    assert decision.mode == "filtered"
+    assert decision.query_type == query_type
+    assert decision.tool_names == (tool_name,)
 
 
 def test_unsafe_and_mixed_questions_always_use_full_planner():

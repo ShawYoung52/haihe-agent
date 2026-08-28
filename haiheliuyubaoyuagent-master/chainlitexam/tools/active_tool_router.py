@@ -121,6 +121,19 @@ def _looks_like_river_scope(text: str) -> bool:
     return any(name in text for name in _KNOWN_RIVER_NAMES) or bool(_RIVER_QUERY_RE.search(text))
 
 
+def _has_river_forecast_exclusion(text: str) -> bool:
+    """统一河流路由与通用河系回退共用实况、混合和非降雨排除规则。"""
+    if any(marker in text for marker in _RIVER_FORECAST_EXCLUDE_MARKERS):
+        return True
+    if any(marker in text for marker in _RIVER_FORECAST_NON_RAIN_WEATHER_MARKERS):
+        return True
+    # 已发生降雨标记优先视为实况；即使同句还追问明天，也应交完整 Planner
+    # 组合实况与预报工具，不能强制为单一河流未来预报。
+    if "下了" in text or _RIVER_FORECAST_RETROSPECTIVE_RAIN_RE.search(text):
+        return True
+    return bool(re.search(r"(?:与|和)[\u4e00-\u9fff]{1,8}河", text))
+
+
 def is_conservative_river_forecast_query(user_text: str) -> bool:
     """仅识别纯河流当日/未来降雨预报，无法确定时交完整 Planner。"""
     text = str(user_text or "").strip()
@@ -134,17 +147,11 @@ def is_conservative_river_forecast_query(user_text: str) -> bool:
         return False
     if has_decision_weather_poi_marker(text) or any(marker in text for marker in _RIVER_FORECAST_POI_MARKERS):
         return False
-    if any(marker in text for marker in _RIVER_FORECAST_EXCLUDE_MARKERS):
-        return False
-    if any(marker in text for marker in _RIVER_FORECAST_NON_RAIN_WEATHER_MARKERS):
-        return False
-    # 已发生降雨标记优先视为实况；即使同句还追问明天，也应交完整 Planner
-    # 组合实况与预报工具，不能强制为单一河流未来预报。
-    if "下了" in text or _RIVER_FORECAST_RETROSPECTIVE_RAIN_RE.search(text):
+    if _has_river_forecast_exclusion(text):
         return False
     if is_areal_rainfall_query(text) or is_river_network_relation_intent(text) or is_rainfall_impact_intent(text):
         return False
-    return not re.search(r"(?:与|和)[\u4e00-\u9fff]{1,8}河", text)
+    return True
 
 
 class ActiveToolRouter:
@@ -238,6 +245,10 @@ class ActiveToolRouter:
                 policy_key = "decision_poi"
                 query_type = "decision_poi"
             elif "流域" in text or "河系" in text or _looks_like_river_scope(text):
+                # 共享谓词已排除的实况/混合/非降雨问题，不能被通用预报域
+                # 再次收窄为河系降雨工具；纯河系预报仍保留既有回退。
+                if _has_river_forecast_exclusion(text):
+                    return self._full("forecast", "river_forecast_requires_full")
                 policy_key = "basin_forecast"
                 query_type = "basin_forecast"
 
