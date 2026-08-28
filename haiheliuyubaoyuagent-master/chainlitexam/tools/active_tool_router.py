@@ -55,6 +55,10 @@ _RIVER_FORECAST_NON_RAIN_WEATHER_MARKERS = (
 _RIVER_FORECAST_POI_MARKERS = (
     "公园", "湿地", "附近", "景区", "机场", "大学", "医院", "广场", "车站", "火车站",
 )
+_RIVER_FORECAST_EXPLICIT_FUTURE_MARKERS = ("明天", "明日", "后天", "未来")
+_RIVER_FORECAST_RETROSPECTIVE_RAIN_RE = re.compile(
+    r"(?:已经|已)下雨|下雨了|雨下了吗|(?:今天|今日).*?下雨情况"
+)
 
 _DOMAIN_TOOLS: dict[str, tuple[str, ...]] = {
     "current": ("query_current_weather_observation",),
@@ -135,7 +139,12 @@ def is_conservative_river_forecast_query(user_text: str) -> bool:
         return False
     if any(marker in text for marker in _RIVER_FORECAST_NON_RAIN_WEATHER_MARKERS):
         return False
-    if "下了" in text:
+    # 当日“已经下雨/下雨了吗/下雨情况”属于实况追问，不能把“今天”一概当作
+    # 未来预报。显式明天/后天/未来仍保留给预报，避免误伤真正的未来问法。
+    if "下了" in text or (
+        _RIVER_FORECAST_RETROSPECTIVE_RAIN_RE.search(text)
+        and not any(marker in text for marker in _RIVER_FORECAST_EXPLICIT_FUTURE_MARKERS)
+    ):
         return False
     if is_areal_rainfall_query(text) or is_river_network_relation_intent(text) or is_rainfall_impact_intent(text):
         return False

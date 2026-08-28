@@ -74,6 +74,23 @@ def test_river_forecast_boundary_replaces_later_planner_overreach():
     }]
 
 
+def test_river_forecast_boundary_keeps_observation_query_planner_calls():
+    """“今天已经下雨了吗”不是未来预报，不得替换为河流预报工具。"""
+    original_call = {
+        "id": "observation-1",
+        "name": "query_current_weather_observation",
+        "args": {"user_query": "海河今天已经下雨了吗"},
+    }
+    planner_msg = type("PlannerMessage", (), {
+        "tool_calls": [original_call],
+        "content": "",
+    })()
+
+    guarded = mo._enforce_river_forecast_tool_boundary(planner_msg, "海河今天已经下雨了吗")
+
+    assert guarded.tool_calls == [original_call]
+
+
 @pytest.mark.asyncio
 async def test_river_forecast_second_planner_answer_does_not_repeat_tool_or_drop_content(monkeypatch):
     """首轮已查河流预报后，补充 Planner 的完整答案必须原样保留。"""
