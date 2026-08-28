@@ -428,6 +428,23 @@
       "should_gis": true
     },
     {
+      "id": "region_weather_risk",
+      "category": "区域综合风险",
+      "question": "今天蓟州可能有哪些风险？",
+      "expected_tools": {
+        "allowed": ["query_region_weather_risks"],
+        "required": ["query_region_weather_risks"],
+        "forbidden": []
+      },
+      "key_facts": ["地质灾害", "山洪", "中小河流"],
+      "time_scope": "today",
+      "spatial_scope": "蓟州",
+      "units": [],
+      "forbidden_phrases": [],
+      "should_image": false,
+      "should_gis": false
+    },
+    {
       "id": "station_img",
       "category": "图片",
       "question": "给我看天津降雨的实况图",

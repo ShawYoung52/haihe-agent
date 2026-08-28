@@ -63,6 +63,32 @@ def test_water_level_uses_filtered_domain_without_forecast_tool():
     assert "query_rolling_forecast" not in decision.tool_names
 
 
+def test_generic_region_risk_question_uses_dedicated_tool():
+    """泛区域风险研判必须使用综合风险工具，而不是由 Planner 自行拼装。"""
+    router, _ = _router()
+
+    decision = router.select("今天蓟州可能有哪些风险？")
+
+    assert decision.mode == "filtered"
+    assert decision.query_type == "region_risk"
+    assert decision.tool_names == ("query_region_weather_risks",)
+
+
+def test_non_weather_business_risk_does_not_use_weather_risk_tool():
+    router, _ = _router()
+
+    assert router.select("项目上线有哪些风险？").query_type != "region_risk"
+
+
+def test_mixed_region_risk_and_river_question_uses_full_planner():
+    router, _ = _router()
+
+    decision = router.select("今天蓟州可能有哪些风险和河流影响？")
+
+    assert decision.mode == "full"
+    assert decision.query_type != "region_risk"
+
+
 def test_current_poi_uses_decision_tool_not_regional_observation():
     """防止把点位当前天气退化成天津/区域聚合实况。"""
     router, _ = _router()

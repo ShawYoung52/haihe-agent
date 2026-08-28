@@ -25,6 +25,7 @@ from rolling_forecast_service import (
     is_basin_weather_query,
     is_dynamic_event_date_query,
     is_unresolved_poi_forecast_query,
+    query_region_weather_risks_core,
     query_rolling_forecast_core,
 )
 
@@ -3206,6 +3207,20 @@ def register_haihe_tools(mcp: FastMCP) -> None:
             forecast_days=forecast_days,
             query_window=query_window,
         )
+
+    @mcp.tool()
+    def query_region_weather_risks(user_query: str, regions: str = "") -> dict:
+        """查询天津已知区域在用户指定时段的地质灾害、山洪和中小河流综合风险。
+
+        仅用于“某区今天/明天可能有哪些风险”等泛区域风险研判；必须完整使用三类
+        风险状态、风险点数量、等级和建议。山洪、地质灾害或中小河流洪水等明确
+        单一灾种的专业查询，仍使用 query_risk_warning。
+
+        Args:
+            user_query: 用户原始问题，用于解析区域与风险时段。
+            regions: 可选天津区域文本；为空时由 user_query 解析。
+        """
+        return query_region_weather_risks_core(user_query=user_query, regions=regions)
 
     @mcp.tool()
     def get_haihe_station_observations(

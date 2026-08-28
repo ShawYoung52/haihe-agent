@@ -100,6 +100,7 @@ class HaiheWeatherAnalyzerMCP:
                     "query_poi_nearest_observation - 查询POI经纬度及最近观测站实况值",
                     "query_poi_hazard_reminders - 查询POI周边地质灾害/山洪/中小河流隐患点",
                     "query_risk_warning - 查询山洪、地质灾害或中小河流洪水风险预警",
+                    "query_region_weather_risks - 查询天津区域地质灾害、山洪和中小河流综合风险",
                     "search_poi - 按名称查询 POI 地点/设施/单位",
                     "search_poi_by_distance - 按名称和经纬度范围查询附近 POI",
                     "query_rolling_forecast - 天津滚动预报综合天气查询",

@@ -58,12 +58,25 @@ _RIVER_FORECAST_POI_MARKERS = (
 _RIVER_FORECAST_RETROSPECTIVE_RAIN_RE = re.compile(
     r"(?:已经|已)下雨|下雨了|雨下了吗|(?:今天|今日).*?下雨情况"
 )
+_REGION_RISK_SCOPE_MARKERS = (
+    "天津市区", "天津市", "天津", "全市", "我市", "本市", "市区", "中心城区",
+    "蓟州区", "蓟州", "宝坻区", "宝坻", "武清区", "武清", "宁河区", "宁河",
+    "静海区", "静海", "北辰区", "北辰", "西青区", "西青", "津南区", "津南",
+    "东丽区", "东丽", "滨海新区", "滨海",
+)
+_REGION_RISK_TIME_MARKERS = ("今天", "今日", "明天", "明日", "未来", "当前", "现在", "可能")
+_REGION_RISK_NON_WEATHER_MARKERS = ("项目", "投资", "合同", "上线", "账号")
+_REGION_RISK_SINGLE_HAZARD_MARKERS = (
+    "山洪", "地质灾害", "中小河流洪水", "中小河流", "河流洪水", "滑坡", "崩塌", "泥石流",
+)
+_REGION_RISK_MIXED_DOMAIN_MARKERS = ("河流", "河道")
 
 _DOMAIN_TOOLS: dict[str, tuple[str, ...]] = {
     "current": ("query_current_weather_observation",),
     "water_level": ("query_water_level",),
     "rain": ("query_basin_areal_rainfall",),
     "forecast": ("query_rolling_forecast",),
+    "region_risk": ("query_region_weather_risks",),
     "decision_poi": ("query_decision_weather_for_poi",),
     "basin_forecast": ("get_river_system_rainfall_forecast",),
     "river_forecast": ("query_river_rainfall_forecast",),
@@ -154,6 +167,27 @@ def is_conservative_river_forecast_query(user_text: str) -> bool:
     return True
 
 
+def is_conservative_region_risk_query(user_text: str) -> bool:
+    """仅识别天津已知区域的泛综合风险研判，专业或混合问题一律回退。"""
+    text = str(user_text or "").strip()
+    if not text or "风险" not in text:
+        return False
+    if not any(scope in text for scope in _REGION_RISK_SCOPE_MARKERS):
+        return False
+    if not any(marker in text for marker in _REGION_RISK_TIME_MARKERS):
+        return False
+    if any(marker in text for marker in _REGION_RISK_NON_WEATHER_MARKERS):
+        return False
+    if any(marker in text for marker in _REGION_RISK_SINGLE_HAZARD_MARKERS):
+        return False
+    if any(marker in text for marker in _REGION_RISK_MIXED_DOMAIN_MARKERS):
+        return False
+    # 预警、降雨/面雨量等已有专用域，以及河网、应急响应等混合域不能被泛风险抢占。
+    if _classify_domains(text) or is_unsafe_for_active_tool_filter(text):
+        return False
+    return True
+
+
 class ActiveToolRouter:
     """选择过滤工具集并缓存对应 Planner chain。"""
 
@@ -199,6 +233,13 @@ class ActiveToolRouter:
             return self._full("unsafe", "unsafe_domain")
         if has_mixed_regional_and_poi_scope(text):
             return self._full("mixed", "regional_and_poi_scope")
+        if is_conservative_region_risk_query(text):
+            required = _DOMAIN_TOOLS["region_risk"]
+            if any(name not in self._tools_by_name for name in required):
+                return self._full("region_risk", "required_tool_missing")
+            return ToolRouteDecision(
+                "filtered", "region_risk", required, True, "single_domain:region_risk"
+            )
         if is_conservative_river_forecast_query(text):
             required = _DOMAIN_TOOLS["river_forecast"]
             if any(name not in self._tools_by_name for name in required):
