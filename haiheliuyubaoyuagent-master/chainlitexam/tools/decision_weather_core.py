@@ -1093,8 +1093,15 @@ def _decision_time_of_day_table(user_text: str, facts: dict, periods: list[dict]
     if len(period_dates) != 1:
         return ""
     target_date = next(iter(period_dates))
+    text = str(user_text or "")
+    explicit_calendar_or_weekday = bool(
+        re.search(r"(?:(?:\d{4})\s*年\s*)?\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)", text)
+        or re.search(r"(?:(?:下|本|这)?(?:周|星期))[一二三四五六日天]", text)
+    )
     day_offset = (target_date - _decision_now_bjt().date()).days
-    if day_offset == 0:
+    if explicit_calendar_or_weekday:
+        day_name = f"{target_date.month}月{target_date.day}日"
+    elif day_offset == 0:
         day_name = "今天"
     elif day_offset == 1:
         day_name = "明天"

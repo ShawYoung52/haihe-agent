@@ -9,6 +9,8 @@ from chainlitexam.tests.stubs import ensure_stubs
 
 ensure_stubs()
 
+import chainlitexam.message_orchestrator as mo
+
 from tools.active_tool_router import ActiveToolRouter, ToolRouteDecision
 from tools.tool_candidate_index import ToolCandidateIndex
 
@@ -107,6 +109,33 @@ def test_current_poi_uses_decision_tool_not_regional_observation():
     river_named_poi = router.select("海河教育园区明天天气怎么样")
     assert river_named_poi.query_type == "decision_poi"
     assert river_named_poi.tool_names == ("query_decision_weather_for_poi",)
+
+
+@pytest.mark.parametrize("question", [
+    "未来三天于桥水库降雨预报？",
+    "盘山景区未来两天天气？",
+])
+def test_highlighted_poi_questions_use_decision_weather(question):
+    """水库和景区 POI 问题使用唯一的决策天气组合工具。"""
+    router, _ = _router()
+
+    decision = router.select(question)
+
+    assert decision.mode == "filtered"
+    assert decision.query_type == "decision_poi"
+    assert decision.tool_names == ("query_decision_weather_for_poi",)
+
+
+@pytest.mark.parametrize("question", [
+    "未来三天于桥水库降雨预报？",
+    "盘山景区未来两天天气？",
+])
+def test_highlighted_poi_questions_use_decision_weather_before_planner(question):
+    """规则快速路径必须在 Planner 前将高置信 POI 查询交给组合工具。"""
+    assert mo._route_simple_weather_query(question) == (
+        "query_decision_weather_for_poi",
+        {"user_text": question},
+    )
 
 
 def test_weather_intensity_word_is_not_misclassified_as_school_poi():

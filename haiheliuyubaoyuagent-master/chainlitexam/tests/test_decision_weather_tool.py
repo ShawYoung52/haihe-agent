@@ -294,9 +294,16 @@ def test_point_time_of_day_query_keeps_hourly_rows_when_explicitly_requested(que
     assert "12时" in table and "13时" in table
 
 
-@pytest.mark.parametrize("query", ["8月29日下午天津港天气怎么样", "下周六下午天津港天气怎么样"])
-def test_point_time_of_day_query_uses_actual_date_for_explicit_day(query):
+@pytest.mark.parametrize(
+    ("query", "frozen_now"),
+    [
+        ("8月29日下午天津港天气怎么样", datetime(2026, 8, 28, 8, 0)),
+        ("下周六下午天津港天气怎么样", datetime(2026, 8, 28, 8, 0)),
+    ],
+)
+def test_point_time_of_day_query_uses_actual_date_for_explicit_day(query, frozen_now, monkeypatch):
     """明确日期/星期不能被时段聚合误标成“今天下午”。"""
+    monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: frozen_now)
     facts = {
         "poi": {"name": "天津港"},
         "periods": [{
@@ -314,6 +321,28 @@ def test_point_time_of_day_query_uses_actual_date_for_explicit_day(query):
 
     assert "【天津港8月29日下午天气预报】" in table
     assert "今天下午" not in table
+
+
+def test_point_time_of_day_query_keeps_relative_tomorrow_label(monkeypatch):
+    """相对“明天”仍应显示相对标签，而不是退化为日历日期。"""
+    monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: datetime(2026, 8, 28, 8, 0))
+    facts = {
+        "poi": {"name": "天津港"},
+        "periods": [{
+            "start_time": f"2026-08-29 {hour:02d}:00:00",
+            "end_time": f"2026-08-29 {hour + 1:02d}:00:00",
+            "weather": "晴",
+            "tmax": 28,
+            "tmin": 28,
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+        } for hour in range(12, 18)],
+    }
+
+    table = dw_core._build_decision_weather_table("明天下午天津港天气怎么样", facts)
+
+    assert "【天津港明天下午天气预报】" in table
+    assert "8月29日下午" not in table
 
 
 def test_multi_day_time_of_day_query_does_not_merge_dates_into_one_row():
@@ -399,6 +428,52 @@ def test_full_text_point_keeps_low_visibility_reminder():
     }
     reminder = dw_core._build_poi_reminder_section(facts)
     assert "能见度较低" in reminder
+
+
+def _fair_weather_facts(name, category, days):
+    return {
+        "poi": {"name": name},
+        "poi_category": category,
+        "has_rain_signal": False,
+        "total_rain_mm": 0.0,
+        "periods": [{
+            "period_label": f"08月{28 + offset}日",
+            "weather": "多云",
+            "tmax": 28,
+            "tmin": 21,
+            "EDA": "西北风2-3级",
+            "rain_1h": 0.0,
+            "visibility_min_km": 8.0,
+        } for offset in range(days)],
+    }
+
+
+def test_yuqiao_reservoir_renders_three_days_without_invented_hazards():
+    """无雨、能见度正常的水库事实不得凭空增加天气风险。"""
+    facts = _fair_weather_facts("于桥水库", "reservoir", 3)
+
+    table = dw_core._build_decision_weather_table("未来三天于桥水库降雨预报？", facts)
+    reminder = dw_core._build_poi_reminder_section(facts)
+
+    assert all(f"08月{day}日" in table for day in (28, 29, 30))
+    assert "低能见度" not in reminder
+    assert "雷电" not in reminder
+    assert "高温" not in reminder
+
+
+def test_panshan_renders_two_days_and_real_weather_can_trigger_advice():
+    """景区只有真实雷雨信号时才生成相应防雷建议。"""
+    facts = _fair_weather_facts("盘山景区", "scenic", 2)
+
+    table = dw_core._build_decision_weather_table("盘山景区未来两天天气？", facts)
+
+    assert "08月28日" in table and "08月29日" in table
+    facts["periods"][0]["weather"] = "雷阵雨"
+    facts["has_rain_signal"] = True
+    facts["total_rain_mm"] = 12.0
+    reminder = dw_core._build_poi_reminder_section(facts)
+
+    assert "雷电" in reminder or "雷雨" in reminder
 
 
 @pytest.mark.asyncio
