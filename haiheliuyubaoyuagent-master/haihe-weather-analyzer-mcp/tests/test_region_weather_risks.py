@@ -161,6 +161,57 @@ def test_unsupported_explicit_region_does_not_query(monkeypatch):
     assert result["regions"] == []
 
 
+def test_unrecognized_bare_region_does_not_default_to_tianjin(monkeypatch):
+    def unexpected_query(*args):
+        pytest.fail("unknown bare region must not call the hazard service")
+
+    monkeypatch.setattr(rfs, "_query_region_hazards", unexpected_query)
+
+    result = rfs.query_region_weather_risks_core("雄安未来风险如何？", now=FIXED_NOW)
+
+    assert result["status"] == "unsupported_region"
+    assert result["regions"] == []
+
+
+def test_same_day_fallback_does_not_claim_calendar_day_coverage(monkeypatch):
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a: hazard_payload(risk_levels={}))
+
+    result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+
+    assert result["risk_window"] == {
+        "forecast_start_time": None,
+        "forecast_end_time": None,
+        "forecast_days": None,
+        "fcst_times": None,
+        "time_mode": "latest_available_cycle_with_same_day_fallback",
+    }
+
+
+@pytest.mark.parametrize("invalid_count", [-1, True, "1.5"])
+def test_invalid_risk_level_counts_are_unavailable(monkeypatch, invalid_count):
+    monkeypatch.setattr(
+        rfs,
+        "_query_region_hazards",
+        lambda *a: hazard_payload(risk_levels={"dzzh": {"levels": {"三级": invalid_count}}}),
+    )
+
+    result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+
+    assert _risk(result, "dzzh")["risk_status"] == "unavailable"
+    assert _risk(result, "dzzh")["unavailable_reason"] == "malformed_risk_payload"
+
+
+@pytest.mark.parametrize("invalid_count", [-1, True, "1.5"])
+def test_invalid_static_counts_are_unknown(monkeypatch, invalid_count):
+    payload = hazard_payload(risk_levels={})
+    payload["categories"] = [{"key": "dzzh", "label": "地质灾害", "count": invalid_count}]
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a: payload)
+
+    result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+
+    assert _risk(result, "dzzh")["hidden_point_count"] is None
+
+
 def test_risk_window_reports_the_clamped_actual_days(monkeypatch):
     captured = {}
 

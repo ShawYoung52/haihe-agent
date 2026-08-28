@@ -337,7 +337,7 @@ def _risk_window_payload(
         "forecast_end_time": None,
         "forecast_days": None,
         "fcst_times": risk_fcst_times,
-        "time_mode": "latest_cycle_with_same_day_fallback",
+        "time_mode": "latest_available_cycle_with_same_day_fallback",
     }
     if risk_fcst_times:
         try:
@@ -352,24 +352,25 @@ def _risk_window_payload(
             "time_mode": "explicit_daily_cycles",
         })
         return payload
-    if isinstance(calendar_window, dict):
-        start = calendar_window.get("target_start")
-        end = calendar_window.get("target_end")
-        if isinstance(start, datetime) and isinstance(end, datetime):
-            payload.update({
-                "forecast_start_time": start.strftime("%Y-%m-%d %H:%M"),
-                "forecast_end_time": end.strftime("%Y-%m-%d %H:%M"),
-                "forecast_days": calendar_window.get("forecast_days"),
-            })
+    # None 代表既有 helper 自行选择最近可用起报并可能回退上一个周期；它不返回
+    # 实际命中的周期，因而不能把用户的日历日窗口当成已经确认的风险覆盖范围。
     return payload
 
 
 def _coerce_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and (not value.is_integer()):
+        return None
+    if isinstance(value, Decimal) and value != value.to_integral_value():
+        return None
+    if isinstance(value, str) and not re.fullmatch(r"\d+", value.strip()):
+        return None
     try:
         number = int(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    return max(0, number)
+    return number if number >= 0 else None
 
 
 def _region_static_counts(hazards: dict) -> dict[str, int | None]:
@@ -457,8 +458,6 @@ def _normalize_region_risk(
 def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[str], bool]:
     """为独立风险入口校验范围，避免旧解析器把明确未知地点默认为天津市区。"""
     text = (regions or user_query or "").strip()
-    if not text:
-        return [DEFAULT_ROLLING_FORECAST_REGION], False
     matched_regions: list[str] = []
     if has_matched_rolling_region(text):
         matched_regions.extend(parse_rolling_forecast_regions(text))
@@ -470,12 +469,9 @@ def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[st
         matched_regions.append(DEFAULT_ROLLING_FORECAST_REGION)
     if matched_regions:
         return matched_regions, False
-    # 显式 regions 参数必定是调用方指定的范围，不能回退；常见行政区后缀也作为
-    # 问句中的显式地点处理。无地点的泛问句仍保留天津市区默认范围。
-    explicit_region = bool(regions.strip()) or bool(re.search(r"[\u4e00-\u9fff]{2,}(?:新区|市|区|县|镇|乡|旗|省)", text))
-    if explicit_region:
-        return [], True
-    return [DEFAULT_ROLLING_FORECAST_REGION], False
+    # 此专用核心只接受已验证的区域、别名或明确泛天津范围。与通用天气入口不同，
+    # 不能因没有行政后缀而把“雄安未来风险”等未知地点默认为天津市区。
+    return [], True
 
 
 def query_region_weather_risks_core(
