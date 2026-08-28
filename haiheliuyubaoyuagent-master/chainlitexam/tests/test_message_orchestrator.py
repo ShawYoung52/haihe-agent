@@ -91,6 +91,32 @@ def test_river_forecast_boundary_keeps_observation_query_planner_calls():
     assert guarded.tool_calls == [original_call]
 
 
+def test_river_forecast_boundary_keeps_mixed_observation_and_future_calls():
+    """实况加未来追问由 Planner 组合工具，河流边界不得改写成单一未来预报。"""
+    original_calls = [
+        {
+            "id": "observation-1",
+            "name": "query_current_weather_observation",
+            "args": {"user_query": "海河今天已经下雨了吗"},
+        },
+        {
+            "id": "forecast-1",
+            "name": "query_rolling_forecast",
+            "args": {"user_query": "海河明天还会下吗"},
+        },
+    ]
+    planner_msg = type("PlannerMessage", (), {
+        "tool_calls": original_calls,
+        "content": "",
+    })()
+
+    guarded = mo._enforce_river_forecast_tool_boundary(
+        planner_msg, "海河今天已经下雨了吗，明天还会下吗"
+    )
+
+    assert guarded.tool_calls == original_calls
+
+
 @pytest.mark.asyncio
 async def test_river_forecast_second_planner_answer_does_not_repeat_tool_or_drop_content(monkeypatch):
     """首轮已查河流预报后，补充 Planner 的完整答案必须原样保留。"""

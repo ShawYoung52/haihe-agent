@@ -168,6 +168,15 @@ def test_river_forecast_filter_rejects_retrospective_rain_observation_forms():
         assert "query_river_rainfall_forecast" not in decision.tool_names, question
 
 
+def test_river_forecast_filter_keeps_observation_and_future_followup_mixed():
+    """实况加明天追问是混合问题，不能被单一未来河流工具抢占。"""
+    decision = _router()[0].select("海河今天已经下雨了吗，明天还会下吗")
+
+    assert decision.mode == "full"
+    assert decision.query_type != "river_forecast"
+    assert "query_river_rainfall_forecast" not in decision.tool_names
+
+
 def test_unsafe_and_mixed_questions_always_use_full_planner():
     router, _ = _router()
     assert router.select("暴雨洪水大概多久到达下游").mode == "full"
