@@ -18,6 +18,16 @@ def test_prompts_use_unified_river_forecast_entry(routing_prompt):
     assert "query_river_rainfall_forecast" in routing_prompt
 
 
+def test_prompts_limit_unified_river_tool_to_supported_time_windows(routing_prompt):
+    start = routing_prompt.index("#### 3.5 子流域未来天气查询规范")
+    end = routing_prompt.index("### 4. 决策天气", start)
+    section = routing_prompt[start:end]
+    assert "今天/今日、明天/明日、后天、今天晚上/今晚、未来N天" in section
+    assert "一周/周末、明确日期、其他日内时段或混合时段" in section
+    assert "get_river_system_rainfall_forecast" in section
+    assert "不得强制统一入口或改成今天" in section
+
+
 def test_prompts_keep_basin_forecast_scope_and_observation_separate(routing_prompt):
     start = routing_prompt.index('用户问"流域"时区分实况与预报')
     end = routing_prompt.index("数据来源必须如实", start)

@@ -36,6 +36,16 @@ _RIVER_CORRIDOR_RE = re.compile(r"([\u4e00-\u9fff]{1,8}?)(?:的)?河道")
 _RIVER_NAME_RE = re.compile(r"([\u4e00-\u9fff]{1,8}河)")
 _RAIN_OR_WEATHER_PREDICATE_RE = re.compile(r"有雨|下雨|降雨|降水|雨量|天气")
 _FUTURE_DAYS_RE = re.compile(r"未来\s*([^\s，。！？?、]{1,8}?)\s*天")
+_SUPPORTED_PERIOD_RE = re.compile(
+    r"今天晚上|今晚|今天|今日|明天|明日|(?<!大)后天|未来\s*"
+    r"(?:[1-9]\d?|[一二两三四五六七八九]|[一二两三四五六七八九]?十[一二两三四五六七八九]?)\s*天"
+)
+_OTHER_PERIOD_RE = re.compile(
+    r"未来|今夜|周(?!边)|星期|礼拜|年|月|小时|钟头|分钟|"
+    r"清晨|早上|上午|中午|下午|傍晚|晚上|夜间|夜里|夜晚|凌晨|白天|"
+    r"昨天|昨日|前天|近期|最近|接下来|之后|以后|后续|"
+    r"\d\s*(?:日|号|点|时|[:：/-])|[0-9一二两三四五六七八九十几]+\s*天"
+)
 _LEADING_POLITENESS_RE = re.compile(
     r"^(?:(?:请|劳烦|烦请|麻烦)(?:问|教|帮忙)?|(?:想|想要|想请)(?:问|了解|咨询)|(?:咨询|请教))(?:一下|下)?"
 )
@@ -214,6 +224,14 @@ def resolve_river_forecast_periods(
     """将相对时间解析为北京时间的连续预报窗口。"""
     current = _as_tianjin_time(now) if now is not None else time_source.now(TIANJIN_TIMEZONE)
     query = str(user_query or "")
+    future_match = _FUTURE_DAYS_RE.search(query)
+    future_days = _parse_day_count(future_match.group(1)) if future_match else None
+    # 只接受已实现的单一窗口。先移除完整窗口词，避免“今天晚上”被当成额外“晚上”；
+    # 其余明确日期、周/小时、日内时段与混合窗口不得缩成今天或一个自然日。
+    if len(_SUPPORTED_PERIOD_RE.findall(query)) != 1 or _OTHER_PERIOD_RE.search(
+        _SUPPORTED_PERIOD_RE.sub("", query)
+    ):
+        raise ValueError("统一河流预报暂不支持该时间表达，请由原有预报工具处理明确时段")
 
     if "今天晚上" in query or "今晚" in query:
         day_start = datetime.combine(current.date(), time.min, tzinfo=TIANJIN_TIMEZONE)
@@ -222,12 +240,10 @@ def resolve_river_forecast_periods(
         start = max(evening_start, current_hour)
         return [ForecastPeriod("今天晚上", start, day_start + timedelta(days=1))]
 
-    future_match = _FUTURE_DAYS_RE.search(query)
-    if future_match:
-        count = _parse_day_count(future_match.group(1))
+    if future_days is not None:
         return [
             _day_period(current.date() + timedelta(days=offset), f"未来第{offset}天")
-            for offset in range(1, count + 1)
+            for offset in range(1, future_days + 1)
         ]
 
     if "后天" in query:

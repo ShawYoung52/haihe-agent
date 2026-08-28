@@ -855,7 +855,7 @@ def _is_future_hour_weather_query(user_text: str) -> bool:
 
 def _enforce_initial_future_hour_weather_route(planner_msg, user_text: str):
     """未来 N 小时问题使用确定性路由，避免被时间工具或短临合作方抢占。"""
-    if not _is_future_hour_weather_query(user_text) or is_conservative_river_forecast_query(user_text):
+    if not _is_future_hour_weather_query(user_text) or is_conservative_river_forecast_query(user_text, require_supported_time=False):
         return planner_msg
     if _decision_weather_prefilter(user_text):
         calls = [{
@@ -927,7 +927,7 @@ def _is_basin_or_river_query(user_text: str) -> bool:
         return True
     if any(m in text for m in _POI_CONTEXT_MARKERS):
         return False
-    return is_conservative_river_forecast_query(text) or any(name in text for name in _BASIN_RIVER_NAMES)
+    return is_conservative_river_forecast_query(text, require_supported_time=False) or any(name in text for name in _BASIN_RIVER_NAMES)
 
 
 def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:

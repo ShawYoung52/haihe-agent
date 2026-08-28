@@ -5,8 +5,9 @@
 - 新增天河精确目录51题已接入，原文传参并优先于简单天气；既有03/04/05目录兼容，不扩展普通天气问题到天河。
 - 5个标黄问题已落实工具边界：泃河/滦河走统一河流降雨入口，蓟州走三灾种区域综合风险，于桥水库/盘山景区复用POI决策天气。河道采用全量表与geography真实5000米缓冲；裸河名仅在未找到时回退已知河系。
 - 本轮修复黄金路由模式漏登记、旧提示词契约，恢复今天流域示例；补充今日流域核心调用验证，并修复缺水情且无雨时无依据预测水库水位平稳的提醒。未启用快速路径，未改登录/权限、外部配置或历史包。
-- 最新自动化结果：Chainlit全量 **853 passed / 8 skipped**，定向 **494 passed**；MCP定向 **103 passed / 4 skipped**。既有skip来自真实Chainlit/GDAL缺失。
-- MCP原始全量因缺fastmcp/networkx出现 **20个收集错误**；额外进程内import-only检查为 **545 passed / 17 skipped / 2 failed**，剩余为rich缺失和真实FastMCP实例化未验证。不能称为MCP全量通过或服务启动成功。
+- Task4复审fix1：统一河流入口仅强制今天/明天/后天/今晚/未来N自然日单一窗口；周/周末、明确日期、其他日内/小时或混合时段保留原Planner/河系调用，直接调用新核心返回invalid_request，不得改成今天；未新增周日期解析。
+- 最新自动化结果（fix1后）：Chainlit全量 **874 passed / 8 skipped**，定向 **515 passed**；MCP定向 **120 passed / 4 skipped**。既有skip来自真实Chainlit/GDAL缺失。
+- MCP原始全量因缺fastmcp/networkx出现 **20个收集错误**；额外进程内import-only检查为 **562 passed / 17 skipped / 2 failed**，剩余为rich缺失和真实FastMCP实例化未验证。不能称为MCP全量通过或服务启动成功。
 - 当前状态：实现与本轮离线回归已完成，独立最终审查待执行；完整依赖环境复测及内网真实接口联调待完成。51+5题的生产状态均未验收，PC/手机实际展示也未验收。
 - 完整56题、逐题工具/范围、执行裁定及代价、可复现命令与上线门禁见[验收记录](haiheliuyubaoyuagent-master/chainlitexam/docs/superpowers/2026-08-27-priority-acceptance.md)。旧POI风险no_data语义保留供终审判断，不与新区域风险混合。
 

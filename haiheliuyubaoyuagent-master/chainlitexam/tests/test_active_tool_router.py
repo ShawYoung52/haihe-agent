@@ -166,12 +166,28 @@ def test_regional_collection_words_are_not_misclassified_as_poi():
 def test_bare_river_forecast_never_uses_tianjin_rolling_forecast():
     """裸河名仍是子流域问题，不能套用天津滚动预报。"""
     router, _ = _router()
-    for question in ("大清河明天天气如何", "卫河未来24小时降雨如何"):
+    for question in ("大清河明天天气如何", "卫河明天降雨如何"):
         decision = router.select(question)
         assert decision.mode in {"filtered", "full"}
         assert "query_rolling_forecast" not in decision.tool_names
         if decision.mode == "filtered":
             assert decision.tool_names == ("query_river_rainfall_forecast",)
+
+
+@pytest.mark.parametrize("question", [
+    "海河流域未来一周天气", "海河流域一周天气", "海河流域周末天气",
+    "海河未来一周降雨如何", "海河今天起3天有雨吗", "海河大后天有雨吗",
+    "海河今天下午有雨吗", "海河明天晚上有雨吗", "海河8月30日有雨吗",
+    "海河今天和明天有雨吗", "海河未来三天下午有雨吗", "卫河未来24小时降雨如何",
+])
+def test_unsupported_river_time_windows_do_not_use_unified_entry(question):
+    router, _ = _router()
+    decision = router.select(question)
+
+    assert not mo.is_conservative_river_forecast_query(question)
+    assert decision.tool_names in ((), ("get_river_system_rainfall_forecast",))
+    assert "query_rolling_forecast" not in decision.tool_names
+    assert mo._route_simple_weather_query(question) is None
 
 
 def test_highlighted_river_and_today_basin_questions_use_unified_river_tool():
@@ -248,6 +264,7 @@ def test_river_forecast_filter_keeps_observation_and_future_followup_mixed():
     ("大清河流域未来三天天气", "river_forecast", "query_river_rainfall_forecast"),
     ("海河河系降水预报", "basin_forecast", "get_river_system_rainfall_forecast"),
     ("海河流域一周天气", "basin_forecast", "get_river_system_rainfall_forecast"),
+    ("海河流域未来一周天气", "basin_forecast", "get_river_system_rainfall_forecast"),
 ))
 def test_pure_river_system_forecasts_keep_existing_routes(question, query_type, tool_name):
     router, _ = _router()

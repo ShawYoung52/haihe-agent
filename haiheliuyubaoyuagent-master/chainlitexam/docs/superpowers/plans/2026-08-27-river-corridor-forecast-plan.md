@@ -2,6 +2,8 @@
 
 > 执行状态（2026-08-28）：河流/河系实现和离线回归完成，独立最终审查待执行，真实PostGIS/GDAL与内网栅格待验证；最终状态、56题清单和命令见[验收记录](../2026-08-27-priority-acceptance.md)。下方保留原始提案步骤，不以未勾选复选框表示尚未实现。原known-system-first与EPSG:3857示例已被替代：裸河名先查全量表，仅未找到才回退河系；采用geography真实米制5000米缓冲，明确河系由统一入口复用既有核心。新区域风险no_data为不可用，Chainlit/MCP必须分目录分进程使用系统Python测试。
 
+> 复审fix1时间裁定：上述“明确河系统一入口”和下方“所有河流未来降雨”仅限今天/明天/后天/今晚/未来N自然日单一窗口；周/周末、明确日期、其他日内/小时或混合时段及未定时问法保留旧Planner/河系工具。新核心直接收到未支持窗口时返回invalid_request，不默认今天；本次不实现周日期解析。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让“明天泃河有雨吗”“今天晚上滦河有雨吗”等问题稳定使用河道或河系专用降雨数据，并按动态自然日/时段返回真实统计。

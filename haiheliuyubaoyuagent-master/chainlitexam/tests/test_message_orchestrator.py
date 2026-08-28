@@ -91,6 +91,22 @@ def test_river_forecast_boundary_keeps_observation_query_planner_calls():
     assert guarded.tool_calls == [original_call]
 
 
+@pytest.mark.parametrize("question", [
+    "海河流域未来一周天气", "海河今天下午有雨吗", "海河明天晚上有雨吗",
+    "海河未来一周降雨如何",
+    "海河今天和明天有雨吗", "卫河未来24小时降雨如何",
+])
+def test_unsupported_river_window_keeps_planner_call_and_parameters(question):
+    original_call = {"id": "legacy", "name": "get_river_system_rainfall_forecast",
+                     "args": {"river_system": "海河", "forecast_hours": 168}}
+    planner_msg = type("PlannerMessage", (), {"tool_calls": [original_call], "content": ""})()
+
+    guarded = mo._enforce_river_forecast_tool_boundary(planner_msg, question, require_query=True)
+    guarded = mo._enforce_initial_future_hour_weather_route(guarded, question)
+
+    assert guarded.tool_calls == [original_call]
+
+
 def test_river_forecast_boundary_keeps_mixed_observation_and_future_calls():
     """实况加未来追问由 Planner 组合工具，河流边界不得改写成单一未来预报。"""
     original_calls = [

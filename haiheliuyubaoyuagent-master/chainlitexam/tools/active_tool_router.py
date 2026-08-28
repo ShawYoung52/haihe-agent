@@ -43,7 +43,16 @@ _KNOWN_RIVER_NAMES = (
 _RIVER_QUERY_RE = re.compile(
     r"[\u4e00-\u9fff]{1,8}河(?=流域|河系|沿线|今天|今日|今晚|今夜|明天|明日|后天|未来|当前|现在|目前|天气|降雨|降水|有雨|会下雨|是否下雨|气温|温度|$|[，。！？?\s])"
 )
-_RIVER_FORECAST_TIME_MARKERS = ("今天", "今日", "今晚", "今夜", "明天", "明日", "后天", "未来")
+_RIVER_FORECAST_TIME_RE = re.compile(
+    r"今天晚上|今晚|今天|今日|明天|明日|(?<!大)后天|未来\s*"
+    r"(?:[1-9]\d?|[一二两三四五六七八九]|[一二两三四五六七八九]?十[一二两三四五六七八九]?)\s*天"
+)
+_OTHER_RIVER_TIME_RE = re.compile(
+    r"未来|今夜|周(?!边)|星期|礼拜|年|月|小时|钟头|分钟|"
+    r"清晨|早上|上午|中午|下午|傍晚|晚上|夜间|夜里|夜晚|凌晨|白天|"
+    r"昨天|昨日|前天|近期|最近|接下来|之后|以后|后续|"
+    r"\d\s*(?:日|号|点|时|[:：/-])|[0-9一二两三四五六七八九十几]+\s*天"
+)
 _RIVER_FORECAST_EXCLUDE_MARKERS = (
     "水位", "水势", "库容", "闸上", "闸下", "蓄水量",
     "历史", "过去", "去年", "前年", "实况", "观测", "累计",
@@ -147,13 +156,16 @@ def _has_river_forecast_exclusion(text: str) -> bool:
     return bool(re.search(r"(?:与|和)[\u4e00-\u9fff]{1,8}河", text))
 
 
-def is_conservative_river_forecast_query(user_text: str) -> bool:
-    """仅识别纯河流当日/未来降雨预报，无法确定时交完整 Planner。"""
+def is_conservative_river_forecast_query(user_text: str, *, require_supported_time: bool = True) -> bool:
+    """仅支持已实现的单一时间窗口；范围防护可单独检查纯河流意图。"""
     text = str(user_text or "").strip()
     if not text or not _looks_like_river_scope(text):
         return False
-    if not any(marker in text for marker in _RIVER_FORECAST_TIME_MARKERS):
-        return False
+    if require_supported_time:
+        if len(_RIVER_FORECAST_TIME_RE.findall(text)) != 1:
+            return False
+        if _OTHER_RIVER_TIME_RE.search(_RIVER_FORECAST_TIME_RE.sub("", text)):
+            return False
     if not any(word in text for word in _WEATHER_WORDS):
         return False
     if is_unsafe_for_active_tool_filter(text):

@@ -84,6 +84,39 @@ def test_invalid_future_day_count_raises_instead_of_falling_back_to_today():
         )
 
 
+@pytest.mark.parametrize("query", [
+    "海河流域未来一周天气", "海河流域一周天气", "海河流域周末天气",
+    "海河未来一周降雨如何", "海河今天起3天有雨吗", "海河大后天有雨吗",
+    "海河今天下午有雨吗", "海河明天晚上有雨吗", "海河8月30日有雨吗",
+    "海河今天和明天有雨吗", "海河未来三天下午有雨吗", "卫河未来24小时降雨如何",
+])
+def test_unsupported_time_window_is_invalid_without_querying_any_forecast(monkeypatch, query):
+    def unexpected_query(*args, **kwargs):
+        pytest.fail("unsupported time must not query a substitute forecast window")
+
+    monkeypatch.setattr(rqf, "load_river_corridor", unexpected_query)
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", unexpected_query)
+
+    result = rqf.query_river_rainfall_forecast_core(query, {}, now=datetime(2026, 8, 27, 9, tzinfo=TZ))
+
+    assert result["status"] == "invalid_request"
+    assert result["periods"] == []
+
+
+@pytest.mark.parametrize(("query", "start", "end", "count"), [
+    ("海河今天有雨吗", "2026-08-27T00:00:00+08:00", "2026-08-28T00:00:00+08:00", 1),
+    ("海河明天有雨吗", "2026-08-28T00:00:00+08:00", "2026-08-29T00:00:00+08:00", 1),
+    ("海河后天有雨吗", "2026-08-29T00:00:00+08:00", "2026-08-30T00:00:00+08:00", 1),
+    ("海河今晚有雨吗", "2026-08-27T18:00:00+08:00", "2026-08-28T00:00:00+08:00", 1),
+    ("海河未来3天有雨吗", "2026-08-28T00:00:00+08:00", "2026-08-31T00:00:00+08:00", 3),
+])
+def test_supported_windows_keep_their_exact_dates(query, start, end, count):
+    periods = rqf.resolve_river_forecast_periods(query, datetime(2026, 8, 27, 9, tzinfo=TZ))
+    assert len(periods) == count
+    assert periods[0].target_start.isoformat() == start
+    assert periods[-1].target_end.isoformat() == end
+
+
 class FakeCursor:
     def __init__(self, executed):
         self.executed = executed

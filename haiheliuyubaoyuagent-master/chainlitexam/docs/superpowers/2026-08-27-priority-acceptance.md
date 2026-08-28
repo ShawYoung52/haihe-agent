@@ -2,12 +2,13 @@
 
 日期：2026-08-28  
 状态：实现及本轮离线回归已完成；独立最终审查待执行，完整依赖环境复测和内网真实接口验收待完成。  
-实现基线：`58ac85f..9c5f25e`，另包含本轮提示词/路由契约和缺水情提醒修复。本文是三份原始实施计划的执行结论，历史示例冲突以本记录裁定为准。
+实现基线：`58ac85f..836f9ed`，另包含Task4复审fix1的时间窗口守卫。本文是三份原始实施计划的执行结论，历史示例冲突以本记录裁定为准。
 
 ## 1. 结论与证据边界
 
 - 已接入新增天河目录 51 题，保留既有 03/04/05 问法；新增匹配仅归一化空白与句末标点，不做宽泛语义扩展。工具参数保留用户原文。
 - 5 个标黄问题已有确定性工具路由、空间/时间或 POI 逐日输出离线测试；`ENABLE_FAST_PATHS = False` 未改变。
+- 统一河流入口仅支持今天/今日、明天/明日、后天、今天晚上/今晚、未来N自然日（1—99天）的单一窗口。一周/周末、明确日期、其他日内时段、小时窗口、混合时段或未指定时间保留原有Planner/河系工具处理；直接调用新核心时返回invalid_request，不能默默统计今天。此限制不改变原接口的统计范围。
 - 未访问天河、生产数据库、MUSIC、GeoServer、真实预报栅格或风险接口。下列 56 题的生产状态全部是“待内网验收”，不得把离线通过写成生产通过。
 - Chainlit 全量通过但使用仓库既有离线 stubs；8 个真实 Chainlit 依赖测试仍跳过。MCP 原始全量未通过收集；额外 import-only 测试不代表真实 FastMCP、networkx、GDAL 或服务启动成功。
 - 本轮未安装依赖、未改配置、未操作 Git、未修改用户新增归档或 MCP 的既有隐藏配置目录。
@@ -84,15 +85,18 @@ T 类共同契约：只调用 `query_tianhe_fixed_qa(query=用户原文)`；允�
 | --- | --- | --- |
 | 精确目录先于简单天气及旧天河规则 | `process_message` 使用经过行为测试的 `_select_pre_planner_route(user_text)`；不启用快速路径 | 增加一个内部选择接口；源码检查测试需同步维护 |
 | Chainlit/MCP 分目录、分进程测试 | 两个项目均有顶层 `tools`；使用系统 Python，并把 TEMP/TMP 指向仓库可写临时目录 | 同进程可能测试了错误模块；错误临时目录会产生权限失败 |
-| 裸河名先查全量河道 | 即使“滦河”是已知河系，也先查 `river_table_full`；只有 `RiverNotFoundError` 可以回退河系；明确河系/流域不查走廊 | 多一次数据库查询；模糊裸名的统计范围可能与旧习惯不同 |
+| 统一入口内裸河名先查全量河道 | 在支持的单一时间窗口内，即使“滦河”是已知河系，也先查 `river_table_full`；只有 `RiverNotFoundError` 可以回退河系；明确河系/流域不查走廊 | 多一次数据库查询；模糊裸名的统计范围可能与旧习惯不同 |
 | 使用真实米制5公里缓冲 | `ST_Buffer(…::geography, 5000)::geometry` 输出 WGS84；不采用 EPSG:3857 平面5000单位冒充地面5公里。依据控制器核对的 [PostGIS ST_Buffer 文档](https://postgis.net/docs/ST_Buffer.html) | SQL 离线断言需要更新；真实几何和投影效果仍须 PostGIS 内网验证 |
 | 首轮与补充 Planner 都执行河流工具边界 | 防止后续全工具开放时改查天津；保留已取得工具结果后的完整答案，禁止重复调用；POI、混合、河网、水位等排除语义不变 | 识别条件过宽会阻挡混合请求，必须保留排除用例 |
-| 明确河系/流域使用统一 MCP 入口并复用既有核心 | 外层选 `query_river_rainfall_forecast`，内部调用 `river_system_forecast.get_river_system_rainfall_forecast`，保留九分区与逐日时间解析；不加载走廊 | 外层工具名与旧实现不同；未来若要求直接 MCP 兼容需另作小范围路由调整 |
+| 支持窗口内的明确河系/流域使用统一 MCP 入口并复用既有核心 | 仅今天/明天/后天/今晚/未来N天单一窗口外层选 `query_river_rainfall_forecast`，内部调用 `river_system_forecast.get_river_system_rainfall_forecast`，保留九分区与逐日时间解析；不加载走廊 | 支持窗口的外层工具名与旧实现不同；其他时间形式仍由旧Planner/河系工具处理 |
+| 统一入口只强制其已支持的单一窗口 | 不把一周、周末、明确日期、其他日内时段或混合时段强制到新解析器；主动路由和首轮/补充编排保留原调用，核心直接调用返回invalid_request；不新增周日期解析功能 | 部分周预报/无时间问题保留旧工具名和Planner参数处理；后续扩大统一日期支持需单独补测试实现 |
 | 新区域风险 `no_data` 是 unavailable | `risk_forecast_no_data` 单独保留；仅服务有效且结果确实空才是 no_risk；不使用禁用的缺时次文案 | 缺预报周期会明确显示不可用，不能得到虚假的“无风险”结论 |
 | POI 显式日期/星期标题做最小生产修复 | 日期类请求按实际月日显示，不随运行当天变成今天/明天；相对日期请求保留原格式 | 显式日期标题改变，必须同时测试相对“明天”标签 |
 | 缺水情且无雨时不预测水库水位 | 标黄于桥也必须满足事实门控；缺水位或汛限资料时说明无法判断，不宣称水位平稳或当次山洪风险；有数据的提醒和表格保留 | 缺事实时一条水库提醒改变；不新增查询，不替换水位工具 |
 
 原计划的 known-system-first、EPSG:3857 缓冲、no_data→no_risk、跨项目单进程测试命令属于已被替代的提案示例，不是最终契约。新区域风险与既有 POI 风险展示不是同一个状态机，不得以“简化”为由合并。
+
+原计划“所有河流未来降雨问题统一入口”的概括亦已被上述时间窗口限制取代；例如“海河流域一周天气”“海河流域未来一周天气”仍可选择既有get_river_system_rainfall_forecast，不能将其视为漏路由后强改成今天。
 
 ## 4. 本轮自动化验证（2026-08-28）
 
@@ -103,12 +107,13 @@ T 类共同契约：只调用 `query_tianhe_fixed_qa(query=用户原文)`；允�
 | 提示词＋黄金路由修复后 | 60 passed | 检查统一入口、原文、九分区、无天津替代和真实 data_source |
 | 水库缺水情提醒 RED → GREEN | 5 failed → 5 passed | 无水位、空水位字典、仅有水位但无汛限三种缺事实输入；更新两项旧契约断言 |
 | POI/路由/滚动回答回归 | 257 passed | 保留有雨/有水位风险建议、原表格与日期格式 |
-| Chainlit 定向七文件 | 494 passed | 天河目录/边界、主动路由、POI、编排、提示词、黄金路由 |
-| Chainlit 全量 | 853 passed, 8 skipped | 无失败；8项均因真实 Chainlit 包缺失的既有 skip |
-| MCP 河流核心 | 50 passed | 含新增“今天海河流域天气怎么样”真实核心调用及24小时参数契约 |
-| MCP 定向六文件 | 103 passed, 4 skipped | 河道/河系、区域风险、注册与滚动风险；4项既有 GDAL skip |
+| fix1未支持时段守卫 RED → GREEN | Chainlit 14 failed / 112 passed → 定向全绿；MCP 8 failed / 56 passed → 定向全绿 | 周/周末、明确日期、日内、混合、小时窗口；另补“今天起3天/大后天”两项失败后修复 |
+| Chainlit 定向七文件（fix1后） | 515 passed | 天河目录/边界、主动路由、POI、编排、提示词、黄金路由 |
+| Chainlit 全量（fix1后） | 874 passed, 8 skipped | 无失败；8项均因真实 Chainlit 包缺失的既有 skip |
+| MCP 河流核心（fix1后） | 67 passed | 含今日流域核心复用、五类支持窗口日期、未支持时段不查替代数据 |
+| MCP 定向六文件（fix1后） | 120 passed, 4 skipped | 河道/河系、区域风险、注册与滚动风险；4项既有 GDAL skip |
 | MCP 原始全量 | 20 collection errors | 缺少 fastmcp/networkx；未执行完整测试主体 |
-| MCP 额外 import-only 全量 | 545 passed, 17 skipped, 2 failed | 仅导入替身；真实分析器缺 rich、真实 FastMCP 实例化均仍失败，未伪造框架 |
+| MCP 额外 import-only 全量（fix1后） | 562 passed, 17 skipped, 2 failed | 仅导入替身；真实分析器缺 rich、真实 FastMCP 实例化均仍失败，未伪造框架 |
 
 MCP 17 个既有 skip：9 项缺 GDAL，8 项缺样本 .nc 文件；本轮没有把失败改成 skip。两个剩余失败分别为 `TestForecastEvaluateCacheOrder.test_analyzer_can_build_report_without_charts`（rich）和 `test_poi_hazard_reminder_tool.py::test_register_exposes_tool`（真实 FastMCP 实例化）。注册单测中的 FakeMCP 只能证明本项目注册边界，不能替代这项真实框架测试。
 
@@ -156,6 +161,7 @@ Set-Location (Join-Path $acceptanceRoot 'haiheliuyubaoyuagent-master\haihe-weath
 - [ ] 逐题执行 T01—T51/H01—H05，记录接口响应、参数、时间、来源和最终正文。
 - [ ] 断开/超时/缺资料/零像元/数据库错误等故障场景；不能输出无雨或无风险。
 - [ ] 对照地图检查泃河/滦河匹配、full_v6、两侧5公里、河系 fallback；人工核对逐日栅格无重复累计。
+- [ ] 验证周/周末/明确日期/日内或混合时段保留原时间参数；统一核心不支持时明确invalid_request，不返回当天整日替代结果。
 - [ ] 核对蓟州三灾种、静态隐患数量与动态风险、实际起报周期；未知覆盖不得宣称完整当天。
 - [ ] 核对天津于桥水库/盘山景区定位、逐日雨量、注意事项来源；缺气象/水位事实不得作事实断言。
 - [ ] PC/手机端核对56题代表性输出、长表、长文本、错误提示和可操作性；此轮未做浏览器/UI验收。
