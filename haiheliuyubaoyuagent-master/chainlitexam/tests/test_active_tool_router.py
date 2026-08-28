@@ -174,9 +174,9 @@ def test_bare_river_forecast_never_uses_tianjin_rolling_forecast():
             assert decision.tool_names == ("query_river_rainfall_forecast",)
 
 
-def test_highlighted_river_questions_use_unified_river_tool():
+def test_highlighted_river_and_today_basin_questions_use_unified_river_tool():
     router, _ = _router()
-    for question in ("明天泃河有雨吗？", "今天晚上滦河有雨吗？"):
+    for question in ("明天泃河有雨吗？", "今天晚上滦河有雨吗？", "今天海河流域天气怎么样"):
         decision = router.select(question)
         assert decision.mode == "filtered"
         assert decision.query_type == "river_forecast"

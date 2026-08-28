@@ -1807,8 +1807,8 @@ def _decision_reservoir_risk_lines(facts: dict) -> list[str]:
     if has_rain:
         return [f"{rain_clause}，需关注库区水位上涨与上游来水，"
                 "警惕泄洪调度引发的下游河道涨水及山洪风险。"]
-    return [f"{no_rain_clause}，短期库区水位预计平稳；雨季仍需关注上游来水与泄洪调度，"
-            "下游河道警惕突发涨水与山洪风险。"]
+    return ["水情资料不足，无法判断库区水位变化或洪水风险；"
+            "请关注水库管理部门发布的水情与运行信息。"]
 
 
 def _build_poi_reminder_section(

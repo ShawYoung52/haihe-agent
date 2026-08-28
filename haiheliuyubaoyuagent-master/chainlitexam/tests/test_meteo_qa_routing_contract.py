@@ -11,6 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from chainlitexam.tests.stubs import ensure_stubs
+
+ensure_stubs()
+
 from langchain_core.messages import AIMessage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -56,6 +61,9 @@ ACTIVE_FILTER_CASE_IDS = {
     "national_warning",
     "basin_areal",
     "basin_future_weather",
+    "river_forecast_jvhe",
+    "river_forecast_luanhe_tonight",
+    "region_weather_risk",
     "water_level",
 }
 

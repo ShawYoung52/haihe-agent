@@ -3,26 +3,44 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import prompts
+
 PROMPTS_PATH = Path(__file__).resolve().parents[1] / "prompts.py"
 
 
-def test_prompts_mentions_river_system_forecast_tool():
-    text = PROMPTS_PATH.read_text(encoding="utf-8")
-    assert "get_river_system_rainfall_forecast" in text
+@pytest.fixture(params=["PLANNER_SYSTEM_PROMPT", "WEATHER_ASSISTANT_PROMPT"])
+def routing_prompt(request):
+    return getattr(prompts, request.param)
 
 
-def test_prompts_prioritizes_river_system_for_basin_forecast():
-    text = PROMPTS_PATH.read_text(encoding="utf-8")
-    # 流域预报规则中应优先提到新工具
-    basin_section = text[text.find("用户问\"流域\"时区分实况与预报"):text.find("数据来源必须如实")]
-    assert "get_river_system_rainfall_forecast" in basin_section
+def test_prompts_use_unified_river_forecast_entry(routing_prompt):
+    assert "query_river_rainfall_forecast" in routing_prompt
 
 
-def test_prompts_subbasin_section_uses_river_system_tool():
-    text = PROMPTS_PATH.read_text(encoding="utf-8")
-    subbasin_section = text[text.find("#### 3.5 子流域未来天气查询规范"):text.find("### 4. 决策天气")]
-    assert "get_river_system_rainfall_forecast" in subbasin_section
-    assert "优先调用" in subbasin_section
+def test_prompts_keep_basin_forecast_scope_and_observation_separate(routing_prompt):
+    start = routing_prompt.index('用户问"流域"时区分实况与预报')
+    end = routing_prompt.index("数据来源必须如实", start)
+    basin_section = routing_prompt[start:end]
+    assert "query_basin_areal_rainfall" in basin_section
+    assert "实况" in basin_section
+    assert "调用 `query_river_rainfall_forecast`" in basin_section
+    assert "明确河系/流域复用九分区预报" in basin_section
+    assert "未找到才回退已知河系" in basin_section
+    assert "禁止调 `query_rolling_forecast`" in basin_section
+    assert '禁止"以天津市代表海河流域"' in basin_section
+
+
+def test_prompts_subbasin_entry_preserves_original_query_and_scope(routing_prompt):
+    start = routing_prompt.index("#### 3.5 子流域未来天气查询规范")
+    end = routing_prompt.index("### 4. 决策天气", start)
+    subbasin_section = routing_prompt[start:end]
+    assert "统一调用 `query_river_rainfall_forecast`" in subbasin_section
+    assert "`user_query` 必须原样传入" in subbasin_section
+    assert "具体河流优先匹配真实河道走廊，未找到才回退已知河系" in subbasin_section
+    assert "明确河系/流域直接复用九分区预报" in subbasin_section
+    assert "不得把全流域或天津市的预报直接套用到某个子流域上" in subbasin_section
+    assert "不编造气温、风力、湿度等数据" in subbasin_section
 
 
 def test_anti_redundancy_rule_present():
@@ -33,22 +51,29 @@ def test_anti_redundancy_rule_present():
     assert "市台" in text or "全市" in text
 
 
-def test_prompts_does_not_hardcode_ec_for_river_system():
+def test_prompts_does_not_hardcode_ec_for_river_system(routing_prompt):
     """3.4 工具列表中，新工具条目必须要求引用 data_source 而非硬编码数据来源。"""
-    text = PROMPTS_PATH.read_text(encoding="utf-8")
-    tool_list_section = text[text.find("#### 3.4 降水相关工具列表"):text.find("#### 3.5")]
+    start = routing_prompt.index("#### 3.4 降水相关工具列表")
+    end = routing_prompt.index("#### 3.5", start)
+    tool_list_section = routing_prompt[start:end]
     for line in tool_list_section.splitlines():
-        if "get_river_system_rainfall_forecast" in line:
+        if "query_river_rainfall_forecast" in line:
             assert "data_source" in line
+            assert "只引用工具返回的降雨字段" in line
+            assert "ECMWF" not in line
             break
     else:
-        raise AssertionError("3.4 工具列表缺少 get_river_system_rainfall_forecast 条目")
+        raise AssertionError("3.4 工具列表缺少 query_river_rainfall_forecast 条目")
 
 
-def test_prompts_basin_rule_covers_today_wording():
+def test_prompts_basin_rule_covers_today_wording(routing_prompt):
     """"今天海河流域天气怎么样"必须被流域预报规则覆盖，防止路由到天津滚动预报。"""
-    text = PROMPTS_PATH.read_text(encoding="utf-8")
-    assert "今天海河流域天气怎么样" in text
+    start = routing_prompt.index('用户问"流域"时区分实况与预报')
+    end = routing_prompt.index("数据来源必须如实", start)
+    basin_section = routing_prompt[start:end]
+    assert "今天海河流域天气怎么样" in basin_section
+    assert "调用 `query_river_rainfall_forecast`" in basin_section
+    assert "禁止调 `query_rolling_forecast`" in basin_section
 
 
 def test_prompts_forbids_tianjin_as_basin_representative():

@@ -461,6 +461,21 @@ def test_yuqiao_reservoir_renders_three_days_without_invented_hazards():
     assert "高温" not in reminder
 
 
+@pytest.mark.parametrize("water_info", [None, {}, {"water_level_m": "10.0"}])
+def test_dry_yuqiao_with_incomplete_water_data_does_not_predict_water_trend(water_info):
+    """缺少水位或汛限资料，不能把无雨推导成水位平稳或当次山洪风险。"""
+    facts = _fair_weather_facts("于桥水库", "reservoir", 3)
+    facts["water_level_info"] = water_info
+
+    reminder = dw_core._build_poi_reminder_section(facts)
+
+    assert "【注意事项】" in reminder
+    assert "预计平稳" not in reminder
+    assert "突发涨水与山洪风险" not in reminder
+    assert "水情资料不足" in reminder
+    assert "无法判断库区水位变化或洪水风险" in reminder
+
+
 def test_panshan_renders_two_days_and_real_weather_can_trigger_advice():
     """景区只有真实雷雨信号时才生成相应防雷建议。"""
     facts = _fair_weather_facts("盘山景区", "scenic", 2)
@@ -2185,13 +2200,14 @@ class TestPoiReminderExtended:
         assert "保障港口生产航行安全" in out
 
     def test_reservoir_without_water_info_no_crash(self):
-        # 无水位数据：不编造水位，只按降雨给一般洪水/山洪研判
+        # 无水位且无雨：明确资料不足，不凭无雨预测水位或当次山洪风险。
         facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
         out = dw_core._build_poi_reminder_section(facts)
         assert "【注意事项】" in out
         assert "库上水位" not in out, "无水位数据时不应编造水位"
-        assert "未来无明显降雨，短期库区水位预计平稳" in out
-        assert "山洪风险" in out
+        assert "水情资料不足" in out
+        assert "预计平稳" not in out
+        assert "山洪风险" not in out
 
     def test_reservoir_no_rain_with_water_info_gives_risk_judgment(self):
         # 无降雨但有水位数据：水位照常 + 余量分档研判（无雨时不给"水位上涨"警告，防与结论矛盾）
@@ -2638,8 +2654,10 @@ class TestReservoirRiskTiers:
     def test_no_water_data_no_rain_general_caution(self):
         facts = {"poi_category": "reservoir", "has_rain_signal": False, "periods": [], "total_rain_mm": None}
         out = dw_core._build_poi_reminder_section(facts)
-        assert "未来无明显降雨，短期库区水位预计平稳" in out
-        assert "突发涨水与山洪风险" in out
+        assert "水情资料不足" in out
+        assert "无法判断库区水位变化或洪水风险" in out
+        assert "预计平稳" not in out
+        assert "突发涨水与山洪风险" not in out
 
     def test_historical_rain_wording(self):
         # 历史实况：风险研判用"当日实际"措辞，不用"预报/未来"

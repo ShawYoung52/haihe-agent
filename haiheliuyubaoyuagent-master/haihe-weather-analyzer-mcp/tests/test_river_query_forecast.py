@@ -382,7 +382,14 @@ def test_explicit_river_system_uses_nine_zone_tool(monkeypatch):
     assert calls[0]["river_system"] == "滦河"
 
 
-def test_named_basin_request_uses_nine_zone_tool(monkeypatch):
+@pytest.mark.parametrize(
+    ("query", "expected_start"),
+    [
+        ("明天海河流域降雨", "2026-08-28 00:00:00"),
+        ("今天海河流域天气怎么样", "2026-08-27 00:00:00"),
+    ],
+)
+def test_named_basin_request_uses_nine_zone_tool(monkeypatch, query, expected_start):
     """Catches 海河流域 being treated as a bare river name because it is itself a known target."""
     calls = []
     monkeypatch.setattr(
@@ -392,15 +399,25 @@ def test_named_basin_request_uses_nine_zone_tool(monkeypatch):
     )
     monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: calls.append(kwargs) or {
         "data_source": "滚动预报网格",
-        "zones": [{"zone_name": "海河", "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0}],
+        "zones": [{"zone_name": "海河", "valid_count": 3, "average_rainfall_mm": 0.0, "max_rainfall_mm": 0.0, "min_rainfall_mm": 0.0}],
     })
 
     result = rqf.query_river_rainfall_forecast_core(
-        "明天海河流域降雨", TEST_CONFIG, now=FIXED_NOW
+        query, TEST_CONFIG, now=FIXED_NOW
     )
 
     assert result["scope_type"] == "river_system"
-    assert calls[0]["river_system"] == "海河流域"
+    assert calls == [{
+        "river_system": "海河流域",
+        "start_time": expected_start,
+        "forecast_hours": 24,
+        "zone_type": "9",
+        "config": TEST_CONFIG,
+        "ec_output_path": "",
+    }]
+    assert result["periods"][0]["data_source"] == "滚动预报网格"
+    assert result["periods"][0]["status"] == "ok"
+    assert result["periods"][0]["has_rain"] is False
 
 
 def test_three_days_are_computed_independently(monkeypatch):

@@ -472,7 +472,7 @@ get_river_network_for_plot
 - 回答要如实：用 `query_basin_areal_rainfall` 查流域/分区**实况**面雨量，用 `get_city_rainfall_time_range` 查**预报**（城市级，数据源为海河流域预报网格或 EC）
 - 用户问"流域"时区分实况与预报：
   - **流域实况/面雨量**（如"流域今天下了多少雨"）→ `query_basin_areal_rainfall`（天擎面雨量实况，非预报）
-  - **具体河流、河系或流域的预报/明天天气** → **调用 `query_river_rainfall_forecast`**，具体河流按真实河道两侧 5 公里统计、未找到才回退已知河系，明确河系/流域复用九分区预报；**禁止调 `query_rolling_forecast`**（那是天津 11 站点接口），**禁止"以天津市代表海河流域"的口径**。
+  - **具体河流、河系或流域的今天/明天/未来天气预报**（如"今天海河流域天气怎么样"）→ **调用 `query_river_rainfall_forecast`**，具体河流按真实河道两侧 5 公里统计、未找到才回退已知河系，明确河系/流域复用九分区预报；**禁止调 `query_rolling_forecast`**（那是天津 11 站点接口），**禁止"以天津市代表海河流域"的口径**。
 - **数据来源必须如实**：
   - `query_basin_areal_rainfall` → 数据来源：天擎面雨量实况（非预报）
   - `query_river_rainfall_forecast` → 只使用工具返回的降雨字段和 `data_source`；**禁止硬编码 "ECMWF AIFS"**
@@ -1156,7 +1156,7 @@ get_river_network_for_plot
 - 回答要如实：用 `query_basin_areal_rainfall` 查流域/分区**实况**面雨量，用 `get_city_rainfall_time_range` 查**预报**（城市级，数据源为海河流域预报网格或 EC）
 - 用户问"流域"时区分实况与预报：
   - **流域实况/面雨量**（如"流域今天下了多少雨"）→ `query_basin_areal_rainfall`（天擎面雨量实况，非预报）
-  - **具体河流、河系或流域的预报/明天天气** → **调用 `query_river_rainfall_forecast`**，具体河流按真实河道两侧 5 公里统计、未找到才回退已知河系，明确河系/流域复用九分区预报；**禁止调 `query_rolling_forecast`**（那是天津 11 站点接口），**禁止"以天津市代表海河流域"的口径**。
+  - **具体河流、河系或流域的今天/明天/未来天气预报**（如"今天海河流域天气怎么样"）→ **调用 `query_river_rainfall_forecast`**，具体河流按真实河道两侧 5 公里统计、未找到才回退已知河系，明确河系/流域复用九分区预报；**禁止调 `query_rolling_forecast`**（那是天津 11 站点接口），**禁止"以天津市代表海河流域"的口径**。
 - **数据来源必须如实**：
   - `query_basin_areal_rainfall` → 数据来源：天擎面雨量实况（非预报）
   - `query_river_rainfall_forecast` → 只使用工具返回的降雨字段和 `data_source`；**禁止硬编码 "ECMWF AIFS"**
