@@ -1,7 +1,7 @@
 # 天河目录与标黄问题验收记录
 
 日期：2026-08-28  
-状态：实现、最终修复波及真实依赖离线回归已完成；最终 scoped re-review 和内网真实接口验收待完成。
+状态：实现、最终修复波、真实依赖离线回归及最终 scoped re-review 已完成；内网真实接口验收待完成。
 实现基线：`58ac85f..836f9ed`，另包含Task4复审fix1的时间窗口守卫。本文是三份原始实施计划的执行结论，历史示例冲突以本记录裁定为准。
 
 ## 1. 结论与证据边界
@@ -102,7 +102,7 @@ T 类共同契约：只调用 `query_tianhe_fixed_qa(query=用户原文)`；允�
 
 ### 2026-08-31 最终审查修复波
 
-独立终审的六项 Important finding 已完成一次合并修复波，但控制器要求的最终 scoped re-review 仍待执行。业务契约更新如下：
+独立终审的六项 Important finding 已完成一次合并修复波；最终 scoped re-review 已逐项确认六项均关闭，未发现直接相关的 Critical、Important 或 Minor 回归，结论为 `Ready to merge: Yes`。业务契约更新如下：
 
 - 河流/河系统一入口把 aware 北京时间转换为既有 resolver 使用的北京本地 naive 时间；公开 `start_time/end_time` 仍带 `+08:00`。严格模式只接受与请求起止完全一致且逐小时齐全的滚动网格；旧 resolver 默认钳制语义不变。
 - 今天 00:00—次日00:00 若当前08时周期不能覆盖，会尝试可发现的前一20时周期；没有完整来源时返回不可用，不再把08—次日08统计标为自然日。
@@ -169,7 +169,7 @@ Set-Location (Join-Path $acceptanceRoot 'haiheliuyubaoyuagent-master\haihe-weath
 
 上线前仍需完成：
 
-- [ ] 独立全改动终审（由控制器安排，不等同于本轮简化复核）。
+- [x] 独立全改动终审及六项修复后的限定复审；限定复审结论为 `Ready to merge: Yes`。
 - [ ] 在真实 Chainlit、FastMCP、networkx、rich、GDAL 和样本齐全的环境重跑两项目全量；无新增失败。
 - [ ] 逐题执行 T01—T51/H01—H05，记录接口响应、参数、时间、来源和最终正文。
 - [ ] 断开/超时/缺资料/零像元/数据库错误等故障场景；不能输出无雨或无风险。

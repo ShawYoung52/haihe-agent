@@ -3,7 +3,7 @@
 ## 2026-08-28：天河与标黄问题交付进展
 
 - 2026-08-31 最终审查修复波已完成六项代码和离线回归：河流滚动网格采用北京时间适配并要求完整物理窗口；今天自然日不能再用 08—次日08 冒充 00—24；POI `no_data` 显示风险预报资料不可用；区域三灾种保留逐起报覆盖，缺日不得报全窗无风险；混合未知地域不再静默丢弃；“风大/大风/风速”等混合意图保留完整 Planner。11项控制器裁定均保留。
-- 真实依赖 `.venv-test` 最新结果：Chainlit **992 passed / 5 skipped**；MCP **579 passed / 20 skipped**。Chainlit 另有1条 Pydantic 弃用 warning；MCP skip 为缺 scipy、GDAL 或样本 `.nc`。本轮最终 scoped re-review 仍待控制器安排，不能据此称生产验收完成。
+- 真实依赖 `.venv-test` 最新结果：Chainlit **992 passed / 5 skipped**；MCP **579 passed / 20 skipped**。Chainlit 另有1条 Pydantic 弃用 warning；MCP skip 为缺 scipy、GDAL 或样本 `.nc`。最终 scoped re-review 已逐项确认六项发现全部关闭，结论为 `Ready to merge: Yes`；这仍不等同于生产验收完成。
 
 - 新增天河精确目录51题已接入，原文传参并优先于简单天气；既有03/04/05目录兼容，不扩展普通天气问题到天河。
 - 5个标黄问题已落实工具边界：泃河/滦河走统一河流降雨入口，蓟州走三灾种区域综合风险，于桥水库/盘山景区复用POI决策天气。河道采用全量表与geography真实5000米缓冲；裸河名仅在未找到时回退已知河系。
@@ -11,7 +11,7 @@
 - Task4复审fix1：统一河流入口仅强制今天/明天/后天/今晚/未来N自然日单一窗口；周/周末、明确日期、其他日内/小时或混合时段保留原Planner/河系调用，直接调用新核心返回invalid_request，不得改成今天；未新增周日期解析。
 - fix1历史自动化结果：Chainlit全量 **874 passed / 8 skipped**，定向 **515 passed**；MCP定向 **120 passed / 4 skipped**。最新结果以上述2026-08-31真实依赖全量为准。
 - 历史系统Python环境中，MCP原始全量曾因缺fastmcp/networkx出现 **20个收集错误**，import-only为 **562 passed / 17 skipped / 2 failed**；现已由已有 `.venv-test` 真实依赖全量替代，但仍不能称服务启动或生产内网成功。
-- 当前状态：最终审查提出的六项修复及真实依赖离线回归已完成，最终 scoped re-review 待执行；内网真实接口联调待完成。51+5题的生产状态均未验收，PC/手机实际展示也未验收。
+- 当前状态：最终审查提出的六项修复、真实依赖离线回归及限定复审均已完成；内网真实接口联调待完成。51+5题的生产状态均未验收，PC/手机实际展示也未验收。
 - 完整56题、逐题工具/范围、执行裁定及代价、可复现命令与上线门禁见[验收记录](haiheliuyubaoyuagent-master/chainlitexam/docs/superpowers/2026-08-27-priority-acceptance.md)。旧POI风险 `no_data` 已按裁定独立修复，未与新区域风险状态机混合。
 
 ## 当前状态
