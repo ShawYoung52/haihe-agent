@@ -52,8 +52,9 @@
       （`_finalize_complete_tool_evidence` 等）拿返回值覆盖 `stream_msg.content` → 修复被冲掉，
       模型偶发压成一行的表格 `|...||:---|` 原样渲染。修：返回值与展示一致（主路径 + ainvoke 兜底都过
       `_repair_markdown_layout`）。回归测试 `test_answer_return_value_has_repaired_table`（红绿闭环验证）。
-- [ ] R8（待定）prompt 0.5 段逐字枚举的其它 03 实况问法（全市现在下了多少雨/市区现在气温和风的实况等）
-      仍走天河——若拉本地需同步改 prompts.py 防 planner 被推向天河，用户说"再说"。
+- [x] R8（关闭，用户确认 2026-08-31）prompt 0.5 段逐字枚举的其它 03 实况问法
+      （全市现在下了多少雨/市区现在气温和风的实况/今天雨下了多长时间/昨天雨下得怎么样）
+      仍走天河——用户确认"这些走天河就行"，保持现状不动，不改 prompts.py。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 
