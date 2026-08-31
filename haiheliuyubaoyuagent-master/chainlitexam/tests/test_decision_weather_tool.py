@@ -174,6 +174,74 @@ def test_point_weather_ignores_zero_visibility_placeholder_everywhere():
     assert "能见度" not in reminder
 
 
+def _lifestyle_facts(weather, tmax, tmin, rain=0.0):
+    period = {"weather": weather, "tmax": tmax, "tmin": tmin, "EDA": "东南风3级", "rain_1h": rain}
+    return {
+        "poi_category": "scenic",
+        "has_rain_signal": rain > 0,
+        "total_rain_mm": rain,
+        "periods": [period],
+    }
+
+
+def _allowed_ids(facts):
+    return set(dw_core._decision_allowed_advice_actions(facts))
+
+
+class TestLifestyleAdviceActions:
+    """天河风格生活指数动作（2026-08-31）：穿衣/洗车/晾晒/晨练，受控 action_id + 代码渲染，零编造。"""
+
+    def test_fine_and_mild_conditions(self):
+        # 晴好无雨 → fine；有温度且无高/低温 → mild
+        conds = dw_core._poi_weather_conditions(_lifestyle_facts("晴", 25, 15), _lifestyle_facts("晴", 25, 15)["periods"])
+        assert "fine" in conds and "mild" in conds
+
+    def test_rain_blocks_fine(self):
+        facts = _lifestyle_facts("中雨", 24, 18, rain=12.0)
+        conds = dw_core._poi_weather_conditions(facts, facts["periods"])
+        assert "rain" in conds and "fine" not in conds
+
+    def test_storm_blocks_fine(self):
+        facts = _lifestyle_facts("雷阵雨", 26, 20, rain=5.0)
+        conds = dw_core._poi_weather_conditions(facts, facts["periods"])
+        assert "storm" in conds and "fine" not in conds
+
+    def test_dressing_by_temperature(self):
+        assert "dress_heat" in _allowed_ids(_lifestyle_facts("晴", 38, 28))
+        assert "dress_cold" in _allowed_ids(_lifestyle_facts("晴", 2, -5))
+        assert "dress_mild" in _allowed_ids(_lifestyle_facts("晴", 25, 15))
+        # 互斥：高温天不出现 mild/寒冷档
+        hot = _allowed_ids(_lifestyle_facts("晴", 38, 28))
+        assert "dress_mild" not in hot and "dress_cold" not in hot
+
+    def test_wash_and_drying_follow_rain(self):
+        dry = _allowed_ids(_lifestyle_facts("晴", 25, 15))
+        assert {"car_wash_ok", "drying_ok", "exercise_ok"} <= dry
+        wet = _allowed_ids(_lifestyle_facts("中雨", 24, 18, rain=12.0))
+        assert {"car_wash_no", "drying_no"} <= wet
+        assert "car_wash_ok" not in wet and "drying_ok" not in wet and "exercise_ok" not in wet
+
+    def test_exercise_storm(self):
+        wet = _allowed_ids(_lifestyle_facts("雷阵雨", 26, 20, rain=5.0))
+        assert "exercise_storm" in wet and "exercise_ok" not in wet
+
+    def test_rendered_texts_are_code_owned(self):
+        # 渲染文案来自代码表（零编造），且每条非空。
+        for action_id in ("dress_heat", "dress_cold", "dress_mild", "car_wash_ok", "car_wash_no",
+                          "drying_ok", "drying_no", "exercise_ok", "exercise_storm"):
+            assert dw_core._MODEL_ADVICE_ACTIONS[action_id][2].strip()
+
+    def test_model_advice_renders_selected_action(self):
+        # 模型选中 action_id 后渲染为代码文案；未在候选集的动作被丢弃。
+        facts = _lifestyle_facts("晴", 25, 15)
+        answer = "【核心结论】\n天气晴好。\n【注意事项】\n[action:dress_mild]\n[action:car_wash_ok]\n[action:not_a_real_action]"
+        advice = dw_core._decision_model_weather_advice(answer, facts)
+        assert any("气温总体适宜" in a for a in advice)
+        assert any("适宜洗车" in a for a in advice)
+        assert not any("not_a_real_action" in a for a in advice)
+
+
+
 def test_point_time_of_day_query_renders_one_afternoon_summary_row(monkeypatch):
     """点位“今天下午”问法只展示一个时段汇总，不铺 6 条逐小时记录。"""
     monkeypatch.setattr(dw_core, "_decision_now_bjt", lambda: datetime(2026, 8, 24, 8, 0))

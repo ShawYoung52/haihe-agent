@@ -16,4 +16,8 @@
   2. （中低）支流归并在剥后缀之前 → "泃河流域/潮白河河系"映射失败。修：`_tributary_zone_lookup` 容忍"流域/河系"后缀，`_match_zone_name`/`tributary_zone_for` 共用。新增 `_norm_zone_name` 统一归一化（消除 rstrip 链重复）。
   3. （低）scope_note 原用裸等值 `zone_name == parent_zone`，与 `_match_zone_name` 的归一化+别名包含口径不一致（zone_name 带"区"后缀时缺失）。修：复用匹配结果——`parent_zone and zones`（zones 已被过滤到所属分区）。
 - 修复后全量：MCP 597 passed / chainlitexam 835+160 passed，0 失败。
-- 下一步：code-simplifier → commit（显式路径）。
+- **code-simplifier**：结论"已经足够简单"，2 条可选清理——采纳 1 条（river_query_forecast 三态分支拆开，去掉 `zone_target != target` 守卫）；另 1 条（合并 tributary_zone_for/_tributary_zone_lookup）保留 public/private 分层不动。
+- **提交并推送**：ee7bc17（领导问题清单20260826）已 push 到 origin/main（58ac85f..ee7bc17，含本地累计 26 个提交）。
+- **遗留 1（能见度假阳性）**：查证已修复（rain_only 占位值守卫 + min_vis<1.0 门控 + 测试锁定），无需改。
+- **遗留 2（POI 丰富注意事项）**：按用户选定的推荐方案实现——扩受控 action 词表（dress/car_wash/drying/exercise 9 动作 + fine/mild 派生条件），保持零编造；prompt 加生活指数引导。测试 TestLifestyleAdviceActions 8 条。全量 chainlitexam 835+168 passed。
+- 下一步：提交生活指数建议并推送。

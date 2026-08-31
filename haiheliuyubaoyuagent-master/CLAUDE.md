@@ -342,3 +342,12 @@ This project uses the superpowers plugin for disciplined development:
 - **支流名归并同口径（code-review 2026-08-26 加固）**：支流查表经 `_tributary_zone_lookup` 容忍"流域/河系"后缀（"泃河流域"→北三河，否则直接调 `get_river_system_rainfall_forecast` 带后缀会映射失败）；`_norm_zone_name` 统一"流域/河系/河"rstrip 归一化（`_match_zone_name` 与 scope_note 共用，消除重复）；scope_note 判定复用 `_match_zone_name` 的过滤结果（`parent_zone and zones`），不再二次等值判断（裸等值/归一化等值都覆盖不了别名包含命中的 zone_name 带"区"后缀场景）。
 - **测试**：MCP `test_river_system_rainfall_forecast.py::TestTributaryZoneMapping`（支流归并/scope_note/zone 名不变/未知河空）+ `test_river_query_forecast.py::test_tributary_corridor_miss_falls_back_to_parent_zone`（泃河走廊未命中→北三河、river_name 保留）+ `test_rolling_forecast_basin_guard.py`（泃河入正面用例）+ `test_rolling_forecast_poi_guard.py::test_bare_tianjin_port_is_unresolved`；chainlitexam `test_decision_weather_tool.py`（天津港 prefilter/自命名槽位、本周末/适合去槽位）+ `test_simple_weather_route.py`（天津港→决策天气）。
 - **待内网验证**：于桥水库 POI 可检索性、泃河在 full_v6 是否有走廊（无则回退北三河已覆盖）。
+
+### 决策天气生活指数建议（2026-08-31，天河风格穿衣/洗车/晾晒/晨练）
+
+甲方此前反馈"注意事项太少、要大模型根据实际情况给出（参考天河穿衣/防晒/出行风格）"。在既有**受控 action_id** 机制（`_MODEL_ADVICE_ACTIONS`：模型按 id 选、代码渲染文案、零编造）上扩充生活指数词汇表，而非放开模型自由撰写（保持零编造约束）。
+
+- **新增派生条件（`_poi_weather_conditions`）**：`fine`（无雨且无强对流→适宜户外/洗车/晾晒）、`mild`（有温度数据但无高/低温→穿衣"气温适宜"档）。均为纯代码判定。模板条目 gating 只用 rain/wind/storm/visibility，新增 fine/mild 不影响既有模板。
+- **新增动作（`_MODEL_ADVICE_ACTIONS`）**：`dress_heat/dress_cold/dress_mild`（按温度三档）、`car_wash_ok/car_wash_no`、`drying_ok/drying_no`、`exercise_ok/exercise_storm`。同一天气动作的 ok/no 由互斥条件（fine vs rain、storm）保证不会同时进入候选。
+- **prompt 引导**：`output_instruction` 提示模型候选中出现生活指数动作且与天气相符时可一并选择（仍 2～4 条、只输出 `[action:id]`、代码渲染）。
+- 测试：`test_decision_weather_tool.py::TestLifestyleAdviceActions`（8 条：fine/mild 判定、雨/强对流阻断 fine、穿衣三档互斥、洗车/晾晒随雨、exercise_storm、文案代码化、模型选中渲染+未知动作丢弃）。

@@ -33,7 +33,7 @@
 - [x] P5 测试 + code-review（3 条确认缺陷已修）+ code-simplifier + CLAUDE.md 更新
 - [ ] P6 提交（显式路径）+ github（待用户确认是否推送/PR）
 
-## 遗留（上一批未完成）
+## 遗留（上一批未完成 → 本轮已处理）
 
-- POI 决策天气"大模型生成丰富注意事项/游玩建议"（参考天河穿衣/防晒/出行风格）未实现——本轮按领导清单优先级后排。
-- "能见度较低"晴天假阳性未修。
+- [x] POI 决策天气"丰富注意事项/游玩建议"——按推荐方案**扩受控 action 词表**（新增 dress/car_wash/drying/exercise 9 个动作 + fine/mild 条件），保持零编造。已提交。
+- [x] "能见度较低"晴天假阳性——**查证已修复**（`_poi_weather_conditions` 仅非 rain-only 解析能见度、动态从句 `min_vis<1.0` 门控 + rain_only 占位值守卫；test_decision_weather_tool.py:408-434/1241-1268/1553 锁定）。

@@ -1499,6 +1499,12 @@ def _poi_weather_conditions(facts: dict, periods: list[dict]) -> set[str]:
         conditions.add("heat")
     if min_temperatures and min(min_temperatures) <= 0:
         conditions.add("cold")
+    # 生活指数派生条件（2026-08-31 天河风格穿衣/洗车/晾晒/晨练，零编造、代码渲染）：
+    # mild = 有温度数据但无高/低温（穿衣"气温适宜"档）；fine = 无雨且无强对流（适宜户外/洗车/晾晒）。
+    if (max_temperatures or min_temperatures) and "heat" not in conditions and "cold" not in conditions:
+        conditions.add("mild")
+    if "rain" not in conditions and "storm" not in conditions:
+        conditions.add("fine")
     if not _decision_periods_rain_only(periods):
         max_wind = _decision_max_wind_level(periods)
         if max_wind is not None and max_wind >= 5:
@@ -2086,6 +2092,17 @@ _MODEL_ADVICE_ACTIONS: dict[str, tuple[str | None, tuple[str, ...] | None, str]]
     "sun_protection": ("sun", None, "户外活动时做好防晒补水，并合理安排连续暴露时长。"),
     "heat_protection": ("heat", None, "尽量避开高温时段开展高强度活动，注意防暑降温和补水。"),
     "cold_protection": ("cold", None, "注意防寒保暖，户外活动前检查道路和设施是否存在结冰影响。"),
+    # 生活指数类（2026-08-31 天河风格：穿衣/洗车/晾晒/晨练，零编造、代码渲染文案）。
+    # 天气动作同一条件互斥（如 car_wash_ok 要 fine=无雨、car_wash_no 要 rain），模型按实际选其一。
+    "dress_heat": ("heat", None, "天气炎热，建议穿轻薄、透气、浅色衣物，注意防暑降温、及时补水。"),
+    "dress_cold": ("cold", None, "天气寒冷，注意添衣保暖，外出做好防风。"),
+    "dress_mild": ("mild", None, "气温总体适宜，可按早晚温差适时增减衣物。"),
+    "car_wash_ok": ("fine", None, "天气晴好、无明显降雨，适宜洗车。"),
+    "car_wash_no": ("rain", None, "有降雨，暂不适宜洗车，建议雨歇后再安排。"),
+    "drying_ok": ("fine", None, "无明显降雨，适宜晾晒衣被。"),
+    "drying_no": ("rain", None, "有降雨，衣被建议室内晾晒或烘干。"),
+    "exercise_ok": ("fine", None, "天气条件适宜晨练和户外运动，注意量力而行、适时补水。"),
+    "exercise_storm": ("storm", None, "有雷电或强对流，请暂停户外晨练与运动，改在室内进行。"),
 }
 _MODEL_ADVICE_ACTION_RE = re.compile(r"^\[action:([a-z_]+)\]\s*$", re.IGNORECASE)
 
@@ -2168,6 +2185,8 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "输出【核心结论】及其正文，并继续输出【注意事项】。从 JSON 的“可选注意事项动作”中选择"
         "2～4 个 action_id，每行只输出一个编号和 [action:action_id]，不得自行撰写建议正文。"
         "候选 action_id 均对应代码维护的气象专业建议，应结合该类场所的出行或生产场景选择；"
+        "候选中如出现穿衣（dress_*）、洗车（car_wash_*）、晾晒（drying_*）、晨练运动（exercise_*）"
+        "等生活指数动作且与实际天气相符，可一并选择，让注意事项更丰富实用；"
         "只能依据 JSON 中实际返回的"
         "天气现象、降水、气温、风力、能见度和实际天气条件，不得补充未出现的降雨、道路湿滑、"
         "低能见度、大风、雷电或强对流。注意事项不得复述或新增任何气象数值，具体数值由代码表格展示；"
