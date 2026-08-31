@@ -204,8 +204,11 @@ def _release_chainlit_session(session_id: str) -> None:
 _SIDEBAND_PREFIXES = ("❌", "⏱️", "📊", "（系统消息：")
 
 # 只有引导语、没有实质结论的开场白。单独出现时不算答案。
+# 2026-08-31：`_build_thinking_summary` 对实况问法（"天津当前天气实况"等）前缀用
+# "已结合实况观测数据…"，必须与预报版并列进清单，否则实况问法兜底路径的纯引导语过滤失效。
 _LEAD_IN_ONLY = (
     "已结合预报数据完成分析，为您整理结论如下：",
+    "已结合实况观测数据完成分析，为您整理结论如下：",
     "已理解您的问题，为您解答如下：",
 )
 _LEAD_IN_ONLY_NORMALIZED = tuple(s.rstrip("：:") for s in _LEAD_IN_ONLY)

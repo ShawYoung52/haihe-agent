@@ -82,19 +82,31 @@ def test_merge_answers_skips_blank_and_returns_empty_when_nothing():
     assert qa.merge_answers(steps) == ""
 
 
-def test_merge_answers_drops_lead_in_only_with_fallback_text():
-    """兜底路径的自相矛盾必须消除。
+@pytest.mark.parametrize(
+    "lead_in",
+    [
+        "已结合预报数据完成分析，为您整理结论如下：",
+        "已结合实况观测数据完成分析，为您整理结论如下：",
+        # 半角冒号变体也归一化命中（_LEAD_IN_ONLY_NORMALIZED rstrip("：:")）
+        "已结合实况观测数据完成分析，为您整理结论如下:",
+    ],
+)
+def test_merge_answers_drops_lead_in_only_with_fallback_text(lead_in):
+    """兜底路径的自相矛盾必须消除（预报版与实况观测版前缀都算纯引导语）。
 
     `_prepend_thinking_summary` 会把 stream_msg 填成纯引导语，紧接着又
     send 一条"未能获得有效结果" —— 直接拼接会得到
-    "已结合预报数据完成分析，为您整理结论如下：\\n\\n当前查询未能获得有效结果"。
+    "已结合预报数据完成分析，为您整理结论如下：\n\n当前查询未能获得有效结果"。
+    2026-08-31：实况问法（"天津当前天气实况"）前缀改用"已结合实况观测数据…"，
+    必须同样在 `_LEAD_IN_ONLY` 内，否则实况兜底路径的纯引导语过滤失效。
     """
     steps = [
-        {"id": "m1", "type": "assistant_message", "output": "已结合预报数据完成分析，为您整理结论如下："},
+        {"id": "m1", "type": "assistant_message", "output": lead_in},
         {"id": "m2", "type": "assistant_message", "output": "当前查询未能获得有效结果，请换个问法或稍后重试。"},
     ]
     merged = qa.merge_answers(steps)
-    assert "已结合预报数据完成分析" not in merged
+    assert "已结合" not in merged
+    assert "完成分析" not in merged
     assert merged == "当前查询未能获得有效结果，请换个问法或稍后重试。"
 
 

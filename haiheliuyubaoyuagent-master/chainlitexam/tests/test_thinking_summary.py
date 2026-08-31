@@ -81,6 +81,23 @@ def test_today_summary():
     assert "实况" in result
 
 
+def test_current_observation_query_gets_observation_prefix():
+    """2026-08-31 内网复测"天津当前天气实况"：含 实况/现在/当前/实时 的查询是实况查询，
+    前缀必须是"已结合实况观测数据"，不能因同时含"天气"被"预报"分支
+    （["未来","预报","明天","后天","周末","天气"] 在观察词之前）截走。"""
+    for q in ("天津当前天气实况", "现在天津天气", "当前天气实况", "天津现在的天气实况", "天津实时天气"):
+        result = _build_thinking_summary(q)
+        assert result == "已结合实况观测数据完成分析，为您整理结论如下：", f"{q} -> {result}"
+
+
+def test_today_with_weather_stays_forecast_prefix():
+    """"今天/今日"必须保持在预报分支之后：今天+天气 是预报问法（走滚动预报），
+    不得因含"今天"被标成实况。防止后人把两组观察词合并/调序回归。"""
+    for q in ("今天天津天气", "今天海河流域天气怎么样", "今日天气如何"):
+        result = _build_thinking_summary(q)
+        assert result == "已结合预报数据完成分析，为您整理结论如下：", f"{q} -> {result}"
+
+
 def test_basin_weather_not_river_network_prefix():
     """流域天气问题不得误命中河网可视化前缀（"河流" 是 "海河流域" 的子串）。"""
     for q in ("今天海河流域天气怎么样", "明天海河流域天气怎么样", "大清河流域未来三天降雨"):
@@ -109,12 +126,12 @@ def test_has_chart():
 
 def test_prepend_strips_llm_imitated_summary_prefix():
     """2026-08-31 内网"天津当前天气实况"重复摘要：answer LLM 仿写历史里带前缀的回答，
-    开头又产出一句"已结合实况观测数据…如下："，代码再前置"已结合预报数据…"→两句叠加。
-    前置正确摘要前必须剥离开头已有的摘要行。"""
+    开头又产出一句"已结合实况观测数据…如下："，代码再前置正确摘要→两句叠加。
+    前置正确摘要前必须剥离开头已有的摘要行（只剩一句）。"""
     body = "已结合实况观测数据完成分析，为您整理结论如下：\n\n正文内容"
     out = _prepend_thinking_summary(body, "天津当前天气实况")
-    assert out.startswith("已结合预报数据完成分析，为您整理结论如下：")
-    assert "已结合实况观测数据" not in out
+    assert out.startswith("已结合实况观测数据完成分析，为您整理结论如下：")
+    assert out.count("完成分析") == 1
     assert out.count("如下：") == 1
     assert "正文内容" in out
 
@@ -126,7 +143,7 @@ def test_prepend_strips_multiple_stacked_summaries():
         "正文内容"
     )
     out = _prepend_thinking_summary(body, "天津当前天气实况")
-    assert out == "已结合预报数据完成分析，为您整理结论如下：\n\n正文内容"
+    assert out == "已结合实况观测数据完成分析，为您整理结论如下：\n\n正文内容"
 
 
 def test_prepend_normal_case_unchanged():
@@ -142,10 +159,10 @@ def test_prepend_strips_chart_variant_summary():
 
 
 def test_prepend_strips_halfwidth_colon_summary():
-    """answer LLM 若用半角冒号仿写摘要前缀，也要剥掉，否则重复摘要仍在。"""
+    """answer LLM 若用半角冒号仿写摘要前缀，也要剥掉，否则重复摘要仍在（只剩一句）。"""
     body = "已结合实况观测数据完成分析,为您整理结论如下:\n正文内容"
     out = _prepend_thinking_summary(body, "天津当前天气实况")
-    assert "已结合实况观测数据" not in out
+    assert out.count("完成分析") == 1
     assert "正文内容" in out
 
 
@@ -153,7 +170,7 @@ def test_prepend_does_not_strip_non_summary_content():
     """不以"已…如下："开头的正常回答不被误剥。"""
     body = "目前天津以晴为主，气温 25℃。"
     out = _prepend_thinking_summary(body, "天津当前天气实况")
-    assert out == "已结合预报数据完成分析，为您整理结论如下：\n\n" + body
+    assert out == "已结合实况观测数据完成分析，为您整理结论如下：\n\n" + body
 
 
 def test_prepend_warning_no_effective_guard_unchanged():
