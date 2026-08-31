@@ -14,6 +14,7 @@ if str(MCP_DIR) not in sys.path:
     sys.path.insert(0, str(MCP_DIR))
 
 import rolling_forecast_service as rfs  # noqa: E402
+from custom_tools import risk_warning_tool as rwt  # noqa: E402
 
 
 FIXED_NOW = datetime(2026, 8, 27, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -215,7 +216,7 @@ def test_invalid_static_counts_are_unknown(monkeypatch, invalid_count):
 def test_risk_window_reports_the_clamped_actual_days(monkeypatch):
     captured = {}
 
-    def query(lon, lat, times):
+    def query(lon, lat, times, **kwargs):
         captured["times"] = times
         return hazard_payload(risk_levels={})
 
@@ -226,3 +227,87 @@ def test_risk_window_reports_the_clamped_actual_days(monkeypatch):
     assert captured["times"] == ["20260828080000", "20260829080000", "20260830080000"]
     assert result["risk_window"]["forecast_days"] == 3
     assert result["risk_window"]["forecast_end_time"] == "2026-08-31 08:00"
+
+
+def test_supported_and_unsupported_geography_is_not_silently_narrowed(monkeypatch):
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a, **k: pytest.fail("mixed unsupported scope must not query"))
+    result = rfs.query_region_weather_risks_core("今天蓟州和雄安新区可能有哪些风险？", now=FIXED_NOW)
+    assert result["status"] == "unsupported_region"
+    assert "雄安新区" in result["unsupported_regions"]
+
+
+def test_optional_regions_cannot_hide_contradictory_raw_scope(monkeypatch):
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a, **k: pytest.fail("contradictory scope must not query"))
+    result = rfs.query_region_weather_risks_core(
+        "今天蓟州和雄安新区可能有哪些风险？", regions="蓟州", now=FIXED_NOW
+    )
+    assert result["status"] == "unsupported_region"
+
+
+def test_multiple_supported_regions_are_all_retained(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a, **k: calls.append(a[:2]) or hazard_payload(risk_levels={}))
+    result = rfs.query_region_weather_risks_core("今天蓟州和宝坻可能有哪些风险？", now=FIXED_NOW)
+    assert result["status"] == "ok"
+    assert [entry["region"] for entry in result["regions"]] == ["蓟州", "宝坻"]
+    assert len(calls) == 2
+
+
+def _run_real_aggregator(monkeypatch, outcomes):
+    """Keep the real three-hazard aggregator; replace only static/HTTP IO boundaries."""
+    with rwt._region_levels_lock:
+        rwt._region_levels_cache.clear()
+    monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda *a: {"status": "no_data", "categories": []})
+
+    def fetch(kind, extra, **kwargs):
+        outcome = outcomes[kind][extra["fcstTime"]]
+        if outcome == "missing":
+            raise rwt.RiskInterfaceNoDataError("missing cycle")
+        if outcome == "failure":
+            raise RuntimeError("HTTP failure")
+        if outcome == "empty":
+            return {"data": []}
+        return {"data": [{"level": "三级", "longitude": 117.45, "latitude": 40.05}]}
+
+    monkeypatch.setattr(rwt, "_fetch_risk_warning", fetch)
+    monkeypatch.setattr(
+        rfs, "_region_risk_level_queryer",
+        lambda lon, lat, radius, times, **kwargs: rwt.query_region_risk_levels(
+            lon, lat, radius, times, include_coverage=kwargs.get("include_coverage", False)
+        ),
+    )
+    return rfs.query_region_weather_risks_core("蓟州未来三天可能有哪些风险？", now=FIXED_NOW)
+
+
+def _all_kind_outcomes(sequence):
+    times = ["20260828080000", "20260829080000", "20260830080000"]
+    return {kind: dict(zip(times, sequence)) for kind in ("geologic", "mountain", "river")}
+
+
+def test_real_aggregation_full_empty_is_full_window_no_risk(monkeypatch):
+    result = _run_real_aggregator(monkeypatch, _all_kind_outcomes(["empty", "empty", "empty"]))
+    assert result["status"] == "ok"
+    assert result["risk_window"]["coverage_status"] == "complete"
+    assert all(risk["risk_status"] == "no_risk" for risk in result["regions"][0]["risks"])
+
+
+@pytest.mark.parametrize("sequence", [
+    ["empty", "missing", "missing"],
+    ["risk", "missing", "missing"],
+    ["risk", "failure", "empty"],
+])
+def test_real_aggregation_partial_cycles_never_claim_full_window_no_risk(monkeypatch, sequence):
+    result = _run_real_aggregator(monkeypatch, _all_kind_outcomes(sequence))
+    assert result["status"] == "partial"
+    assert result["risk_window"]["coverage_status"] == "partial"
+    assert result["risk_window"]["forecast_start_time"] is None
+    assert not all(risk["risk_status"] == "no_risk" for risk in result["regions"][0]["risks"])
+    if sequence[0] == "risk":
+        assert all(risk["risk_status"] == "risk" for risk in result["regions"][0]["risks"])
+
+
+def test_real_aggregation_fully_missing_is_unavailable(monkeypatch):
+    result = _run_real_aggregator(monkeypatch, _all_kind_outcomes(["missing", "missing", "missing"]))
+    assert result["status"] == "risk_service_unavailable"
+    assert result["risk_window"]["coverage_status"] == "unavailable"
+    assert all(risk["risk_status"] == "unavailable" for risk in result["regions"][0]["risks"])

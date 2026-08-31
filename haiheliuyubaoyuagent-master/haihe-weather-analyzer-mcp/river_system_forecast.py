@@ -266,9 +266,12 @@ def _resolve_forecast_file(
     forecast_hours: int,
     start_time: datetime,
     ec_output_path: str,
+    *,
+    require_full_window: bool = False,
 ) -> tuple[str | None, str]:
     """根据数据可用性选择滚动预报或 EC AIFS 栅格文件。"""
-    return _ra_resolve_forecast_raster_path(forecast_hours, start_time, ec_output_path)
+    options = {"require_full_window": True} if require_full_window else {}
+    return _ra_resolve_forecast_raster_path(forecast_hours, start_time, ec_output_path, **options)
 
 
 def _match_zone_name(river_system: str, zones: list[dict]) -> list[dict]:
@@ -309,6 +312,8 @@ def get_river_system_rainfall_forecast(
     zone_type: str = "9",
     config: dict | None = None,
     ec_output_path: str = "",
+    *,
+    require_full_window: bool = False,
 ) -> dict:
     """获取指定河系/流域的未来降雨预报。
 
@@ -353,7 +358,8 @@ def get_river_system_rainfall_forecast(
         if not zones:
             return {"error": "未找到指定的河系分区数据。"}
 
-        raster_path, data_source_label = _resolve_forecast_file(hours, start_dt, ec_path)
+        options = {"require_full_window": True} if require_full_window else {}
+        raster_path, data_source_label = _resolve_forecast_file(hours, start_dt, ec_path, **options)
         if not raster_path:
             return {
                 "data_source": data_source_label,

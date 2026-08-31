@@ -1998,7 +1998,7 @@ def _format_point_risk_level(value: Any, available: bool) -> str:
     if not available or value is None:
         return "接口暂不可用"
     if value == _POINT_RISK_NO_DATA:
-        return "本次无风险"
+        return "风险预报资料不可用"
     if not isinstance(value, dict):
         return "接口暂不可用"
     levels = value.get("levels")
@@ -2028,7 +2028,7 @@ def _format_point_risk_level(value: Any, available: bool) -> str:
 
 
 def _build_point_risk_level_section(facts: dict) -> str:
-    """渲染点位风险等级；无资料按业务口径显示无风险，接口失败单独标记。"""
+    """渲染点位风险等级；缺起报资料与有效空风险结果分别展示。"""
     if "point_risk_levels_available" not in facts and "point_risk_levels" not in facts:
         return ""
     available = facts.get("point_risk_levels_available") is True

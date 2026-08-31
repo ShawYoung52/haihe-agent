@@ -212,7 +212,9 @@ def _load_region_risk_level_queryer() -> Any:
     return query_region_risk_levels
 
 
-def _query_region_risk_levels(lon: float, lat: float, fcst_times: list[str] | None = None) -> dict | None:
+def _query_region_risk_levels(
+    lon: float, lat: float, fcst_times: list[str] | None = None, *, include_coverage: bool = False
+) -> dict | None:
     """查询区域代表点半径内各灾种风险等级分布（风险接口 level，一~四级）。
 
     返回 {hazard_key: {...}} / {}（可达无风险）/ None（接口失败）。任何异常静默降级
@@ -223,8 +225,9 @@ def _query_region_risk_levels(lon: float, lat: float, fcst_times: list[str] | No
     try:
         if _region_risk_level_queryer is None:
             _region_risk_level_queryer = _load_region_risk_level_queryer()
+        options = {"include_coverage": True} if include_coverage else {}
         return _region_risk_level_queryer(
-            float(lon), float(lat), REGION_HAZARD_RADIUS_KM, fcst_times
+            float(lon), float(lat), REGION_HAZARD_RADIUS_KM, fcst_times, **options
         )
     except Exception as exc:
         print(f"[region_risk_levels] query failed: {exc}", flush=True)
@@ -273,6 +276,7 @@ def _query_region_hazards(
     lon: float,
     lat: float,
     risk_fcst_times: list[str] | None = None,
+    *, include_risk_coverage: bool = False,
 ) -> dict:
     """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
 
@@ -316,14 +320,19 @@ def _query_region_hazards(
             "count": count,
         })
     # 区域天气#8：叠加目标窗口的风险等级；接口失败只影响增强列，不阻断天气回答。
-    risk_levels = _query_region_risk_levels(lon, lat, risk_fcst_times)
+    risk_levels = _query_region_risk_levels(
+        lon, lat, risk_fcst_times, include_coverage=include_risk_coverage
+    )
     return {
         "total_found": total_found,
         "radius_km": REGION_HAZARD_RADIUS_KM,
         "categories": merged,
         "hazards_available": hazards_available,
         "risk_levels": risk_levels,
-        "risk_levels_available": risk_levels is not None,
+        "risk_levels_available": (
+            risk_levels is not None
+            and not (isinstance(risk_levels, dict) and risk_levels.get("_all_unreachable") is True)
+        ),
     }
 
 
@@ -398,6 +407,7 @@ def _normalize_region_risk(
     hidden_point_count: int | None,
     risk_levels: Any,
     risk_levels_available: Any,
+    coverage: dict | None = None,
 ) -> dict:
     """把风险接口的三态及异常载荷归一化为单一灾种输出。"""
     result = {
@@ -409,13 +419,19 @@ def _normalize_region_risk(
         "risk_point_count": None,
         "advice": [],
     }
+    if coverage:
+        result["coverage"] = coverage
     if risk_levels_available is not True:
         result["unavailable_reason"] = "risk_service_unavailable"
         return result
     if not isinstance(risk_levels, dict):
         result["unavailable_reason"] = "malformed_risk_payload"
         return result
+    coverage_complete = not coverage or coverage.get("complete") is True
     if key not in risk_levels:
+        if not coverage_complete:
+            result["unavailable_reason"] = "risk_window_incomplete"
+            return result
         result.update({"risk_status": "no_risk", "risk_point_count": 0})
         return result
     raw = risk_levels.get(key)
@@ -452,12 +468,30 @@ def _normalize_region_risk(
         "risk_point_count": total if total is not None else sum(normalized_levels.values()),
         "advice": advice,
     })
+    if not coverage_complete:
+        result["coverage_status"] = "partial"
     return result
 
 
-def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[str], bool]:
+def _unsupported_region_scopes(user_query: str, regions: str) -> list[str]:
+    """Conservatively expose explicit unsupported administrative scopes; this is not a geocoder."""
+    text = f"{user_query or ''} {regions or ''}"
+    supported = set(ROLLING_FORECAST_COORDS) | set(ROLLING_FORECAST_REGION_ALIASES) | set(BASIN_CITY_COORDS)
+    for name in sorted(supported | {"天津市", "天津", "全市", "我市", "本市", "市区", "中心城区"}, key=len, reverse=True):
+        text = text.replace(name, " ")
+    found = re.findall(r"[\u4e00-\u9fff]{2,8}?(?:新区|自治县|自治州|区|县|市)", text)
+    cleaned = []
+    for name in found:
+        name = re.sub(r"^(?:今天|今日|明天|未来|和|与|及)+", "", name)
+        if name and name not in cleaned:
+            cleaned.append(name)
+    return cleaned
+
+
+def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[str], bool, list[str]]:
     """为独立风险入口校验范围，避免旧解析器把明确未知地点默认为天津市区。"""
-    text = (regions or user_query or "").strip()
+    text = f"{user_query or ''} {regions or ''}".strip()
+    unsupported_names = _unsupported_region_scopes(user_query, regions)
     matched_regions: list[str] = []
     if has_matched_rolling_region(text):
         matched_regions.extend(parse_rolling_forecast_regions(text))
@@ -467,11 +501,11 @@ def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[st
     # "天津/全市/我市"是明确支持的全市范围，且保持旧天气入口的默认语义。
     if not matched_regions and any(scope in text for scope in ("天津", "全市", "我市", "本市", "市区", "中心城区")):
         matched_regions.append(DEFAULT_ROLLING_FORECAST_REGION)
-    if matched_regions:
-        return matched_regions, False
+    if matched_regions and not unsupported_names:
+        return matched_regions, False, []
     # 此专用核心只接受已验证的区域、别名或明确泛天津范围。与通用天气入口不同，
     # 不能因没有行政后缀而把“雄安未来风险”等未知地点默认为天津市区。
-    return [], True
+    return [], True, unsupported_names
 
 
 def query_region_weather_risks_core(
@@ -487,13 +521,14 @@ def query_region_weather_risks_core(
     current = now or time_source.now(TIANJIN_TIMEZONE)
     if current.tzinfo is None:
         current = current.replace(tzinfo=TIANJIN_TIMEZONE)
-    region_names, unsupported = _resolve_region_risk_regions(user_query, regions)
+    region_names, unsupported, unsupported_names = _resolve_region_risk_regions(user_query, regions)
     if unsupported:
         return {
             "status": "unsupported_region",
             "message": "暂不支持该区域的综合风险查询。",
             "query_time": current.strftime("%Y-%m-%d %H:%M:%S"),
             "regions": [],
+            "unsupported_regions": unsupported_names,
             "risk_window": _risk_window_payload(None, None),
         }
     calendar_window = resolve_requested_calendar_window(user_query, now=current)
@@ -504,16 +539,21 @@ def query_region_weather_risks_core(
     for name in region_names:
         try:
             lon_text, lat_text = _region_or_city_coord(name).split("_", 1)
-            hazards = _query_region_hazards(float(lon_text), float(lat_text), risk_fcst_times)
+            options = {"include_risk_coverage": True} if risk_fcst_times else {}
+            hazards = _query_region_hazards(
+                float(lon_text), float(lat_text), risk_fcst_times, **options
+            )
         except Exception:
             hazards = None
             lon_text, lat_text = "", ""
         if not isinstance(hazards, dict):
             hazards = {}
         counts = _region_static_counts(hazards)
+        coverage_by_kind = hazards.get("risk_levels", {}).get("_coverage", {}) if isinstance(hazards.get("risk_levels"), dict) else {}
         risks = [
             _normalize_region_risk(
-                key, label, counts[key], hazards.get("risk_levels"), hazards.get("risk_levels_available")
+                key, label, counts[key], hazards.get("risk_levels"), hazards.get("risk_levels_available"),
+                coverage_by_kind.get(key) if isinstance(coverage_by_kind, dict) else None,
             )
             for key, label in REGION_RISK_CATEGORIES
         ]
@@ -534,6 +574,26 @@ def query_region_weather_risks_core(
         status = "partial"
     else:
         status = "ok"
+    if risk_fcst_times:
+        all_coverages = [
+            risk.get("coverage")
+            for entry in entries for risk in entry["risks"]
+            if isinstance(risk.get("coverage"), dict)
+        ]
+        if all_coverages:
+            complete = all(item.get("complete") is True for item in all_coverages)
+            any_success = any(item.get("successful_times") for item in all_coverages)
+            coverage_status = "complete" if complete else ("partial" if any_success else "unavailable")
+            risk_window["coverage_status"] = coverage_status
+            if not complete:
+                risk_window.update({
+                    "forecast_start_time": None,
+                    "forecast_end_time": None,
+                    "forecast_days": None,
+                    "time_mode": "explicit_daily_cycles_incomplete",
+                })
+                if any_success:
+                    status = "partial"
     return {
         "status": status,
         "query_time": current.strftime("%Y-%m-%d %H:%M:%S"),

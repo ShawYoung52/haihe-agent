@@ -698,9 +698,9 @@ REGION_RISK_LEVELS_TIMEOUT_SEC = int(os.getenv("REGION_RISK_LEVELS_TIMEOUT_SEC",
 
 _region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_cache(
     REGION_RISK_LEVELS_CACHE_TTL,
-    lambda lon, lat, radius_km, fcst_times=None: (
+    lambda lon, lat, radius_km, fcst_times=None, include_coverage=False: (
         f"{round(float(lon), 3)}|{round(float(lat), 3)}|{round(float(radius_km), 1)}|"
-        f"{'|'.join(fcst_times) if fcst_times else ''}"
+        f"{'|'.join(fcst_times) if fcst_times else ''}|coverage={bool(include_coverage)}"
     ),
     # 接口不可达(None)不缓存以便重试；可达（{} 无风险 / {...} 有等级）缓存。
     should_cache=lambda v: v is not None,
@@ -709,7 +709,8 @@ _region_levels_decorator, _region_levels_cache, _region_levels_lock = make_ttl_c
 
 @_region_levels_decorator
 def query_region_risk_levels(
-    lon: float, lat: float, radius_km: float, fcst_times: list[str] | None = None
+    lon: float, lat: float, radius_km: float, fcst_times: list[str] | None = None,
+    *, include_coverage: bool = False,
 ) -> dict | None:
     """按区域代表坐标半径查风险接口当前各灾种风险等级分布。
 
@@ -746,23 +747,29 @@ def query_region_risk_levels(
         times = list(fcst_times)
     missing = object()
 
-    def query_kind(kind: str) -> tuple[str, Any, bool]:
+    def query_kind(kind: str) -> tuple[str, Any, bool, dict]:
         key = HAZARD_KIND_TO_KEY[kind]
         level_counts: dict[str, int] = {}
         saw_no_data = False
         failed = False
         reachable = False
+        successful_times: list[str | None] = []
+        no_data_times: list[str | None] = []
+        failed_times: list[str | None] = []
         for t in times:
             try:
                 extra = {} if t is None else {"fcstTime": t}
                 payload = _fetch_risk_warning(kind, extra, timeout_sec=REGION_RISK_LEVELS_TIMEOUT_SEC)
             except RiskInterfaceNoDataError:
                 saw_no_data = True  # 接口可达，仅该起报时次无资料 → 跳过继续
+                no_data_times.append(t)
                 continue
             except Exception:
                 failed = True  # 该灾种接口调用失败 → 打标"接口暂不可用"
+                failed_times.append(t)
                 break
             reachable = True
+            successful_times.append(t)
             records = [_normalize_record(x) for x in _extract_items(payload)]
             for rec in records:
                 if not _is_risky_level(rec.get("level")):
@@ -781,8 +788,15 @@ def query_region_risk_levels(
                 # 默认路径：第一个有资料（可达且成功返回）的起报时次即收口，
                 # 不再回退/合并更早时次。可达但零风险记录属"本次无风险"，不回退。
                 break
-        if failed:
-            return key, None, reachable
+        coverage = {
+            "requested_times": list(times),
+            "successful_times": successful_times,
+            "no_data_times": no_data_times,
+            "failed_times": failed_times,
+            "complete": len(successful_times) == len(times),
+        }
+        if failed and (not include_coverage or not level_counts):
+            return key, None, reachable, coverage
         only_no_data = saw_no_data and not reachable
         if saw_no_data:
             reachable = True  # 接口是通的，只是某个起报时次无资料
@@ -798,7 +812,7 @@ def query_region_risk_levels(
             value = RISK_LEVELS_NO_DATA
         else:
             value = missing
-        return key, value, reachable
+        return key, value, reachable, coverage
 
     # 三个灾种接口相互独立，并发后故障时总等待上限由“三份串行超时之和”
     # 降为“最慢一份的超时”；同一灾种内的起报回退仍保持原顺序。
@@ -808,14 +822,21 @@ def query_region_risk_levels(
 
     kinds: dict[str, dict | None] = {}
     reachable = False
-    for key, value, kind_reachable in outcomes:
+    coverage_by_kind: dict[str, dict] = {}
+    for key, value, kind_reachable, coverage in outcomes:
         reachable = reachable or kind_reachable
+        if include_coverage:
+            coverage_by_kind[key] = coverage
         if value is not missing:
             kinds[key] = value
     if not reachable:
         # 全部灾种接口失败 → None（不缓存以便重试；前端整列显示"接口暂不可用"）。
-        return None
+        if not include_coverage:
+            return None
+        return {"_coverage": coverage_by_kind, "_all_unreachable": True}
     # 可达：无风险且无失败 → {}（前端渲染"本次无风险"）；含 None 值 = 对应灾种失败。
+    if include_coverage:
+        kinds["_coverage"] = coverage_by_kind
     return kinds
 
 

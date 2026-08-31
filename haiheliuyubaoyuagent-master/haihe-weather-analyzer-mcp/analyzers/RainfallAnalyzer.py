@@ -191,12 +191,15 @@ def find_ec_forecast_tif(
 
 
 def resolve_forecast_raster_path(
-    forecast_hours: int, start_time: datetime, ec_output_path: str
+    forecast_hours: int, start_time: datetime, ec_output_path: str,
+    *, require_full_window: bool = False,
 ) -> tuple[str | None, str]:
     """根据数据可用性选择滚动预报或 EC AIFS 栅格文件。
 
     滚动预报分支把用户请求的 start_time 换算为相对 cycle 的 lead 小时，
     并对窗口内各时次 TP1H 求和，与 EC `rain_total_Nh.tif` 的累计口径一致。
+    require_full_window 为新河流入口的严格模式：不能钳制/平移请求窗口，
+    必要时查找能覆盖起点的更早周期，并要求每个小时均有资料。旧调用行为不变。
 
     Returns:
         (file_path, data_source_label)
@@ -206,6 +209,12 @@ def resolve_forecast_raster_path(
     source_info = rolling_forecast_grid.resolve_forecast_grid_source(
         ec_output_path=ec_output_path
     )
+    if require_full_window and source_info.get("source") == "rolling_forecast":
+        cycle_dt = datetime.strptime(source_info["cycle"], "%Y%m%d%H%M%S")
+        if cycle_dt > start_time:
+            source_info = rolling_forecast_grid.resolve_forecast_grid_source(
+                now=start_time, ec_output_path=ec_output_path
+            )
     if source_info.get("source") == "rolling_forecast" and source_info.get("file"):
         nc_path = source_info["file"]
         cycle = source_info.get("cycle", "")
@@ -213,8 +222,14 @@ def resolve_forecast_raster_path(
             lead_start, lead_end = rolling_forecast_grid.compute_lead_hours(
                 cycle, start_time, forecast_hours
             )
+            if require_full_window:
+                cycle_dt = datetime.strptime(cycle, "%Y%m%d%H%M%S")
+                if (cycle_dt + timedelta(hours=lead_start) != start_time
+                        or lead_end - lead_start != forecast_hours):
+                    raise ValueError("滚动预报不能完整覆盖请求时间窗口")
+            options = {"require_full_window": True} if require_full_window else {}
             tiff_path = rolling_forecast_grid.materialize_rolling_forecast_accumulated(
-                nc_path, lead_start, lead_end
+                nc_path, lead_start, lead_end, **options
             )
             if tiff_path:
                 return tiff_path, f"滚动预报网格（cycle={cycle}）"

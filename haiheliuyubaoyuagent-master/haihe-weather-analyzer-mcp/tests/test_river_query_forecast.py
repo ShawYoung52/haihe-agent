@@ -335,7 +335,7 @@ def fake_stats(*args, **kwargs):
 def test_juhe_uses_corridor_and_reports_scope(monkeypatch):
     """Catches a concrete river query being routed through a nine-zone aggregate."""
     monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
-    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "滚动预报网格"))
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "滚动预报网格"))
     monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
 
     result = rqf.query_river_rainfall_forecast_core(
@@ -356,7 +356,7 @@ def test_bare_luanhe_uses_corridor_when_found(monkeypatch):
         "load_river_corridor",
         lambda *a, **k: rqf.RiverCorridor("滦河", "滦河", 4326, object(), 5.0),
     )
-    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "TEST"))
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "TEST"))
     monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
     monkeypatch.setattr(
         rqf.rsf,
@@ -447,6 +447,7 @@ def test_named_basin_request_uses_nine_zone_tool(monkeypatch, query, expected_st
         "zone_type": "9",
         "config": TEST_CONFIG,
         "ec_output_path": "",
+        "require_full_window": True,
     }]
     assert result["periods"][0]["data_source"] == "滚动预报网格"
     assert result["periods"][0]["status"] == "ok"
@@ -460,7 +461,7 @@ def test_three_days_are_computed_independently(monkeypatch):
     monkeypatch.setattr(
         rqf.rsf,
         "_resolve_forecast_file",
-        lambda hours, start, path: resolved_starts.append(start) or ("rain.tif", "TEST"),
+        lambda hours, start, path, **kwargs: resolved_starts.append(start) or ("rain.tif", "TEST"),
     )
     monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
 
@@ -475,7 +476,7 @@ def test_three_days_are_computed_independently(monkeypatch):
 def test_no_coverage_is_not_reported_as_no_rain(monkeypatch):
     """Catches missing raster coverage being mislabeled as a dry period."""
     monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
-    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "TEST"))
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "TEST"))
     monkeypatch.setattr(
         rqf.rsf,
         "_compute_rainfall_stats_for_geometry",
@@ -528,7 +529,7 @@ def test_missing_non_system_river_is_reported_as_not_found(monkeypatch):
 def test_missing_forecast_file_is_reported_as_unavailable(monkeypatch):
     """Catches a missing forecast raster being represented as zero rainfall."""
     monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
-    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: (None, "无可用预报文件"))
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: (None, "无可用预报文件"))
 
     result = rqf.query_river_rainfall_forecast_core(
         "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
@@ -540,7 +541,7 @@ def test_missing_forecast_file_is_reported_as_unavailable(monkeypatch):
 def test_raster_statistics_failure_is_reported_as_calculation_error(monkeypatch):
     """Catches raster processing failures being represented as a dry forecast."""
     monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
-    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a: ("rain.tif", "TEST"))
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "TEST"))
     monkeypatch.setattr(
         rqf.rsf,
         "_compute_rainfall_stats_for_geometry",

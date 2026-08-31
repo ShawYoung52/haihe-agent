@@ -1051,8 +1051,8 @@ def test_build_poi_reminder_section_hazard_points():
     assert "降雨信号" not in text
 
 
-def test_point_risk_level_section_uses_business_no_risk_wording_for_no_data():
-    """点位回答不展示“暂无资料”；no_data 按用户口径显示“本次无风险”。"""
+def test_point_risk_level_section_distinguishes_missing_cycle_from_no_risk():
+    """缺起报资料不能伪装为无风险，保留真实等级与原有表格。"""
     facts = {
         "point_risk_levels": {
             "dzzh": {"label": "地质灾害", "levels": {"四级": 2}, "total": 2},
@@ -1066,8 +1066,22 @@ def test_point_risk_level_section_uses_business_no_risk_wording_for_no_data():
 
     assert "【本次风险等级】" in text
     assert "| 地质灾害 | 四级 2 处 |" in text
-    assert "| 山洪 | 本次无风险 |" in text
+    assert "| 山洪 | 风险预报资料不可用 |" in text
     assert "| 中小河流 | 接口暂不可用 |" in text
+    assert "暂无对应时次风险资料" not in text
+
+
+@pytest.mark.parametrize("poi", ["于桥水库", "盘山景区"])
+def test_highlighted_poi_missing_risk_cycles_never_render_no_risk(poi):
+    facts = dw_core._compact_decision_forecast_facts({
+        "poi_name": poi,
+        "periods": [{"weather": "多云", "precipitation_mm": 0}],
+        "point_risk_levels": dict.fromkeys(("dzzh", "sh", "zxhl"), "no_data"),
+        "point_risk_levels_available": True,
+    })
+    text = dw_core._build_point_risk_level_section(facts)
+    assert text.count("风险预报资料不可用") == 3
+    assert "无风险" not in text
     assert "暂无对应时次风险资料" not in text
 
 

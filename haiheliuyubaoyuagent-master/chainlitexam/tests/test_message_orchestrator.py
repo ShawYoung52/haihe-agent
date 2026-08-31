@@ -20,6 +20,30 @@ import chainlitexam.message_orchestrator as mo
 import external_skill_tools as est
 
 
+class _ContextFreeStep:
+    def __init__(self, **kwargs):
+        self.id = kwargs.get("id") or "unit-step"
+        self.name = kwargs.get("name", "")
+        self.parent_id = kwargs.get("parent_id")
+        self.show_input = False
+        self.input = ""
+        self.output = ""
+    async def send(self): pass
+    async def update(self): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): return None
+
+
+@pytest.fixture(autouse=True)
+def _context_free_chainlit_boundaries(monkeypatch):
+    """Unit tests keep real imports while replacing only request-context UI boundaries."""
+    monkeypatch.setattr(mo.cl, "Step", _ContextFreeStep)
+    monkeypatch.setattr(mo.cl, "user_session", type("Session", (), {
+        "get": staticmethod(lambda *a, **k: None),
+        "set": staticmethod(lambda *a, **k: None),
+    })())
+
+
 @pytest.mark.asyncio
 async def test_weekend_activity_fast_path_does_not_intercept_specific_poi(monkeypatch):
     """具体景点周末游玩必须交给点位天气链路，不能降级成天津市降雨概览。"""
@@ -89,6 +113,21 @@ def test_river_forecast_boundary_keeps_observation_query_planner_calls():
     guarded = mo._enforce_river_forecast_tool_boundary(planner_msg, "海河今天已经下雨了吗")
 
     assert guarded.tool_calls == [original_call]
+
+
+@pytest.mark.parametrize("question", [
+    "明天泃河有雨吗，风大吗？", "明天滦河有雨吗，会有大风吗？",
+    "明天泃河有雨吗，风力如何？", "明天滦河有雨吗，风速多大？",
+])
+@pytest.mark.parametrize("require_query", [True, False], ids=["first", "supplemental"])
+def test_mixed_river_wind_calls_survive_each_planner_boundary(question, require_query):
+    calls = [
+        {"id": "rain", "name": "query_river_rainfall_forecast", "args": {"user_query": question}},
+        {"id": "wind", "name": "query_rolling_forecast", "args": {"user_query": question}},
+    ]
+    message = type("PlannerMessage", (), {"tool_calls": calls, "content": ""})()
+    result = mo._enforce_river_forecast_tool_boundary(message, question, require_query=require_query)
+    assert result.tool_calls == calls
 
 
 @pytest.mark.parametrize("question", [
@@ -335,7 +374,7 @@ async def test_run_tool_round_failure_records_tool_message_without_generic_error
         raise Exception("未找到起报 2026071302 的 12h/24h 预报文件。")
 
     monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", fake_invoke_tool_with_tolerance)
-    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+    monkeypatch.setattr(mo.cl, "Step", _ContextFreeStep)
 
     sent_messages: list[dict] = []
     monkeypatch.setattr(mo.cl, "Message", lambda **kwargs: type("CapturingMessage", (), {
@@ -514,7 +553,7 @@ async def test_run_tool_round_parallelizes_pure_data_tools(monkeypatch):
         return f"{tool_name}-result", 0.05
 
     monkeypatch.setattr(mo, "_invoke_tool_with_tolerance", slow_invoke)
-    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+    monkeypatch.setattr(mo.cl, "Step", _ContextFreeStep)
 
     class FakePlannerMsg:
         tool_calls = [
@@ -1387,7 +1426,7 @@ async def test_run_tool_round_direct_historical_assembles_with_hazard(monkeypatc
     }
     tools = [FakeHistoricalTool(), FakeHazardTool()]
     messages = []
-    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+    monkeypatch.setattr(mo.cl, "Step", _ContextFreeStep)
     # 真实 Chainlit Step 需要上下文；裸环境使用 tests/stubs.py 的无上下文 Step。
     if hasattr(chainlit, "__path__"):
         from chainlit.context import context_var, init_http_context
@@ -1450,7 +1489,7 @@ async def test_run_tool_round_direct_historical_non_ok_no_crash(monkeypatch, his
     }
     tools = [FakeHistoricalTool()]
     messages = []
-    monkeypatch.setattr(mo.cl, "Step", chainlit.Step)
+    monkeypatch.setattr(mo.cl, "Step", _ContextFreeStep)
     if hasattr(chainlit, "__path__"):
         from chainlit.context import context_var, init_http_context
 

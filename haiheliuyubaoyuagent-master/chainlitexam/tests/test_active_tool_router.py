@@ -65,6 +65,15 @@ def test_water_level_uses_filtered_domain_without_forecast_tool():
     assert "query_rolling_forecast" not in decision.tool_names
 
 
+@pytest.mark.parametrize("question", [
+    "明天泃河有雨吗，风大吗？", "明天滦河有雨吗，会有大风吗？",
+    "明天泃河有雨吗，风力如何？", "明天滦河有雨吗，风速多大？",
+])
+def test_mixed_river_rain_and_wind_preserves_full_competing_tool_inventory(question):
+    router, _ = _router()
+    assert router.select(question).mode == "full"
+
+
 def test_generic_region_risk_question_uses_dedicated_tool():
     """泛区域风险研判必须使用综合风险工具，而不是由 Planner 自行拼装。"""
     router, _ = _router()

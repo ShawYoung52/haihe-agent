@@ -364,7 +364,8 @@ def _query_corridor_periods(
         hours = _forecast_hours(period)
         try:
             raster_path, data_source = rsf._resolve_forecast_file(
-                hours, period.target_start, ec_output_path
+                hours, period.target_start.astimezone(TIANJIN_TIMEZONE).replace(tzinfo=None),
+                ec_output_path, require_full_window=True,
             )
         except Exception as exc:
             return _query_error("forecast_unavailable", corridor.river_name, str(exc))
@@ -409,6 +410,7 @@ def _query_river_system_periods(
                 zone_type="9",
                 config=config,
                 ec_output_path=ec_output_path,
+                require_full_window=True,
             )
         except Exception as exc:
             return _query_error("calculation_error", target, str(exc))

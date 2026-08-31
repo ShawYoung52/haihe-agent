@@ -312,6 +312,7 @@ def materialize_rolling_forecast_accumulated(
     end_hour: int,
     *,
     output_dir: str | os.PathLike | None = None,
+    require_full_window: bool = False,
 ) -> str | None:
     """把滚动预报 .nc 在 [start_hour, end_hour) 半开区间内的 TP1H 累计成单个 GeoTIFF。
 
@@ -331,6 +332,8 @@ def materialize_rolling_forecast_accumulated(
     try:
         tp = ds["TP1H"].sel(time=slice(start_hour, end_hour - 1))
         if tp.sizes.get("time", 0) == 0:
+            return None
+        if require_full_window and list(tp["time"].values) != list(range(start_hour, end_hour)):
             return None
         total = tp.sum(dim="time", min_count=1).load()
         lat = tp["lat"].values
