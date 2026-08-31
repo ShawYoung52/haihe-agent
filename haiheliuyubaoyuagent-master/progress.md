@@ -41,3 +41,70 @@
 - **B 泃河/滦河回答太简（用户："怎么回答的这么少了"）**：河流走廊/九分区预报走通用 planner→answer 纯 LLM 路径，**没有代码生成的表格**，只出一句话（与本次改动无关，是既有路径）。
   - 修：新增 `chainlitexam/tools/river_forecast_response.py` `build_river_forecast_answer`——确定性组装【核心结论】（无明显降雨/有降雨含时段最大雨量/多日分述）+【逐时段降雨预报】表（时段×平均雨量×最大雨量×降雨判断）+数据来源，零编造只引用工具返回降雨字段；`_run_tool_round` 对 `query_river_rainfall_forecast` 且纯河流查询（`is_conservative_river_forecast_query`）设 `forced_final_text` 直接收口（镜像 query_decision_weather_for_poi），非 ok/混合查询交回原 LLM 路径。测试 `test_river_forecast_response.py` 7 条。
 - 全量：MCP 606 passed / chainlitexam 842+174 passed，0 失败。
+
+## 2026-08-31（内网实测第三轮：今日雨情走天河没图 + 实况重复摘要）
+
+用户复测报两条疑似回归，并自己发现"今日雨情走了天河接口"。先以 `git show --stat` 举证：本轮前两笔提交
+（8e26c32 / fb39b9c）只碰 河流预报/区域风险话术/水库0/专业化，**未碰实况观测、任何出图/长图工具、思考摘要逻辑**。
+
+- **A 今日雨情走天河、没图（用户选定"改走本地长图"）**：根因 = "今日雨情"在天河固定目录
+  `tools/tianhe_fixed_qa_catalog.py:29`（甲方 48 条第 29 条）里，`_route_tianhe_fixed_catalog_query`
+  整句精确命中→强制 `query_tianhe_fixed_qa`；天河纯文本 QA 对这条的成品答案是"长图已生成，请查看图片"
+  （全仓库 grep 无此句，证实是天河原文透传），图字节不经文本接口传过来 → 只见文案不见图。
+  该问法本是 **2026-08-21 验收 #4 既定的"降水专题组合长图"触发问法**（prompts 组合长图规则 +
+  `test_prompts.py::test_longimg_trigger_covers_today_rain` 锁定），2026-08-24 天河目录接入把它截走造成退化。
+  - 修（只改路由选择层，不动目录清单/底层识别）：`message_orchestrator` 新增
+    `_TIANHE_LOCAL_LONGIMG_QUESTIONS={"今日雨情","今天雨情"}` + `_route_local_longimg_catalog_query`，
+    在 `_select_pre_planner_route` 顶部、天河固定目录判断**之前**优先路由到 `generate_haihe_composite_longimg`
+    （无参=今天长图），确定性出图并跳过 planner/天河。`_route_tianhe_fixed_catalog_query` 与 48 条清单保持不变。
+  - 测试 `test_tianhe_knowledge_route.py::TestLocalLongimgOverride`（7 条：今日/今天雨情+带标点→组合长图、
+    目录清单仍含今日雨情、底层识别不变、其它目录问法仍走天河）。
+- **B 天津当前天气实况 重复思考摘要**：该问法**不走天河**（与目录"天津当前的天气情况"字面不同、
+  03 实况规则缺"风大/多长时间/昨天"等词不命中），走本地 planner→实况工具。重复摘要"已结合预报数据…：
+  已结合实况观测数据…："根因 = answer LLM **仿写历史**（历史 AIMessage 连摘要前缀一起存入，
+  `messages.append(AIMessage(content=text))`），开头再产出一句"已…如下："，代码 `_prepend_thinking_summary`
+  又前置正确摘要 → 摘要套摘要。既有设计，非本轮提交。
+  - 修：`_prepend_thinking_summary` 幂等——新增 `_strip_leading_thinking_summary`
+    （`_THINKING_SUMMARY_LEAD_RE=^已[^\n]*?如下：\s*`，匹配全部摘要分支含 has_chart 变体），前置正确摘要前
+    剥离开头已有摘要行。预警"当前无生效…"守卫、正常无前缀回答不受影响。
+  - 测试 `test_thinking_summary.py` +6 条（仿写剥离/多句叠加剥离/has_chart 变体/正常不变/非摘要不误剥/预警守卫不变）。
+- **全量回归**：chainlitexam 1028 passed / 5 skipped / 0 failed。
+- **待用户内网复测**：① 今日雨情应出本地组合长图（依赖服务器装有 Playwright+Chromium，否则降级网址文案）；
+  ② 天津当前天气实况重复摘要应消失。**表格换行异常**（"|区域|平均雨量…"表头单元格被拆开）未能在代码侧复现，
+  疑为粘贴换行塌陷或 answer LLM 表格生成抖动——若复测仍在，请给原始答案（非粘贴）定位。
+
+## 2026-08-31（第三轮续：天津当前的天气情况 → 本地 + 冲突原则推广）
+
+用户给天河已完成 51 问清单，并定口径：**"假如我们的问题跟天河冲突了，那肯定先走我们的智能体"**。
+问"天津当前的天气情况"是否归我们时用户不耐烦："肯定归我们啊，我不是说过了吗，还要问我"——按冲突原则直接收归，不再逐条问。
+
+- **R6 天津当前的天气情况 → 本地实况**：该问法在天河固定目录（catalog 第 45 条），但天河成品是静态文本、
+  本地实况观测是实时数据更准。修复方式重构：把 R1 的"长图覆盖"扩为统一的"冲突问法收归本地"集合——
+  `_TIANHE_LOCAL_LONGIMG_QUESTIONS={"今日雨情","今天雨情"}`（走本地组合长图）+
+  `_TIANHE_LOCAL_PLANNER_QUESTIONS={"天津当前的天气情况"}`（落本地 planner 当前天气），
+  并集 `_TIANHE_SERVED_LOCALLY`；`_route_tianhe_fixed_catalog_query` 对该并集返回 None（不再走天河），
+  由 `_select_pre_planner_route` 顶部的长图覆盖先接住今日雨情，天津当前的天气情况则穿透到 planner 实况。
+  **目录清单 TIANHE_FIXED_QA_QUESTIONS 保持不动**（是天河"已备好答案"的事实记录），只改路由策略层。
+  安全性：prompts.py 未逐字枚举"天津当前的天气情况"（0.5 段只列全市雨量/市区气温风等其它 03 实况问法），
+  planner 不会被推向天河；`_enforce_tianhe_catalog_boundary` 因 `_route_tianhe_knowledge_query` 对它返回 None
+  会正确拦截 planner 万一误选天河 → 回退本地。probe 实证：fixed/knowledge/simple 全 None → select=None 交 planner。
+- **测试**：test_tianhe_knowledge_route.py `test_all_new_questions_route_verbatim` 排除 _TIANHE_SERVED_LOCALLY
+  + 新增 `test_served_locally_questions_skip_tianhe_catalog`；`test_override_keeps_question_in_tianhe_catalog`
+  改为"目录仍含但路由返回 None"；新增 `TestLocalPlannerOverride`（5 条）。docx 路由测试把"天津当前的天气情况"
+  加入"不被天河截走"清单。test_tianhe_knowledge_route 199 passed。
+- **code-simplifier 微调**：`_strip_leading_thinking_summary` 循环内 `.lstrip()` 冗余（正则 `\s*` 已吞尾随空白），删除。
+- **code-review（独立 agent，完整当前 diff）**：**无确认缺陷**。1 条 PLAUSIBLE 已加固 + 2 个 nit 采纳 1 个：
+  - （低）`天津当前的天气情况` 原靠 planner 善意——prompts.py:255 告诉 planner"51 题优先按固定目录精确命中"，
+    万一 planner 误选天河 → 边界拦截 → 空工具调用落"无法获取"。修：新增 `_route_local_current_weather_catalog_query`
+    确定性强制 `("query_current_weather_observation", {})`（hours_back 默认 6，与通用实况同口径），
+    与长图覆盖对称，三条冲突问法全部确定性收归本地。
+  - （nit）strip 正则只认全角`：`——answer LLM 若用半角冒号仿写前缀则剥不掉。改 `如下[:：]`。
+  - （nit）strip 吃掉 `已…如下：` 开头的合法引导句——正文保留、代码前置自己的摘要，属方法固有、可接受，不改。
+- **code-simplifier（第二轮，R6+review 加固后）**：采纳提取共享 helper `_route_local_catalog_query`
+  （归一化→成员检查→无参工具元组 共性与两个包装函数各留专属 docstring 的"为何本地赢天河"），
+  冲突问法家族 0→2 后模式明确会复现，集中惯用法为真净收益。行为逐字不变。
+- **github 环节**：仓库直推 main 无 PR；唯一 PR #1（2026-07 chore）已关闭未合并，无待处理评审意见。
+- **context7**：本轮纯路由逻辑+测试改动，无三方库/框架/API 用法变化，不适用。
+- **全量回归（最终门禁，含 test_decision_weather_tool.py——CLAUDE.md 记录的既有导入失败已不成立）**：
+  chainlitexam **1080 passed / 5 skipped / 0 failed**（无 --ignore）。diff 敏感信息扫描 CLEAN（无内网 IP/凭据）。
+- **待办**：提交推送（显式路径 git add，不提交 AgentWeb.zip）。

@@ -33,6 +33,21 @@
 - [x] P5 测试 + code-review（3 条确认缺陷已修）+ code-simplifier + CLAUDE.md 更新
 - [ ] P6 提交（显式路径）+ github（待用户确认是否推送/PR）
 
+## 内网实测第三轮（2026-08-31 下午，本轮）
+
+用户复测报疑似回归两条，并补"冲突先走我们智能体"原则 + 天河已完成清单对照。
+
+- [x] R1 今日雨情走天河没图 → 改走本地组合长图（冲突归我们）。路由选择层覆盖，目录清单不动。
+- [x] R2 天津当前天气实况重复思考摘要 → `_prepend_thinking_summary` 幂等剥离。
+- [x] R3 docx 43 条全量路由回归测试 `test_docx_question_routing.py`（天河→天河、其余→本地、无冲突）。
+- [x] R6 天津当前的天气情况 → 本地实况（用户"肯定归我们"）。`_route_tianhe_fixed_catalog_query` 对
+      `_TIANHE_SERVED_LOCALLY`（长图 2 条 + 实况 1 条）返回 None，冲突问法确定性强制本地工具
+      （长图→generate_haihe_composite_longimg、实况→query_current_weather_observation），不靠 planner 善意。
+- [x] R4 全流程：code-review（无确认缺陷，1 PLAUSIBLE 加固 + 半角冒号 nit）+ code-simplifier（提取共享 helper）
+      + 验证（1080 passed/5 skipped/0 failed，diff 敏感信息 CLEAN）+ github（无 PR）+ context7（不适用）。
+- [x] R7 提交推送：完成（显式路径 git add，不含 AgentWeb.zip）。
+- [ ] R5 表格换行异常：代码侧未复现，待用户给原始答案定位（疑粘贴塌陷/LLM 表格抖动）
+
 ## 遗留（上一批未完成 → 本轮已处理）
 
 - [x] POI 决策天气"丰富注意事项/游玩建议"——按推荐方案**扩受控 action 词表**（新增 dress/car_wash/drying/exercise 9 个动作 + fine/mild 条件），保持零编造。已提交。

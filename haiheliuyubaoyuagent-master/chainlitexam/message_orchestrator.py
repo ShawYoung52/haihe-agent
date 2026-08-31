@@ -74,7 +74,7 @@ from tools.rolling_forecast_response import (
 )
 from tools import decision_weather_fast_path, warning_workflow
 from tools.river_forecast_response import build_river_forecast_answer
-from tools.tianhe_fixed_qa_catalog import is_tianhe_fixed_qa_question
+from tools.tianhe_fixed_qa_catalog import is_tianhe_fixed_qa_question, normalize_tianhe_catalog_question
 from tools.meteo_evidence import is_evidence_complete
 from tools.tool_round_evidence import TOOL_QUERY_TYPES, ToolRoundEvidence
 from tools.request_intent_policy import (
@@ -1135,16 +1135,68 @@ def _route_tianhe_knowledge_query(user_text: str) -> tuple[str, dict] | None:
     return None
 
 
+# 天河目录里、但按"冲突先走我们智能体"原则（2026-08-31 用户口径）改由本地承接的问法。
+# TIANHE_FIXED_QA_QUESTIONS 是天河"已备好答案"的事实清单，保持不动；这里只是路由策略层收归本地。
+# - 今日雨情/今天雨情：天河纯文本答案"长图已生成，请查看图片"拿不到图（"我长图呢"），本就是
+#   2026-08-21 验收 #4 既定的组合长图触发问法（天河目录接入把它截走造成退化）→ 本地组合长图工具。
+# - 天津当前的天气情况：本地实况观测是实时数据、比天河成品更准 → 确定性强制本地实况观测工具。
+_TIANHE_LOCAL_LONGIMG_QUESTIONS = frozenset({"今日雨情", "今天雨情"})
+_TIANHE_LOCAL_PLANNER_QUESTIONS = frozenset({"天津当前的天气情况"})
+_TIANHE_SERVED_LOCALLY = _TIANHE_LOCAL_LONGIMG_QUESTIONS | _TIANHE_LOCAL_PLANNER_QUESTIONS
+
+
 def _route_tianhe_fixed_catalog_query(user_text: str) -> tuple[str, dict] | None:
-    """精确目录命中时固定走天河，并保留工具调用的用户原文。"""
+    """精确目录命中时固定走天河，并保留工具调用的用户原文。
+
+    冲突问法（_TIANHE_SERVED_LOCALLY，按"冲突先走我们智能体"原则）不走天河，返回 None 交本地承接。
+    """
     raw = str(user_text or "")
     if not is_tianhe_fixed_qa_question(raw):
+        return None
+    if normalize_tianhe_catalog_question(raw) in _TIANHE_SERVED_LOCALLY:
         return None
     return "query_tianhe_fixed_qa", {"query": raw}
 
 
+def _route_local_catalog_query(
+    user_text: str, question_set: frozenset, tool_name: str
+) -> tuple[str, dict] | None:
+    """本地承接的目录问法共性：归一化后命中指定清单则无参调用指定本地工具。"""
+    normalized = normalize_tianhe_catalog_question(user_text)
+    if normalized and normalized in question_set:
+        return tool_name, {}
+    return None
+
+
+def _route_local_longimg_catalog_query(user_text: str) -> tuple[str, dict] | None:
+    """"今日/今天雨情"→ 本地降水专题组合长图（天河纯文本答案拿不到图，须本地出图）。
+
+    无参调用 generate_haihe_composite_longimg：工具默认取当前北京时整点出今天的长图。
+    """
+    return _route_local_catalog_query(
+        user_text, _TIANHE_LOCAL_LONGIMG_QUESTIONS, "generate_haihe_composite_longimg"
+    )
+
+
+def _route_local_current_weather_catalog_query(user_text: str) -> tuple[str, dict] | None:
+    """"天津当前的天气情况"→ 本地实况观测工具（实时数据，比天河静态成品更准）。
+
+    无参调用 query_current_weather_observation：hours_back 取默认 6，与 planner 通用实况口径一致。
+    确定性强制可避免 planner 万一误选天河被边界拦截后落到无工具的"无法获取"回答。
+    """
+    return _route_local_catalog_query(
+        user_text, _TIANHE_LOCAL_PLANNER_QUESTIONS, "query_current_weather_observation"
+    )
+
+
 def _select_pre_planner_route(user_text: str) -> tuple[tuple[str, dict] | None, str]:
     """选择 Planner 前的确定性路由，维持既有未来小时和兼容目录优先级。"""
+    local_longimg_route = _route_local_longimg_catalog_query(user_text)
+    if local_longimg_route is not None:
+        return local_longimg_route, "本地组合长图路由"
+    local_current_route = _route_local_current_weather_catalog_query(user_text)
+    if local_current_route is not None:
+        return local_current_route, "本地实况观测路由"
     simple_route = _route_tianhe_fixed_catalog_query(user_text)
     simple_route_label = "天河固定目录路由" if simple_route else "简单天气路由"
     if simple_route is None and not _is_future_hour_weather_query(user_text):
@@ -1510,11 +1562,31 @@ def _build_thinking_summary(query: str, has_chart: bool = False) -> str:
     return base
 
 
+# 思考摘要统一以"已…如下："单行开头。answer LLM 会仿写历史里带前缀的回答（历史 AIMessage 连摘要
+# 一起存入），在开头再产出一句摘要，代码又前置正确摘要 → "摘要套摘要"（2026-08-31 内网
+# "天津当前天气实况"重复摘要）。前置前先剥离开头已有的摘要行（含 has_chart 的"…，并生成相关图表，…"变体）。
+_THINKING_SUMMARY_LEAD_RE = re.compile(r"^已[^\n]*?如下[:：]\s*")
+
+
+def _strip_leading_thinking_summary(text: str) -> str:
+    """剥离文本开头已连续存在的思考摘要行（可一句或多句），返回正文。"""
+    stripped = str(text or "").lstrip()
+    while True:
+        match = _THINKING_SUMMARY_LEAD_RE.match(stripped)
+        if not match:
+            return stripped
+        # 正则结尾 \s* 已吞掉摘要行后的换行/空白，无需再 lstrip。
+        stripped = stripped[match.end():]
+
+
 def _prepend_thinking_summary(text: str, query: str, has_chart: bool = False) -> str:
     if re.fullmatch(r"当前无生效.+预警信号", str(text or "").strip()):
         return str(text).strip()
     summary = _build_thinking_summary(query, has_chart=has_chart)
-    return summary + "\n\n" + text if summary else text
+    if not summary:
+        return text
+    body = _strip_leading_thinking_summary(text)
+    return summary + "\n\n" + body
 
 
 async def _invoke_tool_for_fast_path(tool_name: str, tool, tool_args, user_text: str):

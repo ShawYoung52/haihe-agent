@@ -34,12 +34,20 @@ from chainlitexam.tools.tianhe_fixed_qa_catalog import TIANHE_FIXED_QA_QUESTIONS
 class TestTianheFixedCatalogRoute:
     """新增精确目录优先于本地天气和旧天河兼容规则。"""
 
-    @pytest.mark.parametrize("question", TIANHE_FIXED_QA_QUESTIONS)
+    @pytest.mark.parametrize(
+        "question",
+        [q for q in TIANHE_FIXED_QA_QUESTIONS if q not in mo._TIANHE_SERVED_LOCALLY],
+    )
     def test_all_new_questions_route_verbatim(self, question):
         assert mo._route_tianhe_fixed_catalog_query(question) == (
             "query_tianhe_fixed_qa",
             {"query": question},
         )
+
+    def test_served_locally_questions_skip_tianhe_catalog(self):
+        # 冲突问法（_TIANHE_SERVED_LOCALLY，"冲突先走我们智能体"）底层目录识别返回 None。
+        for question in mo._TIANHE_SERVED_LOCALLY:
+            assert mo._route_tianhe_fixed_catalog_query(question) is None
 
     def test_original_text_is_not_trimmed_before_tool_call(self):
         raw = "  当前湿度大不大？  "
@@ -466,3 +474,58 @@ class TestTianheCatalogBoundaryGuard:
         guarded = mo._enforce_tianhe_catalog_boundary(msg, user_text)
 
         assert guarded.tool_calls[0]["args"] == {"query": user_text}
+
+
+class TestLocalLongimgOverride:
+    """2026-08-31 内网反馈："今日雨情"被天河固定目录（甲方 48 条第 29 条）整句命中后走天河，
+    天河纯文本 QA 只回"长图已生成，请查看图片"、图字节传不过来 → 用户看不到图（"我长图呢"）。
+
+    该问法本是 2026-08-21 验收 #4 既定的"降水专题组合长图"触发问法
+    （prompts 组合长图规则 + tests/test_prompts.py::test_longimg_trigger_covers_today_rain 锁定），
+    2026-08-24 天河目录接入把它截走造成退化。修复：在路由选择层把"今日雨情/今天雨情"
+    优先确定性路由回本地 generate_haihe_composite_longimg，恢复出图。
+    目录清单与底层目录识别不动（今日雨情仍是天河目录问法），只改路由选择层。
+    """
+
+    @pytest.mark.parametrize(
+        "question", ["今日雨情", "今天雨情", "今日雨情？", "今天雨情。"]
+    )
+    def test_today_rain_routes_to_local_composite_longimg(self, question):
+        route, label = mo._select_pre_planner_route(question)
+
+        assert route == ("generate_haihe_composite_longimg", {})
+        assert label == "本地组合长图路由"
+
+    def test_override_keeps_question_in_tianhe_catalog(self):
+        # 甲方 48 条目录清单保持不变（今日雨情仍是天河目录问法），
+        # 但按"冲突先走我们智能体"原则，底层目录路由对它返回 None（交本地承接）。
+        assert "今日雨情" in TIANHE_FIXED_QA_QUESTIONS
+        assert mo._route_tianhe_fixed_catalog_query("今日雨情") is None
+
+    def test_other_catalog_questions_still_route_to_tianhe(self):
+        # 不误伤其它天河目录问题。
+        route, label = mo._select_pre_planner_route("暴雨天气的防范建议")
+
+        assert route == ("query_tianhe_fixed_qa", {"query": "暴雨天气的防范建议"})
+        assert label == "天河固定目录路由"
+
+
+class TestLocalPlannerOverride:
+    """"天津当前的天气情况"：天河成品答案是静态文本，本地实况观测是实时数据、更准。
+
+    按"冲突先走我们智能体"原则（2026-08-31 用户口径），该目录问法不走天河，
+    确定性强制本地实况观测工具（不靠 planner 善意，防误选天河被边界拦截后落到无工具回答）。
+    """
+
+    @pytest.mark.parametrize(
+        "question", ["天津当前的天气情况", "天津当前的天气情况？", "天津当前的天气情况。"]
+    )
+    def test_tianjin_current_weather_routes_to_local_observation(self, question):
+        assert mo._route_tianhe_fixed_catalog_query(question) is None
+        route, label = mo._select_pre_planner_route(question)
+        assert route == ("query_current_weather_observation", {})
+        assert label == "本地实况观测路由"
+
+    def test_override_keeps_question_in_tianhe_catalog(self):
+        # 目录清单保持不变，只改路由策略层。
+        assert "天津当前的天气情况" in TIANHE_FIXED_QA_QUESTIONS

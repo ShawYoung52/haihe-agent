@@ -11,7 +11,7 @@ from chainlitexam.tests.stubs import ensure_stubs
 
 ensure_stubs()
 
-from chainlitexam.message_orchestrator import _build_thinking_summary
+from chainlitexam.message_orchestrator import _build_thinking_summary, _prepend_thinking_summary
 
 
 def test_rainfall_distribution_summary():
@@ -105,6 +105,60 @@ def test_empty_query():
 def test_has_chart():
     result = _build_thinking_summary("未来三天降雨如何", has_chart=True)
     assert "并生成相关图表" in result
+
+
+def test_prepend_strips_llm_imitated_summary_prefix():
+    """2026-08-31 内网"天津当前天气实况"重复摘要：answer LLM 仿写历史里带前缀的回答，
+    开头又产出一句"已结合实况观测数据…如下："，代码再前置"已结合预报数据…"→两句叠加。
+    前置正确摘要前必须剥离开头已有的摘要行。"""
+    body = "已结合实况观测数据完成分析，为您整理结论如下：\n\n正文内容"
+    out = _prepend_thinking_summary(body, "天津当前天气实况")
+    assert out.startswith("已结合预报数据完成分析，为您整理结论如下：")
+    assert "已结合实况观测数据" not in out
+    assert out.count("如下：") == 1
+    assert "正文内容" in out
+
+
+def test_prepend_strips_multiple_stacked_summaries():
+    body = (
+        "已结合预报数据完成分析，为您整理结论如下：\n\n"
+        "已结合实况观测数据完成分析，为您整理结论如下：\n\n"
+        "正文内容"
+    )
+    out = _prepend_thinking_summary(body, "天津当前天气实况")
+    assert out == "已结合预报数据完成分析，为您整理结论如下：\n\n正文内容"
+
+
+def test_prepend_normal_case_unchanged():
+    out = _prepend_thinking_summary("正文内容", "今天天津降水情况")
+    assert out == "已结合实况观测数据完成分析，为您整理结论如下：\n\n正文内容"
+
+
+def test_prepend_strips_chart_variant_summary():
+    body = "已结合预报数据完成分析，并生成相关图表，为您整理结论如下：\n\n正文内容"
+    out = _prepend_thinking_summary(body, "未来三天降雨如何", has_chart=True)
+    assert out.count("如下：") == 1
+    assert "正文内容" in out
+
+
+def test_prepend_strips_halfwidth_colon_summary():
+    """answer LLM 若用半角冒号仿写摘要前缀，也要剥掉，否则重复摘要仍在。"""
+    body = "已结合实况观测数据完成分析,为您整理结论如下:\n正文内容"
+    out = _prepend_thinking_summary(body, "天津当前天气实况")
+    assert "已结合实况观测数据" not in out
+    assert "正文内容" in out
+
+
+def test_prepend_does_not_strip_non_summary_content():
+    """不以"已…如下："开头的正常回答不被误剥。"""
+    body = "目前天津以晴为主，气温 25℃。"
+    out = _prepend_thinking_summary(body, "天津当前天气实况")
+    assert out == "已结合预报数据完成分析，为您整理结论如下：\n\n" + body
+
+
+def test_prepend_warning_no_effective_guard_unchanged():
+    out = _prepend_thinking_summary("当前无生效暴雨预警信号", "天津有哪些预警")
+    assert out == "当前无生效暴雨预警信号"
 
 
 if __name__ == "__main__":
