@@ -31,3 +31,13 @@
 - **③ 回答专业化**：根因是结论被严格压成一句话、数字全剥到表格，只剩空泛评价（"气温适宜""天气不错"）。两条结论 prompt 各加"专业表述"约束（用规范天气术语写天气过程与时段、气温可给整数区间、降水/大风点明量级与时段、避免空泛评价），仍守零编造、不与表格重复。改 `rolling_forecast_response.rolling_forecast_llm_instruction` + `decision_weather_core._generate_decision_weather_answer` prompt。
 - 全量：MCP 602 passed / chainlitexam 835+174 passed，0 失败。
 - 待确认：区域路径多日窗口（蓟州类）目前仍按 8-24 口径渲染（no_data→"无风险"、超 24h 移除列），是否要与点位路径统一为"标数据时段+超窗说明"。
+
+## 2026-08-31（内网实测第二轮：区域风险话术 + 河流预报太简）
+
+用户复测后两条新反馈：
+
+- **A 蓟州风险"接口暂不可用（无对应预报数据）"（用户："这能给业务人员看吗"）**：诊断 = **我们这边渲染口径问题，不是接口问题**。日志显示 08 时与 20 时（回退）两类都调了——08 时若真失败会 break 不再调 20 时；现 20 时也被调 → 08 时回的是"该时次无数据"（业务正常应答，走 continue），地质(SCMOC)/中小河流(EC type1) 20 时仍无数据 → `unavailable_reason="risk_forecast_no_data"`；山洪(EC type2) 20 时有数据（零风险）→ 正确"无风险"。接口一直通。但 prompt 把所有 unavailable 一律写"接口暂不可用"，模型还自行加"（无对应预报数据）"。
+  - 修：`_normalize_region_risk` 新增**确定性 `status_text`**（面向业务用户）：no_data/risk_window_incomplete→"暂无风险预报资料"、真失败（risk_service_unavailable/risk_kind_unavailable/malformed）→"风险数据查询暂时不可用"、no_risk→"无风险"、risk→"有风险"。prompts.py 双轨规则改为**逐字采用 `status_text`**，禁止改写为"接口暂不可用/无对应预报数据/暂无对应时次风险资料"等技术化措辞、禁止自加括号说明。测试 `TestRegionRiskStatusText` 4 条（含"status_text 绝不含'接口'/'预报数据'"反向锁）。
+- **B 泃河/滦河回答太简（用户："怎么回答的这么少了"）**：河流走廊/九分区预报走通用 planner→answer 纯 LLM 路径，**没有代码生成的表格**，只出一句话（与本次改动无关，是既有路径）。
+  - 修：新增 `chainlitexam/tools/river_forecast_response.py` `build_river_forecast_answer`——确定性组装【核心结论】（无明显降雨/有降雨含时段最大雨量/多日分述）+【逐时段降雨预报】表（时段×平均雨量×最大雨量×降雨判断）+数据来源，零编造只引用工具返回降雨字段；`_run_tool_round` 对 `query_river_rainfall_forecast` 且纯河流查询（`is_conservative_river_forecast_query`）设 `forced_final_text` 直接收口（镜像 query_decision_weather_for_poi），非 ok/混合查询交回原 LLM 路径。测试 `test_river_forecast_response.py` 7 条。
+- 全量：MCP 606 passed / chainlitexam 842+174 passed，0 失败。

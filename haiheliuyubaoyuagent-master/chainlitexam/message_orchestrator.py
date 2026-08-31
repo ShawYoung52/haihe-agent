@@ -73,6 +73,7 @@ from tools.rolling_forecast_response import (
     rolling_forecast_llm_instruction,
 )
 from tools import decision_weather_fast_path, warning_workflow
+from tools.river_forecast_response import build_river_forecast_answer
 from tools.tianhe_fixed_qa_catalog import is_tianhe_fixed_qa_question
 from tools.meteo_evidence import is_evidence_complete
 from tools.tool_round_evidence import TOOL_QUERY_TYPES, ToolRoundEvidence
@@ -2724,6 +2725,21 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                         else callbacks["tool_observation_to_text"](decision_result)
                     )
                     forced_final_text = _sanitize_display_text(str(observation_text or ""))
+                elif tool_name == "query_river_rainfall_forecast":
+                    river_result = _unwrap_tool_result(observation)
+                    river_answer = build_river_forecast_answer(user_text, river_result)
+                    # 纯河流降雨预报：代码确定性组装完整回答（核心结论+逐时段降雨表+数据来源）
+                    # 直接收口、不经 answer LLM（与 query_decision_weather_for_poi 同模式，零编造）。
+                    # 非 ok（未找到/无资料/失败）或非纯河流的混合查询则交回原 LLM 路径。
+                    if river_answer and is_conservative_river_forecast_query(user_text):
+                        forced_final_text = river_answer
+                        observation_text = river_answer
+                    else:
+                        observation_text = (
+                            river_result
+                            if isinstance(river_result, str)
+                            else callbacks["tool_observation_to_text"](river_result)
+                        )
                 elif warning_workflow.is_warning_tool(tool_name):
                     warning_bundles.append(warning_workflow.build_warning_bundle(tool_name, observation))
                     observation_text = (

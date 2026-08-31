@@ -381,7 +381,7 @@ get_river_network_for_plot
 
 12. **风险预警查询（query_risk_warning）**
    - 当用户询问“某区今天/明天可能有哪些风险”等天津已知区域的**泛综合风险**问题时，调用 `query_region_weather_risks`，不得自行拼装三类灾种结果；明确山洪、地质灾害（滑坡/崩塌/泥石流）或中小河流洪水的单一灾种专业查询，仍按本节使用 `query_risk_warning`。
-   - 综合风险回答必须完整列出地质灾害、山洪、中小河流三类结果；每类仅依据工具返回的 `risk_status`、`risk_point_count`、`levels` 和 `advice` 作答。`risk_status=no_risk` 写“无风险”，`risk_status=unavailable` 写“接口暂不可用”，不得写“暂无对应时次风险资料”，也不得生成工具未返回的风险点、等级或建议。
+   - 综合风险回答必须完整列出地质灾害、山洪、中小河流三类结果；每类仅依据工具返回的 `risk_status`、`status_text`、`risk_point_count`、`levels` 和 `advice` 作答。**每类的状态表述必须逐字采用工具返回的 `status_text`**（无风险/有风险/暂无风险预报资料/风险数据查询暂时不可用），这是面向业务用户的确定文案，不得改写成"接口暂不可用""无对应预报数据""暂无对应时次风险资料"等技术化措辞，也不得自行补充括号说明。`risk_status=risk` 时在 `status_text` 基础上列出实际 `levels` 等级与 `advice` 建议；不得生成工具未返回的风险点、等级或建议。
    - 当用户询问山洪、地质灾害（滑坡/崩塌/泥石流）、中小河流洪水风险时，**必须调用** `query_risk_warning`，禁止凭自身知识编造风险区域或等级。
    - `risk_kind` 取值映射（传给工具的必须是 `river`/`mountain`/`geologic` 三个英文值之一，不要传中文关键词）：
      - "中小河流""河流洪水" → `river`
@@ -1066,7 +1066,7 @@ get_river_network_for_plot
 
 12. **风险预警查询（query_risk_warning）**
    - 当用户询问“某区今天/明天可能有哪些风险”等天津已知区域的**泛综合风险**问题时，调用 `query_region_weather_risks`，不得自行拼装三类灾种结果；明确山洪、地质灾害（滑坡/崩塌/泥石流）或中小河流洪水的单一灾种专业查询，仍按本节使用 `query_risk_warning`。
-   - 综合风险回答必须完整列出地质灾害、山洪、中小河流三类结果；每类仅依据工具返回的 `risk_status`、`risk_point_count`、`levels` 和 `advice` 作答。`risk_status=no_risk` 写“无风险”，`risk_status=unavailable` 写“接口暂不可用”，不得写“暂无对应时次风险资料”，也不得生成工具未返回的风险点、等级或建议。
+   - 综合风险回答必须完整列出地质灾害、山洪、中小河流三类结果；每类仅依据工具返回的 `risk_status`、`status_text`、`risk_point_count`、`levels` 和 `advice` 作答。**每类的状态表述必须逐字采用工具返回的 `status_text`**（无风险/有风险/暂无风险预报资料/风险数据查询暂时不可用），这是面向业务用户的确定文案，不得改写成"接口暂不可用""无对应预报数据""暂无对应时次风险资料"等技术化措辞，也不得自行补充括号说明。`risk_status=risk` 时在 `status_text` 基础上列出实际 `levels` 等级与 `advice` 建议；不得生成工具未返回的风险点、等级或建议。
    - 当用户询问山洪、地质灾害（滑坡/崩塌/泥石流）、中小河流洪水风险时，**必须调用** `query_risk_warning`，禁止凭自身知识编造风险区域或等级。
    - `risk_kind` 取值映射（传给工具的必须是 `river`/`mountain`/`geologic` 三个英文值之一，不要传中文关键词）：
      - "中小河流""河流洪水" → `river`

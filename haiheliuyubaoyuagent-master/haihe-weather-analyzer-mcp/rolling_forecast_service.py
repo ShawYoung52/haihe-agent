@@ -462,7 +462,12 @@ def _normalize_region_risk(
     risk_levels_available: Any,
     coverage: dict | None = None,
 ) -> dict:
-    """把风险接口的三态及异常载荷归一化为单一灾种输出。"""
+    """把风险接口的三态及异常载荷归一化为单一灾种输出。
+
+    status_text 是给业务用户看的确定性状态文案（2026-08-31 用户口径："接口暂不可用/
+    无对应预报数据"太技术化、不能给业务人员看），由代码按 risk_status/unavailable_reason
+    生成，上层逐字采用、不得改写——避免 LLM 自行补"（无对应预报数据）"这类技术化措辞。
+    """
     result = {
         "key": key,
         "label": label,
@@ -471,6 +476,8 @@ def _normalize_region_risk(
         "levels": {},
         "risk_point_count": None,
         "advice": [],
+        # 默认按"接口真失败"给业务文案；下面各分支按真实原因覆盖。
+        "status_text": "风险数据查询暂时不可用",
     }
     if coverage:
         result["coverage"] = coverage
@@ -484,13 +491,15 @@ def _normalize_region_risk(
     if key not in risk_levels:
         if not coverage_complete:
             result["unavailable_reason"] = "risk_window_incomplete"
+            result["status_text"] = "暂无风险预报资料"
             return result
-        result.update({"risk_status": "no_risk", "risk_point_count": 0})
+        result.update({"risk_status": "no_risk", "risk_point_count": 0, "status_text": "无风险"})
         return result
     raw = risk_levels.get(key)
-    # risk_warning_tool 的 no_data 表示这个起报时次缺少预报资料，绝非无风险。
+    # risk_warning_tool 的 no_data 表示这个起报时次缺少预报资料，绝非无风险、也非接口坏了。
     if raw == "no_data":
         result["unavailable_reason"] = "risk_forecast_no_data"
+        result["status_text"] = "暂无风险预报资料"
         return result
     if raw is None:
         result["unavailable_reason"] = "risk_kind_unavailable"
@@ -512,7 +521,7 @@ def _normalize_region_risk(
         result["unavailable_reason"] = "malformed_risk_payload"
         return result
     if not normalized_levels:
-        result.update({"risk_status": "no_risk", "risk_point_count": 0})
+        result.update({"risk_status": "no_risk", "risk_point_count": 0, "status_text": "无风险"})
         return result
     total = _coerce_nonnegative_int(raw.get("total"))
     result.update({
@@ -520,6 +529,7 @@ def _normalize_region_risk(
         "levels": normalized_levels,
         "risk_point_count": total if total is not None else sum(normalized_levels.values()),
         "advice": advice,
+        "status_text": "有风险",
     })
     if not coverage_complete:
         result["coverage_status"] = "partial"

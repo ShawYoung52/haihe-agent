@@ -130,6 +130,55 @@ def test_all_risk_interfaces_failed_is_not_no_risk(monkeypatch):
     assert all(item["risk_status"] == "unavailable" for item in result["regions"][0]["risks"])
 
 
+class TestRegionRiskStatusText:
+    """2026-08-31 用户口径：状态文案面向业务用户，由代码确定性生成 status_text。
+
+    上层逐字采用 status_text，不得再出现"接口暂不可用""无对应预报数据"等技术化措辞。
+    """
+
+    def test_no_data_status_text_is_business_friendly(self, monkeypatch):
+        monkeypatch.setattr(
+            rfs, "_query_region_hazards",
+            lambda *a: hazard_payload(risk_levels={"dzzh": "no_data"}),
+        )
+        result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+        dzzh = _risk(result, "dzzh")
+        assert dzzh["risk_status"] == "unavailable"
+        assert dzzh["unavailable_reason"] == "risk_forecast_no_data"
+        assert dzzh["status_text"] == "暂无风险预报资料"
+
+    def test_kind_failure_status_text(self, monkeypatch):
+        monkeypatch.setattr(
+            rfs, "_query_region_hazards",
+            lambda *a: hazard_payload(risk_levels={"dzzh": None, "sh": {"levels": {"四级": 1}, "total": 1}}),
+        )
+        result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+        assert _risk(result, "dzzh")["status_text"] == "风险数据查询暂时不可用"
+        assert _risk(result, "sh")["status_text"] == "有风险"
+        assert _risk(result, "zxhl")["status_text"] == "无风险"
+
+    def test_service_unavailable_status_text(self, monkeypatch):
+        monkeypatch.setattr(
+            rfs, "_query_region_hazards",
+            lambda *a: hazard_payload(risk_levels=None, risk_levels_available=False),
+        )
+        result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+        assert all(
+            item["status_text"] == "风险数据查询暂时不可用"
+            for item in result["regions"][0]["risks"]
+        )
+
+    def test_status_text_never_technical_jargon(self, monkeypatch):
+        monkeypatch.setattr(
+            rfs, "_query_region_hazards",
+            lambda *a: hazard_payload(risk_levels={"dzzh": "no_data", "sh": None}),
+        )
+        result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+        for item in result["regions"][0]["risks"]:
+            assert "接口" not in item["status_text"]
+            assert "预报数据" not in item["status_text"]
+
+
 def test_static_hazard_failure_keeps_hidden_counts_unknown(monkeypatch):
     monkeypatch.setattr(
         rfs,
