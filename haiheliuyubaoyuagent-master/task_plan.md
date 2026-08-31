@@ -46,7 +46,9 @@
 - [x] R4 全流程：code-review（无确认缺陷，1 PLAUSIBLE 加固 + 半角冒号 nit）+ code-simplifier（提取共享 helper）
       + 验证（1080 passed/5 skipped/0 failed，diff 敏感信息 CLEAN）+ github（无 PR）+ context7（不适用）。
 - [x] R7 提交推送：完成（显式路径 git add，不含 AgentWeb.zip）。
-- [ ] R5 表格换行异常：代码侧未复现，待用户给原始答案定位（疑粘贴塌陷/LLM 表格抖动）
+- [x] R5 表格换行异常：**已关闭**。用户判断该次是走了天河接口所致；代码侧确认无问题，不追。
+- [ ] R8（待定）prompt 0.5 段逐字枚举的其它 03 实况问法（全市现在下了多少雨/市区现在气温和风的实况等）
+      仍走天河——若拉本地需同步改 prompts.py 防 planner 被推向天河，用户说"再说"。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

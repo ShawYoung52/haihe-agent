@@ -108,3 +108,10 @@
 - **全量回归（最终门禁，含 test_decision_weather_tool.py——CLAUDE.md 记录的既有导入失败已不成立）**：
   chainlitexam **1080 passed / 5 skipped / 0 failed**（无 --ignore）。diff 敏感信息扫描 CLEAN（无内网 IP/凭据）。
 - **待办**：提交推送（显式路径 git add，不提交 AgentWeb.zip）。
+
+## 2026-08-31（收尾确认）
+
+- 提交推送完成：`fb39b9c..7ee5284 main -> main`（fix(routing): 冲突问法先走本地）。
+- **R5 表格换行异常 关闭**：用户判断该次是走了天河接口所致，代码侧确认无问题，不追。
+- **R8（待定）**：prompt 0.5 段逐字枚举的其它 03 实况问法（全市现在下了多少雨/市区现在气温和风的实况等）
+  仍走天河，用户说"再说"，保持现状不动。
