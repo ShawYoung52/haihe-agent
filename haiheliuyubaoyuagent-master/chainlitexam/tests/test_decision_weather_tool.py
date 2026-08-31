@@ -1163,7 +1163,7 @@ def test_point_risk_level_section_distinguishes_missing_cycle_from_no_risk():
 
     assert "【本次风险等级】" in text
     assert "| 地质灾害 | 四级 2 处 |" in text
-    assert "| 山洪 | 风险预报资料不可用 |" in text
+    assert "| 山洪 | 本时次暂无预报资料 |" in text
     assert "| 中小河流 | 接口暂不可用 |" in text
     assert "暂无对应时次风险资料" not in text
 
@@ -1177,7 +1177,7 @@ def test_highlighted_poi_missing_risk_cycles_never_render_no_risk(poi):
         "point_risk_levels_available": True,
     })
     text = dw_core._build_point_risk_level_section(facts)
-    assert text.count("风险预报资料不可用") == 3
+    assert text.count("本时次暂无预报资料") == 3
     assert "无风险" not in text
     assert "暂无对应时次风险资料" not in text
 
@@ -1215,6 +1215,63 @@ def test_compact_forecast_facts_preserves_point_risk_levels_for_rendering():
     section = dw_core._build_point_risk_level_section(facts)
 
     assert "| 山洪 | 二级 1 处 |" in section
+
+
+def test_point_risk_level_section_labels_data_window_and_beyond_note():
+    """2026-08-31 口径：表头标注资料时段；所问窗口超窗时附"之后暂无资料"。"""
+    facts = {
+        "point_risk_levels": {},
+        "point_risk_levels_available": True,
+        "point_risk_window": {"start_label": "8月31日20时", "end_label": "9月1日20时"},
+        "point_risk_beyond_from": "9月1日20时",
+    }
+
+    text = dw_core._build_point_risk_level_section(facts)
+
+    assert "【本次风险等级】（资料时段：8月31日20时—9月1日20时）" in text
+    assert "注：9月1日20时之后暂无风险预报资料。" in text
+
+
+def test_point_risk_level_section_window_label_without_beyond_when_in_range():
+    """单日今天：标资料时段但不附超窗说明。"""
+    facts = {
+        "point_risk_levels": {},
+        "point_risk_levels_available": True,
+        "point_risk_window": {"start_label": "8月31日8时", "end_label": "9月1日8时"},
+    }
+
+    text = dw_core._build_point_risk_level_section(facts)
+
+    assert "（资料时段：8月31日8时—9月1日8时）" in text
+    assert "暂无风险预报资料" not in text
+
+
+def test_compact_forecast_facts_forwards_point_risk_window_keys():
+    """point_risk_window / point_risk_beyond_from 必须从 payload 透传进 facts。"""
+    payload = {
+        "periods": [{"weather": "多云"}],
+        "point_risk_levels": {},
+        "point_risk_levels_available": True,
+        "point_risk_window": {"start_label": "8月31日20时", "end_label": "9月1日20时"},
+        "point_risk_beyond_from": "9月1日20时",
+    }
+
+    facts = dw_core._compact_decision_forecast_facts(payload)
+
+    assert facts["point_risk_window"]["end_label"] == "9月1日20时"
+    assert facts["point_risk_beyond_from"] == "9月1日20时"
+
+
+def test_to_positive_number_treats_zero_and_garbage_as_missing():
+    assert dw_core._to_positive_number(0) is None
+    assert dw_core._to_positive_number(0.0) is None
+    assert dw_core._to_positive_number(-3) is None
+    assert dw_core._to_positive_number(None) is None
+    assert dw_core._to_positive_number("abc") is None
+    assert dw_core._to_positive_number(True) is None
+    assert dw_core._to_positive_number(float("nan")) is None
+    assert dw_core._to_positive_number(2762.3) == 2762.3
+    assert dw_core._to_positive_number("45.0") == 45.0
 
 
 def test_visibility_falls_back_from_invalid_primary_to_meter_field():
@@ -2302,6 +2359,46 @@ class TestPoiReminderExtended:
         # 余量 = 152.0 - 133.5 = 18.5 米 → 余量充足 + 有降雨 → 山洪风险研判
         assert "低于汛限水位约 18.5 米" in out
         assert "山洪风险" in out
+
+    def test_reservoir_zero_storage_outflow_treated_as_missing(self):
+        # 2026-08-31 用户口径："水库那个0一看就不正常，没有数据就不要显示"。
+        # 接口对未监测的蓄水/出库回 0 占位 → 不显示这两行；库上水位（真实测量）照常。
+        facts = {
+            "poi_category": "reservoir",
+            "has_rain_signal": False,
+            "periods": [],
+            "total_rain_mm": None,
+            "water_level_info": {
+                "reservoir_name": "于桥水库",
+                "water_level_m": "20.33",
+                "flood_limit_m": "21.16",
+                "storage": "0",
+                "outflow_m3s": "0",
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "库上水位约 20.33 米" in out
+        assert "蓄水量" not in out
+        assert "出库流量" not in out
+
+    def test_reservoir_positive_storage_outflow_still_shown(self):
+        # 真实正数蓄水/出库仍照常显示（回归保护，避免把有效 0 误判同时误伤正数）。
+        facts = {
+            "poi_category": "reservoir",
+            "has_rain_signal": False,
+            "periods": [],
+            "total_rain_mm": None,
+            "water_level_info": {
+                "reservoir_name": "密云水库",
+                "water_level_m": "133.5",
+                "flood_limit_m": "152.0",
+                "storage": "2762.3",
+                "outflow_m3s": "44.7",
+            },
+        }
+        out = dw_core._build_poi_reminder_section(facts)
+        assert "蓄水量约 2762.3 百万立方米" in out
+        assert "出库流量约 44.7 立方米/秒" in out
 
     def test_port_reminder(self):
         facts = {"poi_category": "port", "has_rain_signal": False, "periods": [], "total_rain_mm": None}

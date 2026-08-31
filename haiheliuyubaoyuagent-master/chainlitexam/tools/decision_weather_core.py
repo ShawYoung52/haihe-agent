@@ -711,7 +711,12 @@ def _compact_decision_forecast_facts(
         "total_rain_mm": round(sum(rain_values), 2) if rain_values else None,
         "periods": compact_periods,
     }
-    for key in ("point_risk_levels", "point_risk_levels_available"):
+    for key in (
+        "point_risk_levels",
+        "point_risk_levels_available",
+        "point_risk_window",
+        "point_risk_beyond_from",
+    ):
         if key in forecast_payload:
             facts[key] = forecast_payload.get(key)
     hourly_facts = _build_decision_hourly_facts(forecast_payload, hourly)
@@ -1937,10 +1942,15 @@ def _build_poi_reminder_section(
                 if fl is not None:
                     wl_line += f"（汛限水位 {fl} 米）"
                 items.append(wl_line)
-                if water_info.get("storage") is not None:
-                    items.append(f"蓄水量约 {water_info['storage']} 百万立方米")
-                if water_info.get("outflow_m3s") is not None:
-                    items.append(f"出库流量约 {water_info['outflow_m3s']} 立方米/秒")
+                # 蓄水量/出库流量仅当是正数才展示：接口对未监测字段回 0 占位
+                # （2026-08-31 用户口径"水库那个0一看就不正常，没有数据就不要显示"），
+                # 与 VISMIN=0 视为缺测同口径；库上水位本身是真实测量值，不受此影响。
+                storage = water_info.get("storage")
+                if _to_positive_number(storage) is not None:
+                    items.append(f"蓄水量约 {storage} 百万立方米")
+                outflow = water_info.get("outflow_m3s")
+                if _to_positive_number(outflow) is not None:
+                    items.append(f"出库流量约 {outflow} 立方米/秒")
             items.extend(_decision_reservoir_risk_lines(facts))
 
     # —— 风险状态结论（2026-08-24 用户口径：点位答案无论有无雨都带确定性风险结论）——
@@ -2004,6 +2014,23 @@ _POINT_RISK_LABELS = {
     "zxhl": "中小河流",
 }
 _POINT_RISK_LEVEL_ORDER = ("一级", "二级", "三级", "四级")
+
+
+def _to_positive_number(value: Any) -> float | None:
+    """把接口数值归一为正 float；0/负数/None/非法一律视为缺测返回 None。
+
+    用于水库蓄水量、出库流量等字段——接口对未监测项回 0 占位，0 不应展示
+    （与 VISMIN=0 缺测同口径）。True/False 不视为数值。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number <= 0:  # NaN 或非正
+        return None
+    return number
 _POINT_RISK_NO_DATA = "no_data"
 
 
@@ -2019,7 +2046,9 @@ def _format_point_risk_level(value: Any, available: bool) -> str:
     if not available or value is None:
         return "接口暂不可用"
     if value == _POINT_RISK_NO_DATA:
-        return "风险预报资料不可用"
+        # 该起报时次接口可达但无预报产品（区别于接口失败的"接口暂不可用"与
+        # 可达零风险的"本次无风险"）。2026-08-31 用户口径：不刷"不可用"字样。
+        return "本时次暂无预报资料"
     if not isinstance(value, dict):
         return "接口暂不可用"
     levels = value.get("levels")
@@ -2049,7 +2078,13 @@ def _format_point_risk_level(value: Any, available: bool) -> str:
 
 
 def _build_point_risk_level_section(facts: dict) -> str:
-    """渲染点位风险等级；缺起报资料与有效空风险结果分别展示。"""
+    """渲染点位风险等级；标注数据实际覆盖时段，超窗部分明确"之后暂无资料"。
+
+    2026-08-31 用户口径："只显示有数据的时刻的风险，问很多天也要说清楚有数据的
+    时刻"。风险接口每起报时次只出 24h，点位统一用最近起报时次（无资料回退前一
+    周期），表头标注"资料时段：X—Y"；所问窗口超出覆盖时段时附"Y 之后暂无风险
+    预报资料"。缺起报资料与有效空风险结果分别展示。
+    """
     if "point_risk_levels_available" not in facts and "point_risk_levels" not in facts:
         return ""
     available = facts.get("point_risk_levels_available") is True
@@ -2063,12 +2098,23 @@ def _build_point_risk_level_section(facts: dict) -> str:
         else:
             display = _format_point_risk_level(levels.get(key), available)
         rows.append((label, display))
-    return "\n".join([
-        "【本次风险等级】",
+    header = "【本次风险等级】"
+    window = facts.get("point_risk_window")
+    if isinstance(window, dict):
+        start_label = window.get("start_label")
+        end_label = window.get("end_label")
+        if start_label and end_label:
+            header += f"（资料时段：{start_label}—{end_label}）"
+    lines = [
+        header,
         "| 灾害类型 | 风险等级 |",
         "| --- | --- |",
         *(f"| {label} | {display} |" for label, display in rows),
-    ])
+    ]
+    beyond_from = facts.get("point_risk_beyond_from")
+    if beyond_from:
+        lines.append(f"注：{beyond_from}之后暂无风险预报资料。")
+    return "\n".join(lines)
 
 
 _MODEL_ADVICE_ACTIONS: dict[str, tuple[str | None, tuple[str, ...] | None, str]] = {
@@ -2209,6 +2255,12 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "（如“累计降水量约X毫米”）——这些细节由代码生成的表格与注意事项承载。\n"
         "不要机械补充“无降水/无降雨”或“风力为X级”等泛化描述；只有用户明确询问降水或风力时才回答对应要素。\n"
         "所有温度数值必须按四舍五入展示为整数，不得输出小数。\n"
+        # 2026-08-31 用户口径：回答要符合气象专业、不要"很水很抽象"。用规范天气术语
+        # 体现天气过程与时段变化，避免空泛评价；气温可给整数区间。仍只依据事实 JSON、
+        # 不编造数值或天气系统，具体降水/能见度数值仍由表格承载。
+        "表述要专业：用规范天气术语写出天气过程与时段（如“多云转阴”“午后到夜间有雷阵雨”"
+        "“降水集中在傍晚到夜间”“偏南风3到4级”），气温可给整数区间（如“最高气温32℃、"
+        "最低气温24℃”），避免“天气不错”“气温适宜”“比较适合”这类空泛评价。\n"
         "未来N小时降雨问题必须使用代码给出的 rain_level 和 total_rain_text；当前是否下雨只能依据"
         "当前整点至下一整点预报判断，不得表述为降雨实况，也不得编造过去1/3/6小时累计雨量。\n"
         "表格、逐时或逐日数据行和数据来源均由代码生成；不得输出表格、数据来源或技术说明。"

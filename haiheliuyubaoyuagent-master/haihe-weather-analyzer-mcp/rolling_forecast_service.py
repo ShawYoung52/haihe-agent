@@ -272,6 +272,59 @@ def _risk_fcst_times_from_window(
     ]
 
 
+def _latest_risk_cycle_window(now: datetime | None = None) -> dict:
+    """最近一个风险起报时次（08/20）的 24h 覆盖时段，供前端标注"数据时段"。
+
+    与 custom_tools/risk_warning_tool._latest_fcst_cycle 同口径（08/20 起报、每时次
+    覆盖 24h：08→次日 08、20→次日 20）。本地实现以避免在测试/纯天气路径触发
+    custom_tools 重依赖链。返回 datetime 供超窗判定 + 展示用中文标签。
+    """
+    current = now or time_source.now(TIANJIN_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=TIANJIN_TIMEZONE)
+    if current.hour >= 20:
+        start = current.replace(hour=20, minute=0, second=0, microsecond=0)
+    elif current.hour >= 8:
+        start = current.replace(hour=8, minute=0, second=0, microsecond=0)
+    else:
+        start = (current - timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+    end = start + timedelta(hours=24)
+    return {
+        "start": start,
+        "end": end,
+        "start_label": f"{start.month}月{start.day}日{start.hour}时",
+        "end_label": f"{end.month}月{end.day}日{end.hour}时",
+    }
+
+
+def _risk_window_beyond_label(
+    calendar_window: dict | None,
+    window: dict,
+) -> str | None:
+    """所问日历窗口超出风险资料覆盖时段时，返回"X日X时之后暂无风险预报资料"的起点标签。
+
+    单日今天/无窗口（普通当前查询）不超窗 → None。仅当所问结束日晚于资料覆盖结束
+    才返回资料覆盖结束时刻的标签（如"9月1日20时"），供前端补一句说明。
+    """
+    if not calendar_window:
+        return None
+    try:
+        start = _parse_date(calendar_window.get("forecast_start_date") or "")
+        days = max(1, int(calendar_window.get("forecast_days") or 1))
+    except Exception:
+        return None
+    if not start:
+        return None
+    # 所问窗口结束 = 起始日 + 天数 的当日零点（排他）。
+    asked_end = datetime.combine(start + timedelta(days=days), time.min, tzinfo=TIANJIN_TIMEZONE)
+    end = window.get("end")
+    if not isinstance(end, datetime):
+        return None
+    if asked_end > end:
+        return str(window.get("end_label") or "")
+    return None
+
+
 def _query_region_hazards(
     lon: float,
     lat: float,
@@ -2346,9 +2399,23 @@ def query_rolling_forecast_core(
     # 无日历窗口（普通当前/今天下午）沿用最近起报时次 + 前一周期回退逻辑。
     risk_fcst_times = _risk_fcst_times_from_window(calendar_window, now)
     if point_mode:
-        point_levels = _query_region_risk_levels(lons[0], lats[0], risk_fcst_times)
+        # 2026-08-31 用户口径："只显示有数据的时刻的风险，问很多天也要说清楚有数据
+        # 的时刻"。风险接口每起报时次只出 24h，未来起报时次（明天及以后）尚未发布、
+        # 必回"无资料"——点位不再按目标日逐日请求未来时次（否则多日窗口整天刷
+        # "风险预报资料不可用"），统一用最近起报时次（无资料回退前一周期），并把
+        # 数据实际覆盖时段（point_risk_window）与超窗说明（point_risk_beyond_from）
+        # 一并透出，由前端标注"资料时段：X—Y"和"Y 之后暂无风险预报资料"。
+        point_levels = _query_region_risk_levels(lons[0], lats[0], None)
         result["point_risk_levels"] = point_levels
         result["point_risk_levels_available"] = point_levels is not None
+        window = _latest_risk_cycle_window(now)
+        result["point_risk_window"] = {
+            "start_label": window["start_label"],
+            "end_label": window["end_label"],
+        }
+        beyond = _risk_window_beyond_label(calendar_window, window)
+        if beyond:
+            result["point_risk_beyond_from"] = beyond
     elif region_names:
         region_hazards = []
         for name, lon_t, lat_t in zip(region_names, lons, lats):

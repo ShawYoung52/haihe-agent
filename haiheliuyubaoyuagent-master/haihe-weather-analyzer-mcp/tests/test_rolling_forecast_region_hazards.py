@@ -328,3 +328,63 @@ class TestRiskLevelsForecastTimes:
         monkeypatch.setattr(rfs, "_query_region_hazards", fake_hazards)
         rfs.query_rolling_forecast_core(user_query="蓟州天气怎么样", now=NOW)
         assert captured["risk_fcst_times"] is None
+
+
+class TestPointRiskWindow:
+    """2026-08-31 用户口径：点位风险只显示"有数据的时刻"，多天也要标注数据时段。
+
+    点位统一用最近起报时次（None，无资料回退前一周期），不再按目标日逐日请求
+    未来时次；payload 透传 point_risk_window（数据时段）与 point_risk_beyond_from
+    （超窗说明）。NOW = 2026-08-19 10:00 → 最近起报 08:00，窗口 [8月19日8时, 8月20日8时)。
+    """
+
+    def _run(self, monkeypatch, user_query, capture):
+        def fake_levels(lon, lat, fcst_times=None):
+            capture["fcst_times"] = fcst_times
+            return {}
+
+        monkeypatch.setattr(rfs, "_query_region_risk_levels", fake_levels)
+        monkeypatch.setattr(rfs.requests, "get", _fake_request)
+        rfs._rolling_forecast_cache.clear()
+        return rfs.query_rolling_forecast_core(
+            user_query=user_query, lon=117.75, lat=39.0, point_name="天津港", now=NOW
+        )
+
+    def test_multi_day_uses_latest_cycle_not_future_cycles(self, monkeypatch):
+        capture = {}
+        self._run(monkeypatch, "本周末天津港天气怎么样", capture)
+        assert capture["fcst_times"] is None
+
+    def test_window_attached_with_labels(self, monkeypatch):
+        capture = {}
+        result = self._run(monkeypatch, "本周末天津港天气怎么样", capture)
+        assert result["point_risk_window"] == {
+            "start_label": "8月19日8时",
+            "end_label": "8月20日8时",
+        }
+
+    def test_multi_day_marks_beyond_from(self, monkeypatch):
+        capture = {}
+        result = self._run(monkeypatch, "本周末天津港天气怎么样", capture)
+        assert result["point_risk_beyond_from"] == "8月20日8时"
+
+    def test_today_single_day_no_beyond_note(self, monkeypatch):
+        capture = {}
+        result = self._run(monkeypatch, "今天天津港天气怎么样", capture)
+        assert "point_risk_beyond_from" not in result
+        # 今天单日仍标数据时段
+        assert result["point_risk_window"]["start_label"] == "8月19日8时"
+
+    def test_beyond_label_helper_directly(self):
+        window = rfs._latest_risk_cycle_window(NOW)
+        assert window["start_label"] == "8月19日8时"
+        assert window["end_label"] == "8月20日8时"
+        # 单日今天（8-19，1 天）结束 8-20 零点 ≤ 覆盖 8-20 08 时 → 不超窗
+        assert rfs._risk_window_beyond_label(
+            {"forecast_start_date": "2026-08-19", "forecast_days": 1}, window
+        ) is None
+        # 三天窗口结束 8-22 零点 > 覆盖 8-20 08 时 → 超窗，标注覆盖结束时刻
+        assert rfs._risk_window_beyond_label(
+            {"forecast_start_date": "2026-08-19", "forecast_days": 3}, window
+        ) == "8月20日8时"
+        assert rfs._risk_window_beyond_label(None, window) is None

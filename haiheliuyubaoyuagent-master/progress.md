@@ -21,3 +21,13 @@
 - **遗留 1（能见度假阳性）**：查证已修复（rain_only 占位值守卫 + min_vis<1.0 门控 + 测试锁定），无需改。
 - **遗留 2（POI 丰富注意事项）**：按用户选定的推荐方案实现——扩受控 action 词表（dress/car_wash/drying/exercise 9 动作 + fine/mild 派生条件），保持零编造；prompt 加生活指数引导。测试 TestLifestyleAdviceActions 8 条。全量 chainlitexam 835+168 passed。
 - 下一步：提交生活指数建议并推送。
+
+## 2026-08-31（内网实测反馈三条）
+
+用户在内网测了标黄 5 条，粘贴答案+日志，给三条整改口径：
+
+- **① 风险显示"只显示有数据的时刻"**：点位路径（于桥水库"未来三天"）原按目标日逐日请求未来起报时次，未来时次未发布必回无资料 → 整表刷"风险预报资料不可用"。改：点位统一用最近起报时次（`fcst_times=None`，无资料回退前一周期），不再逐日请求未来时次；MCP 透传 `point_risk_window`（数据时段 start_label/end_label，最近 08/20 起报 +24h）与 `point_risk_beyond_from`（所问窗口超资料覆盖时的"之后暂无资料"起点）；前端 `_build_point_risk_level_section` 表头标注"（资料时段：X—Y）"、超窗附注"Y 之后暂无风险预报资料"。no_data 渲染文案 "风险预报资料不可用"→"本时次暂无预报资料"（与"接口暂不可用"=失败、"本次无风险"=可达零风险三态区分）。区域路径（`_query_region_hazards` 逐日）不动。新增 MCP `_latest_risk_cycle_window`/`_risk_window_beyond_label` + 测试 6 条；chainlitexam 测试更新 2 处旧文案 + 新增 5 条。
+- **② 水库 0 不显示**：`蓄水量`/`出库流量` 接口对未监测项回 0 占位（于桥水库"蓄水量约0/出库流量约0"）。改 `_build_poi_reminder_section` 蓄水量/出库流量仅当 `_to_positive_number`（正数才返回，0/负/None/NaN/布尔/非法→None）才显示；库上水位（真实测量）照常。与 VISMIN=0 缺测同口径。新增 `_to_positive_number` + 测试 2 条 + helper 测试 1 条。
+- **③ 回答专业化**：根因是结论被严格压成一句话、数字全剥到表格，只剩空泛评价（"气温适宜""天气不错"）。两条结论 prompt 各加"专业表述"约束（用规范天气术语写天气过程与时段、气温可给整数区间、降水/大风点明量级与时段、避免空泛评价），仍守零编造、不与表格重复。改 `rolling_forecast_response.rolling_forecast_llm_instruction` + `decision_weather_core._generate_decision_weather_answer` prompt。
+- 全量：MCP 602 passed / chainlitexam 835+174 passed，0 失败。
+- 待确认：区域路径多日窗口（蓟州类）目前仍按 8-24 口径渲染（no_data→"无风险"、超 24h 移除列），是否要与点位路径统一为"标数据时段+超窗说明"。
