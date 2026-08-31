@@ -20,6 +20,8 @@ ENV/
 # Chainlit / runtime
 .chainlit/.files/
 .files/
+# MCP 包不是 Chainlit 应用，误在此目录跑 chainlit 会生成默认 .chainlit/（真实配置在 chainlitexam/.chainlit/）
+haihe-weather-analyzer-mcp/.chainlit/
 
 # Frontend build artifacts
 chainlitexam/frontend/

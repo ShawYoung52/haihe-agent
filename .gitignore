@@ -19,3 +19,6 @@ qa-agent-delivery.zip
 __pycache__/
 *.pyc
 
+# pytest 临时产物（测试运行生成，不入库）
+.tmp/
+
