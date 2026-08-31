@@ -274,9 +274,60 @@ def _resolve_forecast_file(
     return _ra_resolve_forecast_raster_path(forecast_hours, start_time, ec_output_path, **options)
 
 
+# 支流/子河名 → 所属九分区（2026-08-26 领导问题清单标黄："明天泃河有雨吗"）。
+# 九分区是面雨量预报的最细聚合粒度；支流问法归并到所属分区统计，并在结果中
+# 以 scope_note 注明口径。与 rolling_forecast_service._BASIN_RIVER_NAMES 的河名
+# 识别配套（那边负责把支流问法挡在天津区域滚动预报之外）。
+_TRIBUTARY_TO_ZONE: dict[str, str] = {
+    # 北三河 = 北运河 + 潮白河 + 蓟运河（泃河/州河/还乡河为蓟运河支流）
+    "潮白河": "北三河",
+    "蓟运河": "北三河",
+    "北运河": "北三河",
+    "泃河": "北三河",
+    "州河": "北三河",
+    "还乡河": "北三河",
+    # 子牙河水系
+    "滹沱河": "子牙河",
+    "滏阳河": "子牙河",
+    # 漳卫南运河水系
+    "漳河": "漳卫南运河",
+    "卫河": "漳卫南运河",
+}
+
+
+def _norm_zone_name(name: str) -> str:
+    """归一化河系/分区名：去空白并剥"流域/河系/河"后缀，供匹配与 scope_note 同口径比较。"""
+    return str(name or "").strip().rstrip("流域").rstrip("河系").rstrip("河")
+
+
+def _tributary_zone_lookup(name: str) -> str | None:
+    """支流名 → 所属九分区；容忍"流域/河系"后缀（"泃河流域"→北三河）。查不到返回 None。"""
+    n = str(name or "").strip()
+    if not n:
+        return None
+    if n in _TRIBUTARY_TO_ZONE:
+        return _TRIBUTARY_TO_ZONE[n]
+    for suf in ("流域", "河系"):
+        if n.endswith(suf):
+            base = n[: -len(suf)]
+            if base in _TRIBUTARY_TO_ZONE:
+                return _TRIBUTARY_TO_ZONE[base]
+    return None
+
+
+def tributary_zone_for(river_name: str) -> str | None:
+    """支流/子河名 → 所属九分区名；非支流（含九分区本身）返回 None。"""
+    return _tributary_zone_lookup(river_name)
+
+
 def _match_zone_name(river_system: str, zones: list[dict]) -> list[dict]:
-    """若用户指定了河系名称，过滤到对应分区；否则返回全部。"""
-    name = str(river_system or "").strip().rstrip("流域").rstrip("河系").rstrip("河")
+    """若用户指定了河系名称，过滤到对应分区；否则返回全部。
+
+    支流/子河名（泃河、潮白河、蓟运河等）先经 _tributary_zone_lookup 归并到所属
+    九分区（容忍"流域/河系"后缀）再匹配，避免返回"未找到指定的河系分区数据"。
+    """
+    raw = str(river_system or "").strip()
+    name = _norm_zone_name(_tributary_zone_lookup(raw) or raw)
     if not name or name in ("全", "海河流域", "海河", "海"):
         return zones
 
@@ -294,7 +345,7 @@ def _match_zone_name(river_system: str, zones: list[dict]) -> list[dict]:
 
     matched = []
     for z in zones:
-        zn = z["zone_name"].rstrip("流域").rstrip("河系").rstrip("河")
+        zn = _norm_zone_name(z["zone_name"])
         if name == zn:
             matched.append(z)
             continue
@@ -358,6 +409,17 @@ def get_river_system_rainfall_forecast(
         if not zones:
             return {"error": "未找到指定的河系分区数据。"}
 
+        # 支流归并所属分区时注明口径，供回答如实说明（如"泃河按所属北三河分区统计"）。
+        # zones 已经 _match_zone_name 按同一口径（rstrip 归一化 + 别名包含）过滤到所属分区，
+        # 故"请求为支流 且 有命中分区"即成立——直接复用匹配结果，不再二次等值判断
+        # （2026-08-26 code-review：裸等值/归一化等值都无法覆盖别名包含命中的场景，
+        # 如 zone_name 带"区"后缀，会导致 scope_note 静默缺失）。
+        scope_note = ""
+        requested = str(river_system or "").strip()
+        parent_zone = tributary_zone_for(requested)
+        if parent_zone and zones:
+            scope_note = f"{requested}按所属{parent_zone}分区统计"
+
         options = {"require_full_window": True} if require_full_window else {}
         raster_path, data_source_label = _resolve_forecast_file(hours, start_dt, ec_path, **options)
         if not raster_path:
@@ -366,6 +428,7 @@ def get_river_system_rainfall_forecast(
                 "fcst_time": start_dt.strftime("%Y%m%d%H%M%S"),
                 "forecast_hours": hours,
                 "zones": [],
+                **({"scope_note": scope_note} if scope_note else {}),
             }
 
         zone_results = []
@@ -397,6 +460,7 @@ def get_river_system_rainfall_forecast(
             "fcst_time": start_dt.strftime("%Y%m%d%H%M%S"),
             "forecast_hours": hours,
             "zones": zone_results,
+            **({"scope_note": scope_note} if scope_note else {}),
         }
     except Exception as exc:
         logger.exception("河系降雨预报处理失败: %s", exc)

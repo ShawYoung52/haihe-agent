@@ -24,6 +24,100 @@ def _gdal_available() -> bool:
         return False
 
 
+class TestTributaryZoneMapping:
+    """支流/子河名归并所属九分区（2026-08-26 领导问题清单标黄："明天泃河有雨吗"）。
+
+    九分区是面雨量预报的最细聚合粒度；泃河/潮白河/蓟运河等支流问法归并到所属分区，
+    不再返回"未找到指定的河系分区数据"。
+    """
+
+    ZONES = [
+        {"zone_name": n, "zone_code": n}
+        for n in (
+            "大清河", "子牙河", "永定河", "北三河", "漳卫南运河",
+            "徒骇马颊河", "黑龙港", "滦河", "海河",
+        )
+    ]
+
+    @pytest.mark.parametrize("tributary", ["泃河", "潮白河", "蓟运河", "北运河", "州河", "还乡河"])
+    def test_north_three_rivers_tributaries(self, tributary):
+        matched = rsf._match_zone_name(tributary, [dict(z) for z in self.ZONES])
+        assert [z["zone_name"] for z in matched] == ["北三河"]
+
+    @pytest.mark.parametrize(
+        ("tributary", "zone"),
+        [("滹沱河", "子牙河"), ("滏阳河", "子牙河"), ("漳河", "漳卫南运河"), ("卫河", "漳卫南运河")],
+    )
+    def test_other_tributaries(self, tributary, zone):
+        matched = rsf._match_zone_name(tributary, [dict(z) for z in self.ZONES])
+        assert [z["zone_name"] for z in matched] == [zone]
+
+    def test_zone_name_itself_unchanged(self):
+        matched = rsf._match_zone_name("滦河", [dict(z) for z in self.ZONES])
+        assert [z["zone_name"] for z in matched] == ["滦河"]
+
+    def test_unknown_river_still_empty(self):
+        assert rsf._match_zone_name("某某河", [dict(z) for z in self.ZONES]) == []
+
+    def test_tributary_zone_for(self):
+        assert rsf.tributary_zone_for("泃河") == "北三河"
+        assert rsf.tributary_zone_for("潮白河") == "北三河"
+        assert rsf.tributary_zone_for("滦河") is None  # 本身是九分区，无需归并
+        assert rsf.tributary_zone_for("某某河") is None
+
+    def test_tributary_with_suffix_still_maps(self):
+        """支流名带"流域/河系"后缀也应归并（2026-08-26 code-review：原 `get(raw, raw)`
+        对未剥后缀名查表，"泃河流域/潮白河河系"映射失败返回"未找到分区数据"）。"""
+        for q in ("泃河流域", "泃河河系", "潮白河河系", "潮白河流域"):
+            matched = rsf._match_zone_name(q, [dict(z) for z in self.ZONES])
+            assert [z["zone_name"] for z in matched] == ["北三河"], q
+        # tributary_zone_for 同步容忍后缀（scope_note 口径与 zone 匹配一致）
+        assert rsf.tributary_zone_for("泃河流域") == "北三河"
+        assert rsf.tributary_zone_for("潮白河河系") == "北三河"
+        assert rsf.tributary_zone_for("某某河流域") is None
+
+    @pytest.mark.asyncio
+    async def test_scope_note_matches_normalized_zone_name(self, monkeypatch):
+        """scope_note 判定与 _match_zone_name 同口径（rstrip 归一化），zone_name 带后缀也命中。"""
+        # DB 返回的 zone_name 带"区"后缀时，分区能匹配上、scope_note 不应静默缺失。
+        def fake_load_boundaries(zone_type, zone_name, config):
+            return [{"zone_name": "北三河区", "geometry": "POINT(0 0)"}]
+
+        monkeypatch.setattr(rsf, "_load_zone_boundaries_from_db", fake_load_boundaries)
+        monkeypatch.setattr(
+            rsf, "_compute_rainfall_stats_for_geometry",
+            lambda *a, **k: {"average_rainfall_mm": 1.0, "max_rainfall_mm": 2.0, "min_rainfall_mm": 0.0},
+        )
+        monkeypatch.setattr(rsf, "_resolve_forecast_file", lambda *a, **k: ("/fake.tif", "TEST"))
+
+        result = rsf.get_river_system_rainfall_forecast(
+            river_system="泃河", start_time="2026-08-31 02:00:00", forecast_hours=24,
+        )
+        assert "泃河" in result.get("scope_note", "")
+        assert "北三河" in result["scope_note"]
+
+    @pytest.mark.asyncio
+    async def test_tributary_query_carries_scope_note(self, monkeypatch):
+        """支流走所属分区时，结果带 scope_note 供回答如实说明口径（泃河按北三河分区统计）。"""
+
+        def fake_load_boundaries(zone_type, zone_name, config):
+            return [{"zone_name": "北三河", "geometry": "POINT(0 0)"}]
+
+        monkeypatch.setattr(rsf, "_load_zone_boundaries_from_db", fake_load_boundaries)
+        monkeypatch.setattr(
+            rsf, "_compute_rainfall_stats_for_geometry",
+            lambda *a, **k: {"average_rainfall_mm": 1.0, "max_rainfall_mm": 2.0, "min_rainfall_mm": 0.0},
+        )
+        monkeypatch.setattr(rsf, "_resolve_forecast_file", lambda *a, **k: ("/fake.tif", "TEST"))
+
+        result = rsf.get_river_system_rainfall_forecast(
+            river_system="泃河", start_time="2026-08-31 02:00:00", forecast_hours=24,
+        )
+        assert [z["zone_name"] for z in result["zones"]] == ["北三河"]
+        assert "泃河" in result.get("scope_note", "")
+        assert "北三河" in result["scope_note"]
+
+
 class TestToolExists:
     def test_get_river_system_rainfall_forecast_is_callable(self):
         assert hasattr(rsf, "get_river_system_rainfall_forecast")

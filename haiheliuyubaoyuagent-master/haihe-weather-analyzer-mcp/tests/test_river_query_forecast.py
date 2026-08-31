@@ -372,6 +372,33 @@ def test_bare_luanhe_uses_corridor_when_found(monkeypatch):
     assert calls == []
 
 
+def test_tributary_corridor_miss_falls_back_to_parent_zone(monkeypatch):
+    """泃河河道走廊未命中时回退所属北三河九分区（领导问题清单标黄："明天泃河有雨吗"）。
+
+    泃河不在 KNOWN_RIVER_SYSTEMS，但属于北三河水系支流；走廊未命中时按所属分区回答，
+    结果保留用户所问河名（river_name=泃河）并注明统计口径。
+    """
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: (_ for _ in ()).throw(rqf.RiverNotFoundError("not found")),
+    )
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: calls.append(kwargs) or {
+        "data_source": "滚动预报网格",
+        "zones": [{"zone_name": "北三河", "average_rainfall_mm": 1.0, "max_rainfall_mm": 4.0, "min_rainfall_mm": 0.0}],
+    })
+
+    result = rqf.query_river_rainfall_forecast_core(
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["scope_type"] == "river_system"
+    assert calls[0]["river_system"] == "北三河"
+    assert result["river_name"] == "泃河"
+    assert "北三河" in result["scope_description"]
+
+
 def test_bare_luanhe_falls_back_to_existing_nine_zone_tool_only_when_not_found(monkeypatch):
     """Catches fallback to a broader scope on database errors or successful corridor matches."""
     calls = []
@@ -519,8 +546,10 @@ def test_missing_non_system_river_is_reported_as_not_found(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(rqf.RiverNotFoundError("not found")),
     )
 
+    # 既非九分区也非已知支流（泃河等支流会回退所属分区，见
+    # test_tributary_corridor_miss_falls_back_to_parent_zone）才真正 river_not_found。
     result = rqf.query_river_rainfall_forecast_core(
-        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+        "明天某某河有雨吗？", TEST_CONFIG, now=FIXED_NOW
     )
 
     assert result["status"] == "river_not_found"

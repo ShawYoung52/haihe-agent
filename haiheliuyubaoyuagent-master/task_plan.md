@@ -1,39 +1,39 @@
-# 任务计划：58智能体接入 14所长图接口（降水实况文字）
+# 领导问题清单接入（2026-08-26 docx + 天河补充问题）
 
-## 目标
+来源：`问题分类列表20260826.docx`（领导测试要求）+ 用户粘贴的天河新增问题列表。
 
-给问答智能体（chainlitexam + haihe-weather-analyzer-mcp）接入 14所 `/openapi/rainfall_describe/real`
-（降水实况文字长图）接口：用户询问"降水实况文字 / 生成降水实况 / 降水实况"等时，调用该接口
-生成长图并展示。
+## 验收口径（用户原话）
 
-## 背景与关键决策
+1. 流域不同河系、水库的天气、山区风险类问题都要做出来（**文档中标黄的先做**）
+2. 将天河做好的新问题接上（天河已有答案的问题，确定性路由到 `query_tianhe_fixed_qa`）
+3. 全流程保证质量：code-review、code-simplifier、superpowers、测试
 
-- 14所已有 `basin_drawing_tool.py`（2026-08-14 接入，日报图片代理 URL，port 8080）作为同族模式。
-- 本接口 `rainfall_describe/real` 位于 `10.226.107.35:8001`，与既有 `get_station_rainfall_real_img`
-  （`/openapi/meteor_img/stationRainRealImg`）同一 host:port。
-- **响应格式假设（待联调确认）**：与同端口 `get_station_rainfall_real_img` 一致，返回 base64 图片字符串
-  在 `data` 字段。故走「base64 → cl.Image」展示路径，**不改动** `_IMAGE_URL_ALLOW_HOSTS` 网络安全白名单
-  （比 URL 方案更小暴露面）。工具端做防御性前缀剥离（`data:image/...;base64,`）。
-- 交付路径：planner 主路径（`ENABLE_FAST_PATHS` 默认 false）。新增 MCP 工具 + `_run_tool_round`
-  base64 渲染特判 + 双轨 prompt 路由。不新增 fast path（与 basin_drawing 一致）。
+## 标黄先做（5 条）
+
+| 问题 | 现状路由 | 目标 |
+|---|---|---|
+| 明天泃河有雨吗？ | PLANNER（未验证质量） | 河系降雨预报，确定性走对工具 |
+| 今天晚上滦河有雨吗？ | PLANNER | 同上 |
+| 今天蓟州可能有哪些风险？ | PLANNER | 风险预警工具（地灾/山洪/中小河流） |
+| 未来三天于桥水库降雨预报？ | SIMPLE→decision_weather | 验证答案质量（水库点位降雨） |
+| 盘山景区未来两天天气？ | SIMPLE→decision_weather | 验证答案质量（景区） |
+
+## 天河侧
+
+- 天河固定目录 48 条已全部接入（`tools/tianhe_fixed_qa_catalog.py`，含用户粘贴的全部新增问题）✅
+- 待办：为目录问法的**近似变体**评估是否需要扩展（如"天津当前天气实况"vs目录"天津当前的天气情况"）——谨慎，防误伤决策天气。
 
 ## 阶段
 
-- [x] **P1 探索与依赖分析**——已完成（见 findings.md）
-- [x] **P2 MCP 工具**：`haihe-weather-analyzer-mcp/custom_tools/rainfall_describe_tool.py`
-      （核心函数 + `register_rainfall_describe_tool(mcp)`），`server.py` + `custom_tools/__init__.py` 注册
-- [x] **P3 前端展示**：`message_orchestrator.py` 的 `TOOL_DISPLAY_NAMES` +
-      `_run_tool_round` 特判（base64 → cl.Image，:2183），`prompts.py` 双轨路由描述
-- [x] **P4 测试**：`haihe-weather-analyzer-mcp/tests/test_rainfall_describe_tool.py`（26 条，全过）
-- [x] **P5 验证 + 文档 + 评审**：FastMCP 注册确认、6 文件 py_compile、CLAUDE.md/README 维护、
-      code-review 后台评审 9 项全部修复（图片魔数校验/URL+相对路径拉取/interval 对齐窗口/
-      prompt"图"字边界/msg+异常脱敏/observation 带分区类型/共享渲染 helper/字节上限/解码发送分离）
+- [x] P0 探针：50 条问题路由摸底（findings.md）
+- [x] P1 标黄 5 条：河系天气（泃河/滦河）路由与答案质量 —— 支流→九分区归并 + 泃河入 basin guard
+- [x] P2 标黄：蓟州山区风险问法路由 —— `query_region_weather_risks` 已存在，路由判定确认
+- [x] P3 标黄：于桥水库/盘山 答案质量验证 —— 槽位干净（reservoir/scenic），POI 命中待内网验证
+- [x] P4 剩余 docx 条目摸底 —— 天河目录已全覆盖
+- [x] P5 测试 + code-review（3 条确认缺陷已修）+ code-simplifier + CLAUDE.md 更新
+- [ ] P6 提交（显式路径）+ github（待用户确认是否推送/PR）
 
-## 决策日志
+## 遗留（上一批未完成）
 
-- D1：响应格式假设为 base64（同端口类比）。若联调发现是 URL，再补 `_IMAGE_URL_ALLOW_HOSTS` 白名单。
-- D2：仅走 planner 主路径，不加 fast path（与 14所 basin_drawing 同机制、改动最小）。
-
-## 环境变量
-
-- `RAINFALL_DESCRIBE_API_BASE`（默认 `http://10.226.107.35:8001`）
+- POI 决策天气"大模型生成丰富注意事项/游玩建议"（参考天河穿衣/防晒/出行风格）未实现——本轮按领导清单优先级后排。
+- "能见度较低"晴天假阳性未修。

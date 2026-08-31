@@ -69,6 +69,10 @@ def test_prefilter_accepts_poi_guard_routed_keywords():
     assert dw._decision_weather_prefilter("湿地公园附近会下雨吗") is True
     assert dw._decision_weather_prefilter("博物馆周边气温多少") is True
     assert dw._decision_weather_prefilter("开发区天气怎么样") is True
+    # 裸"天津港"（无"港口/港区"后缀）也是点位——领导问题清单（2026-08-26 行业服务）：
+    # "天津港明日风力多大"曾静默落到天津市区滚动预报，港口与市区风力口径不同。
+    assert dw._decision_weather_prefilter("天津港明日风力多大") is True
+    assert dw._decision_weather_prefilter("明天天津港有雨吗") is True
 
 
 def test_rule_based_slots_extract_reservoir_location():
@@ -800,6 +804,31 @@ def test_rule_based_slot_extraction_locations():
     assert dw_core._extract_decision_slots_rule_based("周三天津大学天气")["location_name"] == "天津大学"
     assert dw_core._extract_decision_slots_rule_based("下星期五天津大学天气")["location_name"] == "天津大学"
     assert dw_core._extract_decision_slots_rule_based("下周一学校天气") is None  # 剥掉星期词后无具体名词
+    # "本周末/下周末"不得残留"末"字，"适合去/想去"等出行引导词不得进位置名——
+    # 领导问题清单（2026-08-26）："本周末适合去泰达航母主题公园游玩吗"曾抽出
+    # "末适合去泰达航母主题公园"，污染 POI 检索与表格标题。
+    assert dw_core._extract_decision_slots_rule_based("本周末适合去泰达航母主题公园游玩吗？")["location_name"] == "泰达航母主题公园"
+    assert dw_core._extract_decision_slots_rule_based("下周末去盘山景区玩怎么样")["location_name"] == "盘山景区"
+    assert dw_core._extract_decision_slots_rule_based("周末想去天津水上公园露营合适吗")["location_name"] == "天津水上公园"
+    assert dw_core._extract_decision_slots_rule_based("本周六天津大学天气")["location_name"] == "天津大学"
+    # 自命名后缀："天津港"本身即完整点位名（head 为空），规则抽槽直接取出、不回退 LLM。
+    assert dw_core._extract_decision_slots_rule_based("天津港明日风力多大")["location_name"] == "天津港"
+    assert dw_core._extract_decision_slots_rule_based("明天天津港有雨吗")["location_name"] == "天津港"
+
+
+def test_rule_based_slots_strip_modal_activity_prefix():
+    """出行引导词剥离必须先于尾端"去"剥离（2026-08-26 code-review）。
+
+    尾端 `(在|去|…)$` 先吃掉"去"会让前导"能去/可以去/应该去/建议去"匹配不到完整词，
+    残留的"能/可以/应该/建议"不在虚词表、被拼进位置名（"明天能去天津港"→"能天津港"）。
+    """
+    assert dw_core._extract_decision_slots_rule_based("明天能去天津港吗")["location_name"] == "天津港"
+    assert dw_core._extract_decision_slots_rule_based("可以去天津港吗")["location_name"] == "天津港"
+    assert dw_core._extract_decision_slots_rule_based("应该去天津港吗")["location_name"] == "天津港"
+    assert dw_core._extract_decision_slots_rule_based("建议去天津港吗")["location_name"] == "天津港"
+    # 既有的"适合去/想去"句型不受影响
+    assert dw_core._extract_decision_slots_rule_based("明天适合去天津港吗")["location_name"] == "天津港"
+    assert dw_core._extract_decision_slots_rule_based("明天想去天津港吗")["location_name"] == "天津港"
 
 
 def test_rule_based_slot_extraction_falls_back_on_ambiguous():

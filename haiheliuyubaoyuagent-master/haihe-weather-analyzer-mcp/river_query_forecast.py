@@ -335,8 +335,16 @@ def query_river_rainfall_forecast_core(
     try:
         corridor = load_river_corridor(target, pg_conf)
     except RiverNotFoundError as exc:
+        # 九分区本身直接按分区统计。
         if target in KNOWN_RIVER_SYSTEMS:
             return _query_river_system_periods(target, periods, config, ec_output_path)
+        # 支流/子河（泃河、潮白河、蓟运河等）不在 KNOWN_RIVER_SYSTEMS，但属于某个
+        # 九分区水系；走廊未命中时回退所属分区，保留用户所问河名并注明统计口径。
+        zone = rsf.tributary_zone_for(target)
+        if zone:
+            return _query_river_system_periods(
+                zone, periods, config, ec_output_path, display_name=target
+            )
         return _query_error("river_not_found", target, str(exc))
     except RiverDatabaseError as exc:
         return _query_error("database_error", target, str(exc))
@@ -398,7 +406,9 @@ def _query_river_system_periods(
     periods: list[ForecastPeriod],
     config: dict,
     ec_output_path: str,
+    display_name: str | None = None,
 ) -> dict:
+    """按九分区河系统计各时段降雨。display_name：支流回退时保留用户所问河名。"""
     period_results = []
     for period in periods:
         hours = _forecast_hours(period)
@@ -430,11 +440,15 @@ def _query_river_system_periods(
             return _query_error("system_unavailable", target, "河系预报未返回分区结果")
         period_results.append(_build_system_period(period, data_source, zones))
 
+    if display_name and display_name != target:
+        scope_description = f"{display_name}所属{target}九分区河系范围"
+    else:
+        scope_description = f"{target}九分区河系范围"
     return {
         "status": "ok",
-        "river_name": target,
+        "river_name": display_name or target,
         "scope_type": "river_system",
-        "scope_description": f"{target}九分区河系范围",
+        "scope_description": scope_description,
         "buffer_km": None,
         "periods": period_results,
     }

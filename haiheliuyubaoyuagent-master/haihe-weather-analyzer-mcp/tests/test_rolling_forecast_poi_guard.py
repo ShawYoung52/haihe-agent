@@ -16,6 +16,12 @@ class TestIsUnresolvedPoiForecastQuery:
     def test_miyun_reservoir_is_unresolved(self):
         assert rfs.is_unresolved_poi_forecast_query("未来三天密云水库有降水吗？") is True
 
+    def test_bare_tianjin_port_is_unresolved(self):
+        # 裸"天津港"（无"港口/港区"后缀）也是点位——领导问题清单（2026-08-26 行业服务）：
+        # "天津港明日风力多大"曾静默落到天津市区代表点（parse 默认兜底），港口风力口径不同。
+        assert rfs.is_unresolved_poi_forecast_query("天津港明日风力多大？") is True
+        assert rfs.is_unresolved_poi_forecast_query("明天天津港有雨吗") is True
+
     def test_miyun_reservoir_weather_is_unresolved(self):
         assert rfs.is_unresolved_poi_forecast_query("密云水库天气怎么样？") is True
 

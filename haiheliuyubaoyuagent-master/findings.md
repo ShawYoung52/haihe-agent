@@ -1,57 +1,32 @@
-# 研究发现：58智能体接入 14所长图接口（降水实况文字）
+# 路由摸底发现（2026-08-31）
 
-## 目标接口
+## 探针方法
 
-`POST /openapi/rainfall_describe/real`（降水实况文字）@ base `10.226.107.35:8001`
+对 docx 50 条 + 天河补充逐条跑 `_route_simple_weather_query` / `_route_tianhe_knowledge_query`（含 `_route_tianhe_fixed_catalog_query` 固定目录前置）。
 
-请求 body：
-```json
-{
-  "areaIds": [6,7,8,9,10,11,12,13,14],   // 区域 id
-  "beginTime": "2025-07-26 10:00:00",    // 开始时间（北京时）
-  "endTime":   "2025-07-27 10:00:00",    // 结束时间（北京时）
-  "interval":  24,                        // 间隔小时，>24 用累计
-  "type":      "0",                       // 0 国家站 / 1 区域站
-  "range":     "9"                        // 分区，9 或 11（接口文档必填）
-  "isClimateImg": true                    // 出图文字颜色是否黑色（可选）
-}
-```
+## 关键事实
 
-## 代码库同族模式
+1. **天河固定目录已覆盖用户粘贴的全部 48 条**（`chainlitexam/tools/tianhe_fixed_qa_catalog.py` 的 `TIANHE_FIXED_QA_QUESTIONS`）——包括洗车/穿衣/晾晒/带伞/副高/面雨量/短时强降水/雷电防御/高温危害/冰雹/双偏振雷达/自动站/卫星/雾霾/夏天多雨/打雷下雨/预警发布流程/天气会商/面雨量计算/MICAPS/系统问答 6 条/降雨对交通影响/当前湿度/今日雨情。**天河侧（需求 2）已接线，无需新增目录。**
+2. docx 与天河列表的重复对应：科普类（暴雨防范/短时强降水/暴雨形成/雷电防御/自动站/卫星/雾霾）、统计气象 2 条、系统问答 5/6 条、降雨对交通影响 —— 已全部在天河目录。
+3. docx 有但天河目录没有的：
+   - "天津当前天气实况"（目录里是"天津当前的天气情况"——字面不同，走 PLANNER→本地实况工具，合理）
+   - "天津未来三天天气？/未来一周我市天气怎么样？"→ SIMPLE 滚动预报 ✅
+   - "今天晚上蓟州的天气怎么样？"→ SIMPLE ✅
+   - "当前有哪些预警？"→ PLANNER→本地预警工具 ✅
+   - "有什么使用小技巧？"→ PLANNER（系统问答变体，目录只有"我该怎么向你提问？"）
 
-### 1. 14所出图模式（新，port 8080）`custom_tools/basin_drawing_tool.py`
-- 模块级 `BASIN_DRAWING_API_BASE = os.getenv("BASIN_DRAWING_API_BASE", "http://10.226.107.35:8080")`
-- `make_ttl_cache` 共享缓存（`custom_tools/_ttl_cache.py`，只缓存 status=="ok"）
-- 核心函数 `generate_*_core(...) -> dict` + `register_*_tool(mcp: FastMCP)` 里 `@mcp.tool()` 包装
-- 图片返回**代理 URL**，`server.py` 注册，需 `_IMAGE_URL_ALLOW_HOSTS` 放行
+## 标黄 5 条的路由现状
 
-### 2. 同端口 base64 出图模式（old，port 8001）`haihe_mcp_tools.py:3613 get_station_rainfall_real_img`
-- 直接 `requests.post(url, json=payload, timeout=60)`
-- 兼容多种返回：`data.get("data") or .get("result") or .get("image") or data` 取 base64
-- 返回 `{"base64": ..., "beginTime", "endTime", "interval", "range"}` 或 `{"error": ...}`
-- 前端 `_run_tool_round` 特判 + `_try_rainfall_img_fast_path`（ENABLE_FAST_PATHS=true 时）解码 base64→cl.Image
+| 问题 | 路由 | 风险点 |
+|---|---|---|
+| 明天泃河有雨吗？ | PLANNER | 泃河是蓟运河支流，需确认 planner 选 get_river_system_rainfall_forecast 且河系映射覆盖 |
+| 今天晚上滦河有雨吗？ | PLANNER | 滦河在九大河系内，同上待验证；时段化"晚上" |
+| 今天蓟州可能有哪些风险？ | PLANNER | 需确认 planner 选 query_risk_warning/区域风险，且答案是"风险"不是"天气" |
+| 未来三天于桥水库降雨预报？ | SIMPLE→decision_weather POI | 于桥水库能否被 search_poi 命中（自然地物可能不入库，参照密云水库踩坑） |
+| 盘山景区未来两天天气？ | SIMPLE→decision_weather POI | 盘山 POI 命中与景区类注意事项 |
 
-### 3. 前端展示路径（chainlitexam/message_orchestrator.py）
-- `TOOL_DISPLAY_NAMES` = tool 名 → 中文展示名（:1740）
-- `_run_tool_round` 特判 `elif tool_name == "get_station_rainfall_real_img":`（:2150）
-  - 取 `data["base64"]`，剥 `,` 前缀，`base64.b64decode` → `cl.Image(content=..., name=...)` 发送
-  - 设置 `has_chart_generated=True`，`observation_text` 告知 LLM 已绘出并简要说明
-- 错误分支区分「无记录/超时/鉴权」等，隐藏原始错误
-- 降雨分布图 fast path（:2282）仅 ENABLE_FAST_PATHS=true 生效
+## 待验证
 
-### 4. HTTP 图片字段（chainlitexam/qa_http_api.py）
-- `_build_image_payload`：把 emitter 的 cl.Image 元素映射成 `{name,url,mime}`（本地落盘文件 URL）
-- 外部 markdown 图链（代理 URL）追加为 images 条目，但**仅放行 allowlist 主机**
-- `_IMAGE_URL_ALLOW_HOSTS` 默认 `10.226.107.35:8080`；改基线须同步
-
-### 5. prompt 路由（chainlitexam/prompts.py）
-- 工具规则双轨：planner/`WEATHER_ASSISTANT_PROMPT` 两处都要加（如 get_station_rainfall_real_img 在 :399 与 :1055）
-- 规则要点：图片工具只出图不给数值；明确要图才调；调后前端自动展示，回答简短
-
-## 关键结论
-
-- 新工具沿用 `get_station_rainfall_real_img` 的 base64 模式（同 port 8001），不碰 `_scrub` 白名单。
-- 触发词：用户说"降水实况文字/生成降水实况/降水实况"等；区别于"降雨分布图/降水实况图"（旧图工具关键词，
-  而"降水实况文字"不含"图"字，不会被旧 fast path 拦截）。
-- 工具命名建议：`generate_rainfall_describe_longimg`（语义清晰，planner 可按 docstring 路由）。
-- 参数用 camelCase（beginTime/endTime/areaIds/interval/range/type/isClimateImg），与接口及旧工具一致。
+- 九大河系（get_river_system_rainfall_forecast）覆盖范围：泃河/滦河是否在分区表内
+- 于桥水库 POI 可命中性
+- planner 对"X河有雨吗"的工具选择（prompt 规则是否引导到河系工具）

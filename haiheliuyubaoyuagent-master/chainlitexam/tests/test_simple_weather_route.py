@@ -38,6 +38,10 @@ class TestRouteSimpleWeatherQuery:
             ("天津滨海新区明天适合游玩吗", "query_rolling_forecast"),
             ("天津蓟州区明天适合游玩吗", "query_rolling_forecast"),
             ("明天适合去天津之眼游玩吗", "query_decision_weather_for_poi"),
+            # 裸"天津港"（无"港口/港区"后缀）走点位决策天气——领导问题清单（2026-08-26
+            # 行业服务）："天津港明日风力多大"不得落到天津市区代表点。
+            ("天津港明日风力多大？", "query_decision_weather_for_poi"),
+            ("明天天津港有雨吗", "query_decision_weather_for_poi"),
         ],
     )
     def test_routes_simple_weather(self, question, expected_tool):
