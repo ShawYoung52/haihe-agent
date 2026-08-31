@@ -91,3 +91,49 @@ async def test_chainlit_mode_streams_per_chunk():
     )
     assert result == "ab"
     assert smsg.update_count > 1, "chainlit 模式应逐 chunk 更新"
+
+
+@pytest.mark.asyncio
+async def test_answer_return_value_has_repaired_table():
+    """astream_answer_chain_to_message 返回值必须与展示一致：压成一行的表格在返回值里也拆好换行。
+
+    2026-08-31 内网"天津当前天气实况"：answer LLM 输出 |...||:---|... 单行表格（模型偶发压行），
+    函数内 _repair_markdown_layout 把 stream_msg.content 修好了，但返回值仍是未修复原文；
+    调用方（_finalize_complete_tool_evidence 等）拿返回值覆盖 stream_msg.content → 表格又变回
+    单行（|| 原样渲染）。返回值与展示内容必须一致（都过 _repair_markdown_layout）。
+    """
+    import chain_gzt
+
+    class _Chunk:
+        def __init__(self, text):
+            self.content = text
+
+    class _FakeChain:
+        async def astream(self, input_dict, config=None):
+            yield _Chunk(
+                "【核心结论】截至8月31日18时，天津市无降水。\n"
+                "|区域|平均降雨量|最大降雨量|最大降雨站点||:---|:---|:---|:---||全市|0.0毫米|0.0毫米|滨海新区滨海经开区东区||中心城区|0.0毫米|0.0毫米|河西区河西珠江里|\n"
+                "数据来源：天擎自动站。"
+            )
+
+        async def ainvoke(self, input_dict, config=None):
+            return _Chunk("")
+
+    class _StreamMsg:
+        def __init__(self):
+            self.content = ""
+            self.update_count = 0
+
+        async def update(self):
+            self.update_count += 1
+
+    smsg = _StreamMsg()
+    result = await chain_gzt.astream_answer_chain_to_message(
+        _FakeChain(), {"messages": []}, smsg, execution_mode="http"
+    )
+    # 展示与返回值都不该再有 || 粘连，且表格行已被拆成规范多行
+    assert "||" not in result, f"返回值仍含 ||：{result}"
+    assert "||" not in smsg.content, f"stream_msg.content 仍含 ||：{smsg.content}"
+    assert "|最大降雨站点|\n|:---" in result, f"表格行未被拆开：{result}"
+    # 返回值与展示一致（调用方拿返回值覆盖 stream_msg.content 也不丢修复）
+    assert result == smsg.content

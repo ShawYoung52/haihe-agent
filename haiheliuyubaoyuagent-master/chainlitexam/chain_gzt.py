@@ -992,7 +992,10 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
             final_text = _repair_markdown_layout(_sanitize_display_text(full_text))
             stream_msg.content = final_text
             await stream_msg.update()
-            return _sanitize_display_text(full_text)
+            # 返回值必须与展示内容一致（也过 _repair_markdown_layout）：
+            # 调用方（_finalize_complete_tool_evidence 等）会拿返回值覆盖 stream_msg.content，
+            # 只修展示不修返回值 → 模型压成一行的表格被拆好后又被未修复的返回值冲掉（2026-08-31）。
+            return final_text
         except (ConnectionError, httpx.ConnectError, httpx.ReadTimeout) as exc:
             if full_text.strip():
                 # 已有部分内容：无法重发部分流，按部分内容输出（原语义保留）。
@@ -1011,7 +1014,7 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
                 return stream_msg.content
             result = await answer_chain.ainvoke(input_dict, config=config)
             text = getattr(result, "content", None) or ""
-            text = _sanitize_display_text(text)
+            text = _repair_markdown_layout(_sanitize_display_text(text))
             stream_msg.content += text
             await stream_msg.update()
             return text
@@ -1023,7 +1026,7 @@ async def astream_answer_chain_to_message(answer_chain, input_dict, stream_msg: 
         return stream_msg.content
     result = await answer_chain.ainvoke(input_dict, config=config)
     text = getattr(result, "content", None) or ""
-    text = _sanitize_display_text(text)
+    text = _repair_markdown_layout(_sanitize_display_text(text))
     stream_msg.content += text
     await stream_msg.update()
     return text

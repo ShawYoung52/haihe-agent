@@ -47,6 +47,11 @@
       + 验证（1080 passed/5 skipped/0 failed，diff 敏感信息 CLEAN）+ github（无 PR）+ context7（不适用）。
 - [x] R7 提交推送：完成（显式路径 git add，不含 AgentWeb.zip）。
 - [x] R5 表格换行异常：**已关闭**。用户判断该次是走了天河接口所致；代码侧确认无问题，不追。
+- [x] R9 天津当前天气实况表格断行（**当前代码真 bug，非部署**）：`astream_answer_chain_to_message` 内部
+      `_repair_markdown_layout` 修好 `stream_msg.content`，但**返回值是未修复原文**；调用方
+      （`_finalize_complete_tool_evidence` 等）拿返回值覆盖 `stream_msg.content` → 修复被冲掉，
+      模型偶发压成一行的表格 `|...||:---|` 原样渲染。修：返回值与展示一致（主路径 + ainvoke 兜底都过
+      `_repair_markdown_layout`）。回归测试 `test_answer_return_value_has_repaired_table`（红绿闭环验证）。
 - [ ] R8（待定）prompt 0.5 段逐字枚举的其它 03 实况问法（全市现在下了多少雨/市区现在气温和风的实况等）
       仍走天河——若拉本地需同步改 prompts.py 防 planner 被推向天河，用户说"再说"。
 

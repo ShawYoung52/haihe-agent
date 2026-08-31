@@ -193,7 +193,7 @@ This project uses the superpowers plugin for disciplined development:
 - **A1 HTTP 免 data-layer 落库**（qa_http_api.py `_suppress_chainlit_data_layer` + `_run_once` 包住 process_message）：HTTP 客户端不读 DB（答案走 CapturingEmitter、多轮走 InMemoryConversationStore），每请求 ~20-50 次 fire-and-forget PG 写 + 孤儿 thread/step 行是纯浪费。必须同时置 `_data_layer_initialized=True` 防 `get_data_layer()` 懒加载重建真层（chain_gzt 手工装 SQLAlchemy 时未置该标志）。
 - **A2 `stream_text_to_message` 按 execution_mode 累积**（chain_gzt.py）：HTTP 下不逐 32 字块 update+sleep，一次更新；chainlit 模式逐块不变。`_build_orchestrator_callbacks` 用 `_stream_text` 包装注入 mode。
 - **A3 `_response_cache` 修剪**（qa_http_api.py）：`RESPONSE_CACHE_MAX_SIZE`（默认 200）超限时 `_maybe_prune_response_cache` 清过期条目，防无界增长。
-- **A4 answer 流式连接错误重试**（chain_gzt.py `astream_answer_chain_to_message`）：ConnectionError/httpx 连接/读超时在无部分内容时重试（`ANSWER_MAX_RETRIES` 默认 2），与 planner 对称；非连接错误/超时保持原回退。
+- **A4 answer 流式连接错误重试**（chain_gzt.py `astream_answer_chain_to_message`）：ConnectionError/httpx 连接/读超时在无部分内容时重试（`ANSWER_MAX_RETRIES` 默认 2），与 planner 对称；非连接错误/超时保持原回退。**返回值契约（2026-08-31）**：返回值必须与 `stream_msg.content` 一致——都过 `_repair_markdown_layout(_sanitize_display_text(...))`（主路径 + 两个 ainvoke 兜底）。调用方（`_finalize_complete_tool_evidence`、首轮 answer 等）会拿**返回值**覆盖 `stream_msg.content`；若只修展示不修返回值，模型偶发压成一行的表格（`|...||:---|`）会被拆好后又被未修复的返回值冲掉。
 
 **MCP 后端**：
 - **B1 `forecast_evaluate_tool` 缓存顺序缺陷**：原 `_validate_params_and_fetch` 在缓存查询前就调检验 API（1h 缓存形同虚设）。拆成 `_parse_evaluate_params`（廉价校验/解析）+ `_fetch_evaluate_api`（昂贵取数），`_evaluate_forecast_core` 顺序 = 解析 → 缓存命中 → 取数（仅 miss）。

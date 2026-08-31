@@ -115,3 +115,22 @@
 - **R5 表格换行异常 关闭**：用户判断该次是走了天河接口所致，代码侧确认无问题，不追。
 - **R8（待定）**：prompt 0.5 段逐字枚举的其它 03 实况问法（全市现在下了多少雨/市区现在气温和风的实况等）
   仍走天河，用户说"再说"，保持现状不动。
+
+## 2026-08-31（R9：表格断行真 bug 定位修复）
+
+用户复测"天津当前天气实况"（本地工具 query_current_weather_observation），表格又断行（`|区域|...||:---|...`）——
+**这是当前代码的真 bug，不是部署问题**（此前 R5 判断为天河接口所致已关闭，现被本地工具打脸，R5 改判）。
+
+- **根因**：`chain_gzt.astream_answer_chain_to_message` 主路径在函数内 `_repair_markdown_layout(_sanitize_display_text(full_text))`
+  把 `stream_msg.content` 修好（`||`→`|\n|`），但 **`return _sanitize_display_text(full_text)` 返回的是未修复原文**；
+  调用方（`_finalize_complete_tool_evidence` 等 6 处）拿**返回值**再 `stream_msg.content = text`（evidence 路径 :2653、
+  首轮 :5736）覆盖 → 修复被冲掉，模型偶发压成一行的表格原样渲染。两个 ainvoke 兜底返回同样未修复。
+  旁证：`_sanitize_display_text` 自带的 `_concat_row_pattern` `||` 拆行修复对**多于 2 行粘连**失效
+  （贪心 group2 吞多行 → 行内 | 数不等 → 守卫拒绝），实测留 `||`；`_repair_markdown_layout` 的简单
+  `.replace("||","|\n|")` 对任意行数都有效，故两链叠加后输出正确——问题只在返回值不带修复。
+- **修**：返回值与展示一致（主路径 `return final_text`；两个 ainvoke 兜底 `text` 也过 `_repair_markdown_layout`）。
+  副作用：历史消息存修复版（与展示一致，answer LLM 后续仿写格式更稳）。
+- **测试**：`test_execution_mode.py::test_answer_return_value_has_repaired_table`（贴的表格场景：断言返回值与
+  stream_msg.content 都无 `||`、行已拆、两者相等）。**红绿闭环**：stash 修复后测试 FAIL、恢复后 PASS。
+- **全量回归**：chainlitexam 1081 passed / 5 skipped / 0 failed。
+- CLAUDE.md A4 补返回值契约说明。
