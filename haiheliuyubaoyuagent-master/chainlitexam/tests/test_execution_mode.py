@@ -137,3 +137,52 @@ async def test_answer_return_value_has_repaired_table():
     assert "|最大降雨站点|\n|:---" in result, f"表格行未被拆开：{result}"
     # 返回值与展示一致（调用方拿返回值覆盖 stream_msg.content 也不丢修复）
     assert result == smsg.content
+
+
+@pytest.mark.asyncio
+async def test_answer_keeps_multiline_table_rows_adjacent():
+    """answer LLM 输出规范多行表格时，返回值与展示都保持表内行相邻（GFM 可渲染）。
+
+    2026-08-31 内网"天津当前天气实况"：answer LLM 输出紧凑多行表格（|区域|.../|:---|...），
+    _sanitize_display_text 规则 3 曾在每行行首 | 前插空行，表头与分隔行不再相邻，
+    remark-gfm 把整张表拆成普通段落 → UI 显示原始 `|` 字符。修复后表内行必须相邻。
+    """
+    import chain_gzt
+
+    class _Chunk:
+        def __init__(self, text):
+            self.content = text
+
+    class _FakeChain:
+        async def astream(self, input_dict, config=None):
+            yield _Chunk(
+                "【核心结论】截至8月31日18时，天津市全市平均降雨量为0.0毫米，无降水。\n"
+                "|区域|平均降雨量|最大降雨量|最大降雨站点|小时雨强|降水判断|\n"
+                "|:---|:---|:---|:---|:---|:---|\n"
+                "|天津市|0.0mm|0.0mm|滨海新区滨海经开区东区|0.0mm|无降水|\n"
+                "|中心城区|0.0mm|0.0mm|河西区河西珠江里|0.0mm|无降水|\n"
+                "数据来源：天擎自动站"
+            )
+
+        async def ainvoke(self, input_dict, config=None):
+            return _Chunk("")
+
+    class _StreamMsg:
+        def __init__(self):
+            self.content = ""
+            self.update_count = 0
+
+        async def update(self):
+            self.update_count += 1
+
+    smsg = _StreamMsg()
+    result = await chain_gzt.astream_answer_chain_to_message(
+        _FakeChain(), {"messages": []}, smsg, execution_mode="http"
+    )
+    # 表内行相邻（表头与分隔行、分隔行与数据行都不能被空行拆开）
+    assert "|小时雨强|降水判断|\n|:---" in result, f"表头/分隔行被拆开：{result}"
+    assert "|:---|:---|:---|:---|:---|:---|\n|天津市" in result, f"分隔/数据行被拆开：{result}"
+    assert "|无降水|\n|中心城区" in result, f"数据行被拆开：{result}"
+    # 正文后接表格仍有空行（可渲染所需的段落分隔）
+    assert "无降水。\n\n|区域" in result, f"正文/表格边界缺空行：{result}"
+    assert result == smsg.content

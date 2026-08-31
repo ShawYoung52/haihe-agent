@@ -557,7 +557,19 @@ def _sanitize_display_text(text: str) -> str:
     text = re.sub(r"^(#{2,6}\s+.{3,30}?)(?<![（(])((?:截至|根据|目前|当前)\d)", r"\1\n\n\2", text, flags=re.MULTILINE)
     # 3. 正文末尾直接接表格时插入空行（。...|表头|）
     # 负向前瞻避免破坏表格内部单元格分隔（如 (mm)| ）
-    text = re.sub(r"([。：；！？)）\s])\|(?![\s|])", r"\1\n\n|", text)
+    # 但字符类含 \s：无空格紧凑表格的每个行首 |（前一字符是 \n）都会命中——
+    # 表头/分隔行/数据行之间全被插空行，GFM 表格要求表头与分隔行相邻，空行把
+    # 整张表拆成带 | 的普通段落（UI 渲染成原始字符，2026-08-31"天津当前天气实况"）。
+    # 守卫：| 所在行以 | 开头（紧凑表行/表内单元格分隔）时保持原样，只在
+    # "正文后接表格"时插空行。只看行首即可（行内 | 的 prev 是当前行的前半，
+    # 紧凑表行首恰是 |；普通段落不以 | 开头）。
+    def _blank_before_table_row(m: "re.Match") -> str:
+        prev = text[text.rfind("\n", 0, m.start()) + 1 : m.start()]
+        if prev.startswith("|"):
+            return m.group(0)
+        return f"{m.group(1)}\n\n|"
+
+    text = re.sub(r"([。：；！？)）\s])\|(?![\s|])", _blank_before_table_row, text)
     # 3b. 标题/短文本后紧跟表格起始时插入空行
     text = re.sub(r"(#{2,6}\s+[^\n]{1,40})(\|[^\n]*\|)", r"\1\n\n\2", text)
     # 3c. 无标点分隔时，正文直接粘到表格也换行（只匹配行首的表格起始，避免破坏表格内部单元格或行）

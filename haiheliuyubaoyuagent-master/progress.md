@@ -165,3 +165,28 @@
 - 用户确认 R8 其余 03 实况问法（全市现在下了多少雨/市区现在气温和风的实况/今天雨下了多长时间/昨天雨下得怎么样）
   走天河即可："这些你提到的走天河就行"。R8 关闭，保持现状不动，无代码改动、无回归。
 - task_plan.md R8 勾选关闭。
+
+## 2026-08-31（R11：表格渲染成原始字符 —— 规则 3 空行守卫）
+
+用户复测"天津当前天气实况"（前缀已对 R10、表格文本多行正常），仍报"压根就没表格，全是字符"。
+经 AskUserQuestion 澄清 = **UI 里 markdown 表格渲染成原始 `|` 字符**。这是独立于 R9（`||` 粘行）的新根因。
+
+- **根因**：`message_orchestrator._sanitize_display_text` 规则 3（首提交即存在）在"正文后接表格"插空行，
+  但字符类含 `\s`——**无空格紧凑表格**（`|区域|...`，管道后紧跟非空白）的每个行首 `|`（前一字符 `\n`）都命中，
+  表头/分隔行/数据行之间全被插空行。GFM 表格要求表头行与分隔行**相邻**，空行把整张表拆成带 `|` 的普通段落，
+  remark-gfm 不再识别为表格 → UI 显示原始字符。逐层排查：chainlit 2.9.6 bundle `remarkPlugins=[YEn,K2n,Ufn,GEn]`
+  中 K2n=remark-gfm（其 `Y2n` = gfm 五扩展：autolink/footnote/strikethrough/table/tasklist）、Ufn=remark-math——**gfm 已启用**，
+  排除渲染层配置问题；用精确 MSG#5 内容跑 `_sanitize_display_text` 实锤插空行（表头↔分隔行不再相邻）。
+  带空格风格（`| 日期 |`，`_markdown_table` 生成）被规则 3 负向前瞻 `(?![\s|])` 天然豁免、一直正常——
+  这解释了为何滚动预报表格好而当前实况表格坏。
+- **修**：规则 3 改回调 `_blank_before_table_row`——上一行已是表格行（strip 后 `|` 开头 `|` 结尾且 `|` 数≥2）
+  时保持相邻（不插空行），只在"正文后接表格"时插空行。规则 3c/5/6 对紧凑表格已安全（3c 要求行首 `|` 前一字符非 `|`，
+  表行间前一字符恰是 `|`；5 只在表格后接非 `|` 文本时插行；6 与表格无关），无需改。性能：200 行表 0.41ms、
+  10 张×200 行 6.6ms，可忽略。
+- **测试（TDD 红→绿）**：新增 `tests/test_sanitize_display_text.py`（5 条：紧凑表行相邻/生产场景全答案/
+  正文后接表格仍插空行/带空格表完整/行内竖线不变；修复前 3 条红）+ `test_execution_mode.py` 新增
+  `test_answer_keeps_multiline_table_rows_adjacent`（answer 链端到端多行表相邻 + 返回值=展示）。
+- **全量回归**：chainlitexam **1091 passed / 5 skipped / 0 failed**。diff 敏感扫描 CLEAN。
+- **待办**：code-review（独立 agent 进行中）→ 提交推送（显式路径 git add，不提交 AgentWeb.zip）。
+
+- **code-review（独立 agent，无确认缺陷）+ 加固**：守卫从「上一行 strip 后 |开头|结尾 且 |≥2」简化为「`|` 所在行以 `|` 开头」——后者同时修复**行中标点结尾单元格**（`结论：|`/`（中雨）|`）被拆行的既有缺陷（紧凑表单元格分隔符，改动前同病），且不误伤（普通段落不以 `|` 开头，已实测核对）；另采纳 rfind 免整前缀拷贝（性能 nit）。全量 chainlitexam **1093 passed / 5 skipped / 0 failed**。
