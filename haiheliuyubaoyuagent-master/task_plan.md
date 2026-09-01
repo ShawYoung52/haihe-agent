@@ -110,7 +110,7 @@
       region/region_label + display_name 显示区局名；rest_api login 响应同款 parity；
       两服务 DDL 幂等补列、用户管理接口全接线；SQL 建号脚本（gitignored）同步；
       user-admin-api.md 加 5.3/5.4。测试 10+9 条。全量 MCP 632 / chainlitexam 949+174 全绿。
-- [ ] R23 提交推送（显式路径，不含 AgentWeb.zip、不含 create_district_users.sql）。
+- [x] R23 提交推送（显式路径，不含 AgentWeb.zip、不含 create_district_users.sql）——e483bd8 已推送。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 
