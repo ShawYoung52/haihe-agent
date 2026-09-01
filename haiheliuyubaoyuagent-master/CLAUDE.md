@@ -82,7 +82,7 @@ User (Browser) → Chainlit UI → chain_gzt.py (lifecycle + FastAPI + auth)
 - When emergency-response tools (e.g. `safe_evaluate_haihe_emergency_response`) are invoked in the same round, skip both the warning-only hybrid answer path and any `forced_final_text` short-circuit; let the planner synthesize a response that prioritizes the emergency-response result
 - Verification: run `python tests/test_fast_paths.py` for fast-path static checks and `python -m pytest tests/ -v` for the full suite
 - Tests must run from `chainlitexam/`; running from the repo root causes `ModuleNotFoundError: No module named 'utils'`
-- Git Bash 的 `python` 是 Windows Store 占位程序（静默 exit 49 无输出）；测试用项目 venv `D:/PythonProject/haiheliuyubaoyuagent-master/.venv/Scripts/python.exe`（需装 pytest/pytest-asyncio/pandas/requests/langchain-core）
+- Git Bash 的 `python` 是 Windows Store 占位程序（静默 exit 49 无输出）；测试用 venv `D:/PythonProject/develop/haiheliuyubaoyuagent-master/haiheliuyubaoyuagent-master/haihe-weather-analyzer-mcp/.venv-test/Scripts/python.exe`（pytest 9.1.1，已装 pytest-asyncio/pandas/requests/langchain-core；⚠️ 旧文档里的 `D:/PythonProject/haiheliuyubaoyuagent-master/.venv/...` 在本机不存在）
 - 选择性运行单个测试文件可能被 `tests/stubs.py` 的 `langchain_core` stub 阻断（stub 只在真实 langchain_core 未加载时安装）；以全量 `python -m pytest tests/` 结果为准
 - `test_decision_weather_tool.py` has a pre-existing import failure (`ModuleNotFoundError: No module named 'tools'`) unrelated to forecast evaluate; exclude with `--ignore=chainlitexam/tests/test_decision_weather_tool.py` when running the full suite
 - Bash working directory persists across tool calls; use absolute paths when invoking commands outside `chainlitexam/` (the parent directory name contains spaces)
@@ -175,7 +175,7 @@ This project uses the superpowers plugin for disciplined development:
 
 口径（用户逐条确认）：**`ENABLE_FAST_PATHS` 保持关闭**（fast path 不作优化向量）；**实况类短 TTL 60-120s**；**思考过程必须显示**（主路径 LLM 行为不动）。主路径 LLM（planner+answer，2 次 LLM）已优化到底，剩余优化集中在 MCP 工具取数。复用既有模式：模块级 dict `{key:(ts,value)}` + 惰性过期 + env 可调 TTL + `threading.Lock`；**只有成功结果才写缓存，错误/失败不写**；实况类键含当前时次桶（跨时次必 miss）。
 
-- **A1 `query_current_weather_observation`**（current_weather_observation_service.py）：`CURRENT_WEATHER_CACHE_TTL` 默认 **60s**；键 = `时次桶(YYYYMMDDHH)|hours_back`。
+- **A1 `query_current_weather_observation`**（current_weather_observation_service.py）：`CURRENT_WEATHER_CACHE_TTL` 默认 **60s**；键 = `时次桶(YYYYMMDDHH)|hours_back`。**`regions.tianjin_districts`（2026-09-01，R12）**：`_group_tianjin_districts(tianjin_records)` 按记录 `Cnty` 分组、逐区县复用 `_calculate_area_stats`，供"只问天津当前实况"列天津各区县明细（用户口径：问天津不该只给全市/中心城区/蓟州/海河流域汇总行）。排序 = max_pre_mm 降序、None 无数据排最后、名称兜底；缺 `Cnty` 归"未分区"不丢数据；展示名用原始 `Cnty` 零编造。确定性"滚动实况"路径（`current_weather_observation_response.build_*`）只读 `REGION_LABELS` 固定键 + `if key in REGION_LABELS` 过滤，新增键不影响该路径。prompt 双轨"展示范围"规则引导 answer 用该键、不带海河流域/北京/河北（除非用户明确问到）。
 - **A2 `query_poi_nearest_observation`**（custom_tools/poi_nearest_observation_tool.py）：工具体提取为 `_query_poi_nearest_observation_core`；`POI_NEAREST_OBS_CACHE_TTL` 默认 **60s**；键 = `入参|时次桶`（POI 部分仍走 `_search_poi_core` 已有 3600s 缓存）。
 - **A3 `get_tianjin_wind_warning_assessment`**（haihe_mcp_tools.py）：工具体提取为 `_query_tianjin_wind_warning_core`；`TIANJIN_WIND_CACHE_TTL` 默认 **120s**；键 = `request_time`；接口失败（`wind_observation_api_failed`）不写缓存。
 - **A4 预警 4 工具**（haihe_mcp_tools.py，缓存放辅助函数层）：`WARNING_INFO_CACHE_TTL` **120s**（effective/history 各自由 `warning_status` 做键；`include_raw=True` 排查路径不缓存）；`TODAY_WARNING_SUMMARY_CACHE_TTL` **120s**；`NATIONAL_WARNING_CACHE_TTL` **120s**（键=`keywords|max_items`）。

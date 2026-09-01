@@ -61,6 +61,16 @@
       `_blank_before_table_row`（`|` 所在行以 `|` 开头则保持原样，code-review 加固后同时覆盖
       行中标点/括号结尾单元格分隔）。测试 test_sanitize_display_text.py（7 条）
       + test_execution_mode.py 端到端多行表相邻。全量 1093 passed/5 skipped/0 failed。
+- [x] R12 天津当前天气实况**内容口径**（表格已渲染，但出现海河流域行、不列天津各区县）：
+      "问的不是天津的吗，为什么会出现海河流域，而不把天津各区的列出来呢"。两层修复：
+      ① MCP `current_weather_observation_service._group_tianjin_districts` 按 Cnty 分组、
+      逐区县复用 `_calculate_area_stats`，`regions` 新增 `tianjin_districts`（按最大雨量降序、
+      无数据排最后、缺 Cnty 归"未分区"不丢数据、展示名用原始 Cnty 零编造）；确定性"滚动实况"
+      路径只读 REGION_LABELS 固定键不受影响。② prompt 双轨（PLANNER/WEATHER）加"展示范围"规则：
+      只问天津/全市/我市时用 `regions.tianjin_districts` 逐区县列表、不带海河流域/北京/河北
+      （除非用户明确问到）；haihe_mcp_tools docstring 同步。测试 test_current_weather_districts.py（6 条，
+      含 code-review 加固：累计缺测回退小时雨量排序）+ test_prompts.py 双轨锁 1 条。
+      全量 MCP 612 passed / chainlitexam 1094 passed/5 skipped/0 failed。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

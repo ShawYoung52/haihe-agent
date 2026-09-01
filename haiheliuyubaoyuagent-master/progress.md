@@ -190,3 +190,40 @@
 - **待办**：code-review（独立 agent 进行中）→ 提交推送（显式路径 git add，不提交 AgentWeb.zip）。
 
 - **code-review（独立 agent，无确认缺陷）+ 加固**：守卫从「上一行 strip 后 |开头|结尾 且 |≥2」简化为「`|` 所在行以 `|` 开头」——后者同时修复**行中标点结尾单元格**（`结论：|`/`（中雨）|`）被拆行的既有缺陷（紧凑表单元格分隔符，改动前同病），且不误伤（普通段落不以 `|` 开头，已实测核对）；另采纳 rfind 免整前缀拷贝（性能 nit）。全量 chainlitexam **1093 passed / 5 skipped / 0 failed**。
+
+## 2026-09-01（R12：天津当前天气实况内容口径 —— 列天津各区县、不带海河流域）
+
+用户复测"天津当前天气实况"（R11 修复后表格已正常渲染），但内容口径不对：
+"问的不是天津的吗，为什么会出现海河流域，而不把天津各区的列出来呢"——回答给了
+天津市/中心城区/蓟州区/海河流域 4 个汇总行，没有天津各区县明细，还多了海河流域行。
+
+- **根因**：① 粒度——`query_current_weather_observation` 只聚合 6 个固定桶
+  （tianjin/tianjin_central/jizhou/beijing/hebei/haihe_basin），无天津区县明细
+  （数据层 `Cnty` 字段完全支持按区县聚合）；② 口径——该问法不含"滚动" → 不走
+  `is_current_rolling_weather_query` 确定性格式化器（那路径按设计就带海河流域行），
+  走 planner→`query_current_weather_observation`→answer LLM 从 JSON 自由挑行，
+  prompt :124 的"不得将天津市与海河流域混为一谈"不足以约束。
+- **修（两层，与"司南分层回答"同模式：代码供数据 + prompt 引导展示）**：
+  ① MCP `current_weather_observation_service._group_tianjin_districts(tianjin_records)`：
+  按 `Cnty` 分组、逐区县复用 `_calculate_area_stats`，`regions` 新增 `tianjin_districts`
+  （list：name + 同口径统计字段；按 max_pre_mm 降序、None 无数据排最后、名称兜底；
+  缺 Cnty 归"未分区"不丢数据；展示名用原始 Cnty 零编造）。确定性"滚动实况"路径
+  （current_weather_observation_response.build_*）只读 REGION_LABELS 固定键 +
+  `if key in REGION_LABELS` 过滤，新增键不影响该路径。
+  ② prompt 双轨（PLANNER :302-304 / WEATHER :987-989 同段）加"展示范围"规则：
+  只问"天津/全市/我市"当前实况时用 `regions.tianjin_districts` 逐区县列表，
+  不把海河流域/北京/河北列入明细（除非用户明确问到）。haihe_mcp_tools docstring 同步。
+  注：PLANNER 轨用半角引号、WEATHER 轨用全角引号（两轨既有差异，非字节级一致），分别 edit。
+- **测试（TDD 红→绿）**：MCP `tests/test_current_weather_districts.py`（6 条：按 Cnty 分组/
+  复用 area_stats 同区聚合/按雨量降序/缺 Cnty 归未分区/既有 6 桶不变/累计缺测但小时有雨不排最后）
+  ——修复前 4 failed。chainlitexam `test_prompts.py::test_current_weather_observation_tianjin_districts_scope_rule`
+  双轨锁 1 条。
+- **code-review（独立 agent，无确认缺陷）**：采纳 1 条加固——排序键原只用 `max_pre_mm`，
+  "累计 PRE 缺测但小时 PRE_1h 有雨"的区县会被当无数据排到最后；改为与 `rainfall_judgement`
+  的 `rain_basis` 同口径（累计缺测回退小时），新增 `TestTianjinDistrictsSortEdge` 红绿锁定。
+  另修正 CLAUDE.md 测试 venv 路径（旧路径本机不存在）。**未采纳（出范围/既有设计）**：
+  ① "滚动气象信息实况"确定性路径按设计带海河流域 6 行（流域级运行报告，非本问法）；
+  ② 拆分 prompt（ENABLE_NEW_ANSWER_PROMPT，非默认）的 METEO_ANSWER 本就不含当前实况块，
+  属既有结构缺口。
+- **全量回归**：MCP **612 passed / 20 skipped**（+6）；chainlitexam **1094 passed / 5 skipped / 0 failed**。
+- diff 敏感信息扫描 CLEAN。待办：提交推送。

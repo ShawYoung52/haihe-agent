@@ -224,6 +224,42 @@ def _calculate_area_stats(
     }
 
 
+def _group_tianjin_districts(
+    tianjin_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按 Cnty 把天津站点分组，逐区县复用 _calculate_area_stats 统计。
+
+    供"天津当前天气实况"列出天津各区县明细（2026-09-01 用户口径：问天津就该
+    列天津各区县，而不是只给全市/中心城区/蓟州/海河流域汇总行）。零编造：展示名
+    用原始 Cnty 不改写；缺 Cnty 的记录归入"未分区"，不丢数据。按雨量降序、
+    完全无降水数据排最后、名称次序兜底。确定性"滚动实况"路径只读 REGION_LABELS
+    固定键，本列表不影响该路径。
+    """
+
+    def _sort_key(item: dict[str, Any]) -> tuple:
+        # 排序口径与 rainfall_judgement 的 rain_basis 一致：优先累计 PRE，
+        # 累计缺测回退小时 PRE_1h——否则"累计缺测但小时有雨"的区县会被当无数据排最后。
+        effective = item["max_pre_mm"]
+        if effective is None:
+            effective = item["max_pre_1h_mm"]
+        return (
+            effective is None,  # 完全无降水数据排最后
+            -(effective if effective is not None else 0.0),  # 按雨量降序
+            item["name"],  # 名称兜底，保证确定性
+        )
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in tianjin_records:
+        county = str(record.get("Cnty") or "").strip() or "未分区"
+        grouped.setdefault(county, []).append(record)
+    districts = [
+        {"name": county, **_calculate_area_stats(rows)}
+        for county, rows in grouped.items()
+    ]
+    districts.sort(key=_sort_key)
+    return districts
+
+
 def _record_time_key(record: dict[str, Any]) -> str | None:
     """把记录 Datetime 归一化为 UTC YYYYMMDDHHMMSS（天擎 times 格式）。
 
@@ -441,6 +477,7 @@ def query_current_weather_observation_core(
             "tianjin": _calculate_area_stats(tianjin_records),
             "tianjin_central": _calculate_area_stats(central_records),
             "jizhou": _calculate_area_stats(jizhou_records),
+            "tianjin_districts": _group_tianjin_districts(tianjin_records),
             "beijing": _calculate_area_stats(beijing_records),
             "hebei": _calculate_area_stats(hebei_records),
             "haihe_basin": _calculate_area_stats(

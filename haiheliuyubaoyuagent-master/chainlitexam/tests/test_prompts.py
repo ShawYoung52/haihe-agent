@@ -221,3 +221,18 @@ def test_longimg_trigger_covers_today_rain():
         assert "默认走本工具" in section
         # 明确"海河流域的雨情"不在此列（保持天擎站点分析路由）
         assert "海河流域的雨情" in section
+
+
+def test_current_weather_observation_tianjin_districts_scope_rule():
+    """2026-09-01 用户口径：只问"天津当前天气实况"应列天津各区县，不带海河流域/北京/河北。
+
+    双轨 prompt 的当前实况规则必须引导 answer 用 `regions.tianjin_districts` 逐区县列出
+    天津各区县，并明确海河流域/北京/河北仅在用户问到时才展示——否则 LLM 会照旧只给
+    全市/中心城区/蓟州/海河流域汇总行（"问的不是天津的吗，为什么会出现海河流域"）。
+    """
+    import prompts
+    for p in (prompts.PLANNER_SYSTEM_PROMPT, prompts.WEATHER_ASSISTANT_PROMPT):
+        assert "regions.tianjin_districts" in p, "当前实况规则应引导用 tianjin_districts 列天津各区县"
+        assert "逐区县列出天津各区县" in p
+        assert "不要把海河流域、北京、河北列入明细" in p
+        assert "只有用户明确问到海河流域、北京或河北时" in p

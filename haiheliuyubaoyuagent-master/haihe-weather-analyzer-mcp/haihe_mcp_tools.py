@@ -3022,7 +3022,10 @@ def register_haihe_tools(mcp: FastMCP) -> None:
         转换为天擎 UTC+0 整点时次，并逐小时回退；同一候选时次同时调用
         getSurfEleInRegionByTime 和 getSurfEleInBasinByTime，只有两类数据均成功
         时才进行统计。返回天津、中心城区、蓟州、北京、河北和海河流域的平均
-        降水量、最大降水量、最大小时降水量、对应站点及代码判定的降水等级。
+        降水量、最大降水量、最大小时降水量、对应站点及代码判定的降水等级；
+        另返回 `regions.tianjin_districts`——按 Cnty 分组的天津各区县明细
+        （含区县名与上述同口径统计，按最大雨量降序），供"只问天津"时逐区县列出，
+        此时不要把海河流域、北京、河北列入明细（除非用户明确问到）。
 
         Args:
             hours_back: 无数据时最多向前尝试的整点数，默认6。正常问答不要修改。
