@@ -43,3 +43,6 @@ haihe-weather-analyzer-mcp/tj/
 # OS
 .DS_Store
 Thumbs.db
+
+# 运维一次性产物（含账号密码哈希，绝不入库）
+scripts/create_district_users.sql
