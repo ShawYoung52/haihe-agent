@@ -49,6 +49,8 @@
    - **无需重启 Tomcat**（静态资源即拷即用，必要时清浏览器缓存）。
    - **面板挂载**：脚本运行时自动找页面"说明"元素，把面板锚在其**左侧、垂直居中**（找不到则回退右下角悬浮）。**比例随"说明"自适应**：面板字号/宽度在运行时按"说明"元素的 computed font-size 等比推导（内距用 em），不写死像素；**默认收起为小胶囊**「🕒 系统时间·真实/模拟中」，点胶囊才展开完整控件（避免大卡片压住说明旁）。本地参照页（模拟"使用说明"导航）已截图验证：左侧+居中+比例协调、点按展开/收起正常。
    - **注意**：若前端同事重新构建又把 index.html 改回 `./public/*.js` 引用，404 会复现——把引用改回根级即可。
+   - **注意2（2026-09-01，AgentWeb(3) 重建又踩）**：前端同事重新打包**拿了旧版自定义 JS**——`img-zoom-agentweb.js` 被换成缺「思考过程自动折叠」IIFE 的旧版（只剩看图器段），导致折叠失效（后端 chainlit 2.9.6 不发 auto_collapse，折叠全靠该 JS 监听 `chainlit_reasoning_complete`）。**修复 = 用仓库 `chainlitexam/AgentWeb/img-zoom-agentweb.js` 整文件覆盖包内同名文件**（免重启、清缓存）。排查口令：`diff 包内文件 chainlitexam/AgentWeb/img-zoom-agentweb.js`，看是否缺 `chainlit_reasoning_complete`/`scanOpenReasoningSteps`。sim-time JS 本次未受影响。**前端同事每次重建后，务必把仓库里这两个自定义 JS 原样回拷。**
+   - **avatar.svg 404（无害）**：`.chainlit/config.toml` 的 `logo_file_url`/`default_avatar_file_url` 指向 `avatar.svg`（后端 chainlit 进程托管 UI 时由其 public/ 提供）。AgentWeb 独立静态包没有该文件 → 控制台 404，但 logo/头像有兜底渲染、不影响功能。要消除：把 `chainlitexam/public/avatar.svg` 拷到包内 `public/avatar.svg`（本批已在 AgentWeb(3) 包内建好）；若部署后仍 404，说明浏览器按站点根绝对路径 `/public/avatar.svg` 解析，需把 avatar.svg 放到 Tomcat 根应用的 `public/` 下，或直接忽略此 console 噪音。
 
 ---
 

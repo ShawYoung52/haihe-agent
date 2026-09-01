@@ -115,6 +115,13 @@
       切界面（零代码改动），region 列保留但前端忽略。纯文档口径更新（user-admin-api.md 5.3/5.4、
       CLAUDE.md、progress.md）。
 - [x] R25 提交推送——8945835 已推送。
+- [x] R26 AgentWeb(3) 新包两回归（systematic-debugging 定位）：① 思考过程不折叠——包内
+      `img-zoom-agentweb.js` 是旧版，缺折叠处理 IIFE（后端 chainlit 2.9.6 无 auto_collapse，
+      折叠全靠该 JS 监听 `chainlit_reasoning_complete`；前端重建拿了过期 JS）。修复 = 用仓库
+      `chainlitexam/AgentWeb/img-zoom-agentweb.js` 整文件覆盖包内同名文件（已验证折叠处理器
+      6 处函数在）。② `public/avatar.svg` 404——config.toml 的 logo/avatar 指向后端托管
+      public，静态包无此文件；已在包内补 `public/avatar.svg`（无害 console 噪音，有兜底渲染）。
+      包在仓库外 WeChat 目录不进 git；DEPLOY-sim-time.md 加"注意2"防重建再丢折叠逻辑。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 
