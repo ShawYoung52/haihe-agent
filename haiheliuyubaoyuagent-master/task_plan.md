@@ -104,7 +104,7 @@
       支流回退（泃河→北三河）风险表按所属分区标注（region_display="北三河九分区河系"）。
       前端无需改（region_hazards 渲染本就通用），补 1 条 river_system 渲染测试。
       测试 MCP 6 条 + 前端 1 条。全量 MCP 623 passed / chainlitexam 939+174 passed/5 skipped/0 failed。
-- [ ] R21 提交推送（显式路径，不含 AgentWeb.zip）。
+- [x] R21 提交推送（显式路径，不含 AgentWeb.zip）——099cd57 已推送。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 
