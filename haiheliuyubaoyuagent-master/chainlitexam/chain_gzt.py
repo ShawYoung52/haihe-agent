@@ -973,6 +973,39 @@ async def astream_chain_to_message(chain, input_dict, stream_msg: cl.Message, co
     return result
 
 
+def _join_split_table_headers(text: str) -> str:
+    """把被模型拆成多行的表头拼回单行（紧贴 |---| 分隔行之上、以 | 开头的若干行）。
+
+    GFM 要求表头与分隔行都是单行且相邻；模型偶发把宽表表头换行拆开
+    （`|区域|平均降雨量(mm)` 换行 `|最大降雨量(mm)` …），整表渲染成原始 `|`。
+    逐行扫描：遇分隔行（只含 | - : 空格）时向上收集连续的、以 | 开头的片段行，
+    拼接后单元格数与分隔行一致才替换（否则原样放回，绝不误改正常表格）。
+    """
+    if not isinstance(text, str) or "|" not in text:
+        return text
+    sep_row = re.compile(r"^\s*\|?[\s:\-]+\|[\s:\-|]*\s*$")
+
+    def _cells(row: str) -> int:
+        return len(row.strip().strip("|").split("|"))
+
+    out: list[str] = []
+    for line in text.split("\n"):
+        if sep_row.match(line) and out:
+            frags: list[str] = []
+            while out and out[-1].lstrip().startswith("|"):
+                frags.insert(0, out.pop())
+            if len(frags) > 1:
+                joined = "".join(f.strip() for f in frags)
+                if _cells(joined) == _cells(line):
+                    out.append(joined)
+                else:
+                    out.extend(frags)
+            else:
+                out.extend(frags)
+        out.append(line)
+    return "\n".join(out)
+
+
 def _repair_markdown_layout(text: str) -> str:
     """修复模型偶发把 Markdown 标题、表格和编号列表压成一行的问题。"""
     if not isinstance(text, str) or not text:
@@ -988,6 +1021,10 @@ def _repair_markdown_layout(text: str) -> str:
     for heading in headings:
         text = re.sub(rf"\s*(【{heading}】)", rf"\n\n\1", text)
 
+    # 行首小标题【...】粘到表格起始（【标题】|表头|）→ 标题独占一行。
+    # 锚定行首，避免误伤表格单元格内的【...】（如 |【蓝色预警】暴雨| 四级 |）。
+    text = re.sub(r"(^|\n)(【[^】\n]+】)[ \t]*(\|)", r"\1\2\n\3", text)
+
     # 常见压扁形态：...|数据||:---|... 或 ...|数据|【预警内容】
     text = re.sub(r"(【(?:今日发布预警清单|生效预警清单)】)\s*(\|)", r"\1\n\2", text)
     text = text.replace("||", "|\n|")
@@ -996,6 +1033,14 @@ def _repair_markdown_layout(text: str) -> str:
     # 编号列表压成一行时，在 2. 3. ... 前补换行；保留 1. 紧跟标题后的情况。
     text = re.sub(r"(?<=[。；;！!？?])\s*(\d{1,2}\.)", r"\n\1", text)
     text = re.sub(r"(【预警内容】)\s*(1\.)", r"\1\n\2", text)
+
+    # 表格表头被拆成多行时拼回单行（见 _join_split_table_headers）。
+    text = _join_split_table_headers(text)
+
+    # 表头与分隔行之间不得有空行：标题【...】粘到表头时，_sanitize_display_text 规则 3
+    # 会因"上一行以【开头"误判，在表头与 |---| 分隔行之间插入空行（GFM 要求二者相邻）。
+    # 这里把"表格行 \n空行+ 分隔行"合回单行相邻。
+    text = re.sub(r"(\|[^\n]*\|)\n{2,}(?=\|[\s:\-]+\|)", r"\1\n", text)
 
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()

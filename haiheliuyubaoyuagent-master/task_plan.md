@@ -138,6 +138,17 @@
       prompt 双轨加"灾害风险表"规则。区域范围经用户授权按推荐=只天津市区（同预报）。
       测试 MCP 5 + 前端 6 + prompt 1。全量 MCP 637 passed/20 skipped、chainlitexam 956+174=1130
       passed/5 skipped/0 failed。
+- [x] R29 R28 之后"表格没渲染出来啊"（所有表格显示成原始 `|`）：systematic-debugging 定位
+      = answer LLM 偶发把表格输出成 malformed markdown，`_repair_markdown_layout` 修不了——
+      ① 实况表表头被拆成多行（`|区域|平均降雨量(mm)` 换行 `|最大降雨量(mm)`…紧贴 `|---|` 分隔行）；
+      ② 【天津市区灾害风险】标题粘到表头同一行且无分隔；③ `_sanitize_display_text` 规则 3 在
+      "上一行以【开头"（标题粘表头）时误判，于表头与 `|---|` 分隔行间插空行（GFM 要求相邻）。
+      修复（`_repair_markdown_layout`，chain_gzt.py）：新增 `_join_split_table_headers`
+      （`|---|` 分隔行之上多个 `|`-开头碎片行按"拼接后单元格数==分隔行列数"才合回单行，
+      不匹配则原样保留）；行首锚定标题拆分 `(^|\n)(【[^】\n]+】)[ \t]*(\|)`（避开单元格内
+      【...】，有防误伤测试）；`(\|[^\n]*\|)\n{2,}(?=\|[\s:\-]+\|)` 把表头/分隔行间空行合回相邻。
+      良构表（紧凑/带空格）不受影响。测试 `test_repair_markdown_layout.py` 6 条。
+      全量 chainlitexam 962+174=1136 passed/5 skipped/0 failed。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

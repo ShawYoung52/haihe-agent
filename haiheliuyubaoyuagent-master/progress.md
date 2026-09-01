@@ -400,3 +400,24 @@
 - 测试：MCP `test_current_weather_region_hazards.py`（5）+ 前端
   `test_current_observation_risk_table.py`（6）+ `test_prompts.py` 双轨锁（1）。
   全量 MCP 637 passed/20 skipped、chainlitexam 956+174=1130 passed/5 skipped/0 failed。
+
+### R29 表格渲染成原始 `|`（R28 之后所有表格不渲染）
+
+- 用户复测：R28 接入后「天津当前天气实况」风险表出来了，但**所有表格都渲染成原始 `|`**
+  （"表格没渲染出来啊"）。systematic-debugging 定位根因 = answer LLM 偶发把表格输出成
+  malformed markdown，`_repair_markdown_layout` 修不了：
+  ① 实况表表头被拆成多行（`|区域|平均降雨量(mm)` 换行 `|最大降雨量(mm)`…紧贴 `|---|` 分隔行）；
+  ② 【天津市区灾害风险】标题粘到表头同一行且无分隔；
+  ③ `_sanitize_display_text` 规则 3 在"上一行以【开头"（标题粘表头）时误判，于表头与
+  `|---|` 分隔行间插空行（GFM 要求表头/分隔行相邻，否则整表渲染成带 `|` 的普通段落）。
+- **改动（`_repair_markdown_layout`，chain_gzt.py，确定性代码修复）**：
+  新增 `_join_split_table_headers`——`|---|` 分隔行之上多个 `|`-开头碎片行，
+  仅当拼接后单元格数 == 分隔行列数才合回单行表头，不匹配则原样保留（零误伤）；
+  行首锚定标题拆分 `(^|\n)(【[^】\n]+】)[ \t]*(\|)`（`(^|\n)` 锚定避开单元格内
+  `【...】`，如 `|【蓝色预警】暴雨|`，有专门防误伤测试）；
+  `(\|[^\n]*\|)\n{2,}(?=\|[\s:\-]+\|)` 把表头/分隔行间空行合回相邻。
+  良构表（紧凑风格 / 带空格 `_markdown_table` 风格）均不受影响。
+- 端到端验证：用户那条 malformed 原文（拆行表头 + 标题粘表头）经完整管线后两张表都成为
+  合法 GFM。测试 `test_repair_markdown_layout.py`（6：拆行表头合回、标题拆分、单元格内标题
+  不动、紧凑良构不变、带空格良构不变、标题粘+空行合回）。
+  全量 chainlitexam 962+174=1136 passed/5 skipped/0 failed。
