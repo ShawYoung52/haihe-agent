@@ -78,6 +78,7 @@ from tools.tianhe_fixed_qa_catalog import is_tianhe_fixed_qa_question, normalize
 from tools.meteo_evidence import is_evidence_complete
 from tools.tool_round_evidence import TOOL_QUERY_TYPES, ToolRoundEvidence
 from tools.request_intent_policy import (
+    CURRENT_TIME_MARKERS,
     has_mixed_current_future_scope,
     has_concrete_rolling_activity,
     is_emergency_response_intent,
@@ -975,6 +976,16 @@ def _route_simple_weather_query(user_text: str) -> tuple[str, dict] | None:
     has_weather = any(w in text for w in _SIMPLE_WEATHER_KEYWORD_WORDS)
     if not (has_time and has_weather):
         return None
+    # 观测词守卫（2026-09-01 测试人员反馈"问实况可能出预报"）：含 现在/当前/目前/实时/实况
+    # 的问法要的是实况观测数据，绝不路由到预报工具 query_rolling_forecast。
+    # has_mixed_current_future_scope 已把"观测词+未来词(明天/预报等)"的混合问法拦到 planner，
+    # 走到这里的一定是"含观测词且无未来词"的纯实况问法（如"今天天气实况"——"今天"不算未来词，
+    # 原先漏到预报）。有点位（_decision_weather_prefilter 命中）交回 planner——区域实况聚合
+    # 工具粒度不对，planner 可用 query_poi_nearest_observation 查点位实况；无点位 → 区域实况工具。
+    if any(w in text for w in CURRENT_TIME_MARKERS):
+        if _decision_weather_prefilter(text):
+            return None
+        return ("query_current_weather_observation", {})
     if _decision_weather_prefilter(text):
         return ("query_decision_weather_for_poi", {"user_text": text})
     return ("query_rolling_forecast", {"user_query": text, "regions": ""})

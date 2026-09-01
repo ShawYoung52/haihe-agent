@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 
 
-CURRENT_TIME_MARKERS = ("现在", "当前", "目前", "实时", "实况")
+CURRENT_TIME_MARKERS = ("现在", "当前", "目前", "实时", "实况", "实测")
 FUTURE_TIME_MARKERS = (
     "明天", "明日", "后天", "未来", "周末", "一周", "下周", "几点开始",
     "什么时候停", "何时停", "预报", "预计",

@@ -75,6 +75,16 @@
       那样回答"）。`resolve_river_forecast_periods` future_days 分支改用 `_relative_day_label`
       （明天/后天/M月D日，同滚动预报 _time_of_day_label 口径）。测试 1 条红绿锁定。
       全量 MCP 613 passed / chainlitexam 1094 passed/5 skipped/0 failed。
+- [x] R14 **问实况却出预报**（测试人员开会反馈，"可能"=非确定性）：systematic-debugging 定位根因 =
+      `_route_simple_weather_query` 不检查观测词，"今天/今日+天气词+实况"被确定性强制到 `query_rolling_forecast`
+      （预报）；`has_mixed_current_future_scope` 拦不住因 `FUTURE_TIME_MARKERS` 无"今天"（今天=当天非未来）。
+      "现在/当前/实时 实况"因不是时间词落回 planner 通常答对 → 表现为"有时/可能"。修：最终返回前加观测词守卫
+      （`CURRENT_TIME_MARKERS` 并入"实测"），纯实况问法无点位→`query_current_weather_observation`、
+      有点位→planner。测试 TestRouteObservationQuery 14 条红绿锁定。全量 chainlitexam 1108 passed/5 skipped/0 failed。
+- [x] R15 河流预报时段标签带具体日期（用户确认"带个具体日期也是比较好的"）：`_relative_day_label`
+      明天→明天（M月D日）、后天→后天（M月D日）、≥3天仍 M月D日；单日分支保留短标签。测试断言同步。
+      全量 MCP 613 passed。
+- [ ] R16 提交推送（显式路径，不含 AgentWeb.zip）。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

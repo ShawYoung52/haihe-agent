@@ -80,6 +80,65 @@ class TestRouteSimpleWeatherQuery:
         assert mo._route_simple_weather_query(question) is None, f"不应误路由：{question}"
 
 
+class TestRouteObservationQuery:
+    """含"实况/实时/实测/现在/当前"观测词的问法：绝不路由到预报工具（query_rolling_forecast）。
+
+    测试人员反馈"问实况可能出预报"：`_route_simple_weather_query` 原先不检查观测词，
+    "今天/今日 + 天气词 + 实况"会被确定性强制到预报工具；"现在/当前"类因不是时间词
+    落回 planner 通常答对——表现为"有时/可能"出预报。修复后纯实况问法路由到实况工具。
+    """
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "今天天气实况",
+            "今天降雨实况",
+            "今日天气实况",
+            "今天气温实况",
+            "天津今天天气实况",
+            "今天天气实时",
+            "今日降水实测",
+            "今天当前天气",
+        ],
+    )
+    def test_observation_query_routes_to_observation_tool(self, question):
+        route = mo._route_simple_weather_query(question)
+        assert route is not None, f"实况问法应命中确定性路由：{question}"
+        assert route[0] == "query_current_weather_observation", (
+            f"实况问法不得路由到预报工具：{question} -> {route[0]}"
+        )
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "今天盘山风景名胜区天气实况",   # 点位实况（触发 prefilter）：区域实况工具粒度不对，交回 planner
+            "今天天津大学天气实时",         # 点位实况（大学后缀触发 prefilter）
+        ],
+    )
+    def test_poi_observation_query_falls_back_to_planner(self, question):
+        assert mo._route_simple_weather_query(question) is None, (
+            f"点位实况应交回 planner 用点位实况工具：{question}"
+        )
+
+    @pytest.mark.parametrize(
+        "question, expected_tool",
+        [
+            ("今天天气", "query_rolling_forecast"),          # 无观测词：仍是预报
+            ("今天天气预报", "query_rolling_forecast"),       # 预报词：仍是预报
+            ("今天会下雨吗", "query_rolling_forecast"),       # 既有契约不变
+            ("明天天气实况", None),                          # 实况+明天=混合：交回 planner
+        ],
+    )
+    def test_forecast_and_mixed_unchanged(self, question, expected_tool):
+        route = mo._route_simple_weather_query(question)
+        if expected_tool is None:
+            assert route is None, f"实况+未来词混合问法应交回 planner：{question} -> {route}"
+        else:
+            assert route is not None and route[0] == expected_tool, (
+                f"{question} 路由不应被观测词守卫改变 -> {route}"
+            )
+
+
 class TestEnforceSimpleWeatherRoute:
     def test_sets_tool_call_and_clears_content(self):
         from langchain_core.messages import AIMessage

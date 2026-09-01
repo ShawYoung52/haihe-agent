@@ -260,17 +260,18 @@ def _day_period(day: date, label: str) -> ForecastPeriod:
 
 
 def _relative_day_label(day: date, today: date) -> str:
-    """未来第 N 天的业务化时段标签：明天/后天/具体日期（M月D日）。
+    """未来第 N 天的业务化时段标签：明天（M月D日）/后天（M月D日）/具体日期（M月D日）。
 
-    与滚动预报 _time_of_day_label 同口径（今天/明天/后天/M月D日）。不用"未来第N天"——
-    2026-09-01 用户口径：河流预报要像"天气怎么样"类问题那样说明天/后天/具体日期。
+    明天/后天也带具体日期（2026-09-01 用户口径："带个具体日期也是比较好的"）——
+    多天窗口里相对词与绝对日期（M月D日）混排时，带上日期可避免歧义。不用"未来第N天"。
     """
     delta = (day - today).days
+    date_str = f"{day.month}月{day.day}日"
     if delta == 1:
-        return "明天"
+        return f"明天（{date_str}）"
     if delta == 2:
-        return "后天"
-    return f"{day.month}月{day.day}日"
+        return f"后天（{date_str}）"
+    return date_str
 
 
 def _as_tianjin_time(value: datetime) -> datetime:

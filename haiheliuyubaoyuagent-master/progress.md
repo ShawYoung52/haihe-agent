@@ -246,3 +246,41 @@
   修复前红、修复后绿；既有"未来三天"测试只锁窗口数量/日期连续性，不锁标签，不受影响。
 - **全量回归**：MCP **613 passed / 20 skipped**；chainlitexam **1094 passed / 5 skipped / 0 failed**。
 - 纯标签微改（1 纯函数 + 1 分支），范围太轻未启动独立 review agent，自行复核无副作用面。
+
+## 2026-09-01（R14：问实况却出预报 —— 路由观测词守卫；R15：河流标签带具体日期）
+
+用户转述测试人员开会反馈两个问题：① **问"实况"有时会出"预报"**（"可能"=非确定性，要好好排查）；
+② 河流预报时段标签**带个具体日期比较好**（确认采纳 R13 末尾提议）。
+
+### R14 实况→预报 根因排查与修复（systematic-debugging）
+
+- **取证**：`_select_pre_planner_route` 顺序 = 长图覆盖 → 实况目录（天津当前的天气情况）→ 天河固定目录 →
+  `_route_simple_weather_query` → 天河知识路由。嫌疑锁定第 4 步 `_route_simple_weather_query`——
+  它把"时间词（今天/明天…)+ 天气词"**确定性强制到 `query_rolling_forecast`（预报）**，跳过 planner，
+  但**全程不检查"实况/实时/实测"等观测词**。
+- **根因**：`has_mixed_current_future_scope` 要求同时含"当前词（现在/当前/目前/实时/实况）"和"未来词
+  （明天/后天/未来/预报…)"才算混合，而 `FUTURE_TIME_MARKERS` **没有"今天"**（今天=当天非未来）。
+  于是"今天天气实况"：有观测词"实况"但无未来词 → 不算混合 → 不拦截 → 命中 `query_rolling_forecast`（预报）。
+  而"现在/当前/实时 实况"因这些**不是** `_SIMPLE_WEATHER_TIME_WORDS` 时间词、`has_time=False` 落回 planner
+  通常答对。**是否出预报取决于措辞 → 表现为"有时/可能"**。现有 21 条路由测试无任何含"实况"样本，洞一直没被锁。
+- **修**：`_route_simple_weather_query` 最终返回前加观测词守卫——含 `CURRENT_TIME_MARKERS`
+  （现在/当前/目前/实时/实况，**并入"实测"**——实况同义族，测试人员会换着用；has_mixed/active_tool_router/
+  新守卫三消费方语义都正确）且无未来词的纯实况问法：无点位→`query_current_weather_observation`（实况），
+  有点位（`_decision_weather_prefilter` 命中）→返回 None 交回 planner（区域实况工具粒度不对，planner 用
+  `query_poi_nearest_observation`）。"观测词+未来词"（明天实况）仍被 `has_mixed_current_future_scope` 提前拦到 planner。
+  端到端验证：5 条实况问法→实况工具；"现在天气实况"/"明天天气实况"→None 交 planner；"今天天气/今天天气预报"→预报不变。
+  误伤自查：天河 03 实况目录问法（全市/市区/现在/昨天+雨量/气温风）不含"今天/今日+天气关键词"组合、到不了本守卫，仍走天河（R8 不破）。
+- **测试（TDD 红→绿）**：`test_simple_weather_route.py::TestRouteObservationQuery` 新增 14 条
+  （8 实况→实况工具 / 2 点位实况→planner / 4 预报与混合不变：今天天气、今天天气预报、今天会下雨吗→预报、明天天气实况→None）。
+  修复前 9 failed → 修复后全过。
+- **全量回归**：chainlitexam **1108 passed / 5 skipped / 0 failed**（1094+14）。改动小且测试充分，按工作流对微小改动自行复核。
+
+### R15 河流预报时段标签带具体日期
+
+- 用户确认采纳 R13 末尾提议：明天/后天也带具体日期，多天窗口相对词与绝对日期混排时避免歧义。
+- **修**：`_relative_day_label` 改 明天→`明天（M月D日）`、后天→`后天（M月D日）`、≥3 天仍 `M月D日`。
+  单日分支（今天/明天/后天）保留短标签不变。前端渲染 label 原样，无需改。
+- **测试**：`test_future_days_labels_are_friendly_dates_not_future_day_n` 断言同步改带日期形式
+  （未来三天→明天（9月2日）/后天（9月3日）/9月4日 等）。
+- **全量回归**：MCP **613 passed / 20 skipped**（改既有测试，数不变）；chainlitexam 不受影响。
+- 待办：提交推送（显式路径，不含 AgentWeb.zip）。

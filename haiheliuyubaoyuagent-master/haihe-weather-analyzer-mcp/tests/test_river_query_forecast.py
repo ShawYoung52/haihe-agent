@@ -66,19 +66,21 @@ def test_future_three_days_returns_three_non_overlapping_periods():
 
 def test_future_days_labels_are_friendly_dates_not_future_day_n():
     """2026-09-01 用户口径：河流预报时段标签要像"天气怎么样"那样用 明天/后天/具体日期，
-    不得用"未来第N天"（与滚动预报 _time_of_day_label 同口径：今天/明天/后天/M月D日）。"""
+    不得用"未来第N天"；且明天/后天要带具体日期（明天（9月2日）），避免与绝对日期混排时歧义。"""
     now = datetime(2026, 9, 1, 8, 0, tzinfo=TZ)  # 2026-09-01
     periods = rqf.resolve_river_forecast_periods("未来三天泃河有雨吗？", now)
-    assert [p.label for p in periods] == ["明天", "后天", "9月4日"]
+    assert [p.label for p in periods] == ["明天（9月2日）", "后天（9月3日）", "9月4日"]
     assert all("未来第" not in p.label for p in periods)
 
-    # 未来 2 天 → 明天/后天
+    # 未来 2 天 → 明天（9月2日）/后天（9月3日）
     two = rqf.resolve_river_forecast_periods("未来两天泃河有雨吗？", now)
-    assert [p.label for p in two] == ["明天", "后天"]
+    assert [p.label for p in two] == ["明天（9月2日）", "后天（9月3日）"]
 
-    # 未来 5 天 → 明天/后天/9月4日/9月5日/9月6日
+    # 未来 5 天 → 明天（9月2日）/后天（9月3日）/9月4日/9月5日/9月6日
     five = rqf.resolve_river_forecast_periods("未来五天泃河有雨吗？", now)
-    assert [p.label for p in five] == ["明天", "后天", "9月4日", "9月5日", "9月6日"]
+    assert [p.label for p in five] == [
+        "明天（9月2日）", "后天（9月3日）", "9月4日", "9月5日", "9月6日",
+    ]
 
 
 @pytest.mark.parametrize(
