@@ -139,7 +139,7 @@ This project uses the superpowers plugin for disciplined development:
 
 ### 用户/区局归属（region，2026-09-01）
 
-`hh_user_account` 有 `region VARCHAR(32)` 列（10 区局 pinyin key：xiqing/dongli/jinnan/beichen/binhai/ninghe/jinghai/jizhou/wuqing/baodi，非区局账号 NULL），与 role 正交（区局账号都是 forecaster）。**前端按它区分登录后页面**：① Chainlit 登录 → `User.metadata={role, region, region_label}` 随 JWT（`create_jwt` 编码 `User.to_dict()`），`display_name` 有区局显示区局中文名；② MCP `rest_api` `/api/v1/auth/login` 响应 data 同款字段。两服务（`chain_gzt.py` + `rest_api.py`）独立进程操作同一张表，`REGION_LABELS`/`_validate_region`/`_region_payload` 各自维护**必须同值**（`test_user_region.py`/`test_rest_api_region.py` 分别锁定字面量）。建表 DDL 两侧都幂等 `ALTER TABLE ADD COLUMN IF NOT EXISTS region`。区局建号 SQL（`scripts/create_district_users.sql`，含密码哈希）**已 gitignore 绝不提交**。
+`hh_user_account` 有 `region VARCHAR(32)` 列（10 区局 pinyin key：xiqing/dongli/jinnan/beichen/binhai/ninghe/jinghai/jizhou/wuqing/baodi，非区局账号 NULL），与 role 正交（区局账号都是 forecaster）。**前端区分界面按 `role`（admin/forecaster/external），不按 region**（2026-09-01 用户口径：10 区局账号权限相同、页面相同，region 是预留字段、前端忽略）。登录两路传值：① Chainlit 登录 → `User.metadata={role, region, region_label}` 随 JWT（`create_jwt` 编码 `User.to_dict()`），`display_name` 有区局显示区局中文名；② MCP `rest_api` `/api/v1/auth/login` 响应 data 同款字段。两服务（`chain_gzt.py` + `rest_api.py`）独立进程操作同一张表，`REGION_LABELS`/`_validate_region`/`_region_payload` 各自维护**必须同值**（`test_user_region.py`/`test_rest_api_region.py` 分别锁定字面量）。建表 DDL 两侧都幂等 `ALTER TABLE ADD COLUMN IF NOT EXISTS region`。区局建号 SQL（`scripts/create_district_users.sql`，含密码哈希）**已 gitignore 绝不提交**。
 
 - **依赖方向**：`chain_gzt` → `qa_http_api`（单向注入）。`qa_http_api.py` 禁止 import `chain_gzt`。
 - **核心**：`init_http_context` 伪造 HTTP 会话 + `CapturingEmitter` 拦截输出。`message_orchestrator.py` 零改动。

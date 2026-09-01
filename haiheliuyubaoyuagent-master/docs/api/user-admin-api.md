@@ -322,11 +322,16 @@ MCP 服务采用 **HTTP Basic Auth**：
 
 - `region` 与 `role` 正交：区局账号 `role` 均为 `forecaster`；非区局账号（admin、普通外部用户）`region` 为 `null`。
 - 非法 `region` 值（非上表 10 个 key）接口返回 `400`。
+- **当前为预留字段**（2026-09-01 口径）：区局账号权限/页面相同，前端按 `role` 区分界面（见 5.4），`region` 可忽略。
 
-### 5.4 前端按用户区分页面（登录后取 region）
+### 5.4 前端按用户区分页面（登录后取 role）
+
+**口径（2026-09-01 确认）：前端按 `role` 区分登录后界面，不按 region。** 10 个区局账号
+权限相同、页面相同（都是 `forecaster`），无需彼此区分；`region` 字段保留但前端可忽略
+（为未来可能的区局级扩展预留，当前不影响任何逻辑）。
 
 - **走 Chainlit 登录页（推荐，同域部署）**：登录成功后 Chainlit 签发 JWT（cookie）。
-  `region`/`region_label` 在 JWT payload 的 `metadata` 里——前端 base64 解码 JWT 第二段即可读：
+  `role` 在 JWT payload 的 `metadata` 里——前端 base64 解码 JWT 第二段即可读：
   ```json
   {
     "identifier": "xiqing",
@@ -335,10 +340,10 @@ MCP 服务采用 **HTTP Basic Auth**：
     "exp": ..., "iat": ...
   }
   ```
-  非区局账号 `metadata.region` 为 `null`，`display_name` 回退为角色中文名（如"管理员"）。
+  界面切换读 `metadata.role`（`admin / forecaster / external`）即可；`region` 忽略。
 - **走 MCP 服务登录接口**：`POST /api/v1/auth/login` 响应 `data` 直接含
-  `region`/`region_label`（见 4.2.1）。
-- 前端据此渲染对应区局的页面；`region` 为 `null` 时按通用/管理页处理。
+  `role`/`role_label`（见 4.2.1）。
+- 界面分类建议：`admin` → 管理页（含用户管理）；`forecaster` → 业务页；`external` → 普通页。
 
 ## 6. 错误码
 

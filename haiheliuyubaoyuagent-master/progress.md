@@ -358,3 +358,14 @@
 - **全量回归**：MCP **632 passed / 20 skipped**（623+9）；chainlitexam **949+174 passed /
   5 skipped / 0 failed**（939+10）。
 - 待办：提交推送（显式路径，不含 AgentWeb.zip、不含 create_district_users.sql）。
+
+### R24 区局界面区分口径修正：按 role 不按 region
+
+- 用户澄清（2026-09-01）：10 个区局账号**不用区分 region**——权限相同、登录后页面相同；
+  真正要的只是"前端登录后按用户类别显示不同界面"。确认方案：前端按现有 `role`
+  （admin/forecaster/external）切界面（两条登录路径本就带 role，零代码改动），
+  **region 列保留但前端忽略**（nullable 无害、为未来区局级扩展预留）。
+- **改动（纯文档口径，无代码）**：`docs/api/user-admin-api.md` 5.4 改为"按 role 区分页面"
+  （含界面分类建议 admin→管理页/forecaster→业务页/external→普通页）、5.3 标注 region 为
+  预留字段；CLAUDE.md region 条目同步口径。
+- 代码不动：R22 已交付的 region 字段/接口/测试保持，role 两条登录路径早已传给前端。

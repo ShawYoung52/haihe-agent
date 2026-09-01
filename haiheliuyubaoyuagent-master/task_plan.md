@@ -111,6 +111,10 @@
       两服务 DDL 幂等补列、用户管理接口全接线；SQL 建号脚本（gitignored）同步；
       user-admin-api.md 加 5.3/5.4。测试 10+9 条。全量 MCP 632 / chainlitexam 949+174 全绿。
 - [x] R23 提交推送（显式路径，不含 AgentWeb.zip、不含 create_district_users.sql）——e483bd8 已推送。
+- [x] R24 口径修正（用户澄清：区局账号不用区分 region，权限/页面都一样）：前端按现有 role
+      切界面（零代码改动），region 列保留但前端忽略。纯文档口径更新（user-admin-api.md 5.3/5.4、
+      CLAUDE.md、progress.md）。
+- [ ] R25 提交推送。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 
