@@ -241,9 +241,10 @@ def resolve_river_forecast_periods(
         return [ForecastPeriod("今天晚上", start, day_start + timedelta(days=1))]
 
     if future_days is not None:
+        today = current.date()
         return [
-            _day_period(current.date() + timedelta(days=offset), f"未来第{offset}天")
-            for offset in range(1, future_days + 1)
+            _day_period(day, _relative_day_label(day, today))
+            for day in (today + timedelta(days=offset) for offset in range(1, future_days + 1))
         ]
 
     if "后天" in query:
@@ -256,6 +257,20 @@ def resolve_river_forecast_periods(
 def _day_period(day: date, label: str) -> ForecastPeriod:
     start = datetime.combine(day, time.min, tzinfo=TIANJIN_TIMEZONE)
     return ForecastPeriod(label, start, start + timedelta(days=1))
+
+
+def _relative_day_label(day: date, today: date) -> str:
+    """未来第 N 天的业务化时段标签：明天/后天/具体日期（M月D日）。
+
+    与滚动预报 _time_of_day_label 同口径（今天/明天/后天/M月D日）。不用"未来第N天"——
+    2026-09-01 用户口径：河流预报要像"天气怎么样"类问题那样说明天/后天/具体日期。
+    """
+    delta = (day - today).days
+    if delta == 1:
+        return "明天"
+    if delta == 2:
+        return "后天"
+    return f"{day.month}月{day.day}日"
 
 
 def _as_tianjin_time(value: datetime) -> datetime:

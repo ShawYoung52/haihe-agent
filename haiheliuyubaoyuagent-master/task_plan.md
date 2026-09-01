@@ -71,6 +71,10 @@
       （除非用户明确问到）；haihe_mcp_tools docstring 同步。测试 test_current_weather_districts.py（6 条，
       含 code-review 加固：累计缺测回退小时雨量排序）+ test_prompts.py 双轨锁 1 条。
       全量 MCP 612 passed / chainlitexam 1094 passed/5 skipped/0 failed。
+- [x] R13 河流预报时段标签"未来第N天"→明天/后天/具体日期（用户："什么未来第1天都是错的，要像天气怎么样
+      那样回答"）。`resolve_river_forecast_periods` future_days 分支改用 `_relative_day_label`
+      （明天/后天/M月D日，同滚动预报 _time_of_day_label 口径）。测试 1 条红绿锁定。
+      全量 MCP 613 passed / chainlitexam 1094 passed/5 skipped/0 failed。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

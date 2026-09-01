@@ -227,3 +227,22 @@
   属既有结构缺口。
 - **全量回归**：MCP **612 passed / 20 skipped**（+6）；chainlitexam **1094 passed / 5 skipped / 0 failed**。
 - diff 敏感信息扫描 CLEAN。待办：提交推送。
+
+## 2026-09-01（R13：河流预报时段标签"未来第N天"→明天/后天/日期）
+
+用户复测"未来三天泃河有雨吗"：答案数据没问题，但时段标签写"未来第1天/第2天/第3天"——
+"意思是你没按照天气怎么样那些问题回答啊，什么未来第1天都是错的啊，不要这样描述啊"。
+
+- **根因**：非数据问题，是标签文案。`resolve_river_forecast_periods`（river_query_forecast.py:243-247）
+  把"未来N天"分支每天标成 `f"未来第{offset}天"`；前端 `build_river_forecast_answer` 直接渲染
+  `period.label`，于是结论与【逐时段降雨预报】表都出现"未来第N天"。项目里"天气怎么样"类问题的
+  惯例是 `rolling_forecast_service._time_of_day_label`：今天/明天/后天/M月D日。
+- **修**：新增 `_relative_day_label(day, today)`（明天/后天/M月D日），future_days 分支改用它。
+  纯函数 offset→标签映射，不触碰取数/窗口逻辑。前端无需改（渲染 label 原样）。
+  修复后"未来三天泃河有雨吗"结论 = "预计明天、后天、9月4日泃河河道两侧约5公里沿线范围无明显降雨"，
+  表格行 = 明天/后天/9月4日。
+- **测试（TDD 红→绿）**：`test_river_query_forecast.py::test_future_days_labels_are_friendly_dates_not_future_day_n`
+  （未来3天→明天/后天/9月4日；未来2天→明天/后天；未来5天→明天/后天/9月4/5/6日；断言不含"未来第"）。
+  修复前红、修复后绿；既有"未来三天"测试只锁窗口数量/日期连续性，不锁标签，不受影响。
+- **全量回归**：MCP **613 passed / 20 skipped**；chainlitexam **1094 passed / 5 skipped / 0 failed**。
+- 纯标签微改（1 纯函数 + 1 分支），范围太轻未启动独立 review agent，自行复核无副作用面。
