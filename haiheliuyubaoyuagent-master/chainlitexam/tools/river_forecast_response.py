@@ -7,9 +7,21 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
+from .rolling_forecast_response import _region_hazard_table
+
 _NO_RAIN = "无明显降雨"
+
+# 数据来源里的起报时次括号（如"滚动预报网格（cycle=20260901080000）"）——
+# 2026-09-01 用户口径：展示时去掉括号内容，只留数据源名。MCP data_source 契约保留 cycle。
+_CYCLE_SUFFIX_RE = re.compile(r"（cycle=[^）]*）")
+
+
+def _strip_data_source_cycle(data_source: Any) -> str:
+    """剥掉数据来源里的（cycle=…）起报时次括号，只留数据源名。"""
+    return _CYCLE_SUFFIX_RE.sub("", str(data_source or "")).strip()
 
 
 def _fmt_rain(value: Any) -> str:
@@ -107,6 +119,11 @@ def build_river_forecast_answer(user_text: str, result: Any) -> str | None:
     )
     sections = [f"【核心结论】\n{_build_core_conclusion(result, periods)}"]
     sections.append(_build_period_table(periods))
+    # 灾害风险表（MCP 走廊路径附 region_hazards）：与"天气怎么样"区域风险表同渲染器，
+    # 排在数据来源之前；无 region_hazards 时 _region_hazard_table 返回空串自动省略。
+    risk_section = _region_hazard_table(result.get("region_hazards"))
+    if risk_section:
+        sections.append(risk_section)
     if data_source:
-        sections.append(f"数据来源：{data_source}。")
+        sections.append(f"数据来源：{_strip_data_source_cycle(data_source)}。")
     return "\n\n".join(sections).strip()

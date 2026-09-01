@@ -391,6 +391,97 @@ def test_bare_luanhe_uses_corridor_when_found(monkeypatch):
     assert calls == []
 
 
+# —— 2026-09-01 用户口径：河流预报答案要像"天气怎么样"那样带灾害风险（走廊代表点查隐患+风险等级）——
+
+
+def _fake_rfs(hazards=None, raise_exc=False, captured=None):
+    """伪造 rolling_forecast_service，供走廊风险附着测试（免触发真实隐患/风险接口）。"""
+
+    class _Fake:
+        @staticmethod
+        def _risk_fcst_times_from_window(window, now=None):
+            if captured is not None:
+                captured["window"] = window
+                captured["now"] = now
+            return ["SENTINEL_FCST"]
+
+        @staticmethod
+        def _query_region_hazards(lon, lat, fcst_times):
+            if captured is not None:
+                captured["lon"], captured["lat"], captured["fcst"] = lon, lat, fcst_times
+            if raise_exc:
+                raise RuntimeError("hazard iface down")
+            return hazards
+
+    return _Fake
+
+
+def _stub_corridor_path(monkeypatch):
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "滚动预报网格"))
+    monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
+
+
+def test_corridor_attaches_region_hazards(monkeypatch):
+    captured = {}
+    hazards = {
+        "total_found": 3,
+        "radius_km": 25.0,
+        "categories": [{"key": "zxhl", "label": "中小河流", "kind": "river", "count": 3}],
+        "hazards_available": True,
+        "risk_levels": {},
+        "risk_levels_available": True,
+    }
+    _stub_corridor_path(monkeypatch)
+    monkeypatch.setattr(rqf, "_corridor_representative_point", lambda c: (116.5, 40.2))
+    monkeypatch.setattr(
+        rqf, "_load_rolling_forecast_service", lambda: _fake_rfs(hazards, captured=captured)
+    )
+
+    result = rqf.query_river_rainfall_forecast_core("未来三天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["status"] == "ok"
+    entry = result["region_hazards"][0]
+    assert entry["region"] == "泃河"
+    assert entry["region_display"] == "泃河沿线"
+    assert entry["categories"][0]["count"] == 3
+    # 代表点与逐日起报换算结果被透传给隐患查询
+    assert captured["lon"] == 116.5 and captured["lat"] == 40.2
+    assert captured["fcst"] == ["SENTINEL_FCST"]
+    # 日历窗口由时段换算：起日 = 第一时段日期、天数 = 时段数
+    assert captured["window"]["forecast_start_date"] == "2026-08-28"
+    assert captured["window"]["forecast_days"] == 3
+    assert captured["now"] is FIXED_NOW
+
+
+def test_corridor_hazard_failure_degrades_silently(monkeypatch):
+    """隐患/风险接口失败绝不阻断降雨回答——静默降级，不附 region_hazards。"""
+    _stub_corridor_path(monkeypatch)
+    monkeypatch.setattr(rqf, "_corridor_representative_point", lambda c: (116.5, 40.2))
+    monkeypatch.setattr(rqf, "_load_rolling_forecast_service", lambda: _fake_rfs(raise_exc=True))
+
+    result = rqf.query_river_rainfall_forecast_core("明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["status"] == "ok"
+    assert "region_hazards" not in result
+
+
+def test_corridor_empty_hazards_not_attached(monkeypatch):
+    _stub_corridor_path(monkeypatch)
+    monkeypatch.setattr(rqf, "_corridor_representative_point", lambda c: (116.5, 40.2))
+    monkeypatch.setattr(rqf, "_load_rolling_forecast_service", lambda: _fake_rfs({}))
+
+    result = rqf.query_river_rainfall_forecast_core("明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW)
+
+    assert "region_hazards" not in result
+
+
+def test_corridor_representative_point_handles_dummy_geometry():
+    """测试环境无 osgeo，dummy 几何（object()）触发异常应优雅返回 None。"""
+    corridor = rqf.RiverCorridor("泃河", "泃河", 4326, object(), 5.0)
+    assert rqf._corridor_representative_point(corridor) is None
+
+
 def test_tributary_corridor_miss_falls_back_to_parent_zone(monkeypatch):
     """泃河河道走廊未命中时回退所属北三河九分区（领导问题清单标黄："明天泃河有雨吗"）。
 

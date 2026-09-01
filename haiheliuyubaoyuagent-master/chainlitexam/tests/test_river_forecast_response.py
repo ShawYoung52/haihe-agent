@@ -85,3 +85,42 @@ def test_nan_and_garbage_rainfall_render_dash():
     period = _period("明天", True, float("nan"), "abc")
     out = build_river_forecast_answer("明天泃河有雨吗？", _result([period]))
     assert "| 明天 | — | — | 有降雨 |" in out
+
+
+def test_data_source_cycle_suffix_stripped():
+    """2026-09-01 用户口径：数据来源"滚动预报网格"后面不要带（cycle=…）括号内容。"""
+    result = _result([_period("明天", False, 0.0, 0.0, source="滚动预报网格（cycle=20260901080000）")])
+    out = build_river_forecast_answer("明天泃河有雨吗？", result)
+    assert "数据来源：滚动预报网格。" in out
+    assert "cycle=" not in out
+
+
+def test_data_source_without_cycle_unchanged():
+    out = build_river_forecast_answer("明天泃河有雨吗？", _result([_period("明天", False, 0.0, 0.0, source="ECMWF AIFS")]))
+    assert "数据来源：ECMWF AIFS。" in out
+
+
+def test_region_hazards_rendered_as_risk_table():
+    """河流预报附 region_hazards 时，渲染【沿线灾害风险】表（与"天气怎么样"区域风险表同渲染器）。"""
+    result = _result([_period("明天", False, 0.0, 0.0)])
+    result["region_hazards"] = [
+        {
+            "region": "泃河",
+            "region_display": "泃河沿线",
+            "categories": [{"key": "zxhl", "label": "中小河流", "kind": "river", "count": 3}],
+            "hazards_available": True,
+            "risk_levels": {"zxhl": {"levels": {"三级": 2}}},
+            "risk_levels_available": True,
+        }
+    ]
+    out = build_river_forecast_answer("明天泃河有雨吗？", result)
+    assert "【泃河沿线灾害风险】" in out
+    assert "中小河流" in out
+    assert "3 处" in out
+    # 风险表排在数据来源之前
+    assert out.index("灾害风险") < out.index("数据来源")
+
+
+def test_no_region_hazards_no_risk_section():
+    out = build_river_forecast_answer("明天泃河有雨吗？", _result([_period("明天", False, 0.0, 0.0)]))
+    assert "灾害风险" not in out

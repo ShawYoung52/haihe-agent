@@ -365,7 +365,70 @@ def query_river_rainfall_forecast_core(
     except RiverDatabaseError as exc:
         return _query_error("database_error", target, str(exc))
 
-    return _query_corridor_periods(corridor, periods, ec_output_path)
+    return _query_corridor_periods(corridor, periods, ec_output_path, now=now)
+
+
+def _load_rolling_forecast_service():
+    """惰性加载 rolling_forecast_service（避免模块顶层触发重依赖链/循环），供测试 monkeypatch。"""
+    import rolling_forecast_service as rfs
+
+    return rfs
+
+
+def _corridor_representative_point(corridor) -> tuple[float, float] | None:
+    """走廊几何质心（4326）作为灾害隐患/风险查询的代表点；几何异常返回 None。
+
+    走廊是河道 + 缓冲的多边形，质心落在多边形内部，可代表该河段的区域位置。
+    测试环境无 osgeo 时（dummy 几何）异常被吞掉返回 None，风险附着静默跳过。
+    """
+    try:
+        centroid = corridor.geometry.Centroid()
+        if centroid is None or centroid.IsEmpty():
+            return None
+        return float(centroid.GetX()), float(centroid.GetY())
+    except Exception:
+        return None
+
+
+def _river_risk_calendar_window(periods) -> dict:
+    """由河流预报时段构造风险起报换算所需的最小日历窗口（复用滚动预报逐日逻辑）。"""
+    return {
+        "forecast_start_date": periods[0].target_start.date().isoformat(),
+        "forecast_days": len(periods),
+    }
+
+
+def _attach_corridor_region_hazards(result: dict, corridor, periods, now=None) -> None:
+    """按走廊代表点查灾害隐患+风险等级，附 result["region_hazards"]；失败静默降级。
+
+    2026-09-01 用户口径：河流预报回答要像"天气怎么样"那样带灾害风险。复用滚动预报
+    `_query_region_hazards`（含逐日风险起报合并），与区域天气同渲染口径。隐患/风险
+    是增强——任何失败都不得阻断降雨回答。仅走廊路径（具体河段）附着；九分区大区域
+    单点+半径代表性弱，暂不在本路径附着。
+    """
+    if not periods:
+        return
+    point = _corridor_representative_point(corridor)
+    if point is None:
+        return
+    lon, lat = point
+    try:
+        rfs = _load_rolling_forecast_service()
+        risk_fcst_times = rfs._risk_fcst_times_from_window(
+            _river_risk_calendar_window(periods), now
+        )
+        hazards = rfs._query_region_hazards(lon, lat, risk_fcst_times)
+    except Exception:
+        return
+    if not isinstance(hazards, dict) or not hazards:
+        return
+    result["region_hazards"] = [
+        {
+            "region": corridor.river_name,
+            "region_display": f"{corridor.matched_name}沿线",
+            **hazards,
+        }
+    ]
 
 
 def _is_explicit_river_system_request(user_query: str, target: str) -> bool:
@@ -382,6 +445,7 @@ def _query_corridor_periods(
     corridor: RiverCorridor,
     periods: list[ForecastPeriod],
     ec_output_path: str,
+    now: datetime | None = None,
 ) -> dict:
     period_results = []
     for period in periods:
@@ -407,7 +471,7 @@ def _query_corridor_periods(
             return _query_error("calculation_error", corridor.river_name, str(exc))
         period_results.append(_build_corridor_period(period, data_source, stats))
 
-    return {
+    result = {
         "status": "ok",
         "river_name": corridor.river_name,
         "scope_type": "river_corridor",
@@ -415,6 +479,8 @@ def _query_corridor_periods(
         "buffer_km": corridor.buffer_km,
         "periods": period_results,
     }
+    _attach_corridor_region_hazards(result, corridor, periods, now=now)
+    return result
 
 
 def _query_river_system_periods(

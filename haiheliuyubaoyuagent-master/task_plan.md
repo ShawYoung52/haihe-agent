@@ -84,7 +84,19 @@
 - [x] R15 河流预报时段标签带具体日期（用户确认"带个具体日期也是比较好的"）：`_relative_day_label`
       明天→明天（M月D日）、后天→后天（M月D日）、≥3天仍 M月D日；单日分支保留短标签。测试断言同步。
       全量 MCP 613 passed。
-- [ ] R16 提交推送（显式路径，不含 AgentWeb.zip）。
+- [x] R16 提交推送（显式路径，不含 AgentWeb.zip）——d08e6f5 已推送。
+- [x] R17 河流预报数据来源去括号（用户："数据来源滚动预报网格后面的不要加括号里的内容"）：
+      前端 `river_forecast_response._strip_data_source_cycle` 剥 `（cycle=…）` 起报时次括号，
+      只留数据源名；MCP data_source 契约保留 cycle 不动。测试 2 条。
+- [x] R18 河流预报加灾害风险表（用户："你这个回答不像天气怎么样那些啊，风险那些东西也没加进来"）：
+      MCP `river_query_forecast` 走廊路径经 `_attach_corridor_region_hazards` 附着 region_hazards
+      （走廊几何 Centroid 代表点 → `rolling_forecast_service._risk_fcst_times_from_window` +
+      `_query_region_hazards`，失败静默降级不阻断降雨回答；`_load_rolling_forecast_service` 惰性加载
+      供测试 monkeypatch，osgeo 在测试 venv 不可用时 dummy 几何优雅返回 None）；
+      前端 `river_forecast_response.build_river_forecast_answer` 复用
+      `rolling_forecast_response._region_hazard_table` 渲染【沿线灾害风险】表（排在数据来源之前）。
+      测试 MCP 4 条 + 前端 2 条。全量 MCP 617 passed / chainlitexam 938+174 passed/5 skipped/0 failed。
+- [x] R19 提交推送（显式路径，不含 AgentWeb.zip）。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

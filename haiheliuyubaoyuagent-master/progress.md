@@ -284,3 +284,27 @@
   （未来三天→明天（9月2日）/后天（9月3日）/9月4日 等）。
 - **全量回归**：MCP **613 passed / 20 skipped**（改既有测试，数不变）；chainlitexam 不受影响。
 - 待办：提交推送（显式路径，不含 AgentWeb.zip）。
+
+### R17/R18 河流预报数据来源去括号 + 走廊灾害风险表
+
+- 用户复测"未来三天泃河有雨吗"输出，提两条口径：
+  ① 数据来源行不要"滚动预报网格"后面的 `（cycle=…）` 括号内容；
+  ② 河流预报回答不像"天气怎么样"——风险内容（灾害风险表）没加进来。
+- **① 去括号（前端展示层）**：`river_forecast_response._strip_data_source_cycle` 用
+  `_CYCLE_SUFFIX_RE`（`（cycle=[^）]*）`）剥起报时次括号，只留数据源名。MCP data_source 契约
+  保留 cycle 不动（`test_final_river_source_contract.py` 锁定必须含 cycle），所以只能在展示层剥。
+- **② 走廊灾害风险表**：MCP `river_query_forecast._attach_corridor_region_hazards`——走廊几何
+  `Centroid()` 取代表点（4326，免改 SQL）→ `rolling_forecast_service._risk_fcst_times_from_window(
+  _river_risk_calendar_window(periods), now)` + `_query_region_hazards`，结果以
+  `region_display="X沿线"` 附 `result["region_hazards"]`。`_load_rolling_forecast_service` 惰性
+  import（防模块顶层重依赖/循环，供测试 monkeypatch）；osgeo 在测试 venv 不可用，测试用 dummy
+  几何（object()）走优雅降级返回 None。任何异常/空结果静默降级，绝不阻断降雨回答。
+  前端 `build_river_forecast_answer` 复用 `rolling_forecast_response._region_hazard_table`
+  渲染【沿线灾害风险】表（灾害类型×隐患点数量×本次风险等级×风险研判×防范建议），排在数据来源之前。
+  九分区路径（大区域单点代表性弱）暂不附着，留待后续。
+- **测试（TDD 红→绿）**：前端 `test_river_forecast_response.py` +4（去括号/无括号不变/风险表渲染
+  且排数据来源前/无 region_hazards 不出表）；MCP `test_river_query_forecast.py` +4（附着含
+  region_display 与 categories/失败静默降级/空结果不附着/dummy 几何降级）。
+- **全量回归**：MCP **617 passed / 20 skipped**（613+4）；chainlitexam **938+174 passed /
+  5 skipped / 0 failed**（1108+4）。
+- 待办：提交推送（显式路径，不含 AgentWeb.zip）。
