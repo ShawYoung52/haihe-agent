@@ -84,7 +84,8 @@ MCP 服务采用 **HTTP Basic Auth**：
   {
     "username": "zhangsan",
     "password": "123456",
-    "role": "external"
+    "role": "external",
+    "region": ""
   }
   ```
 - **字段说明**：
@@ -93,6 +94,7 @@ MCP 服务采用 **HTTP Basic Auth**：
   | `username` | string | 是 | 用户名，1~64 字符 |
   | `password` | string | 是 | 密码 |
   | `role` | string | 否 | `admin / forecaster / external`，默认 `external`；此处传 `admin` 会报错 |
+  | `region` | string | 否 | 所属区局（见 5.3），留空表示非区局账号 |
 - **成功响应**：
   ```json
   {
@@ -101,6 +103,8 @@ MCP 服务采用 **HTTP Basic Auth**：
       "username": "zhangsan",
       "role": "external",
       "role_label": "外部用户",
+      "region": null,
+      "region_label": null,
       "status": "active"
     },
     "message": "success"
@@ -121,9 +125,21 @@ MCP 服务采用 **HTTP Basic Auth**：
         "username": "admin",
         "role": "admin",
         "role_label": "管理员",
+        "region": null,
+        "region_label": null,
         "status": "active",
         "created_at": "2026-07-01 10:00:00",
         "updated_at": "2026-07-05 12:00:00"
+      },
+      {
+        "username": "xiqing",
+        "role": "forecaster",
+        "role_label": "预报员",
+        "region": "xiqing",
+        "region_label": "西青",
+        "status": "active",
+        "created_at": "2026-09-01 10:00:00",
+        "updated_at": "2026-09-01 10:00:00"
       }
     ],
     "message": "success"
@@ -137,7 +153,7 @@ MCP 服务采用 **HTTP Basic Auth**：
 - **权限**：仅管理员
 - **请求体**：同 `4.1.1`，但 `role` 可以传 `admin`。
 - **说明**：
-  - 若用户名已存在，会覆盖原密码、角色、状态为 `active`。
+  - 若用户名已存在，会覆盖原密码、角色、区局（region）、状态为 `active`。
   - 可用于“创建用户”或“强制修改用户信息”。
 
 #### 4.1.4 修改用户状态
@@ -206,11 +222,14 @@ MCP 服务采用 **HTTP Basic Auth**：
       "username": "admin",
       "role": "admin",
       "role_label": "管理员",
+      "region": null,
+      "region_label": null,
       "status": "active"
     },
     "message": "success"
   }
   ```
+  区局账号示例：`"username": "xiqing"` 时 `region` 为 `"xiqing"`、`region_label` 为 `"西青"`。
 - **说明**：该接口仅做账号密码校验，不返回 Token。前端若对接 MCP 服务，管理接口需使用 Basic Auth。
 
 #### 4.2.2 用户注册
@@ -290,6 +309,36 @@ MCP 服务采用 **HTTP Basic Auth**：
 |--------|------|
 | `active` | 启用，可正常登录 |
 | `disabled` | 禁用，无法登录 |
+
+### 5.3 区局（region）
+
+| region 值 | region_label | region 值 | region_label |
+|-----------|--------------|-----------|--------------|
+| `xiqing` | 西青 | `ninghe` | 宁河 |
+| `dongli` | 东丽 | `jinghai` | 静海 |
+| `jinnan` | 津南 | `jizhou` | 蓟州 |
+| `beichen` | 北辰 | `wuqing` | 武清 |
+| `binhai` | 滨海 | `baodi` | 宝坻 |
+
+- `region` 与 `role` 正交：区局账号 `role` 均为 `forecaster`；非区局账号（admin、普通外部用户）`region` 为 `null`。
+- 非法 `region` 值（非上表 10 个 key）接口返回 `400`。
+
+### 5.4 前端按用户区分页面（登录后取 region）
+
+- **走 Chainlit 登录页（推荐，同域部署）**：登录成功后 Chainlit 签发 JWT（cookie）。
+  `region`/`region_label` 在 JWT payload 的 `metadata` 里——前端 base64 解码 JWT 第二段即可读：
+  ```json
+  {
+    "identifier": "xiqing",
+    "display_name": "西青",
+    "metadata": {"role": "forecaster", "region": "xiqing", "region_label": "西青"},
+    "exp": ..., "iat": ...
+  }
+  ```
+  非区局账号 `metadata.region` 为 `null`，`display_name` 回退为角色中文名（如"管理员"）。
+- **走 MCP 服务登录接口**：`POST /api/v1/auth/login` 响应 `data` 直接含
+  `region`/`region_label`（见 4.2.1）。
+- 前端据此渲染对应区局的页面；`region` 为 `null` 时按通用/管理页处理。
 
 ## 6. 错误码
 

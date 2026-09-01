@@ -328,3 +328,33 @@
 - **全量回归**：MCP **623 passed / 20 skipped**（617+6）；chainlitexam **939+174 passed /
   5 skipped / 0 failed**（938+1）。
 - 待办：提交推送（显式路径，不含 AgentWeb.zip）。
+
+### R22 区局账号 region 归属字段（登录传前端区分页面）
+
+- 用户口径：之前建的 10 个区局账号（西青/东丽/津南/北辰/滨海/宁河/静海/蓟州/武清/宝坻，
+  role 都是 forecaster）需要一个字段传给前端，前端按它区分登录后不同用户展示的页面。
+- **设计**：`hh_user_account` 加 `region VARCHAR(32)` 列（pinyin key，非区局账号 NULL），
+  与 role 正交。登录后两路传给前端：
+  ① Chainlit 登录页 → `User.metadata={role, region, region_label}` 随 JWT（`create_jwt` 编码
+  `User.to_dict()`，已核实），前端解 JWT payload 第二段即可读；`display_name` 有区局显示
+  区局中文名，否则回退角色名。② MCP `rest_api` `/api/v1/auth/login` 响应 data 直接带
+  `region/region_label`（两服务独立进程操作同一张表，契约 parity）。
+- **改动**：
+  - `chain_gzt.py`：`REGION_LABELS`（10 区局 pinyin→中文）、`_ensure_chainlit_auth_tables`
+    幂等 `ALTER TABLE ADD COLUMN IF NOT EXISTS region`、`auth_callback` metadata/display_name、
+    `CreateUserRequest.region`、`_validate_region`（留空或 10 key 之一，非法 400）、
+    `_region_payload`/`_user_payload`、register/create/list/reset-password 四接口接线。
+  - `rest_api.py`：`REGION_LABELS`/`_validate_region`/`_region_payload`（同值独立维护）、
+    `_ensure_auth_tables` 同款 ALTER、login 响应带 region、`RegisterRequest`/
+    `AdminCreateUserRequest.region`、`_upsert_user` 插入/覆盖 region、list/reset-password 返回 region。
+  - `scripts/create_district_users.sql`（gitignored）：加 ALTER + 每账号 region，重跑幂等。
+  - `docs/api/user-admin-api.md`：请求/响应示例加 region、5.3 区局数据字典、5.4 前端取 region
+    两路说明（JWT metadata / MCP login 响应）。
+- **测试（TDD 红→绿）**：`chainlitexam/tests/test_user_region.py` 10 条（标签表/校验/auth_callback
+  metadata 与 display_name/无 region 回退/错误密码仍拒/payload/DDL 补列/register 插 region）；
+  `haihe-weather-analyzer-mcp/tests/test_rest_api_region.py` 9 条（两侧标签表同值/校验/login 带
+  region/无 region 为 None/DDL 补列/upsert 插 region/非法 region 400/list 含 region；重依赖
+  haihe_mcp_tools/tools/networkx 用 try-import 失败才 stub，不污染全量套件）。
+- **全量回归**：MCP **632 passed / 20 skipped**（623+9）；chainlitexam **949+174 passed /
+  5 skipped / 0 failed**（939+10）。
+- 待办：提交推送（显式路径，不含 AgentWeb.zip、不含 create_district_users.sql）。

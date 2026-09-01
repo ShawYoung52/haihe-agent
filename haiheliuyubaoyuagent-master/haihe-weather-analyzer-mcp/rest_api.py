@@ -235,11 +235,42 @@ ROLE_LABELS = {
     "forecaster": "预报员",
     "external": "外部用户",
 }
+# 区局归属（2026-09-01）：与 chainlitexam/chain_gzt.py 的 REGION_LABELS 同值（两服务
+# 独立进程、操作同一张 hh_user_account，常量各自维护）。登录/用户接口返回
+# region/region_label，前端按区局区分登录后展示的页面。
+REGION_LABELS = {
+    "xiqing": "西青",
+    "dongli": "东丽",
+    "jinnan": "津南",
+    "beichen": "北辰",
+    "binhai": "滨海",
+    "ninghe": "宁河",
+    "jinghai": "静海",
+    "jizhou": "蓟州",
+    "wuqing": "武清",
+    "baodi": "宝坻",
+}
 security = HTTPBasic(auto_error=False)
 
 
 def _role_label(role: str) -> str:
     return ROLE_LABELS.get(role, role)
+
+
+def _validate_region(region: str | None) -> str:
+    """区局归属校验：留空（非区局账号）或 REGION_LABELS 十个区局 key 之一。"""
+    normalized = (region or "").strip().lower()
+    if normalized and normalized not in REGION_LABELS:
+        raise HTTPException(400, f"region 只能是：{'、'.join(REGION_LABELS)}，或留空")
+    return normalized
+
+
+def _region_payload(region: str | None) -> dict:
+    normalized = (region or "").strip()
+    return {
+        "region": normalized or None,
+        "region_label": REGION_LABELS.get(normalized) if normalized else None,
+    }
 
 
 def _require_admin(credentials: HTTPBasicCredentials | None = Depends(security)) -> dict:
@@ -271,7 +302,7 @@ def _require_admin(credentials: HTTPBasicCredentials | None = Depends(security))
     return dict(row)
 
 
-def _upsert_user(username: str, password: str, role: str, allow_admin: bool) -> dict:
+def _upsert_user(username: str, password: str, role: str, allow_admin: bool, region: str = "") -> dict:
     """创建或覆盖用户。allow_admin=False 时禁止创建管理员。"""
     if not username or len(username) > 64:
         raise HTTPException(400, "用户名长度应为 1~64 字符")
@@ -282,6 +313,7 @@ def _upsert_user(username: str, password: str, role: str, allow_admin: bool) -> 
         raise HTTPException(400, f"无效角色，可选: {', '.join(sorted(ALLOWED_ROLES))}")
     if not allow_admin and role == "admin":
         raise HTTPException(400, "注册接口不允许创建管理员账号")
+    region = _validate_region(region)
 
     _ensure_auth_tables()
     schema = _schema()
@@ -290,16 +322,17 @@ def _upsert_user(username: str, password: str, role: str, allow_admin: bool) -> 
             with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
                 cur.execute(
                     f"""
-                    INSERT INTO {schema}.hh_user_account (username, password_hash, role, status, updated_at)
-                    VALUES (%s, %s, %s, 'active', NOW())
+                    INSERT INTO {schema}.hh_user_account (username, password_hash, role, status, region, updated_at)
+                    VALUES (%s, %s, %s, 'active', %s, NOW())
                     ON CONFLICT (username) DO UPDATE
                     SET password_hash = EXCLUDED.password_hash,
                         role = EXCLUDED.role,
+                        region = EXCLUDED.region,
                         status = 'active',
                         updated_at = NOW()
-                    RETURNING username, role, status, created_at, updated_at
+                    RETURNING username, role, status, region, created_at, updated_at
                     """,
-                    (username, _hash_password(password), role),
+                    (username, _hash_password(password), role, region or None),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -308,6 +341,7 @@ def _upsert_user(username: str, password: str, role: str, allow_admin: bool) -> 
             "status": row["status"],
             "role": row["role"],
             "role_label": _role_label(row["role"]),
+            **_region_payload(row.get("region")),
         }
     except Exception as e:
         raise HTTPException(500, f"保存用户失败: {e}")
@@ -325,6 +359,11 @@ def _ensure_auth_tables() -> None:
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
     """
+    # 老库幂等补列：区局归属（2026-09-01）
+    migrate = f"""
+    ALTER TABLE {schema}.hh_user_account
+    ADD COLUMN IF NOT EXISTS region VARCHAR(32);
+    """
     seed = f"""
     INSERT INTO {schema}.hh_user_account (username, password_hash, role, status)
     VALUES (%s, %s, %s, 'active')
@@ -333,6 +372,7 @@ def _ensure_auth_tables() -> None:
     with _get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(ddl)
+            cur.execute(migrate)
             cur.execute(seed, (ADMIN_DEFAULT_USERNAME, _hash_password(ADMIN_DEFAULT_PASSWORD), ADMIN_DEFAULT_ROLE))
         conn.commit()
 
@@ -346,12 +386,14 @@ class RegisterRequest(BaseModel):
     username: str = Field(..., description="用户名，1~64 字符")
     password: str = Field(..., description="密码")
     role: str = Field("external", description="角色，默认 external")
+    region: str = Field("", description="所属区局（xiqing/dongli/jinnan/beichen/binhai/ninghe/jinghai/jizhou/wuqing/baodi），留空表示非区局账号")
 
 
 class AdminCreateUserRequest(BaseModel):
     username: str = Field(..., description="用户名，1~64 字符")
     password: str = Field(..., description="密码")
     role: str = Field("external", description="角色，默认 external")
+    region: str = Field("", description="所属区局（xiqing/dongli/jinnan/beichen/binhai/ninghe/jinghai/jizhou/wuqing/baodi），留空表示非区局账号")
 
 
 class StatusUpdateRequest(BaseModel):
@@ -370,7 +412,7 @@ def login(req: LoginRequest):
             with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
                 cur.execute(
                     f"""
-                    SELECT username, password_hash, role, status
+                    SELECT username, password_hash, role, status, region
                     FROM {schema}.hh_user_account
                     WHERE username = %s
                     LIMIT 1
@@ -387,6 +429,8 @@ def login(req: LoginRequest):
                     "data": {
                         "username": row["username"],
                         "role": row["role"],
+                        "role_label": _role_label(row["role"]),
+                        **_region_payload(row.get("region")),
                     },
                     "message": "success",
                 }
@@ -399,7 +443,7 @@ def login(req: LoginRequest):
 @app.post("/api/v1/auth/register", tags=["认证"])
 def register(req: RegisterRequest):
     """注册普通用户，不允许注册管理员；同名用户会覆盖密码/角色并恢复 active。"""
-    result = _upsert_user(req.username, req.password, req.role, allow_admin=False)
+    result = _upsert_user(req.username, req.password, req.role, allow_admin=False, region=req.region)
     return {"code": 200, "data": result, "message": "success"}
 
 
@@ -414,7 +458,7 @@ def list_users(admin: dict = Depends(_require_admin)):
             with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
                 cur.execute(
                     f"""
-                    SELECT username, role, status, created_at, updated_at
+                    SELECT username, role, status, region, created_at, updated_at
                     FROM {schema}.hh_user_account
                     ORDER BY created_at DESC, username ASC
                     """
@@ -426,6 +470,7 @@ def list_users(admin: dict = Depends(_require_admin)):
                         if isinstance(user.get(k), datetime):
                             user[k] = user[k].strftime("%Y-%m-%d %H:%M:%S")
                     user["role_label"] = _role_label(user["role"])
+                    user.update(_region_payload(user.get("region")))
                     users.append(user)
         return {"code": 200, "data": users, "message": "success"}
     except HTTPException:
@@ -437,7 +482,7 @@ def list_users(admin: dict = Depends(_require_admin)):
 @app.post("/api/v1/admin/users", tags=["管理员"])
 def admin_create_user(req: AdminCreateUserRequest, admin: dict = Depends(_require_admin)):
     """管理员创建/覆盖用户，允许创建管理员角色。"""
-    result = _upsert_user(req.username, req.password, req.role, allow_admin=True)
+    result = _upsert_user(req.username, req.password, req.role, allow_admin=True, region=req.region)
     return {"code": 200, "data": result, "message": "success"}
 
 
@@ -496,7 +541,7 @@ def reset_user_password(
                     UPDATE {schema}.hh_user_account
                     SET password_hash = %s, status = 'active', updated_at = NOW()
                     WHERE username = %s
-                    RETURNING username, role, status
+                    RETURNING username, role, status, region
                     """,
                     (_hash_password(req.password), username),
                 )
@@ -511,6 +556,7 @@ def reset_user_password(
                 "status": row["status"],
                 "role": row["role"],
                 "role_label": _role_label(row["role"]),
+                **_region_payload(row.get("region")),
             },
             "message": "success",
         }

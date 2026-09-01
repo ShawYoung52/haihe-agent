@@ -161,6 +161,21 @@ ROLE_LABELS = {
     "forecaster": "预报员",
     "external": "外部用户",
 }
+# 区局归属（2026-09-01 用户口径）：10 区局账号登录后把 region/region_label 放进
+# User.metadata 随 Chainlit JWT 传前端，前端按区局区分登录后展示的页面。
+# 与 role 正交（区局账号 role 都是 forecaster）；非区局账号 region 留 NULL。
+REGION_LABELS = {
+    "xiqing": "西青",
+    "dongli": "东丽",
+    "jinnan": "津南",
+    "beichen": "北辰",
+    "binhai": "滨海",
+    "ninghe": "宁河",
+    "jinghai": "静海",
+    "jizhou": "蓟州",
+    "wuqing": "武清",
+    "baodi": "宝坻",
+}
 
 # 启用 password_auth_callback 时，Chainlit 需要 JWT 密钥。
 # 本地开发默认给一个兜底值；生产环境请改为安全随机值并走环境变量注入。
@@ -233,6 +248,11 @@ def _ensure_chainlit_auth_tables() -> None:
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
     """
+    # 老库幂等补列：区局归属（2026-09-01），新库由下方 CREATE 后的同一条 ALTER 覆盖。
+    migrate = f"""
+    ALTER TABLE {CHAINLIT_DB_SCHEMA}.hh_user_account
+    ADD COLUMN IF NOT EXISTS region VARCHAR(32);
+    """
     seed = f"""
     INSERT INTO {CHAINLIT_DB_SCHEMA}.hh_user_account (username, password_hash, role, status)
     VALUES (%s, %s, %s, 'active')
@@ -242,6 +262,7 @@ def _ensure_chainlit_auth_tables() -> None:
         with conn.cursor() as cur:
             cur.execute(f'CREATE SCHEMA IF NOT EXISTS {CHAINLIT_DB_SCHEMA};')
             cur.execute(ddl)
+            cur.execute(migrate)
             cur.execute(seed, (ADMIN_DEFAULT_USERNAME, _hash_password(ADMIN_DEFAULT_PASSWORD), ADMIN_DEFAULT_ROLE))
         conn.commit()
 
@@ -260,7 +281,7 @@ def auth_callback(username: str, password: str):
             with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
                 cur.execute(
                     f"""
-                    SELECT username, password_hash, role, status
+                    SELECT username, password_hash, role, status, region
                     FROM {CHAINLIT_DB_SCHEMA}.hh_user_account
                     WHERE username = %s
                     LIMIT 1
@@ -272,10 +293,12 @@ def auth_callback(username: str, password: str):
                     return None
                 if row["password_hash"] != _hash_password(password):
                     return None
+                region = (row.get("region") or "").strip() or None
+                region_label = REGION_LABELS.get(region) if region else None
                 return User(
                     identifier=row["username"],
-                    display_name=ROLE_LABELS.get(row["role"], row["username"]),
-                    metadata={"role": row["role"]},
+                    display_name=region_label or ROLE_LABELS.get(row["role"], row["username"]),
+                    metadata={"role": row["role"], "region": region, "region_label": region_label},
                 )
     except Exception as e:
         print(f"[Chainlit] 登录失败: {e}")
@@ -286,6 +309,7 @@ class CreateUserRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=64, description="用户名")
     password: str = Field(..., min_length=1, description="密码")
     role: str = Field("external", description="角色：admin / forecaster / external")
+    region: str = Field("", description="所属区局（xiqing/dongli/jinnan/beichen/binhai/ninghe/jinghai/jizhou/wuqing/baodi），留空表示非区局账号")
 
 
 class UpdateUserStatusRequest(BaseModel):
@@ -323,6 +347,14 @@ def _validate_role(role: str) -> str:
     return normalized
 
 
+def _validate_region(region: str | None) -> str:
+    """区局归属校验：留空（非区局账号）或 REGION_LABELS 十个区局 key 之一。"""
+    normalized = (region or "").strip().lower()
+    if normalized and normalized not in REGION_LABELS:
+        raise HTTPException(400, f"region 只能是：{'、'.join(REGION_LABELS)}，或留空")
+    return normalized
+
+
 def _role_label(role: str) -> str:
     return ROLE_LABELS.get(role, role)
 
@@ -331,9 +363,18 @@ def _role_payload(role: str) -> dict[str, str]:
     return {"role": role, "role_label": _role_label(role)}
 
 
-def _user_payload(username: str, role: str, status: str) -> dict[str, str]:
+def _region_payload(region: str | None) -> dict:
+    normalized = (region or "").strip()
+    return {
+        "region": normalized or None,
+        "region_label": REGION_LABELS.get(normalized) if normalized else None,
+    }
+
+
+def _user_payload(username: str, role: str, status: str, region: str = "") -> dict[str, str]:
     payload = {"username": username, "status": status}
     payload.update(_role_payload(role))
+    payload.update(_region_payload(region))
     return payload
 
 
@@ -356,24 +397,26 @@ def register_user(req: CreateUserRequest):
     _ensure_chainlit_auth_tables()
     username = req.username.strip()
     role = _validate_role(req.role)
+    region = _validate_region(req.region)
     if role == "admin":
         raise HTTPException(400, "注册不允许创建管理员账号")
     with _get_chainlit_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO {CHAINLIT_DB_SCHEMA}.hh_user_account (username, password_hash, role, status)
-                VALUES (%s, %s, %s, 'active')
+                INSERT INTO {CHAINLIT_DB_SCHEMA}.hh_user_account (username, password_hash, role, status, region)
+                VALUES (%s, %s, %s, 'active', %s)
                 ON CONFLICT (username) DO UPDATE
                 SET password_hash = EXCLUDED.password_hash,
                     role = EXCLUDED.role,
+                    region = EXCLUDED.region,
                     status = 'active',
                     updated_at = NOW()
                 """,
-                (username, _hash_password(req.password), role),
+                (username, _hash_password(req.password), role, region or None),
             )
         conn.commit()
-    return {"code": 200, "data": _user_payload(username, role, "active"), "message": "success"}
+    return {"code": 200, "data": _user_payload(username, role, "active", region), "message": "success"}
 
 
 @api_sub_app.post("/admin/users/{username}/reset-password", tags=["用户管理"])
@@ -385,7 +428,7 @@ def reset_user_password(username: str, req: ResetPasswordRequest, request: Reque
         with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT role
+                SELECT role, region
                 FROM {CHAINLIT_DB_SCHEMA}.hh_user_account
                 WHERE username = %s
                 LIMIT 1
@@ -404,7 +447,7 @@ def reset_user_password(username: str, req: ResetPasswordRequest, request: Reque
                 (_hash_password(req.password), normalized_username),
             )
         conn.commit()
-    return {"code": 200, "data": _user_payload(normalized_username, row["role"], "active"), "message": "success"}
+    return {"code": 200, "data": _user_payload(normalized_username, row["role"], "active", row.get("region") or ""), "message": "success"}
 
 
 @api_sub_app.get("/admin/users", tags=["用户管理"])
@@ -415,7 +458,7 @@ def list_users(request: Request):
         with conn.cursor(cursor_factory=__import__("psycopg2.extras", fromlist=["RealDictCursor"]).RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT username, role, status, created_at, updated_at
+                SELECT username, role, status, region, created_at, updated_at
                 FROM {CHAINLIT_DB_SCHEMA}.hh_user_account
                 ORDER BY created_at ASC, username ASC
                 """
@@ -428,6 +471,7 @@ def list_users(request: Request):
                         "username": row["username"],
                         "role": row["role"],
                         **_role_payload(row["role"]),
+                        **_region_payload(row["region"]),
                         "status": row["status"],
                         "created_at": row["created_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("created_at") else None,
                         "updated_at": row["updated_at"].strftime("%Y-%m-%d %H:%M:%S") if row.get("updated_at") else None,
@@ -444,22 +488,24 @@ def create_user(req: CreateUserRequest, request: Request):
     _ensure_chainlit_auth_tables()
     username = req.username.strip()
     role = _validate_role(req.role)
+    region = _validate_region(req.region)
     with _get_chainlit_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                INSERT INTO {CHAINLIT_DB_SCHEMA}.hh_user_account (username, password_hash, role, status)
-                VALUES (%s, %s, %s, 'active')
+                INSERT INTO {CHAINLIT_DB_SCHEMA}.hh_user_account (username, password_hash, role, status, region)
+                VALUES (%s, %s, %s, 'active', %s)
                 ON CONFLICT (username) DO UPDATE
                 SET password_hash = EXCLUDED.password_hash,
                     role = EXCLUDED.role,
+                    region = EXCLUDED.region,
                     status = 'active',
                     updated_at = NOW()
                 """,
-                (username, _hash_password(req.password), role),
+                (username, _hash_password(req.password), role, region or None),
             )
         conn.commit()
-    return {"code": 200, "data": _user_payload(username, role, "active"), "message": "success"}
+    return {"code": 200, "data": _user_payload(username, role, "active", region), "message": "success"}
 
 
 @api_sub_app.patch("/admin/users/{username}/status", tags=["用户管理"])
