@@ -369,3 +369,34 @@
   （含界面分类建议 admin→管理页/forecaster→业务页/external→普通页）、5.3 标注 region 为
   预留字段；CLAUDE.md region 条目同步口径。
 - 代码不动：R22 已交付的 region 字段/接口/测试保持，role 两条登录路径早已传给前端。
+
+### R26/R27 AgentWeb 前端包修复 + 完整构建入仓库
+
+- **R26 折叠回归**：AgentWeb(3) 新包思考过程不自动折叠——包内 `img-zoom-agentweb.js` 是旧版，
+  缺折叠处理 IIFE（后端 chainlit 2.9.6 无 auto_collapse，折叠全靠该 JS 监听
+  `chainlit_reasoning_complete`；前端重建拿了过期 JS）。用仓库版整文件覆盖包内同名文件修复；
+  `public/avatar.svg` 404 系 config 指向后端托管 public、静态包无此文件（无害），已在包内补。
+- **R27 整合入仓库**：把新构建整体同步进 `chainlitexam/AgentWeb/`（本就在 git 管控的上一版构建），
+  与新包全文件/全内容一致（find+diff 校验）；新增 17 个新哈希 bundle + `config/quickQA.json`
+  （快捷问题面板）+ `public/avatar.svg`，保留两个自定义 JS。安全：bundle 内后端 API base 与旧已
+  提交 bundle 一致（既有先例非新增泄露）。已提交 4d2088f。
+
+### R28 天津当前天气实况附【天津市区】灾害风险表
+
+- 用户口径（2026-09-01）：「天津当前天气实况」回答没有灾害风险表（"第一个问题就是还是没风险
+  那些的"），而「天津未来三天天气」（滚动预报）有。根因：实况走 planner+answer LLM 路径，
+  实况工具 payload 无 `region_hazards`，而预报路径 MCP 端附了、前端用 `_region_hazard_table`
+  确定性渲染。
+- **改动（镜像滚动预报）**：MCP `query_current_weather_observation_core` status=="ok" 时
+  `_attach_tianjin_region_hazards`（天津市区代表点 117.14/39.24，`_load_region_hazard_queryer`
+  惰性加载 → `rolling_forecast_service._query_region_hazards(lon,lat,None)` 最近起报+同日回退，
+  任何失败/空静默降级不带键、绝不阻断实况）；chainlitexam `_run_tool_round` 加
+  `elif tool_name=="query_current_weather_observation"` 分支，
+  `current_weather_observation_response.build_current_observation_risk_instruction` 复用
+  `_region_hazard_table` 渲染并附"原样输出"指令，**追加在 `str(observation)` 之后**（无
+  region_hazards 时返回空串、observation_text 零变化）；prompt 双轨加"灾害风险表"规则。
+- 区域范围经用户授权按推荐 = **只天津市区**（与预报一致）。零编造：表内容全来自 MCP 代码统计，
+  answer LLM 只原样透传。
+- 测试：MCP `test_current_weather_region_hazards.py`（5）+ 前端
+  `test_current_observation_risk_table.py`（6）+ `test_prompts.py` 双轨锁（1）。
+  全量 MCP 637 passed/20 skipped、chainlitexam 956+174=1130 passed/5 skipped/0 failed。

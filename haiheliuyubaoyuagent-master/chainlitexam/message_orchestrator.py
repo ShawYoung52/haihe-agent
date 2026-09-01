@@ -62,6 +62,7 @@ from utils.tool_result import _unwrap_tool_result
 from utils import time_source
 from utils.markdown import normalize_markdown_ranges
 from tools.current_weather_observation_response import (
+    build_current_observation_risk_instruction,
     build_current_weather_observation_answer,
     build_current_weather_observation_summary_prompt,
 )
@@ -2992,6 +2993,17 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
                     observation_text = (
                         json.dumps(compact_facts, ensure_ascii=False, default=str)
                         + rolling_forecast_llm_instruction(bundle)
+                    )
+                elif tool_name == "query_current_weather_observation":
+                    # 实况（如"天津当前天气实况"）：payload 已带 region_hazards（MCP 附
+                    # 天津市区灾害风险），在原有观测文本后追加渲染好的风险表 + "原样输出"指令，
+                    # 让 answer 在实况表后、数据来源之前带上与滚动预报一致的灾害风险表。
+                    # 无 region_hazards 时 build_current_observation_risk_instruction 返回空串，
+                    # observation_text 与原先完全一致（str(observation)）。
+                    data = _unwrap_tool_result(observation)
+                    observation_text = (
+                        str(observation or "")
+                        + build_current_observation_risk_instruction(data)
                     )
                 elif tool_name == "query_poi_historical_weather" and answer_chain is not None:
                     # planner 直调历史实况工具（未走 query_decision_weather_for_poi）时，

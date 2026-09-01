@@ -129,6 +129,15 @@
       且仍引用根级两个自定义 JS。折叠处理器保留（grep 验证）。安全：新 bundle 内后端 API base
       （内网 chainlit :8003）与旧已提交 bundle 一致（既有先例，非新增泄露）；无其它内网 IP/密钥。
       已提交推送 4d2088f。
+- [x] R28 天津当前天气实况附【天津市区】灾害风险表（用户："第一个问题就是还是没风险那些的"）：
+      实况走 planner+answer LLM 路径，payload 无 region_hazards。镜像滚动预报——MCP
+      `query_current_weather_observation_core` status==ok 时 `_attach_tianjin_region_hazards`
+      （天津市区 117.14/39.24，`_load_region_hazard_queryer` 惰性→`_query_region_hazards(lon,lat,None)`，
+      失败/空静默降级）；前端 `_run_tool_round` 加实况分支，`build_current_observation_risk_instruction`
+      复用 `_region_hazard_table` 渲染+附"原样输出"指令（追加在 str(observation) 后，无风险时零变化）；
+      prompt 双轨加"灾害风险表"规则。区域范围经用户授权按推荐=只天津市区（同预报）。
+      测试 MCP 5 + 前端 6 + prompt 1。全量 MCP 637 passed/20 skipped、chainlitexam 956+174=1130
+      passed/5 skipped/0 failed。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

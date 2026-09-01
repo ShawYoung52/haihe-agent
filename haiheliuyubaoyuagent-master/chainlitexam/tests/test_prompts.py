@@ -236,3 +236,19 @@ def test_current_weather_observation_tianjin_districts_scope_rule():
         assert "逐区县列出天津各区县" in p
         assert "不要把海河流域、北京、河北列入明细" in p
         assert "只有用户明确问到海河流域、北京或河北时" in p
+
+
+def test_current_weather_observation_risk_table_rule():
+    """2026-09-01 用户口径："天津当前天气实况"也要附【天津市区】灾害风险表（同滚动预报）。
+
+    双轨 prompt 必须引导 answer：工具返回 region_hazards 时把代码生成的灾害风险表
+    原样附在实况明细之后、数据来源之前，不得改动数值/等级、不得新增灾种或点位；
+    未返回 region_hazards 时不输出。
+    """
+    import prompts
+    for p in (prompts.PLANNER_SYSTEM_PROMPT, prompts.WEATHER_ASSISTANT_PROMPT):
+        assert "【天津市区】灾害风险表" in p, "实况规则应引导附【天津市区】灾害风险表"
+        assert "数据来源之前" in p
+        assert "逐字原样使用" in p
+        assert "不得新增灾种或具体点位" in p
+        assert "不输出该表" in p
