@@ -122,6 +122,13 @@
       6 处函数在）。② `public/avatar.svg` 404——config.toml 的 logo/avatar 指向后端托管
       public，静态包无此文件；已在包内补 `public/avatar.svg`（无害 console 噪音，有兜底渲染）。
       包在仓库外 WeChat 目录不进 git；DEPLOY-sim-time.md 加"注意2"防重建再丢折叠逻辑。
+- [x] R27 前端新构建整合入仓库（用户："把新做的整合到我们这个项目中"）：把 AgentWeb(3) 新构建
+      同步进 `chainlitexam/AgentWeb/`（该目录本就在 git 管控、存的是上一版构建）。同步后与新包
+      **全文件/全内容一致**（find + diff 校验）；新增 17 个新哈希 bundle + `config/quickQA.json`
+      （快捷问题面板，8 大类）+ `public/avatar.svg`，删 17 个旧 bundle，index.html 指向新 bundle
+      且仍引用根级两个自定义 JS。折叠处理器保留（grep 验证）。安全：新 bundle 内后端 API base
+      （内网 chainlit :8003）与旧已提交 bundle 一致（既有先例，非新增泄露）；无其它内网 IP/密钥。
+      已提交推送 4d2088f。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

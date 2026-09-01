@@ -51,6 +51,7 @@
    - **注意**：若前端同事重新构建又把 index.html 改回 `./public/*.js` 引用，404 会复现——把引用改回根级即可。
    - **注意2（2026-09-01，AgentWeb(3) 重建又踩）**：前端同事重新打包**拿了旧版自定义 JS**——`img-zoom-agentweb.js` 被换成缺「思考过程自动折叠」IIFE 的旧版（只剩看图器段），导致折叠失效（后端 chainlit 2.9.6 不发 auto_collapse，折叠全靠该 JS 监听 `chainlit_reasoning_complete`）。**修复 = 用仓库 `chainlitexam/AgentWeb/img-zoom-agentweb.js` 整文件覆盖包内同名文件**（免重启、清缓存）。排查口令：`diff 包内文件 chainlitexam/AgentWeb/img-zoom-agentweb.js`，看是否缺 `chainlit_reasoning_complete`/`scanOpenReasoningSteps`。sim-time JS 本次未受影响。**前端同事每次重建后，务必把仓库里这两个自定义 JS 原样回拷。**
    - **avatar.svg 404（无害）**：`.chainlit/config.toml` 的 `logo_file_url`/`default_avatar_file_url` 指向 `avatar.svg`（后端 chainlit 进程托管 UI 时由其 public/ 提供）。AgentWeb 独立静态包没有该文件 → 控制台 404，但 logo/头像有兜底渲染、不影响功能。要消除：把 `chainlitexam/public/avatar.svg` 拷到包内 `public/avatar.svg`（本批已在 AgentWeb(3) 包内建好）；若部署后仍 404，说明浏览器按站点根绝对路径 `/public/avatar.svg` 解析，需把 avatar.svg 放到 Tomcat 根应用的 `public/` 下，或直接忽略此 console 噪音。
+   - **完整构建已入仓库（2026-09-01，R27）**：`chainlitexam/AgentWeb/` 现保存**当前完整前端构建**（assets bundle + index.html + `config/quickQA.json` + `public/avatar.svg` + 两个自定义 JS），与新包 AgentWeb(3) 全内容一致。以后端同事重建后，把新 bundle/index.html/config 同步进该目录、**保留并核对** `img-zoom-agentweb.js`（折叠逻辑）与 `sim-time-agentweb.js` 两自定义文件未被旧版覆盖即可；部署 = 从该目录整体拷到 `webapps/AgentWeb/`。
 
 ---
 
