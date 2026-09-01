@@ -124,3 +124,24 @@ def test_region_hazards_rendered_as_risk_table():
 def test_no_region_hazards_no_risk_section():
     out = build_river_forecast_answer("明天泃河有雨吗？", _result([_period("明天", False, 0.0, 0.0)]))
     assert "灾害风险" not in out
+
+
+def test_river_system_scope_renders_risk_table():
+    """九分区路径结果（scope_type=river_system）附 region_hazards 时同样渲染风险表。"""
+    result = _result([_period("明天", False, 0.0, 0.0)], river="滦河", scope="滦河九分区河系范围")
+    result["scope_type"] = "river_system"
+    result["region_hazards"] = [
+        {
+            "region": "滦河",
+            "region_display": "滦河九分区河系",
+            "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "geologic", "count": 5}],
+            "hazards_available": True,
+            "risk_levels": {"dzzh": {"levels": {"三级": 1}}},
+            "risk_levels_available": True,
+        }
+    ]
+    out = build_river_forecast_answer("未来三天滦河流域降雨", result)
+    assert "【滦河九分区河系灾害风险】" in out
+    assert "地质灾害" in out
+    assert "5 处" in out
+    assert out.index("灾害风险") < out.index("数据来源")

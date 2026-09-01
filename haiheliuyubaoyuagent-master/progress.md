@@ -308,3 +308,23 @@
 - **全量回归**：MCP **617 passed / 20 skipped**（613+4）；chainlitexam **938+174 passed /
   5 skipped / 0 failed**（1108+4）。
 - 待办：提交推送（显式路径，不含 AgentWeb.zip）。
+
+### R20 九分区路径也附灾害风险表
+
+- 用户："九分区这个也得做"（R18 只做走廊路径时留的后续扩展，本轮补上）。
+- **实现（MCP `river_query_forecast.py`）**：新增 `_zone_representative_point(target, config)`——
+  分区边界几何质心（经 `rsf._load_zone_boundaries_from_db("9", target, config)` 加载，TTL/LRU
+  缓存 WKB、每次新建 OGR Geometry，与九分区降雨统计同一几何来源）；任何异常返回 None。
+  新增 `_attach_system_region_hazards(result, target, config, periods, now)`——复用走廊同口径
+  （`_risk_fcst_times_from_window` + `_query_region_hazards`），`region_display=f"{target}九分区河系"`
+  标注统计口径；失败/空结果静默降级不阻断降雨回答。`_query_river_system_periods` 加 `now` 参数，
+  三个调用点（显式河系/九分区直查/支流回退）都透传。支流回退（泃河→北三河）风险表按所属分区
+  标注。走廊 docstring 中"九分区暂不附着"的过时说明同步更新。
+- **前端**：无需改——`build_river_forecast_answer` 的 `_region_hazard_table(result.get("region_hazards"))`
+  本就与 scope_type 无关；补 1 条 river_system 渲染测试锁 parity。
+- **测试（TDD 红→绿）**：MCP +6（显式河系附着含窗口透传/支流回退按分区标注/接口失败静默降级/
+  无代表点不触发隐患查询/代表点=边界质心且参数为("9",target,config)/加载失败与 dummy 几何降级）；
+  前端 +1（river_system 渲染风险表且排数据来源前）。
+- **全量回归**：MCP **623 passed / 20 skipped**（617+6）；chainlitexam **939+174 passed /
+  5 skipped / 0 failed**（938+1）。
+- 待办：提交推送（显式路径，不含 AgentWeb.zip）。

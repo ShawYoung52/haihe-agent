@@ -97,6 +97,14 @@
       `rolling_forecast_response._region_hazard_table` 渲染【沿线灾害风险】表（排在数据来源之前）。
       测试 MCP 4 条 + 前端 2 条。全量 MCP 617 passed / chainlitexam 938+174 passed/5 skipped/0 failed。
 - [x] R19 提交推送（显式路径，不含 AgentWeb.zip）。
+- [x] R20 九分区路径也附灾害风险表（用户："九分区这个也得做"）：`_zone_representative_point`
+      用分区边界质心（经 `rsf._load_zone_boundaries_from_db`，与九分区降雨统计同一几何来源），
+      `_attach_system_region_hazards` 复用走廊同口径（`_risk_fcst_times_from_window` +
+      `_query_region_hazards`，失败静默降级）；`_query_river_system_periods` 加 `now` 参数透传，
+      支流回退（泃河→北三河）风险表按所属分区标注（region_display="北三河九分区河系"）。
+      前端无需改（region_hazards 渲染本就通用），补 1 条 river_system 渲染测试。
+      测试 MCP 6 条 + 前端 1 条。全量 MCP 623 passed / chainlitexam 939+174 passed/5 skipped/0 failed。
+- [ ] R21 提交推送（显式路径，不含 AgentWeb.zip）。
 
 ## 遗留（上一批未完成 → 本轮已处理）
 

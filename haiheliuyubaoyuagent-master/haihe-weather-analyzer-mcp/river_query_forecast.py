@@ -345,7 +345,7 @@ def query_river_rainfall_forecast_core(
         return {"status": "invalid_request", "message": str(exc), "periods": []}
 
     if _is_explicit_river_system_request(user_query, target):
-        return _query_river_system_periods(target, periods, config, ec_output_path)
+        return _query_river_system_periods(target, periods, config, ec_output_path, now=now)
 
     pg_conf = config.get("postgres", {}) if isinstance(config, dict) else {}
     try:
@@ -353,13 +353,13 @@ def query_river_rainfall_forecast_core(
     except RiverNotFoundError as exc:
         # 九分区本身直接按分区统计。
         if target in KNOWN_RIVER_SYSTEMS:
-            return _query_river_system_periods(target, periods, config, ec_output_path)
+            return _query_river_system_periods(target, periods, config, ec_output_path, now=now)
         # 支流/子河（泃河、潮白河、蓟运河等）不在 KNOWN_RIVER_SYSTEMS，但属于某个
         # 九分区水系；走廊未命中时回退所属分区，保留用户所问河名并注明统计口径。
         zone = rsf.tributary_zone_for(target)
         if zone:
             return _query_river_system_periods(
-                zone, periods, config, ec_output_path, display_name=target
+                zone, periods, config, ec_output_path, display_name=target, now=now
             )
         return _query_error("river_not_found", target, str(exc))
     except RiverDatabaseError as exc:
@@ -403,8 +403,8 @@ def _attach_corridor_region_hazards(result: dict, corridor, periods, now=None) -
 
     2026-09-01 用户口径：河流预报回答要像"天气怎么样"那样带灾害风险。复用滚动预报
     `_query_region_hazards`（含逐日风险起报合并），与区域天气同渲染口径。隐患/风险
-    是增强——任何失败都不得阻断降雨回答。仅走廊路径（具体河段）附着；九分区大区域
-    单点+半径代表性弱，暂不在本路径附着。
+    是增强——任何失败都不得阻断降雨回答。九分区路径由 `_attach_system_region_hazards`
+    负责（分区边界质心代表点）。
     """
     if not periods:
         return
@@ -426,6 +426,69 @@ def _attach_corridor_region_hazards(result: dict, corridor, periods, now=None) -
         {
             "region": corridor.river_name,
             "region_display": f"{corridor.matched_name}沿线",
+            **hazards,
+        }
+    ]
+
+
+def _zone_representative_point(target: str, config: dict) -> tuple[float, float] | None:
+    """九分区边界质心（4326）作为灾害隐患/风险查询的代表点；不可用返回 None。
+
+    边界经 rsf._load_zone_boundaries_from_db 加载（TTL/LRU 缓存 WKB、每次新建
+    OGR Geometry，与九分区降雨统计同一几何来源）。数据库/几何任何异常都返回
+    None，风险附着静默跳过——测试环境无 osgeo 时 dummy 几何走同一降级路径。
+    """
+    try:
+        zones = rsf._load_zone_boundaries_from_db("9", target, config)
+    except Exception:
+        return None
+    for zone in zones or []:
+        geom = zone.get("geometry") if isinstance(zone, dict) else None
+        if geom is None:
+            continue
+        try:
+            centroid = geom.Centroid()
+            if centroid is None or centroid.IsEmpty():
+                continue
+            return float(centroid.GetX()), float(centroid.GetY())
+        except Exception:
+            continue
+    return None
+
+
+def _attach_system_region_hazards(
+    result: dict,
+    target: str,
+    config: dict,
+    periods,
+    now=None,
+) -> None:
+    """九分区路径灾害风险附着：按分区边界质心查隐患+风险等级；失败静默降级。
+
+    2026-09-01 用户口径："九分区这个也得做"——与走廊路径同口径复用滚动预报
+    `_query_region_hazards`（含逐日风险起报合并），display 标注"九分区河系"
+    让用户知道统计口径。隐患/风险是增强——任何失败都不得阻断降雨回答。
+    """
+    if not periods:
+        return
+    point = _zone_representative_point(target, config)
+    if point is None:
+        return
+    lon, lat = point
+    try:
+        rfs = _load_rolling_forecast_service()
+        risk_fcst_times = rfs._risk_fcst_times_from_window(
+            _river_risk_calendar_window(periods), now
+        )
+        hazards = rfs._query_region_hazards(lon, lat, risk_fcst_times)
+    except Exception:
+        return
+    if not isinstance(hazards, dict) or not hazards:
+        return
+    result["region_hazards"] = [
+        {
+            "region": target,
+            "region_display": f"{target}九分区河系",
             **hazards,
         }
     ]
@@ -489,6 +552,7 @@ def _query_river_system_periods(
     config: dict,
     ec_output_path: str,
     display_name: str | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """按九分区河系统计各时段降雨。display_name：支流回退时保留用户所问河名。"""
     period_results = []
@@ -526,7 +590,7 @@ def _query_river_system_periods(
         scope_description = f"{display_name}所属{target}九分区河系范围"
     else:
         scope_description = f"{target}九分区河系范围"
-    return {
+    result = {
         "status": "ok",
         "river_name": display_name or target,
         "scope_type": "river_system",
@@ -534,6 +598,8 @@ def _query_river_system_periods(
         "buffer_km": None,
         "periods": period_results,
     }
+    _attach_system_region_hazards(result, target, config, periods, now=now)
+    return result
 
 
 def _build_corridor_period(

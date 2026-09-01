@@ -482,6 +482,161 @@ def test_corridor_representative_point_handles_dummy_geometry():
     assert rqf._corridor_representative_point(corridor) is None
 
 
+def _stub_system_path(monkeypatch, zone_name="滦河"):
+    """打桩九分区降雨主链路（显式河系/支流回退），返回指定分区的模拟降雨。"""
+    monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: {
+        "data_source": "滚动预报网格",
+        "zones": [{"zone_name": zone_name, "average_rainfall_mm": 1.0, "max_rainfall_mm": 4.0, "min_rainfall_mm": 0.0}],
+    })
+
+
+class _FakePoint:
+    def __init__(self, x, y):
+        self._x, self._y = x, y
+
+    def IsEmpty(self):
+        return False
+
+    def GetX(self):
+        return self._x
+
+    def GetY(self):
+        return self._y
+
+
+class _FakeGeometry:
+    def __init__(self, x, y):
+        self._point = _FakePoint(x, y)
+
+    def Centroid(self):
+        return self._point
+
+
+def test_system_attaches_region_hazards(monkeypatch):
+    """九分区路径（显式河系问法）附着【分区】灾害风险——2026-09-01 用户口径"九分区也得做"。"""
+    captured = {}
+    hazards = {
+        "total_found": 2,
+        "radius_km": 25.0,
+        "categories": [{"key": "dzzh", "label": "地质灾害", "kind": "geologic", "count": 2}],
+        "hazards_available": True,
+        "risk_levels": {},
+        "risk_levels_available": True,
+    }
+    _stub_system_path(monkeypatch)
+    monkeypatch.setattr(rqf, "_zone_representative_point", lambda target, config: (118.5, 39.8))
+    monkeypatch.setattr(
+        rqf, "_load_rolling_forecast_service", lambda: _fake_rfs(hazards, captured=captured)
+    )
+
+    result = rqf.query_river_rainfall_forecast_core("未来三天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["status"] == "ok"
+    assert result["scope_type"] == "river_system"
+    entry = result["region_hazards"][0]
+    assert entry["region"] == "滦河"
+    assert entry["region_display"] == "滦河九分区河系"
+    assert entry["categories"][0]["count"] == 2
+    # 代表点与逐日起报换算结果被透传给隐患查询
+    assert captured["lon"] == 118.5 and captured["lat"] == 39.8
+    assert captured["fcst"] == ["SENTINEL_FCST"]
+    assert captured["window"]["forecast_start_date"] == "2026-08-28"
+    assert captured["window"]["forecast_days"] == 3
+    assert captured["now"] is FIXED_NOW
+
+
+def test_tributary_fallback_attaches_zone_hazards(monkeypatch):
+    """支流回退九分区（泃河→北三河）时风险附着用所属分区，display 按分区口径。"""
+    captured = {}
+    hazards = {
+        "total_found": 1,
+        "radius_km": 25.0,
+        "categories": [{"key": "sh", "label": "山洪", "kind": "mountain", "count": 1}],
+        "hazards_available": True,
+        "risk_levels": {},
+        "risk_levels_available": True,
+    }
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: (_ for _ in ()).throw(rqf.RiverNotFoundError("not found")),
+    )
+    _stub_system_path(monkeypatch, zone_name="北三河")
+    monkeypatch.setattr(rqf, "_zone_representative_point", lambda target, config: (117.0, 40.0))
+    monkeypatch.setattr(
+        rqf, "_load_rolling_forecast_service", lambda: _fake_rfs(hazards, captured=captured)
+    )
+
+    result = rqf.query_river_rainfall_forecast_core("明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["status"] == "ok"
+    assert result["scope_type"] == "river_system"
+    assert result["river_name"] == "泃河"
+    entry = result["region_hazards"][0]
+    assert entry["region"] == "北三河"
+    assert entry["region_display"] == "北三河九分区河系"
+    assert captured["lon"] == 117.0 and captured["lat"] == 40.0
+
+
+def test_system_hazard_failure_degrades_silently(monkeypatch):
+    """隐患/风险接口失败绝不阻断九分区降雨回答——静默降级，不附 region_hazards。"""
+    _stub_system_path(monkeypatch)
+    monkeypatch.setattr(rqf, "_zone_representative_point", lambda target, config: (118.5, 39.8))
+    monkeypatch.setattr(rqf, "_load_rolling_forecast_service", lambda: _fake_rfs(raise_exc=True))
+
+    result = rqf.query_river_rainfall_forecast_core("明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["status"] == "ok"
+    assert "region_hazards" not in result
+
+
+def test_system_no_representative_point_skips_attach(monkeypatch):
+    """分区边界不可用（无代表点）时静默跳过，且不触发隐患接口调用。"""
+    called = []
+    _stub_system_path(monkeypatch)
+    monkeypatch.setattr(rqf, "_zone_representative_point", lambda target, config: None)
+    monkeypatch.setattr(
+        rqf, "_load_rolling_forecast_service", lambda: called.append(1) or _fake_rfs({})
+    )
+
+    result = rqf.query_river_rainfall_forecast_core("明天滦河流域降雨", TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["status"] == "ok"
+    assert "region_hazards" not in result
+    assert not called
+
+
+def test_zone_representative_point_from_boundary_centroid(monkeypatch):
+    """代表点 = 九分区边界几何质心（经 rsf._load_zone_boundaries_from_db 加载）。"""
+    seen = {}
+
+    def fake_load(zone_type, zone_name, config):
+        seen["args"] = (zone_type, zone_name, config)
+        return [{"zone_name": zone_name, "geometry": _FakeGeometry(118.1, 39.6)}]
+
+    monkeypatch.setattr(rqf.rsf, "_load_zone_boundaries_from_db", fake_load)
+
+    assert rqf._zone_representative_point("滦河", TEST_CONFIG) == (118.1, 39.6)
+    assert seen["args"] == ("9", "滦河", TEST_CONFIG)
+
+
+def test_zone_representative_point_handles_load_failure_and_dummy_geometry(monkeypatch):
+    """边界加载失败 / dummy 几何（测试环境无 osgeo）都优雅返回 None。"""
+    monkeypatch.setattr(
+        rqf.rsf,
+        "_load_zone_boundaries_from_db",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+    assert rqf._zone_representative_point("滦河", TEST_CONFIG) is None
+
+    monkeypatch.setattr(
+        rqf.rsf,
+        "_load_zone_boundaries_from_db",
+        lambda *a, **k: [{"zone_name": "滦河", "geometry": object()}],
+    )
+    assert rqf._zone_representative_point("滦河", TEST_CONFIG) is None
+
+
 def test_tributary_corridor_miss_falls_back_to_parent_zone(monkeypatch):
     """泃河河道走廊未命中时回退所属北三河九分区（领导问题清单标黄："明天泃河有雨吗"）。
 
