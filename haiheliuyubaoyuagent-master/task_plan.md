@@ -154,3 +154,6 @@
 
 - [x] POI 决策天气"丰富注意事项/游玩建议"——按推荐方案**扩受控 action 词表**（新增 dress/car_wash/drying/exercise 9 个动作 + fine/mild 条件），保持零编造。已提交。
 - [x] "能见度较低"晴天假阳性——**查证已修复**（`_poi_weather_conditions` 仅非 rain-only 解析能见度、动态从句 `min_vis<1.0` 门控 + rain_only 占位值守卫；test_decision_weather_tool.py:408-434/1241-1268/1553 锁定）。
+- [x] R30 回退 R28（用户："表格还是有问题…实况这个咱们就不用这个了，恢复之前那个版本"）：R29 表格修复后用户复测仍不满意，决定实况放弃灾害风险表，恢复 R28 之前版本。
+      回退 = git checkout e223bf6~1 恢复 5 个代码/测试文件 + 删除两个新增测试文件；保留 R29 通用表格修复不动。滚动预报/河流路径风险表不受影响。
+      全量 MCP 632 passed/20 skipped、chainlitexam 955+174 passed/5 skipped/0 failed。

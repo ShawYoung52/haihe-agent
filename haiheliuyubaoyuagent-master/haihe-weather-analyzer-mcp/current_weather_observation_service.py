@@ -28,39 +28,6 @@ CENTRAL_TIANJIN_COUNTIES = frozenset({"和平", "河东", "河西", "南开"})
 JIZHOU_ALIASES = ("蓟州区", "蓟州", "蓟县")
 MISSING_PRECIPITATION_MIN = 9999.0
 
-# 天津市区代表点（与 rolling_forecast_service.ROLLING_FORECAST_COORDS["天津市区"] 一致），
-# 实况附【天津市区】灾害风险用。
-_TIANJIN_URBAN_LON = 117.14
-_TIANJIN_URBAN_LAT = 39.24
-
-
-def _load_region_hazard_queryer() -> Any:
-    """惰性加载 rolling_forecast_service（避免模块顶层触发重依赖链/循环），供测试 monkeypatch。"""
-    import rolling_forecast_service as rfs
-
-    return rfs
-
-
-def _attach_tianjin_region_hazards(result: dict[str, Any]) -> None:
-    """给实况结果附【天津市区】灾害风险（与滚动预报区域风险同口径）。
-
-    仅 status=="ok" 时附着；隐患/风险查询任何失败或返回空都静默降级
-    （payload 不带 region_hazards 键），绝不阻断实况回答。风险等级用最近
-    起报时次 + 同日回退（risk_fcst_times=None，对应"当前/24h 内"口径）。
-    """
-    if not isinstance(result, dict) or result.get("status") != "ok":
-        return
-    try:
-        rfs = _load_region_hazard_queryer()
-        hazards = rfs._query_region_hazards(_TIANJIN_URBAN_LON, _TIANJIN_URBAN_LAT, None)
-    except Exception:
-        return
-    if not isinstance(hazards, dict) or not hazards:
-        return
-    result["region_hazards"] = [
-        {"region": "tianjin", "region_display": "天津市区", **hazards}
-    ]
-
 
 def build_latest_utc_hour_candidates(
     now: datetime | None = None,
@@ -528,7 +495,6 @@ def query_current_weather_observation_core(
         },
         "attempts": attempts,
     }
-    _attach_tianjin_region_hazards(result)
     with _current_weather_cache_lock:
         _current_weather_cache[cache_key] = (time.time(), result)
     return result

@@ -5,8 +5,6 @@ import json
 import re
 from typing import Any
 
-from .rolling_forecast_response import _region_hazard_table
-
 
 REGION_LABELS = {
     "tianjin": "天津市",
@@ -72,36 +70,6 @@ def _fallback_region_summary(key: str, stats: dict[str, Any]) -> str:
         f"出现降雨，局地{level}，平均降雨量{average}毫米，"
         f"最大{maximum}毫米（{max_station}），"
         f"最大小时降雨量{hourly}毫米（{hourly_station}）"
-    )
-
-
-def build_current_observation_risk_section(payload: Any) -> str:
-    """从实况 payload 的 region_hazards 渲染【天津市区】灾害风险表（无则空串）。
-
-    复用滚动预报的 `_region_hazard_table`：纯代码确定性生成，零 LLM 编造；
-    region_hazards 缺失/非 list/渲染为空时返回空串。
-    """
-    if not isinstance(payload, dict):
-        return ""
-    hazards = payload.get("region_hazards")
-    if not isinstance(hazards, list):
-        return ""
-    return _region_hazard_table(hazards)
-
-
-def build_current_observation_risk_instruction(payload: Any) -> str:
-    """实况附灾害风险表的 LLM 指令：表由代码生成，answer 只原样透传。
-
-    返回拼进 observation_text 的系统约束 + 预渲染风险表；answer LLM 只需把表
-    原样附在实况表格之后、数据来源之前。无 region_hazards 时返回空串（不附指令）。
-    """
-    section = build_current_observation_risk_section(payload)
-    if not section:
-        return ""
-    return (
-        "\n\n系统约束：以下【天津市区】灾害风险表由代码根据隐患点静态数据与风险接口生成，"
-        "隐患点数量与本次风险等级以它为准、禁止改动。请把该表原样附在实况表格之后、"
-        "数据来源之前，不要省略、不要改写、不要新增其它灾种或具体点位：\n" + section
     )
 
 

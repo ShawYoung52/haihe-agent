@@ -421,3 +421,13 @@
   合法 GFM。测试 `test_repair_markdown_layout.py`（6：拆行表头合回、标题拆分、单元格内标题
   不动、紧凑良构不变、带空格良构不变、标题粘+空行合回）。
   全量 chainlitexam 962+174=1136 passed/5 skipped/0 failed。
+
+### R30 回退 R28：实况不再附灾害风险表
+
+- 用户口径（2026-09-02）：表格修复后复测仍不满意，"实况这个咱们就不用这个了，恢复之前那个版本"。决定：实况放弃【天津市区】灾害风险表，
+  恢复 R28 之前版本。
+- **改动**：`git checkout e223bf6~1` 恢复 5 个文件（MCP `current_weather_observation_service` / `current_weather_observation_response` /
+  `message_orchestrator` / `prompts` / `test_prompts` + 删除 R28 两个新增测试文件。
+- **保留**：R29 的 `_repair_markdown_layout` 通用表格修复（不动，对良构文本零改动的防护）；R12 `tianjin_districts` 区县明细展示；
+  滚动预报/河流路径风险表路径不受影响。
+- 全量 MCP 632 passed/20 skipped、chainlitexam 955+174 passed/5 skipped/0 failed。
