@@ -157,3 +157,19 @@
 - [x] R30 回退 R28（用户："表格还是有问题…实况这个咱们就不用这个了，恢复之前那个版本"）：R29 表格修复后用户复测仍不满意，决定实况放弃灾害风险表，恢复 R28 之前版本。
       回退 = git checkout e223bf6~1 恢复 5 个代码/测试文件 + 删除两个新增测试文件；保留 R29 通用表格修复不动。滚动预报/河流路径风险表不受影响。
       全量 MCP 632 passed/20 skipped、chainlitexam 955+174 passed/5 skipped/0 failed。
+- [x] R31 按角色查快捷问题接口（前端同事："展示的快捷问题也得出个接口，查询指定角色对应的快捷问题"）：
+      新模块 `chainlitexam/quick_questions.py`（角色→分区映射 `_ROLE_SECTION_IDS`：admin/forecaster 全量 8 区，
+      external 只看 01天气资讯/03文旅出行/04气象科普/08系统问答，未知/空角色兜底 external；mtime 缓存 + 深拷贝）。
+      **数据源 = 后端自带 `chainlitexam/config/quickQA.json`**（从 AgentWeb 拷贝、随 Chainlit 服务部署）——
+      用户指出 AgentWeb 在服务器上是独立部署到 Tomcat webapps 的前端包、与 Chainlit 服务不在一起，
+      后端不能依赖 `AgentWeb/config/quickQA.json` 的相对位置；env `QUICK_QA_CONFIG_PATH` 仍可覆盖。
+      端点 `GET /api/v1/qa/quick-questions?role=...` 挂 api_sub_app（显式 role 优先、不传回退 cookie JWT
+      metadata.role、都没有按 external，显式非法 role→400，返回包 {code,data,message} 与现有端点一致）。
+      前端对接文档 `docs/api/quick-questions-api.md`。
+      测试 tests/test_quick_questions.py 15 条 + TestClient 端到端冒烟（无 role→4区/forecaster→8区/非法→400）。
+      全量 chainlitexam 970 passed/5 skipped/0 failed，diff 脱敏 CLEAN。
+      **code-simplifier + code-review 双评审加固**：① 端点复用既有 `_validate_role`（去内联重复，400 文案单一事实源）；
+      ② 修正测试 docstring 失真（AgentWeb→后端自带 config）；③ 空 role 参数（`?role=`/`?role=undefined`）按未提供兜底不再 400（+1 测试）；
+      ④ mtime 缓存加 `threading.Lock`（同步端点跑线程池，防并发读到新 mtime+旧 sections，对齐 CLAUDE.md 缓存约定）；
+      ⑤ 「未鉴权 role 可绕过公众限制」判定为**设计使然**（快捷问题只是建议词条、真实数据走 /qa/ask 不按角色挡，
+      role 是 UI 定制非安全边界），不改代码、文档补安全口径说明。

@@ -61,6 +61,7 @@ from tools.decision_weather import build_decision_weather_tools
 from tools.rainfall_river_impact import build_rainfall_river_impact_tools
 
 import qa_http_api
+import quick_questions
 
 app = FastAPI(title="海河流域应急响应判定 REST API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -580,6 +581,33 @@ async def _qa_file(session_id: str, file_id: str):
     except qa_http_api.FileExpiredOrMissing:
         raise HTTPException(404, "file expired")
     return FileResponse(path)
+
+
+# 按角色查询快捷问题（前端快捷问题面板调用）。
+# 角色来源：优先 query 参数 role（AgentWeb 是无 chainlit cookie 的机器客户端，
+# 登录后已知自身角色，直接传）；不传时回退读 cookie JWT 的 metadata.role；
+# 两者都没有按 external（公众，最严格）兜底。内容与前端静态 quickQA.json 同源。
+def _resolve_caller_role(request: Request) -> str:
+    """从请求 cookie 的 Chainlit JWT 解 metadata.role；解不到按 external。"""
+    token = get_token_from_cookies(request.cookies)
+    if not token:
+        return quick_questions.DEFAULT_ROLE
+    try:
+        current_user = decode_jwt(token)
+    except Exception:
+        return quick_questions.DEFAULT_ROLE
+    metadata = getattr(current_user, "metadata", None) or {}
+    role = str(metadata.get("role", "")).strip().lower()
+    return role if role in quick_questions.ALLOWED_ROLES else quick_questions.DEFAULT_ROLE
+
+
+@api_sub_app.get("/qa/quick-questions", tags=["问答"])
+def _qa_quick_questions(request: Request, role: str | None = None):
+    # role 为 None 或空白（前端无条件拼 ?role= 空值）都按"未提供"处理，
+    # 回退 cookie JWT / external 兜底，而不是对空串 400。
+    resolved = _validate_role(role) if (role is not None and role.strip()) else _resolve_caller_role(request)
+    payload = quick_questions.get_quick_questions(resolved)
+    return {"code": 200, "data": payload, "message": "success"}
 
 
 # ===============================
