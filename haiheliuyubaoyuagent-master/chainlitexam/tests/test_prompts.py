@@ -53,8 +53,8 @@ def test_prompts_keep_basin_forecast_scope_and_observation_separate(routing_prom
     assert "query_basin_areal_rainfall" in basin_section
     assert "实况" in basin_section
     assert "调用 `query_river_rainfall_forecast`" in basin_section
-    assert "明确河系/流域复用九分区预报" in basin_section
-    assert "未找到才回退已知河系" in basin_section
+    assert "九分区河系名称无论是否带“流域/河系”后缀均直接复用九分区预报" in basin_section
+    assert "下一级具体河流优先匹配真实河道走廊，未找到才回退所属九分区" in basin_section
     assert "禁止调 `query_rolling_forecast`" in basin_section
     assert '禁止"以天津市代表海河流域"' in basin_section
 
@@ -65,8 +65,8 @@ def test_prompts_subbasin_entry_preserves_original_query_and_scope(routing_promp
     subbasin_section = routing_prompt[start:end]
     assert "统一调用 `query_river_rainfall_forecast`" in subbasin_section
     assert "`user_query` 必须原样传入" in subbasin_section
-    assert "具体河流优先匹配真实河道走廊，未找到才回退已知河系" in subbasin_section
-    assert "明确河系/流域直接复用九分区预报" in subbasin_section
+    assert "九分区河系名称无论是否带“流域/河系”后缀均直接复用九分区预报" in subbasin_section
+    assert "下一级具体河流优先匹配真实河道走廊，未找到才回退所属九分区" in subbasin_section
     assert "不得把全流域或天津市的预报直接套用到某个子流域上" in subbasin_section
     assert "不编造气温、风力、湿度等数据" in subbasin_section
 

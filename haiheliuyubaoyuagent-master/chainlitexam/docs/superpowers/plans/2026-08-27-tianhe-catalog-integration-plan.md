@@ -1,6 +1,6 @@
 # 天河新增目录接入 Implementation Plan
 
-> 执行状态（2026-08-28）：51题实现和离线回归完成，独立最终审查待执行，内网联调待完成；最终状态、56题清单和命令见[验收记录](../2026-08-27-priority-acceptance.md)。下方保留原始提案步骤，不以未勾选复选框表示尚未实现。冲突示例已被执行裁定取代：新区域风险no_data为不可用、geography真实米制缓冲、裸河名先查全量表、Chainlit/MCP分目录分进程使用系统Python测试。
+> 执行状态（2026-08-28）：51题实现和离线回归完成，独立最终审查待执行，内网联调待完成；最终状态、56题清单和命令见[验收记录](../2026-08-27-priority-acceptance.md)。下方保留原始提案步骤，不以未勾选复选框表示尚未实现。冲突示例已被执行裁定取代：新区域风险no_data为不可用；九分区名称直接按分区统计，下一级具体河流才查全量表并使用geography真实米制缓冲；Chainlit/MCP分目录分进程使用系统Python测试。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

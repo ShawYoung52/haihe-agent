@@ -327,8 +327,10 @@ def _match_zone_name(river_system: str, zones: list[dict]) -> list[dict]:
     九分区（容忍"流域/河系"后缀）再匹配，避免返回"未找到指定的河系分区数据"。
     """
     raw = str(river_system or "").strip()
+    if not raw or raw in ("全", "全流域", "海河流域", "海"):
+        return zones
     name = _norm_zone_name(_tributary_zone_lookup(raw) or raw)
-    if not name or name in ("全", "海河流域", "海河", "海"):
+    if not name or name == "全":
         return zones
 
     aliases = {

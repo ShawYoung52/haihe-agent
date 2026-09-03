@@ -56,6 +56,12 @@ class TestTributaryZoneMapping:
         matched = rsf._match_zone_name("滦河", [dict(z) for z in self.ZONES])
         assert [z["zone_name"] for z in matched] == ["滦河"]
 
+    def test_haihe_zone_and_whole_basin_are_not_confused(self):
+        matched_zone = rsf._match_zone_name("海河", [dict(z) for z in self.ZONES])
+        matched_basin = rsf._match_zone_name("海河流域", [dict(z) for z in self.ZONES])
+        assert [z["zone_name"] for z in matched_zone] == ["海河"]
+        assert [z["zone_name"] for z in matched_basin] == [z["zone_name"] for z in self.ZONES]
+
     def test_unknown_river_still_empty(self):
         assert rsf._match_zone_name("某某河", [dict(z) for z in self.ZONES]) == []
 

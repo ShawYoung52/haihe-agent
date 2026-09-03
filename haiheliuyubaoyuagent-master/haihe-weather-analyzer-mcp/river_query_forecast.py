@@ -30,10 +30,18 @@ KNOWN_RIVER_SYSTEMS: frozenset[str] = frozenset({
     "滦河",
     "海河",
     "海河流域",
+    "全流域",
 })
 
 _RIVER_CORRIDOR_RE = re.compile(r"([\u4e00-\u9fff]{1,8}?)(?:的)?河道")
 _RIVER_NAME_RE = re.compile(r"([\u4e00-\u9fff]{1,8}河)")
+_BASIN_SCOPE_MARKER_RE = re.compile(r"流域|河系")
+_NESTED_SCOPE_CONNECTOR_RE = re.compile(r"^(?:范围内的?|内的|中的|下的|内|中|下|的)")
+_GENERIC_RIVER_REFERENCE_RE = re.compile(
+    r"^(?:河|河流|河道|"
+    r"(?:哪(?:些|几条|条)?|每(?:一)?条|各(?:条)?|这(?:些|几条)?|那(?:些|几条)?|"
+    r"所有|全部|主要|中小|大小|相关|其他|其它|任意|若干(?:条)?|多条|几条)河)$"
+)
 _RAIN_OR_WEATHER_PREDICATE_RE = re.compile(r"有雨|下雨|降雨|降水|雨量|天气")
 _FUTURE_DAYS_RE = re.compile(r"未来\s*([^\s，。！？?、]{1,8}?)\s*天")
 _SUPPORTED_PERIOD_RE = re.compile(
@@ -196,11 +204,19 @@ def _geometry_from_wkb(value: bytes) -> Any:
 def extract_river_target(user_query: str) -> str:
     """提取已知河系或最接近降雨/天气谓词的具体河名。"""
     query = str(user_query or "").strip()
-    for river_system in sorted(KNOWN_RIVER_SYSTEMS, key=len, reverse=True):
-        if river_system in query:
-            return river_system
-
     query = _strip_leading_query_modifiers(query)
+
+    # “海河流域内泃河”等混合层级问法以被点名的下一级河流为查询目标，
+    # 避免上位九分区/全流域名称抢先命中并扩大统计范围。
+    nested = _extract_nested_river(query)
+    if nested:
+        return nested
+
+    river_system = _extract_known_river_system(query)
+    if river_system:
+        return river_system
+
+    # 九分区名称已经在上方确定；这里只处理下一级具体河流的“某河河道”表述。
     corridor_match = _RIVER_CORRIDOR_RE.search(query)
     if corridor_match:
         candidate = _clean_river_candidate(corridor_match.group(1) + "河")
@@ -331,6 +347,43 @@ def _extract_nearest_river(text: str) -> str | None:
     return None
 
 
+def _extract_known_river_system(text: str) -> str | None:
+    """确定性提取最先出现的九分区名称；同位置优先较长名称。"""
+    matches = (
+        (text.find(name), -len(name), name)
+        for name in KNOWN_RIVER_SYSTEMS
+        if name in text
+    )
+    return min(matches, default=(0, 0, None))[2]
+
+
+def _is_generic_river_reference(candidate: str) -> bool:
+    """识别量词、指示词修饰的河流泛称，避免把它们当作数据库河名。"""
+    return bool(_GENERIC_RIVER_REFERENCE_RE.fullmatch(candidate))
+
+
+def _extract_nested_river(query: str) -> str | None:
+    """提取“某流域内的某河”中的下一级具体河名；泛称“河流/河道”不命中。"""
+    for marker in reversed(list(_BASIN_SCOPE_MARKER_RE.finditer(query))):
+        tail = query[marker.end():].lstrip()
+        if not tail or tail.startswith(("和", "与", "及", "、")):
+            continue
+        tail = _NESTED_SCOPE_CONNECTOR_RE.sub("", tail, count=1).lstrip()
+        tail = _strip_leading_query_modifiers(tail)
+        predicate = _RAIN_OR_WEATHER_PREDICATE_RE.search(tail)
+        subject = tail[:predicate.start()] if predicate else tail
+        candidate = _extract_known_river_system(subject)
+        if not candidate:
+            corridor_match = _RIVER_CORRIDOR_RE.search(subject)
+            if corridor_match:
+                candidate = _clean_river_candidate(corridor_match.group(1) + "河")
+            else:
+                candidate = _extract_nearest_river(subject)
+        if candidate and not _is_generic_river_reference(candidate):
+            return candidate
+    return None
+
+
 def query_river_rainfall_forecast_core(
     user_query: str,
     config: dict,
@@ -344,16 +397,15 @@ def query_river_rainfall_forecast_core(
     except ValueError as exc:
         return {"status": "invalid_request", "message": str(exc), "periods": []}
 
-    if _is_explicit_river_system_request(user_query, target):
+    # 九分区名称本身就是面状业务范围；无论是否带“流域/河系”后缀，均直接
+    # 使用九分区预报，不能因 full_v6 中是否存在同名河道而切换到 5 公里走廊。
+    if target in KNOWN_RIVER_SYSTEMS:
         return _query_river_system_periods(target, periods, config, ec_output_path, now=now)
 
     pg_conf = config.get("postgres", {}) if isinstance(config, dict) else {}
     try:
         corridor = load_river_corridor(target, pg_conf)
     except RiverNotFoundError as exc:
-        # 九分区本身直接按分区统计。
-        if target in KNOWN_RIVER_SYSTEMS:
-            return _query_river_system_periods(target, periods, config, ec_output_path, now=now)
         # 支流/子河（泃河、潮白河、蓟运河等）不在 KNOWN_RIVER_SYSTEMS，但属于某个
         # 九分区水系；走廊未命中时回退所属分区，保留用户所问河名并注明统计口径。
         zone = rsf.tributary_zone_for(target)
@@ -492,16 +544,6 @@ def _attach_system_region_hazards(
             **hazards,
         }
     ]
-
-
-def _is_explicit_river_system_request(user_query: str, target: str) -> bool:
-    """判断请求是否明确要求河系/流域，而非只出现一个河名。"""
-    query = str(user_query or "")
-    return target in KNOWN_RIVER_SYSTEMS and (
-        target.endswith(("流域", "河系"))
-        or f"{target}流域" in query
-        or f"{target}河系" in query
-    )
 
 
 def _query_corridor_periods(

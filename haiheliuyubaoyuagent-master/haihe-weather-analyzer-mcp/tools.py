@@ -2709,7 +2709,7 @@ def register_tools(mcp: FastMCP):
 
     @mcp.tool()
     def query_river_rainfall_forecast(user_query: str) -> dict:
-        """查询具体河流沿线或九分区河系的未来降雨；参数必须传用户原始问题。"""
+        """查询下一级具体河流沿线或九分区河系的未来降雨；九分区裸名称按分区统计。"""
         ec_output_path = config.get("paths", "ecOutput") if config.has_option("paths", "ecOutput") else ""
         normalized_config = {section: dict(config[section]) for section in config.sections()}
         return rqf.query_river_rainfall_forecast_core(

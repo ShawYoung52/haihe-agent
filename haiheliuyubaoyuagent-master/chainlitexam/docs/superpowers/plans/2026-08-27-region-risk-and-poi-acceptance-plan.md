@@ -1,6 +1,6 @@
 # 区域综合风险与水库景区验收 Implementation Plan
 
-> 执行状态（2026-08-28）：区域风险、标黄POI和本轮全量回归检查完成，独立最终审查待执行，完整依赖环境复测和内网联调待完成；最终56题和真实测试状态见[验收记录](../2026-08-27-priority-acceptance.md)。下方保留原始提案步骤，不以未勾选复选框表示尚未实现。no_data→no_risk示例已被替代为unavailable；缺水情且无雨不得预测水位平稳。关联河流裁定为geography真实米制缓冲、裸河名先查全量表。Chainlit/MCP分目录分进程使用系统Python测试；原跨项目命令不能代表最终验证方式。
+> 执行状态（2026-08-28）：区域风险、标黄POI和本轮全量回归检查完成，独立最终审查待执行，完整依赖环境复测和内网联调待完成；最终56题和真实测试状态见[验收记录](../2026-08-27-priority-acceptance.md)。下方保留原始提案步骤，不以未勾选复选框表示尚未实现。no_data→no_risk示例已被替代为unavailable；缺水情且无雨不得预测水位平稳。关联河流裁定为九分区名称直接按分区统计，下一级具体河流查全量表并使用geography真实米制缓冲。Chainlit/MCP分目录分进程使用系统Python测试；原跨项目命令不能代表最终验证方式。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

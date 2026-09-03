@@ -35,6 +35,44 @@ def test_extract_river_treats_corridor_phrases_as_structural_suffixes(query):
     assert rqf.extract_river_target(query) == "泃河"
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("明天海河流域内泃河有雨吗？", "泃河"),
+        ("明天大清河流域内拒马河有雨吗？", "拒马河"),
+        ("明天海河流域中的大清河有雨吗？", "大清河"),
+        ("明天海河流域的潮白河有雨吗？", "潮白河"),
+        ("明天海河流域内泃河河道有雨吗？", "泃河"),
+        ("明天海河流域中的大清河河道有雨吗？", "大清河"),
+        ("明天海河流域中的黑龙港有雨吗？", "黑龙港"),
+        ("明天全流域内黑龙港有雨吗？", "黑龙港"),
+    ],
+)
+def test_extract_river_prefers_named_child_inside_parent_basin(query, expected):
+    """同句出现上位流域和下一级河流时，应提取用户实际询问的下一级目标。"""
+    assert rqf.extract_river_target(query) == expected
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "明天海河流域内的河流有雨吗？",
+        "明天海河流域内的河道有雨吗？",
+        "明天海河流域内哪些河有雨吗？",
+        "明天海河流域内各河有雨吗？",
+        "明天海河流域内主要河流有雨吗？",
+        "明天海河流域内中小河流有雨吗？",
+        "明天海河流域内每条河有雨吗？",
+        "明天海河流域内哪几条河有雨吗？",
+        "明天海河流域内这些河有雨吗？",
+        "明天海河流域内各条河有雨吗？",
+    ),
+)
+def test_extract_river_ignores_generic_river_word_inside_parent_basin(query):
+    """“流域内的河流”没有点名下一级河流，应保持上位流域范围。"""
+    assert rqf.extract_river_target(query) == "海河流域"
+
+
 def test_tomorrow_is_a_natural_day():
     periods = rqf.resolve_river_forecast_periods(
         "明天泃河有雨吗？", datetime(2026, 8, 27, 10, 15, tzinfo=TZ)
@@ -367,28 +405,24 @@ def test_juhe_uses_corridor_and_reports_scope(monkeypatch):
     assert result["periods"][0]["has_rain"] is True
 
 
-def test_bare_luanhe_uses_corridor_when_found(monkeypatch):
-    """Catches bare 滦河 being pre-emptively broadened to the river-system scope."""
-    calls = []
-    monkeypatch.setattr(
-        rqf,
-        "load_river_corridor",
-        lambda *a, **k: rqf.RiverCorridor("滦河", "滦河", 4326, object(), 5.0),
-    )
-    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "TEST"))
+def test_child_river_inside_parent_basin_still_uses_corridor(monkeypatch):
+    """“海河流域内泃河”必须使用泃河5公里走廊，不能被上位流域抢占。"""
+    monkeypatch.setattr(rqf, "load_river_corridor", fake_juhe_corridor)
+    monkeypatch.setattr(rqf.rsf, "_resolve_forecast_file", lambda *a, **k: ("rain.tif", "滚动预报网格"))
     monkeypatch.setattr(rqf.rsf, "_compute_rainfall_stats_for_geometry", fake_stats)
     monkeypatch.setattr(
         rqf.rsf,
         "get_river_system_rainfall_forecast",
-        lambda **kwargs: calls.append(kwargs) or {"zones": []},
+        lambda **kwargs: pytest.fail("the parent basin must not pre-empt its named child river"),
     )
 
     result = rqf.query_river_rainfall_forecast_core(
-        "今天晚上滦河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+        "明天海河流域内泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
     )
 
     assert result["scope_type"] == "river_corridor"
-    assert calls == []
+    assert result["river_name"] == "泃河"
+    assert result["scope_description"] == "泃河河道两侧约5公里沿线范围"
 
 
 # —— 2026-09-01 用户口径：河流预报答案要像"天气怎么样"那样带灾害风险（走廊代表点查隐患+风险等级）——
@@ -664,13 +698,13 @@ def test_tributary_corridor_miss_falls_back_to_parent_zone(monkeypatch):
     assert "北三河" in result["scope_description"]
 
 
-def test_bare_luanhe_falls_back_to_existing_nine_zone_tool_only_when_not_found(monkeypatch):
-    """Catches fallback to a broader scope on database errors or successful corridor matches."""
+def test_bare_luanhe_uses_nine_zone_tool_and_preserves_tonight_window(monkeypatch):
+    """九分区裸名称直接按分区统计，同时保留“今晚”实际小时窗口。"""
     calls = []
     monkeypatch.setattr(
         rqf,
         "load_river_corridor",
-        lambda *a, **k: (_ for _ in ()).throw(rqf.RiverNotFoundError("not found")),
+        lambda *a, **k: pytest.fail("a nine-zone name must not load a river corridor"),
     )
     monkeypatch.setattr(rqf.rsf, "get_river_system_rainfall_forecast", lambda **kwargs: calls.append(kwargs) or {
         "data_source": "滚动预报网格",
@@ -705,6 +739,53 @@ def test_explicit_river_system_uses_nine_zone_tool(monkeypatch):
 
     assert result["scope_type"] == "river_system"
     assert calls[0]["river_system"] == "滦河"
+
+
+@pytest.mark.parametrize(
+    "river_system",
+    (
+        "大清河",
+        "子牙河",
+        "永定河",
+        "北三河",
+        "漳卫南运河",
+        "徒骇马颊河",
+        "黑龙港",
+        "滦河",
+        "海河",
+    ),
+)
+def test_bare_nine_zone_name_always_uses_nine_zone_scope(monkeypatch, river_system):
+    """九分区裸名称不能因 full_v6 是否存在同名河道而随机切换到 5 公里走廊。"""
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: pytest.fail("a nine-zone name must not load a river corridor"),
+    )
+    monkeypatch.setattr(rqf, "_attach_system_region_hazards", lambda *a, **k: None)
+    monkeypatch.setattr(
+        rqf.rsf,
+        "get_river_system_rainfall_forecast",
+        lambda **kwargs: calls.append(kwargs) or {
+            "data_source": "滚动预报网格",
+            "zones": [{
+                "zone_name": river_system,
+                "valid_count": 3,
+                "average_rainfall_mm": 0.0,
+                "max_rainfall_mm": 0.0,
+                "min_rainfall_mm": 0.0,
+            }],
+        },
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(
+        f"明天{river_system}有雨吗？", TEST_CONFIG, now=FIXED_NOW
+    )
+
+    assert result["scope_type"] == "river_system"
+    assert result["scope_description"] == f"{river_system}九分区河系范围"
+    assert calls[0]["river_system"] == river_system
 
 
 @pytest.mark.parametrize(
@@ -744,6 +825,46 @@ def test_named_basin_request_uses_nine_zone_tool(monkeypatch, query, expected_st
     assert result["periods"][0]["data_source"] == "滚动预报网格"
     assert result["periods"][0]["status"] == "ok"
     assert result["periods"][0]["has_rain"] is False
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_target", "expected_scope"),
+    [
+        ("明天海河干流有雨吗？", "海河", "海河九分区河系范围"),
+        ("明天全流域有雨吗？", "全流域", "全流域九分区河系范围"),
+    ],
+)
+def test_haihe_mainstream_and_whole_basin_keep_distinct_nine_zone_scopes(
+    monkeypatch, query, expected_target, expected_scope
+):
+    """海河干流只查海河分区；全流域走全部九分区，二者不可混淆。"""
+    calls = []
+    monkeypatch.setattr(
+        rqf,
+        "load_river_corridor",
+        lambda *a, **k: pytest.fail("a named nine-zone scope must not load a corridor"),
+    )
+    monkeypatch.setattr(rqf, "_attach_system_region_hazards", lambda *a, **k: None)
+    monkeypatch.setattr(
+        rqf.rsf,
+        "get_river_system_rainfall_forecast",
+        lambda **kwargs: calls.append(kwargs) or {
+            "data_source": "滚动预报网格",
+            "zones": [{
+                "zone_name": "海河" if expected_target == "海河" else "大清河",
+                "valid_count": 3,
+                "average_rainfall_mm": 0.0,
+                "max_rainfall_mm": 0.0,
+                "min_rainfall_mm": 0.0,
+            }],
+        },
+    )
+
+    result = rqf.query_river_rainfall_forecast_core(query, TEST_CONFIG, now=FIXED_NOW)
+
+    assert result["scope_type"] == "river_system"
+    assert result["scope_description"] == expected_scope
+    assert calls[0]["river_system"] == expected_target
 
 
 def test_three_days_are_computed_independently(monkeypatch):
@@ -797,7 +918,7 @@ def test_database_error_does_not_fall_back_to_a_broader_scope(monkeypatch):
     )
 
     result = rqf.query_river_rainfall_forecast_core(
-        "明天滦河有雨吗？", TEST_CONFIG, now=FIXED_NOW
+        "明天泃河有雨吗？", TEST_CONFIG, now=FIXED_NOW
     )
 
     assert result["status"] == "database_error"
