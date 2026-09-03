@@ -20,6 +20,16 @@ from custom_tools import risk_warning_tool as rwt  # noqa: E402
 FIXED_NOW = datetime(2026, 8, 27, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
+@pytest.fixture(autouse=True)
+def _stub_region_risk_weather_io(monkeypatch):
+    """风险核心的多数测试只测风险；默认在真实天气解析边界返回无数据，禁止访问网络。"""
+    monkeypatch.setattr(
+        rfs,
+        "_cached_rolling_forecast_request",
+        lambda _params: {"code": 0, "message": "ok", "resultData": {}},
+    )
+
+
 def hazard_payload(*, risk_levels, risk_levels_available=True, hazards_available=True):
     return {
         "total_found": 298,
@@ -64,6 +74,79 @@ def test_jizhou_risk_query_returns_all_three_categories(monkeypatch):
     assert {item["key"] for item in result["regions"][0]["risks"]} == {"dzzh", "sh", "zxhl"}
     assert _risk(result, "dzzh")["risk_status"] == "risk"
     assert _risk(result, "zxhl")["risk_status"] == "no_risk"
+
+
+def test_jizhou_risk_query_also_returns_real_today_weather_without_duplicate_risk_query(monkeypatch):
+    """综合风险核心应附当天滚动预报，且天气查询不得再次查询三灾种风险。"""
+    hazard_calls = []
+
+    def hazards(lon, lat, times, **kwargs):
+        hazard_calls.append((lon, lat, times))
+        return hazard_payload(risk_levels={})
+
+    monkeypatch.setattr(rfs, "_query_region_hazards", hazards)
+    monkeypatch.setattr(
+        rfs,
+        "_cached_rolling_forecast_request",
+        lambda _params: {
+            "code": 0,
+            "message": "ok",
+            "resultData": {
+                "117.45_40.05": {
+                    "WEA": ["多云"],
+                    "TMAX": [30],
+                    "TMIN": [20],
+                    "EDA": ["东北风1-2级"],
+                    "TP1H": [0.0],
+                    "VISMIN": [8.0],
+                }
+            },
+        },
+    )
+
+    result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+
+    weather = result["weather_forecast"]
+    assert weather["status"] == "ok"
+    assert weather["data_source"] == "天津市气象台滚动预报"
+    assert weather["periods"][0]["WEA"] == "多云"
+    assert weather["periods"][0]["TMIN"] == 20
+    assert weather["periods"][0]["TMAX"] == 30
+    assert len(hazard_calls) == 1
+
+
+def test_weather_failure_does_not_erase_available_region_risks(monkeypatch):
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a, **k: hazard_payload(risk_levels={}))
+    monkeypatch.setattr(
+        rfs,
+        "_cached_rolling_forecast_request",
+        lambda _params: (_ for _ in ()).throw(TimeoutError("rolling forecast unavailable")),
+    )
+
+    result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+
+    assert result["weather_forecast"]["status"] == "unavailable"
+    assert result["regions"][0]["risks"][0]["risk_status"] == "no_risk"
+
+
+def test_placeholder_weather_period_is_unavailable_and_keeps_region_risks(monkeypatch):
+    """只有“--”占位行不算有效天气，不能诱导回答模型补写天气。"""
+    monkeypatch.setattr(rfs, "_query_region_hazards", lambda *a, **k: hazard_payload(risk_levels={}))
+    monkeypatch.setattr(
+        rfs,
+        "_cached_rolling_forecast_request",
+        lambda _params: {
+            "code": 0,
+            "message": "ok",
+            "resultData": {"117.45_40.05": {"WEA": ["--"]}},
+        },
+    )
+
+    result = rfs.query_region_weather_risks_core("今天蓟州可能有哪些风险？", now=FIXED_NOW)
+
+    assert result["weather_forecast"]["status"] == "unavailable"
+    assert result["weather_forecast"]["periods"] == []
+    assert result["regions"][0]["risks"][0]["risk_status"] == "no_risk"
 
 
 def test_empty_reachable_levels_are_no_risk(monkeypatch):

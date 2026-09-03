@@ -2571,6 +2571,90 @@ class TestDecisionAnswerQualityBatch:
         core = dw_core._decision_core_only(answer, "未来三天天气", max_sentences=4)
         assert "20日多云转阴" in core and "22日雷阵雨转阴" in core
 
+    @pytest.mark.asyncio
+    async def test_multiday_poi_core_uses_full_month_day_for_every_forecast_date(self):
+        """多日核心结论不得只给“04日/05日”，每一天都要显示完整月日。"""
+        facts = {
+            "poi": {"name": "于桥水库", "address": "天津市蓟州区"},
+            "question_type": "general_weather",
+            "data_source": "天津市气象台滚动预报",
+            "has_rain_signal": False,
+            "total_rain_mm": 0.0,
+            "periods": [
+                {"start_time": "2026-09-04 00:00:00", "end_time": "2026-09-05 00:00:00", "weather": "晴转多云", "tmin": 17, "tmax": 30, "EDA": "北风1-2级", "rain_1h": 0.0},
+                {"start_time": "2026-09-05 00:00:00", "end_time": "2026-09-06 00:00:00", "weather": "多云间晴", "tmin": 19, "tmax": 31, "EDA": "西南风1-2级", "rain_1h": 0.0},
+                {"start_time": "2026-09-06 00:00:00", "end_time": "2026-09-07 00:00:00", "weather": "晴转多云有轻雾", "tmin": 17, "tmax": 30, "EDA": "西南风1-2级", "rain_1h": 0.0},
+            ],
+        }
+
+        class _Result:
+            content = "【核心结论】预计未来三天于桥水库无明显降雨，04日晴转多云，05日多云间晴，06日晴转多云有轻雾。"
+
+        async def invoke(_chain, _inputs):
+            return _Result()
+
+        text = await dw_core._generate_decision_weather_answer(
+            "未来三天于桥水库降雨预报？", facts, None, {"ainvoke_chain": invoke}
+        )
+        core = text.split("【于桥水库逐日预报】", 1)[0]
+        assert "9月4日晴转多云" in core
+        assert "9月5日多云间晴" in core
+        assert "9月6日晴转多云有轻雾" in core
+
+    @pytest.mark.asyncio
+    async def test_multiday_poi_core_uses_actual_month_across_month_boundary(self):
+        facts = {
+            "poi": {"name": "于桥水库"},
+            "question_type": "general_weather",
+            "data_source": "天津市气象台滚动预报",
+            "periods": [
+                {"start_time": "2026-08-31 00:00:00", "end_time": "2026-09-01 00:00:00", "weather": "晴", "rain_1h": 0.0},
+                {"start_time": "2026-09-01 00:00:00", "end_time": "2026-09-02 00:00:00", "weather": "多云", "rain_1h": 0.0},
+                {"start_time": "2026-09-02 00:00:00", "end_time": "2026-09-03 00:00:00", "weather": "小雨", "rain_1h": 1.0},
+            ],
+        }
+
+        class _Result:
+            content = "【核心结论】31日晴，01日多云，02日有小雨。"
+
+        async def invoke(_chain, _inputs):
+            return _Result()
+
+        text = await dw_core._generate_decision_weather_answer(
+            "未来三天于桥水库天气？", facts, None, {"ainvoke_chain": invoke}
+        )
+        core = text.split("【于桥水库逐日预报】", 1)[0]
+        assert "8月31日晴" in core
+        assert "9月1日多云" in core
+        assert "9月2日有小雨" in core
+
+    def test_multiday_date_qualification_does_not_rewrite_duration_days(self):
+        core = (
+            "预计未来3日、未来 3日、未来大约4日及预报时长4日天气平稳，"
+            "于桥水库4日多云、**5日**有小雨。"
+        )
+        periods = [
+            {"start_time": "2026-09-03 00:00:00"},
+            {"start_time": "2026-09-04 00:00:00"},
+            {"start_time": "2026-09-05 00:00:00"},
+        ]
+        result = dw_core._qualify_multiday_core_dates(core, periods)
+        assert "未来3日" in result
+        assert "未来 3日" in result
+        assert "未来大约4日" in result
+        assert "预报时长4日" in result
+        assert "于桥水库9月4日多云" in result
+        assert "**9月5日**有小雨" in result
+
+    def test_multiday_date_qualification_keeps_markdown_wrapped_full_dates(self):
+        core = "9月**4日**多云，9月 **5日**有小雨。"
+        periods = [
+            {"start_time": "2026-09-04 00:00:00"},
+            {"start_time": "2026-09-05 00:00:00"},
+        ]
+        result = dw_core._qualify_multiday_core_dates(core, periods)
+        assert result == core
+
     def test_core_only_single_day_truncates_to_first(self):
         answer = "【核心结论】明天阴转小雨。户外适宜性一般。"
         core = dw_core._decision_core_only(answer, "明天天气", max_sentences=1)

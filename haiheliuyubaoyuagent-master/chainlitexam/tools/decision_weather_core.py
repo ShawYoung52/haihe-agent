@@ -1403,7 +1403,53 @@ def _polish_decision_core(core: str) -> str:
     return core
 
 
-def _decision_core_only(answer: Any, user_text: str = "", max_sentences: int = 1) -> str:
+def _qualify_multiday_core_dates(core: str, periods: list[dict] | None) -> str:
+    """用预报事实中的实际月份补全多日结论里的裸日期（如“04日”）。"""
+    dates_by_day: dict[int, set[date]] = {}
+    for period in periods or []:
+        if not isinstance(period, dict):
+            continue
+        start = _parse_decision_dt(period.get("start_time"))
+        if start is None:
+            continue
+        dates_by_day.setdefault(start.day, set()).add(start.date())
+    if len([values for values in dates_by_day.values() if len(values) == 1]) < 2:
+        return core
+
+    def replace(match: re.Match) -> str:
+        prefix = core[:match.start()]
+        semantic_prefix = re.sub(r"[\s*_`~]+$", "", prefix)
+        # 月日之间可能含空格或 Markdown 标记；这种情况已经是完整日期。
+        if re.search(r"\d{1,2}\s*月$", semantic_prefix):
+            return match.group(0)
+        # “未来 3日”“未来大约4日”“预报时长4日”等是时长，不是月内日期。
+        if re.search(
+            r"(?:未来|近|过去|最近|连续|持续|为期|长达|共|接下来|第|(?:预报)?时长)"
+            r"\s*(?:大约|约)?$",
+            semantic_prefix,
+        ):
+            return match.group(0)
+        candidates = dates_by_day.get(int(match.group("day"))) or set()
+        if len(candidates) != 1:
+            return match.group(0)
+        target = next(iter(candidates))
+        return f"{target.month}月{target.day}日"
+
+    # 已有“9月4日”由“月”负向断言保护；时长表达在回调中按语义前缀排除。
+    # 不限制日期前的标点，以兼容“于桥水库4日”“**4日**”等模型写法。
+    return re.sub(
+        r"(?<![\d月])0?(?P<day>3[01]|[12]\d|[1-9])\s*日",
+        replace,
+        core,
+    )
+
+
+def _decision_core_only(
+    answer: Any,
+    user_text: str = "",
+    max_sentences: int = 1,
+    periods: list[dict] | None = None,
+) -> str:
     """只保留模型生成的核心结论，丢弃其可能附带的表格或其它区块。
 
     max_sentences：逐日（多日）预报允许每天一句 + 气温/适宜性一句，按句数截取，
@@ -1428,6 +1474,7 @@ def _decision_core_only(answer: Any, user_text: str = "", max_sentences: int = 1
         core = "".join(sentences).strip()
     else:
         core = normalized
+    core = _qualify_multiday_core_dates(core, periods)
     return _polish_decision_core(sanitize_forecast_core_summary(core, user_text))
 
 
@@ -2245,8 +2292,9 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
         "严禁输出点位定位过程、经纬度、代表点、工具名、接口名、URL、参数名、query_mode、fcst_time、startPeriod、endPeriod、interval 等技术信息。\n"
         + historical_note
         + output_instruction
-        + "逐日（多日）预报且每天天气不同时，按天分述，每天一句"
-        "（如“20日多云转阴，21日雷阵雨，22日雷阵雨转阴”），不要把多天的天气合并成“前期…后期…”一句；"
+        + "逐日（多日）预报且每天天气不同时，按天分述，每天一句；每一天都必须写完整月日"
+        "（如“8月20日多云转阴，8月21日雷阵雨，8月22日雷阵雨转阴”），不得省略后续日期的月份，"
+        "不要把多天的天气合并成“前期…后期…”一句；"
         "若多日天气相同或均为无降雨，一句话概括即可，不要逐日重复相同内容。单日预报正文一句即可。"
         "只围绕用户明确询问的"
         "降雨、天气、气温、风力、能见度或活动适宜性直接作答，不主动扩展无关风险、背景或建议。\n"
@@ -2273,7 +2321,12 @@ async def _generate_decision_weather_answer(user_text: str, facts: dict, answer_
     # 逐日（多日）预报允许结论按天分述（每天一句 + 气温/适宜性一句），单日收紧为一句。
     n_periods = len([p for p in (facts.get("periods") or []) if isinstance(p, dict)])
     max_sentences = (n_periods + 1) if n_periods > 1 else 1
-    core = _decision_core_only(answer, user_text, max_sentences=max_sentences)
+    core = _decision_core_only(
+        answer,
+        user_text,
+        max_sentences=max_sentences,
+        periods=[p for p in (facts.get("periods") or []) if isinstance(p, dict)],
+    )
     table = _build_decision_weather_table(user_text, facts)
     risk_levels = _build_point_risk_level_section(facts)
     model_weather_advice = _decision_model_weather_advice(answer, facts)

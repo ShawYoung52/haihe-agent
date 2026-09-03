@@ -18,6 +18,24 @@ def test_prompts_use_unified_river_forecast_entry(routing_prompt):
     assert "query_river_rainfall_forecast" in routing_prompt
 
 
+def test_region_risk_answer_contract_requires_weather_first_core_conclusion(routing_prompt):
+    """泛综合风险回答应先依据工具内天气事实概括天气和风险，再展开三灾种。"""
+    start = routing_prompt.index("12. **风险预警查询")
+    section = routing_prompt[start:start + 3500]
+    assert "【核心结论】" in section
+    assert "天气预报" in section
+    assert "实际有风险的灾害类型" in section
+    assert "天津市气象台滚动预报、海河流域风险预警" in section
+
+
+def test_default_answer_prompt_requires_region_weather_risk_core_conclusion():
+    prompt = prompts.METEO_ANSWER_SYSTEM_PROMPT
+    assert "weather_forecast" in prompt
+    assert "实际有风险的灾害类型" in prompt
+    assert "随后再分别输出地质灾害、山洪、中小河流三类详情" in prompt
+    assert "天津市气象台滚动预报、海河流域风险预警" in prompt
+
+
 def test_prompts_limit_unified_river_tool_to_supported_time_windows(routing_prompt):
     start = routing_prompt.index("#### 3.5 子流域未来天气查询规范")
     end = routing_prompt.index("### 4. 决策天气", start)

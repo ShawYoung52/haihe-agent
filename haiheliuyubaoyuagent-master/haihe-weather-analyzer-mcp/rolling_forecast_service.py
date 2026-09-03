@@ -571,6 +571,56 @@ def _resolve_region_risk_regions(user_query: str, regions: str) -> tuple[list[st
     return [], True, unsupported_names
 
 
+def _query_region_risk_weather_forecast(
+    user_query: str,
+    region_names: list[str],
+    current: datetime,
+) -> dict:
+    """复用滚动预报核心，为综合风险回答提供同一时段的真实天气事实。"""
+    unavailable = {
+        "status": "unavailable",
+        "message": "天气预报资料暂不可用",
+        "data_source": "天津市气象台滚动预报",
+        "periods": [],
+    }
+    try:
+        payload = query_rolling_forecast_core(
+            user_query=user_query,
+            regions="、".join(region_names),
+            now=current,
+            include_region_hazards=False,
+        )
+    except Exception:
+        return unavailable
+    if not isinstance(payload, dict):
+        return unavailable
+    periods = [
+        item
+        for item in (payload.get("periods") or [])
+        if isinstance(item, dict) and _period_has_weather_fact(item)
+    ]
+    if not periods:
+        return unavailable
+    return {
+        "status": "ok",
+        "data_source": payload.get("data_source") or "天津市气象台滚动预报",
+        "forecast_start_time": payload.get("forecast_start_time"),
+        "forecast_end_time": payload.get("forecast_end_time"),
+        "periods": periods,
+    }
+
+
+def _period_has_weather_fact(period: dict) -> bool:
+    """判断滚动预报行是否至少含一项清洗后的真实气象事实。"""
+    for key in ("WEA", "EDA"):
+        value = _clean_value(period.get(key))
+        if value is not None and str(value).strip():
+            return True
+    if any(_to_float(period.get(key)) is not None for key in ("TMAX", "TMIN", "TP1H")):
+        return True
+    return _to_positive_float(period.get("VISMIN")) is not None
+
+
 def query_region_weather_risks_core(
     user_query: str,
     regions: str = "",
@@ -597,6 +647,7 @@ def query_region_weather_risks_core(
     calendar_window = resolve_requested_calendar_window(user_query, now=current)
     risk_fcst_times = _risk_fcst_times_from_window(calendar_window, current)
     risk_window = _risk_window_payload(calendar_window, risk_fcst_times)
+    weather_forecast = _query_region_risk_weather_forecast(user_query, region_names, current)
     entries: list[dict] = []
     all_risk_statuses: list[str] = []
     for name in region_names:
@@ -660,6 +711,7 @@ def query_region_weather_risks_core(
     return {
         "status": status,
         "query_time": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "weather_forecast": weather_forecast,
         "risk_window": risk_window,
         "regions": entries,
     }
@@ -2210,6 +2262,8 @@ def query_rolling_forecast_core(
     forecast_days: int = 0,
     query_window: str = "",
     now: datetime | None = None,
+    *,
+    include_region_hazards: bool = True,
 ) -> dict:
     """执行滚动预报查询，日历日入参存在时覆盖底层时效参数。"""
     now = now or time_source.now(TIANJIN_TIMEZONE)
@@ -2426,7 +2480,7 @@ def query_rolling_forecast_core(
         beyond = _risk_window_beyond_label(calendar_window, window)
         if beyond:
             result["point_risk_beyond_from"] = beyond
-    elif region_names:
+    elif region_names and include_region_hazards:
         region_hazards = []
         for name, lon_t, lat_t in zip(region_names, lons, lats):
             hazards = _query_region_hazards(lon_t, lat_t, risk_fcst_times)
