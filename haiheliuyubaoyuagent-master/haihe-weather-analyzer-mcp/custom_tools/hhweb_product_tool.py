@@ -9,10 +9,11 @@
 
 网址格式（天河提供 2026-08-18）：
     http://10.226.107.35:8070/hhweb/#/product-image/type=radar,rain,rain-forcast&time=2025-07-27 10:00:00
-    可选 &radarTime=2025-07-27 15:30:00
+    可选 &radarTime=2025-07-27 15:30:00  &area=tj
 - time      ：产品(预报)时次，**必传**，"YYYY-MM-DD HH:00:00"
 - radarTime ：雷达观测时次，可选，与 time **分开传**
 - type      ：产品类型，逗号分隔 radar(雷达)/rain(降水实况)/rain-forcast(降水预报)
+- area      ：区域，可选，tj（天津）/ jjj（京津冀）；不传则不拼（保持默认范围）
 
 注意：这是 Vue 前端路由（#/ 哈希），参数在哈希里由前端解析；截图需能访问该页的浏览器。
 base 默认 http://10.226.107.35:8070，env HHWEB_PRODUCT_BASE 可覆盖。
@@ -34,6 +35,17 @@ BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 HHWEB_PRODUCT_BASE = os.getenv("HHWEB_PRODUCT_BASE", "http://10.226.107.35:8070").rstrip("/")
 DEFAULT_TYPES = "radar,rain,rain-forcast"
 
+# 长图链接 area 参数（2026-09-02 新增，可选）：tj（天津）/ jjj（京津冀）；空=不拼（保持旧行为）
+VALID_AREAS = {"tj", "jjj"}
+
+
+def _normalize_area(area: str) -> str:
+    """area 可选：tj（天津）/ jjj（京津冀）；空→不拼。非法非空值抛 ValueError。"""
+    a = (area or "").strip().lower()
+    if a and a not in VALID_AREAS:
+        raise ValueError("area 只能是 tj（天津）或 jjj（京津冀）")
+    return a
+
 _SCREENSHOT_TIMEOUT_MS = 60000
 _RENDER_WAIT_MS = 5000   # load 事件后再等图表/图片渲染（networkidle 在轮询型 Vue 页可能永不触发）
 _VIEWPORT = {"width": 1125, "height": 1600}
@@ -46,12 +58,15 @@ def _fmt(t: datetime) -> str:
     return t.strftime("%Y-%m-%d %H:00:00")
 
 
-def build_product_url(time_str: str, radar_time: str = "", types: str = DEFAULT_TYPES) -> str:
-    """按天河格式拼 product-image 网址。time 必传；radarTime 传了才拼。"""
+def build_product_url(time_str: str, radar_time: str = "", types: str = DEFAULT_TYPES, area: str = "") -> str:
+    """按天河格式拼 product-image 网址。time 必传；radarTime/area 传了才拼。"""
     types = (types or DEFAULT_TYPES).strip()
     q = f"type={types}&time={quote(time_str.strip(), safe=':-')}"
     if radar_time and radar_time.strip():
         q += f"&radarTime={quote(radar_time.strip(), safe=':-')}"
+    area = _normalize_area(area)
+    if area:
+        q += f"&area={area}"
     return f"{HHWEB_PRODUCT_BASE}/hhweb/#/product-image/{q}"
 
 
@@ -122,11 +137,21 @@ def get_haihe_product_longimg_core(
     time: str = "",
     radarTime: str = "",
     types: str = DEFAULT_TYPES,
+    area: str = "",
     screenshot: bool = True,
 ) -> dict[str, Any]:
     """拼 product-image 网址；能截图则返回长图 base64，否则返回网址。"""
     time_str = time.strip() or _fmt(time_source.now(BEIJING_TIMEZONE))
-    url = build_product_url(time_str, radarTime, types)
+    try:
+        area_norm = _normalize_area(area)
+    except ValueError as e:
+        return {
+            "status": "error", "url": "", "base64": "", "text": str(e),
+            "time": time_str, "radarTime": radarTime.strip(),
+            "types": types or DEFAULT_TYPES, "area": (area or "").strip(),
+            "screenshot_error": "", "message": str(e),
+        }
+    url = build_product_url(time_str, radarTime, types, area_norm)
 
     global _LAST_SCREENSHOT_REASON
     _LAST_SCREENSHOT_REASON = ""
@@ -150,6 +175,7 @@ def get_haihe_product_longimg_core(
         "time": time_str,
         "radarTime": radarTime.strip(),
         "types": types or DEFAULT_TYPES,
+        "area": area_norm,
         "screenshot_error": screenshot_error,
         "message": "已构造 hhweb 拼网址长图。" if b64 else "已构造 hhweb 拼网址长图网址。",
     }
@@ -161,6 +187,7 @@ def register_hhweb_product_tool(mcp: FastMCP) -> None:
         time: str = "",
         radarTime: str = "",
         types: str = DEFAULT_TYPES,
+        area: str = "",
         screenshot: bool = True,
     ) -> dict:
         """
@@ -174,8 +201,9 @@ def register_hhweb_product_tool(mcp: FastMCP) -> None:
             time: 产品(预报)时次 "YYYY-MM-DD HH:00:00"（北京时），必传；不传取当前整点
             radarTime: 雷达观测时次，可选，与 time 分开传；不传则不拼该参数
             types: 产品类型，逗号分隔，默认 "radar,rain,rain-forcast"（雷达/降水实况/降水预报）
+            area: 区域，可选，"tj"（天津）或 "jjj"（京津冀）；不传则不拼该参数（保持默认范围）
             screenshot: 是否尝试本机浏览器截图出图，默认 True（无浏览器自动降级为返回网址）
         """
         return get_haihe_product_longimg_core(
-            time=time, radarTime=radarTime, types=types, screenshot=screenshot,
+            time=time, radarTime=radarTime, types=types, area=area, screenshot=screenshot,
         )

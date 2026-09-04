@@ -172,6 +172,73 @@ def test_river_forecast_boundary_keeps_mixed_observation_and_future_calls():
     assert guarded.tool_calls == original_calls
 
 
+def _planner_msg(calls):
+    return type("PlannerMessage", (), {"tool_calls": calls, "content": ""})()
+
+
+class TestLongimgAreaBoundary:
+    """长图工具 area 区域按用户原文确定性判定（不靠 planner 善意）。"""
+
+    @pytest.mark.parametrize("tool", ["generate_haihe_composite_longimg", "get_haihe_product_image_url"])
+    def test_jjj_when_jingjinji_mentioned(self, tool):
+        msg = _planner_msg([{"id": "1", "name": tool, "args": {}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "出一张京津冀的长图")
+        assert guarded.tool_calls[0]["args"]["area"] == "jjj"
+
+    @pytest.mark.parametrize("tool", ["generate_haihe_composite_longimg", "get_haihe_product_image_url"])
+    def test_tj_when_tianjin_mentioned(self, tool):
+        msg = _planner_msg([{"id": "1", "name": tool, "args": {}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "出一张天津的长图")
+        assert guarded.tool_calls[0]["args"]["area"] == "tj"
+
+    def test_region_keyword_overrides_planner_wrong_area(self):
+        msg = _planner_msg([{"id": "1", "name": "generate_haihe_composite_longimg", "args": {"area": "tj"}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "京津冀的长图")
+        assert guarded.tool_calls[0]["args"]["area"] == "jjj", "原文明确京津冀应纠正 planner 错传的 tj"
+
+    def test_no_region_keeps_planner_valid_area(self):
+        msg = _planner_msg([{"id": "1", "name": "generate_haihe_composite_longimg", "args": {"area": "jjj"}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "出一张长图")
+        assert guarded.tool_calls[0]["args"]["area"] == "jjj", "无区域词时保留 planner 合理推断的 area"
+
+    def test_no_region_no_area_stays_empty(self):
+        msg = _planner_msg([{"id": "1", "name": "generate_haihe_composite_longimg", "args": {}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "出一张长图")
+        assert guarded.tool_calls[0]["args"].get("area", "") == "", "默认不拼 area（天津默认范围）"
+
+    def test_jingjinji_does_not_false_match_tianjin(self):
+        # "京津冀"含"津"但不含"天津"，不应被判成 tj
+        assert mo._resolve_longimg_area("京津冀长图", "") == "jjj"
+
+    def test_other_tools_untouched(self):
+        msg = _planner_msg([{"id": "1", "name": "query_rolling_forecast", "args": {}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "京津冀明天天气")
+        assert guarded.tool_calls[0]["args"] == {}
+
+    def test_no_longimg_tool_returns_same(self):
+        msg = _planner_msg([{"id": "1", "name": "query_current_weather_observation", "args": {}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "京津冀实况")
+        assert guarded.tool_calls[0]["name"] == "query_current_weather_observation"
+
+    # --- 今日雨情（强制路由）与区域词联动：无论强制路由还是 planner 路径，面积都确定性 ---
+    def test_plain_yuqing_forced_route_keeps_default_area(self):
+        # 裸"今日雨情"命中强制路由，无参调用；无区域词 → 不拼 area（默认天津）
+        route = mo._route_local_longimg_catalog_query("今日雨情")
+        assert route == ("generate_haihe_composite_longimg", {})
+        msg = _planner_msg([{"id": "1", "name": route[0], "args": dict(route[1])}])
+        guarded = mo._enforce_longimg_area_boundary(msg, "今日雨情")
+        assert guarded.tool_calls[0]["args"].get("area", "") == ""
+
+    @pytest.mark.parametrize("text,expected", [("京津冀今日雨情", "jjj"), ("天津今日雨情", "tj")])
+    def test_yuqing_with_region_word_gets_area(self, text, expected):
+        # 带区域词的雨情说法：归一化不剥区域词 → 强制路由不命中、落 planner；
+        # planner 即便漏传 area，边界也按原文确定性补上
+        assert mo._route_local_longimg_catalog_query(text) is None, "区域词应使强制路由不命中、交 planner"
+        msg = _planner_msg([{"id": "1", "name": "generate_haihe_composite_longimg", "args": {}}])
+        guarded = mo._enforce_longimg_area_boundary(msg, text)
+        assert guarded.tool_calls[0]["args"]["area"] == expected
+
+
 @pytest.mark.asyncio
 async def test_river_forecast_second_planner_answer_does_not_repeat_tool_or_drop_content(monkeypatch):
     """首轮已查河流预报后，补充 Planner 的完整答案必须原样保留。"""

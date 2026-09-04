@@ -1061,6 +1061,7 @@ def generate_haihe_composite_longimg_core(
     interval: int = 24,
     range: str = "9",
     type: str = "0",
+    area: str = "",
 ) -> dict[str, Any]:
     """生成组合长图：**hhweb 拼网址 + 本机浏览器截图**（2026-08-19 用户决定改天河做法）。
 
@@ -1075,8 +1076,18 @@ def generate_haihe_composite_longimg_core(
     time_str = _hhweb_time(endTime)
     hhweb = _load_hhweb_product_tool()
     result = hhweb.get_haihe_product_longimg_core(
-        time=time_str, radarTime=time_str, screenshot=True,
+        time=time_str, radarTime=time_str, area=area, screenshot=True,
     )
+    # area 非法等参数错误直接透传（非截图失败）
+    if result.get("status") == "error":
+        return {
+            "status": "error", "base64": "",
+            "text": result.get("text") or result.get("message", "参数错误"),
+            "render_warning": "", "beginTime": beginTime, "endTime": endTime,
+            "range": str(range or "9"), "type": str(type or "0"),
+            "area": (area or "").strip(), "url": "",
+            "message": result.get("message", "参数错误"),
+        }
     b64 = result.get("base64") or ""
     warn = "" if b64 else (
         f"未能直接截图（{result.get('screenshot_error') or '本机无可用浏览器'}），已降级返回 hhweb 长图网址"
@@ -1090,6 +1101,7 @@ def generate_haihe_composite_longimg_core(
         "endTime": endTime,
         "range": str(range or "9"),
         "type": str(type or "0"),
+        "area": result.get("area", ""),
         "url": result.get("url", ""),
         "message": result.get("message", "已生成 hhweb 拼网址长图。"),
     }
@@ -1308,6 +1320,7 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
         interval: int = 24,
         range: str = "9",
         type: str = "0",
+        area: str = "",
     ) -> dict:
         """
         生成海河流域 14所 降水专题**组合长图**（hhweb 拼网址网页版，天河做法）。
@@ -1330,6 +1343,7 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
             interval: 间隔(小时)，网页版忽略，默认 24
             range: 分区，网页版忽略，默认 "9"
             type: 站点类型，网页版忽略，默认 "0"
+            area: 区域，可选，"tj"（天津）或 "jjj"（京津冀）；用户要"京津冀长图"时传 "jjj"，默认不拼（天津）
         """
         return generate_haihe_composite_longimg_core(
             beginTime=beginTime,
@@ -1338,4 +1352,5 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
             interval=interval,
             range=range,
             type=type,
+            area=area,
         )

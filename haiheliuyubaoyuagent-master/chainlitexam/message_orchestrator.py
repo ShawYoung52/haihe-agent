@@ -1299,6 +1299,51 @@ def _enforce_simple_weather_route(
     return planner_msg
 
 
+# 长图出图工具（组合长图 + 网页版长图），area 区域需按用户原文确定性判定
+_LONGIMG_AREA_TOOLS = {"generate_haihe_composite_longimg", "get_haihe_product_image_url"}
+
+
+def _resolve_longimg_area(user_text: str, current_area: str) -> str:
+    """按用户原文确定性定长图 area 区域（不靠 planner 善意）。
+
+    京津冀 → jjj；天津 → tj；都没提 → 保留 planner 已给的合法 area（多轮上下文里 planner
+    可能合理推断出区域），否则默认空（不拼参数 = 天津默认范围）。
+    """
+    text = user_text or ""
+    if "京津冀" in text:
+        return "jjj"
+    if "天津" in text:
+        return "tj"
+    cur = (current_area or "").strip().lower()
+    return cur if cur in ("tj", "jjj") else ""
+
+
+def _enforce_longimg_area_boundary(planner_msg, user_text: str):
+    """长图工具按用户原文确定性定 area 区域（京津冀→jjj、天津→tj），纠正 planner 漏传/错传。
+
+    与 prompt 里的 area 引导是双保险：prompt 引导 planner 选参，本边界在工具执行入口兜底，
+    保证"京津冀长图"必出 jjj、"天津长图"必出 tj，与 _enforce_tianhe_catalog_boundary 同款模式。
+    """
+    calls = list(getattr(planner_msg, "tool_calls", None) or [])
+    if not any(call.get("name") in _LONGIMG_AREA_TOOLS for call in calls):
+        return planner_msg
+    new_calls: list[dict] = []
+    for call in calls:
+        if call.get("name") not in _LONGIMG_AREA_TOOLS:
+            new_calls.append(call)
+            continue
+        normalized = dict(call)
+        args = dict(normalized.get("args") or {})
+        resolved = _resolve_longimg_area(user_text, args.get("area", ""))
+        if resolved != (args.get("area") or ""):
+            args["area"] = resolved
+            normalized["args"] = args
+            print(f"[长图区域] {call.get('name')} area 确定为：{resolved or '默认(天津,不拼参数)'}")
+        new_calls.append(normalized)
+    _set_tool_calls(planner_msg, new_calls)
+    return planner_msg
+
+
 def _has_current_turn_river_forecast_response(messages) -> bool:
     """判断当前用户回合是否已收到统一河流预报的工具响应。"""
     current_turn = list(messages or [])
@@ -2697,6 +2742,7 @@ async def _run_tool_round(planner_msg, tools, messages, user_text: str, iteratio
     planner_msg = _enforce_river_forecast_tool_boundary(
         planner_msg, user_text, messages=messages
     )
+    planner_msg = _enforce_longimg_area_boundary(planner_msg, user_text)
     if had_tool_calls and not planner_msg.tool_calls:
         return (
             forced_final_text,

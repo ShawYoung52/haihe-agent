@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import pytest
 import sys
 from pathlib import Path
 
@@ -46,6 +47,26 @@ class TestBuildProductUrl:
         url = hpt.build_product_url("2025-07-27 10:00:00", types="radar,rain")
         assert "type=radar,rain&" in url
 
+    def test_area_appended_when_tj(self):
+        url = hpt.build_product_url("2025-07-27 10:00:00", area="tj")
+        assert "&area=tj" in url
+
+    def test_area_appended_when_jjj(self):
+        url = hpt.build_product_url("2025-07-27 10:00:00", area="jjj")
+        assert "&area=jjj" in url
+
+    def test_area_case_insensitive(self):
+        url = hpt.build_product_url("2025-07-27 10:00:00", area="  JJJ ")
+        assert "&area=jjj" in url
+
+    def test_area_omitted_when_empty(self):
+        url = hpt.build_product_url("2025-07-27 10:00:00", area="")
+        assert "area=" not in url
+
+    def test_area_invalid_raises(self):
+        with pytest.raises(ValueError):
+            hpt.build_product_url("2025-07-27 10:00:00", area="beijing")
+
 
 class TestCore:
     def test_returns_url_and_status(self):
@@ -78,6 +99,24 @@ class TestCore:
             time="2025-07-27 10:00:00", radarTime="2025-07-27 15:30:00", screenshot=False)
         assert "radarTime=2025-07-27%2015:30:00" in r["url"]
         assert r["radarTime"] == "2025-07-27 15:30:00"
+
+    def test_area_passthrough(self):
+        r = hpt.get_haihe_product_longimg_core(
+            time="2025-07-27 10:00:00", area="jjj", screenshot=False)
+        assert "&area=jjj" in r["url"]
+        assert r["area"] == "jjj"
+
+    def test_area_default_empty(self):
+        r = hpt.get_haihe_product_longimg_core(time="2025-07-27 10:00:00", screenshot=False)
+        assert "area=" not in r["url"]
+        assert r["area"] == ""
+
+    def test_area_invalid_returns_error(self):
+        r = hpt.get_haihe_product_longimg_core(
+            time="2025-07-27 10:00:00", area="beijing", screenshot=False)
+        assert r["status"] == "error"
+        assert r["url"] == ""
+        assert "tj" in r["message"] and "jjj" in r["message"]
 
 
 class _FakeLocator:

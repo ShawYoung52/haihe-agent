@@ -642,3 +642,29 @@ class TestHhwebLongimgCore:
         t = clt._hhweb_time("")
         assert _re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:00:00", t), "默认应取当前北京时整点"
 
+    def test_area_passthrough_to_hhweb(self, monkeypatch):
+        fake = self._install_fake_hhweb(monkeypatch, {
+            "status": "ok", "base64": _IMG_B64, "text": "", "url": "u", "message": "ok",
+            "area": "jjj",
+        })
+        r = clt.generate_haihe_composite_longimg_core(area="jjj")
+        assert fake.calls[0]["area"] == "jjj", "area 应透传给 hhweb"
+        assert r["area"] == "jjj"
+
+    def test_area_default_empty(self, monkeypatch):
+        fake = self._install_fake_hhweb(monkeypatch, {
+            "status": "ok", "base64": _IMG_B64, "text": "", "url": "u", "message": "ok",
+        })
+        clt.generate_haihe_composite_longimg_core()
+        assert fake.calls[0]["area"] == "", "默认 area 应为空（不拼参数）"
+
+    def test_area_invalid_propagates_error(self, monkeypatch):
+        self._install_fake_hhweb(monkeypatch, {
+            "status": "error", "text": "area 只能是 tj（天津）或 jjj（京津冀）",
+            "message": "area 只能是 tj（天津）或 jjj（京津冀）",
+        })
+        r = clt.generate_haihe_composite_longimg_core(area="beijing")
+        assert r["status"] == "error", "area 非法应透传 error 而非当截图失败"
+        assert r["render_warning"] == "", "参数错误不应带截图降级警告"
+        assert "tj" in r["message"]
+

@@ -173,3 +173,21 @@
       ④ mtime 缓存加 `threading.Lock`（同步端点跑线程池，防并发读到新 mtime+旧 sections，对齐 CLAUDE.md 缓存约定）；
       ⑤ 「未鉴权 role 可绕过公众限制」判定为**设计使然**（快捷问题只是建议词条、真实数据走 /qa/ask 不按角色挡，
       role 是 UI 定制非安全边界），不改代码、文档补安全口径说明。
+- [x] R32 长图 URL 拼接新增 area 参数（用户："长图链接增加 area 参数（可选 tj天津/jjj京津冀），给问答智能体涉及到的更新一下"）：
+      hhweb product-image 网址新口径 …&time=…&radarTime=…&forcastTime=…&area=tj（forcastTime 是 hhweb 前端
+      自己拼的、我们不加，现状能跑）。改动：① `hhweb_product_tool.build_product_url` 加 `area` 参数
+      （可选、`_normalize_area` 校验 tj/jjj、空不拼保持旧行为、非法抛 ValueError），`get_haihe_product_longimg_core`
+      + MCP `get_haihe_product_image_url` 透传（非法 area 返回 status=error）；② `composite_longimg_tool`
+      核心 + MCP `generate_haihe_composite_longimg` 加 `area` 透传给 hhweb（error 状态短路透传、不当截图失败）；
+      ③ prompt 双轨（418/1106 composite、434/1122 hhweb）补 area 口径："京津冀长图"传 jjj、默认天津不拼。
+      测试：hhweb +8（URL 拼接 5 + core 透传/默认/非法 3）、composite +3（透传/默认空/error 短路）。
+      全量 MCP 676 passed/20 skipped、chainlitexam 973 passed/5 skipped/0 failed，脱敏 CLEAN。
+      **③ 追问"考虑全面一点"补确定性区域边界**（不靠 planner 善意）：`message_orchestrator` 新增
+      `_LONGIMG_AREA_TOOLS` + `_resolve_longimg_area`（京津冀→jjj、天津→tj、无区域词保留 planner 合法 area、
+      否则默认空=天津；"京津冀"含"津"不含"天津"不误判 tj）+ `_enforce_longimg_area_boundary`
+      （与 `_enforce_tianhe_catalog_boundary` 同款，在 `_run_tool_round` 执行入口按 user_text 改 area arg，
+      纠正 planner 漏传/错传，覆盖 planner 自由调参与今日雨情强制路由两条路径）。prompt 引导为双保险第一层。
+      测试 test_message_orchestrator.py::TestLongimgAreaBoundary 13 条（jjj/tj/纠错/保留/默认/不误判/他工具不动/雨情路径 3 条）。
+      **今日雨情联动（用户追问确认）**：裸"今日雨情"命中强制路由（`_route_local_longimg_catalog_query`，无参调用）→ 无区域词 → 不拼 area=默认天津；
+      "京津冀/天津今日雨情"因归一化不剥区域词、强制路由不命中落 planner → 边界按原文确定性补 jjj/tj。两条路径都被 `_run_tool_round` 内的边界兜住。
+      全量 chainlitexam 986 passed/5 skipped/0 failed。
