@@ -214,3 +214,9 @@
       _rolling_snapshot_table 未来12h interval=1、decision_weather 已有自己的收敛逻辑，均不受影响。
       测试 tests/test_rolling_forecast_period_label.py 4 条（24h 午夜/08时/逐小时/跨午夜边界）。
       全量 MCP 702 passed/21 skipped、chainlitexam 986 passed/5 skipped/0 failed。
+- [x] R35 快捷问题面板分区口径收紧（用户："之前说的是只展示实况和预报的给 forecaster 和 external"，
+      AskUserQuestion 拍板）：`_ROLE_SECTION_IDS` 改为 admin=None（全量 8 区）、forecaster={1,2}
+      （01天气资讯=实况/预报/预警 + 02防汛服务=河系水库降雨预报与风险）、external={1}（仅 01天气资讯）。
+      文旅/科普/行业/业务技术/统计/系统问答不上快捷面板。测试 test_quick_questions.py 15→17 条
+      （forecaster 两区、白名单 id 存在性双角色、端点三角色），docs/api/quick-questions-api.md
+      角色→分区表同步。全量 chainlitexam 988 passed/5 skipped/0 failed。

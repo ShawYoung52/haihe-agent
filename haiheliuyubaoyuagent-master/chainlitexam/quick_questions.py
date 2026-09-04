@@ -30,13 +30,15 @@ _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "quickQA.jso
 CONFIG_PATH_ENV = "QUICK_QA_CONFIG_PATH"
 
 # 角色 → 可见分区 id 集合；值为 None 表示「全部可见」（不做过滤）。
-# external（公众）只看天气资讯/文旅出行/气象科普/系统问答，
-# 防汛服务、行业服务、业务技术、统计气象为专业/业务内容，不对公众开放。
-# forecaster / admin 全量可见。
+# 口径（2026-09-04 用户拍板）：面板只给各角色展示与其工作相关的实况/预报类分区——
+# admin 全量 8 区；
+# forecaster（区局预报员）= 01天气资讯（实况/预报/预警）+ 02防汛服务（河系水库降雨预报与风险）；
+# external（公众）= 仅 01天气资讯。
+# 文旅/科普/行业/业务技术/统计/系统问答不上快捷面板。
 _ROLE_SECTION_IDS: dict[str, set[int] | None] = {
     "admin": None,
-    "forecaster": None,
-    "external": {1, 3, 4, 8},
+    "forecaster": {1, 2},
+    "external": {1},
 }
 
 # 与 chain_gzt.ALLOWED_USER_ROLES 保持一致（独立维护，避免反向 import chain_gzt）。

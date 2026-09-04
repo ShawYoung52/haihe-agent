@@ -5,8 +5,8 @@
 设计：
 - 内容以后端自带 `chainlitexam/config/quickQA.json` 为事实源（随 Chainlit 服务部署），
   `quick_questions` 只读、不读 AgentWeb 那份（AgentWeb 服务器上独立部署、与 Chainlit 不在一起）。
-- 角色 → 可见分区策略在 `quick_questions._ROLE_SECTION_IDS`：
-  admin / forecaster 全量 8 区；external（公众）只看 01天气资讯/03文旅出行/04气象科普/08系统问答。
+- 角色 → 可见分区策略在 `quick_questions._ROLE_SECTION_IDS`（2026-09-04 口径）：
+  admin 全量 8 区；forecaster（区局预报员）= 01天气资讯+02防汛服务；external（公众）= 仅 01天气资讯。
 - 端点 `GET /api/v1/qa/quick-questions?role=...`：显式 role 优先；不传时回退 cookie JWT
   metadata.role；都没有按 external 兜底。显式非法 role → 400。
 """
@@ -58,28 +58,33 @@ def _section(sid, n_questions=2):
 def test_external_sees_only_public_sections():
     result = qq.get_quick_questions("external")
     ids = [s["id"] for s in result["sections"]]
-    assert ids == [1, 3, 4, 8]
+    assert ids == [1]
     assert result["role"] == "external"
 
 
-def test_forecaster_and_admin_see_all_sections():
-    for role in ("forecaster", "admin"):
-        result = qq.get_quick_questions(role)
-        assert len(result["sections"]) == 8
-        assert result["role"] == role
+def test_admin_sees_all_sections():
+    result = qq.get_quick_questions("admin")
+    assert len(result["sections"]) == 8
+    assert result["role"] == "admin"
+
+
+def test_forecaster_sees_weather_and_flood_sections():
+    result = qq.get_quick_questions("forecaster")
+    assert [s["id"] for s in result["sections"]] == [1, 2]
+    assert result["role"] == "forecaster"
 
 
 def test_role_is_case_insensitive_and_stripped():
     result = qq.get_quick_questions("  External ")
     assert result["role"] == "external"
-    assert [s["id"] for s in result["sections"]] == [1, 3, 4, 8]
+    assert [s["id"] for s in result["sections"]] == [1]
 
 
 def test_unknown_or_empty_role_falls_back_to_external():
     for role in ("", "  ", "superadmin", "root"):
         result = qq.get_quick_questions(role)
         assert result["role"] == "external"
-        assert [s["id"] for s in result["sections"]] == [1, 3, 4, 8]
+        assert [s["id"] for s in result["sections"]] == [1]
 
 
 def test_result_is_deep_copied_from_cache():
@@ -109,6 +114,8 @@ def test_custom_config_path_filters_by_role(monkeypatch, tmp_path):
     monkeypatch.setenv(qq.CONFIG_PATH_ENV, str(cfg))
     external = qq.get_quick_questions("external")
     assert [s["id"] for s in external["sections"]] == [1]  # 2/5 不在 external 白名单
+    forecaster = qq.get_quick_questions("forecaster")
+    assert [s["id"] for s in forecaster["sections"]] == [1, 2]  # 5 不在 forecaster 白名单
     admin = qq.get_quick_questions("admin")
     assert [s["id"] for s in admin["sections"]] == [1, 2, 5]
 
@@ -124,8 +131,9 @@ def test_repo_quick_qa_config_shape():
         for key in ("id", "type", "sub", "iconKey", "isOpen", "questions"):
             assert key in s
         assert isinstance(s["questions"], list) and s["questions"]
-    # _ROLE_SECTION_IDS 引用的 external 白名单 id 必须都在真实配置里
+    # _ROLE_SECTION_IDS 引用的白名单 id 必须都在真实配置里
     assert qq._ROLE_SECTION_IDS["external"] <= set(ids)
+    assert qq._ROLE_SECTION_IDS["forecaster"] <= set(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -194,12 +202,17 @@ def test_endpoint_explicit_role_filters():
     resp = cg._qa_quick_questions(_FakeRequest(), role="external")
     assert resp["code"] == 200
     assert resp["data"]["role"] == "external"
-    assert [s["id"] for s in resp["data"]["sections"]] == [1, 3, 4, 8]
+    assert [s["id"] for s in resp["data"]["sections"]] == [1]
 
 
 def test_endpoint_explicit_role_all_sections():
-    resp = cg._qa_quick_questions(_FakeRequest(), role="forecaster")
+    resp = cg._qa_quick_questions(_FakeRequest(), role="admin")
     assert len(resp["data"]["sections"]) == 8
+
+
+def test_endpoint_forecaster_role_two_sections():
+    resp = cg._qa_quick_questions(_FakeRequest(), role="forecaster")
+    assert [s["id"] for s in resp["data"]["sections"]] == [1, 2]
 
 
 def test_endpoint_invalid_role_returns_400():
@@ -212,7 +225,7 @@ def test_endpoint_no_role_falls_back_to_caller_role(monkeypatch):
     monkeypatch.setattr(cg, "_resolve_caller_role", lambda req: "forecaster")
     resp = cg._qa_quick_questions(_FakeRequest(), role=None)
     assert resp["data"]["role"] == "forecaster"
-    assert len(resp["data"]["sections"]) == 8
+    assert [s["id"] for s in resp["data"]["sections"]] == [1, 2]
 
 
 def test_endpoint_blank_role_treated_as_not_provided(monkeypatch):
@@ -221,7 +234,7 @@ def test_endpoint_blank_role_treated_as_not_provided(monkeypatch):
     for blank in ("", "   "):
         resp = cg._qa_quick_questions(_FakeRequest(), role=blank)
         assert resp["data"]["role"] == "forecaster"
-        assert len(resp["data"]["sections"]) == 8
+        assert [s["id"] for s in resp["data"]["sections"]] == [1, 2]
 
 
 def test_resolve_caller_role_no_cookie_defaults_external():

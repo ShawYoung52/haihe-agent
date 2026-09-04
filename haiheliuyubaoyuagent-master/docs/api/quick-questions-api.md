@@ -41,8 +41,8 @@
 | 角色 | 可见分区 |
 |------|----------|
 | `admin` | 全部 8 个分区 |
-| `forecaster` | 全部 8 个分区 |
-| `external` | 01 天气资讯、03 文旅出行、04 气象科普、08 系统问答（防汛服务/行业服务/业务技术/统计气象不对公众开放） |
+| `forecaster` | 01 天气资讯、02 防汛服务（实况/预报/预警 + 河系水库降雨预报与风险，即区局预报员日常口径） |
+| `external` | 仅 01 天气资讯 |
 
 > 角色→分区映射维护在后端 `chainlitexam/quick_questions.py` 的 `_ROLE_SECTION_IDS`，
 > 调整权限改这里即可，不用动前端静态 `quickQA.json`。
@@ -103,4 +103,4 @@ GET /api/v1/qa/quick-questions?role=forecaster
 
 - 面板内容改由本接口下发后，前端可不再静态 `fetch("./config/quickQA.json")`；
   两者数据源内容当前一致、结构字段不变，前端渲染逻辑无需改动。
-- 未登录/匿名场景：不传 `role` 或传 `external`，只返回公众可见的 4 个分区。
+- 未登录/匿名场景：不传 `role` 或传 `external`，只返回 01 天气资讯一个分区。
