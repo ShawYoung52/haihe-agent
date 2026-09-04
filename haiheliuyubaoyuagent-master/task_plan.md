@@ -191,3 +191,26 @@
       **今日雨情联动（用户追问确认）**：裸"今日雨情"命中强制路由（`_route_local_longimg_catalog_query`，无参调用）→ 无区域词 → 不拼 area=默认天津；
       "京津冀/天津今日雨情"因归一化不剥区域词、强制路由不命中落 planner → 边界按原文确定性补 jjj/tj。两条路径都被 `_run_tool_round` 内的边界兜住。
       全量 chainlitexam 986 passed/5 skipped/0 failed。
+- [x] R33 EC AIFS 存储迁移 + 历史清理（用户：服务器定时拉 EC AIFS 磁盘已满，气象局老师指定存 NAS /mnt/ywnas2）：
+      代码侧排查结论：拉取脚本不在本仓库（服务器独立定时任务），**消费侧全部只按「目标日」读最近起报时次、
+      从不往回翻历史 EC**（haihe_mcp_tools._ec_daily_search_directories / emergency_api / RainfallAnalyzer），
+      历史实况走 MUSIC、预报检验走检验 API，均不读本地 EC 历史文件 → 历史数据是死数据，保留窗口只为排查/重跑。
+      读路径全 env 可配（EC_AIFS_ROOT / EC_OUTPUT_PATH），**本仓库消费代码零改动**；config.ini ecOutput 同步改。
+      决策（用户拍板）：保留窗口 **14 天** + 写清理脚本。
+      新增 `haihe-weather-analyzer-mcp/scripts/cleanup_ec_aifs.py`：删 {root}/{YYYY}/{YYYYMMDD}/ 过期日目录 +
+      output/ 扁平等 ec_YYYYMMDDHH_rain_total_Nh.tif / *-Nh-oper-fc.grib2 过期文件；只认精确命名模式+合法日期、
+      年份交叉校验、不跟随符号链接、--dry-run、--days/EC_AIFS_RETENTION_DAYS（默认 14，非法回退）、
+      删除失败逐条记录退出码 1。NAS 地址不入库（全走 env）。
+      测试 tests/test_cleanup_ec_aifs.py 22 条（含 CLI dry-run/env 窗口/软链跳过/未知文件不动）。
+      全量 MCP 698 passed/21 skipped。服务器侧挂载/迁移/env/cron 清单已交付用户（聊天内，敏感地址不写文档）。
+- [x] R34 综合风险回答天气表"时段"列跨天区间→单日日期（用户：「今天蓟州可能有哪些风险」天气表
+      时段格显示 09月04日-09月05日，"不要用时段，改成那个日期就行"）：
+      根因 = MCP `build_rolling_forecast_periods` 的 `period_label` 对 interval=24 整日窗口写成
+      "起始日-结束日" 跨天区间；综合风险 `query_region_weather_risks` 的天气表由 answer LLM
+      直接读 `weather_forecast.periods[].period_label` 组装（无确定性渲染层），区间原样进表。
+      修复（治本，确定性）：interval>=24 时 period_label 只标起始日（"09月04日"，08时起报同样只标日），
+      与决策天气 `_decision_period_label` 既有口径（≥20h 只显当天）对齐；interval=1 逐小时
+      起止范围标签不动。影响面核查：hourly_summary/time_of_day 走 interval=1、
+      _rolling_snapshot_table 未来12h interval=1、decision_weather 已有自己的收敛逻辑，均不受影响。
+      测试 tests/test_rolling_forecast_period_label.py 4 条（24h 午夜/08时/逐小时/跨午夜边界）。
+      全量 MCP 702 passed/21 skipped、chainlitexam 986 passed/5 skipped/0 failed。

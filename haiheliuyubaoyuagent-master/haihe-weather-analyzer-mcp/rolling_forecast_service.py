@@ -1685,7 +1685,14 @@ def build_rolling_forecast_periods(
                 "lat": location.get("lat"),
                 "start_time": start_dt.strftime("%Y-%m-%d %H:%M"),
                 "end_time": end_dt.strftime("%Y-%m-%d %H:%M"),
-                "period_label": f"{_format_period_dt_label(start_dt)}-{_format_period_dt_label(end_dt)}",
+                # 日级聚合（interval>=24h）只标起始日（"09月04日"），不写"09月04日-09月05日"
+                # 跨天区间——与决策天气 _decision_period_label 同口径（2026-09-04 甲方口径：
+                # 综合风险等回答里这一格要"日期"不要"时段"）。逐小时（interval=1）保留起止范围。
+                "period_label": (
+                    start_dt.strftime("%m月%d日")
+                    if interval >= 24
+                    else f"{_format_period_dt_label(start_dt)}-{_format_period_dt_label(end_dt)}"
+                ),
             }
             for element, series in series_by_element.items():
                 row[element] = _clean_value(series[index] if index < len(series) else None)
