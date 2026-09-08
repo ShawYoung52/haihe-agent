@@ -264,7 +264,9 @@ def test_point_time_of_day_query_renders_one_afternoon_summary_row(monkeypatch):
     table = dw_core._build_decision_weather_table("今天下午天津港附近有雨吗", facts)
 
     assert "【天津港今天下午天气预报】" in table
-    assert "| 今天下午 | 多云 | 30～31 | 东风1-2级转东南风1-2级 | 0.0 |" in table
+    # 2026-09-04 风况汇总收敛：连续同风力区间合并、相邻方位渐进转向合并成"X到Y风N级"，
+    # 不再逐条 EDA 机械硬拼（东风1-2级 + 东南风1-2级 → 东到东南风1～2级）。
+    assert "| 今天下午 | 多云 | 30～31 | 东到东南风1～2级 | 0.0 |" in table
     assert "12时" not in table and "17时" not in table
     assert table.count("\n|") == 3  # 表头、分隔行、唯一数据行
 

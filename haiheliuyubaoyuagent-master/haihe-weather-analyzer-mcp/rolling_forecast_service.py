@@ -1456,6 +1456,15 @@ def _summarize_tod_weather(weather_values: list) -> str | None:
     return "转".join(str(group["display"]) for group in groups)
 
 
+# 公共别名：供 chainlitexam 决策天气时段表复用同一风况汇总逻辑（2026-09-04）。
+# 决策天气点位时段表此前把逐小时 EDA 去重后用"转"硬拼，会出
+# "北风4-5级转北风3-4级转西北风1-2级转西北风3-4级"这种机械长串；
+# 复用本模块的连续风向阶段合并（北风3~5级转西北风1~4级）。
+def summarize_wind_eda(eda_values: list) -> str | None:
+    """时段风力风向汇总（公共入口，转发 _summarize_tod_wind）。"""
+    return _summarize_tod_wind(eda_values)
+
+
 def _time_of_day_summary_rows(periods: list[dict]) -> list[dict]:
     """时段化查询：把逐小时 periods 按区域聚合为单条时段汇总（甲方 2026-08-24 口径：
     "今天下午有雨吗"不要逐小时，给该时段整体天气——时段/天气现象/气温/风力风向/降水量）。

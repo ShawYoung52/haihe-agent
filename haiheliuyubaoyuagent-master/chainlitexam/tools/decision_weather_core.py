@@ -36,6 +36,31 @@ DECISION_WEATHER_STATIONS = [
     {"region": "滨海新区", "lon": 117.79, "lat": 39.16},
 ]
 
+def _summarize_decision_wind(eda_values: list) -> str:
+    """时段风力风向汇总：复用 utils.wind_summary.summarize_wind_eda 的连续风向阶段
+    合并（"北风4-5级转北风3-4级转西北风1-2级转西北风3-4级"→"北风3~5级转西北风1~4级"），
+    2026-09-04 甲方反馈点位时段表风力风向机械硬拼太乱；异常时回退去重"转"拼接。"""
+    cleaned = [
+        str(v or "").strip()
+        for v in eda_values
+        if str(v or "").strip() not in ("", "--")
+    ]
+    if not cleaned:
+        return "—"
+    try:
+        from utils.wind_summary import summarize_wind_eda
+        summarized = summarize_wind_eda(cleaned)
+        if summarized:
+            return summarized
+    except Exception:
+        pass
+    dedup: list[str] = []
+    for w in cleaned:
+        if not dedup or dedup[-1] != w:
+            dedup.append(w)
+    return "转".join(dedup)
+
+
 DECISION_WEATHER_COMPOSITE_TOOL = "query_decision_weather_for_poi"
 DECISION_WEATHER_INTERNAL_TOOLS = {
     "search_poi",
@@ -1139,7 +1164,7 @@ def _decision_time_of_day_table(user_text: str, facts: dict, periods: list[dict]
         if weather and weather != "--" and weather not in weather_parts:
             weather_parts.append(weather)
         wind = str(period.get("EDA") or period.get("wind") or "").strip()
-        if wind and wind != "--" and wind not in wind_parts:
+        if wind and wind != "--":
             wind_parts.append(wind)
         rain = _decision_rain_value(period)
         if rain is not None:
@@ -1159,7 +1184,7 @@ def _decision_time_of_day_table(user_text: str, facts: dict, periods: list[dict]
         label,
         "转".join(weather_parts) if weather_parts else "—",
         temperature,
-        "转".join(wind_parts) if wind_parts else "—",
+        _summarize_decision_wind(wind_parts),
         _decision_rain_cell(round(sum(rain_values), 1) if rain_values else None),
     ]
     headers = ["时段", "天气现象", "气温(℃)", "风力风向", "降水量(毫米)"]

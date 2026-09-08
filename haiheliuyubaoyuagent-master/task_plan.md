@@ -220,3 +220,14 @@
       文旅/科普/行业/业务技术/统计/系统问答不上快捷面板。测试 test_quick_questions.py 15→17 条
       （forecaster 两区、白名单 id 存在性双角色、端点三角色），docs/api/quick-questions-api.md
       角色→分区表同步。全量 chainlitexam 988 passed/5 skipped/0 failed。
+- [x] R36 点位时段表风力风向收敛（用户：「今天下午天津港附近有雨吗」表格风力列
+      "北风4-5级转北风3-4级转西北风1-2级转西北风3-4级" 太乱）：
+      根因 = `_decision_time_of_day_table`（decision_weather_core.py）把逐小时 EDA 去重后用
+      "转"硬拼，不做风力区间合并。修复：新增 `chainlitexam/utils/wind_summary.py`
+      `summarize_wind_eda`（与 MCP rolling_forecast_service._summarize_tod_wind 同口径，
+      连续同风向合并风力区间、风向变化才用"转"、0~2级弱风摆动用主导风向概括、
+      渐进转向合并"X到Y风N级"、复合阵风原样保留），`_summarize_decision_wind` 接它、
+      异常回退去重拼接。MCP 侧加公共别名 `summarize_wind_eda` 转发 `_summarize_tod_wind`。
+      效果："北风4-5级转北风3-4级转西北风1-2级转西北风3-4级" → "北风3~5级转西北风1~4级"。
+      测试：test_wind_summary.py 7 条 + 既有 tod 断言更新为收敛格式（东到东南风1～2级）。
+      全量 chainlitexam 1173 passed/5 skipped/0 failed、MCP 702 passed/21 skipped。
