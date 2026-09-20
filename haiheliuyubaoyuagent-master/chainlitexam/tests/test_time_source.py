@@ -76,3 +76,85 @@ def test_external_write_picked_up(sim_file):
     )
     time_source._invalidate()
     assert now() == datetime(2026, 7, 10, 15, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# 请求级锚点（2026-09-20）：把"现在"从进程级标量改成请求级值。
+# ---------------------------------------------------------------------------
+
+
+def test_request_override_beats_global_file(sim_file):
+    """请求级锚点优先级高于全局覆盖文件。"""
+    set_override_from_text("2026-07-10 15:00:00")
+    token = time_source.set_request_override("2026-03-05T08:30:00+08:00")
+    try:
+        assert now() == datetime(2026, 3, 5, 8, 30, 0)
+        assert override_date_str() == "2026-03-05"
+    finally:
+        time_source.reset_request_override(token)
+    assert now() == datetime(2026, 7, 10, 15, 0, 0)
+
+
+def test_request_override_real_sentinel_shadows_file(sim_file):
+    """显式"真实时间"必须压过遗留的全局覆盖文件（修复"改回去了还是旧日期"）。"""
+    set_override_from_text("2026-07-10 15:00:00")
+    token = time_source.set_request_override("real")
+    try:
+        assert datetime.now() - now() < timedelta(seconds=5)
+        assert override_date_str() == datetime.now().strftime("%Y-%m-%d")
+    finally:
+        time_source.reset_request_override(token)
+    assert now() == datetime(2026, 7, 10, 15, 0, 0)
+
+
+def test_request_override_reset_after_double_reset_is_safe(sim_file):
+    """重复 reset 不能抛错——它跑在 finally 清理路径上。"""
+    token = time_source.set_request_override("2026-03-05T08:30:00+08:00")
+    time_source.reset_request_override(token)
+    time_source.reset_request_override(token)  # 不应抛
+
+
+def test_header_value_only_reflects_request_scope(sim_file):
+    """interceptor 取值只看请求级：没设请求锚点时返回 None（不能把全局文件当 header 发出去）。"""
+    set_override_from_text("2026-07-10 15:00:00")
+    assert time_source.request_override_header_value() is None
+    token = time_source.set_request_override("2026-03-05T08:30:00+08:00")
+    try:
+        assert time_source.request_override_header_value() == "2026-03-05T08:30:00+08:00"
+    finally:
+        time_source.reset_request_override(token)
+    token = time_source.set_request_override("real")
+    try:
+        assert time_source.request_override_header_value() == "real"
+    finally:
+        time_source.reset_request_override(token)
+
+
+def test_request_override_is_task_local(sim_file):
+    """并发 Task 之间不串味（ContextVar 天然隔离）。"""
+    import asyncio
+
+    async def worker(text):
+        token = time_source.set_request_override(text)
+        try:
+            await asyncio.sleep(0)
+            return now()
+        finally:
+            time_source.reset_request_override(token)
+
+    async def main():
+        return await asyncio.gather(
+            worker("2026-03-05T08:30:00+08:00"),
+            worker("2026-09-09T20:00:00+08:00"),
+        )
+
+    a, b = asyncio.run(main())
+    assert a == datetime(2026, 3, 5, 8, 30, 0)
+    assert b == datetime(2026, 9, 9, 20, 0, 0)
+
+
+def test_invalid_request_override_raises(sim_file):
+    """显式给了错值应该报错，而不是静默按真实时间回答。"""
+    with pytest.raises(ValueError):
+        time_source.set_request_override("昨天下午")
+
