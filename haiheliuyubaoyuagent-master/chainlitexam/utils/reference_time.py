@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from datetime import datetime, timedelta, timezone
 
 from utils import time_source
@@ -35,8 +36,14 @@ _STRPTIME_FORMATS = (
     "%Y-%m-%d %H:%M",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%dT%H:%M",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
     "%Y-%m-%d",
+    "%Y/%m/%d",
 )
+
+# 仅日期形式（不带时分）。前端面板的输入框就是这种写法。
+_DATE_ONLY_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
 
 
 class InvalidReferenceTime(ValueError):
@@ -71,6 +78,12 @@ def _parse(text) -> datetime:
                 continue
     if dt is None:
         raise InvalidReferenceTime(f"无法解析的 reference_time：{s!r}")
+    if _DATE_ONLY_RE.match(s):
+        # 仅日期时时分取**真实当前时刻**，与 time_source.set_override_from_text 同口径。
+        # 不能落 00:00：那样"现在"=当天凌晨，"今天下午有雨吗 / 14时实况"会被判到未来、
+        # 实况与时段类工具直接取不到数据。显式带了 00:00 的（如 ISO 串）不受影响。
+        real = datetime.now(_CN_TZ)
+        dt = dt.replace(hour=real.hour, minute=real.minute, second=real.second)
     # 无时区的按北京时解释（与前端"2026-07-10 15:00"这类写法一致）。
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=_CN_TZ)
 

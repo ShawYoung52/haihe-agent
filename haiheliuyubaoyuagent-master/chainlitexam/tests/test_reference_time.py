@@ -68,16 +68,43 @@ def test_unparsable_reference_time_raises():
         reference_time.resolve_reference_time({"reference_time": "昨天下午"})
 
 
-def test_csv_and_date_only_forms():
-    assert reference_time.resolve_reference_time(
-        {"reference_time": "2026-07-10"})[1] == datetime(2026, 7, 10, 0, 0, tzinfo=_CN)
+def test_csv_and_time_forms():
+    """带时分的常见写法。仅日期形式另见 test_date_only_keeps_real_clock_time。"""
     assert reference_time.resolve_reference_time(
         {"reference_time": "2026-07-10 15:00:30"})[1] == datetime(2026, 7, 10, 15, 0, 30, tzinfo=_CN)
+    assert reference_time.resolve_reference_time(
+        {"reference_time": "2026-07-10T15:00"})[1] == datetime(2026, 7, 10, 15, 0, tzinfo=_CN)
 
 
 def test_naive_input_treated_as_beijing():
     kind, value = reference_time.resolve_reference_time({"reference_time": "2026-07-10T15:00:00"})
     assert value.utcoffset() == timedelta(hours=8)
+
+
+def test_date_only_keeps_real_clock_time():
+    """仅日期（前端输入框的日期写法）时时分取**真实当前时刻**，不落 00:00。
+
+    与 time_source.set_override_from_text 同口径。落 00:00 会让"现在"=当天凌晨，
+    随后"今天下午有雨吗 / 14时实况"被判到未来、取不到数据。
+    """
+    _, value = reference_time.resolve_reference_time({"reference_time": "2026-07-10"})
+    assert value.strftime("%Y-%m-%d") == "2026-07-10"
+    real = datetime.now(_CN)
+    diff = abs((value.hour * 3600 + value.minute * 60) - (real.hour * 3600 + real.minute * 60))
+    assert min(diff, 86400 - diff) <= 120, f"时分应取真实当前时刻，实际 {value:%H:%M}"
+    assert value.microsecond == 0
+
+
+def test_date_only_slash_form_parses():
+    """`2026/07/10` 也要认（与 time_source 支持的写法对齐）。"""
+    _, value = reference_time.resolve_reference_time({"reference_time": "2026/07/10"})
+    assert value.strftime("%Y-%m-%d") == "2026-07-10"
+
+
+def test_explicit_midnight_is_respected():
+    """显式给了 00:00 就照给——只有**仅日期**形式才套用真实时刻。"""
+    _, value = reference_time.resolve_reference_time({"reference_time": "2026-07-10T00:00:00+08:00"})
+    assert (value.hour, value.minute) == (0, 0)
 
 
 def test_resolve_day():

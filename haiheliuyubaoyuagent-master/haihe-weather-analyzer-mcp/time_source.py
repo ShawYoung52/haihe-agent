@@ -280,12 +280,24 @@ def now(tz=None) -> datetime:
 
 
 def get_override() -> datetime | None:
-    """当前生效的锚定时刻（aware +08:00）；无覆盖返回 None。"""
+    """**全局兜底文件**里当前生效的锚定时刻（aware +08:00）；无覆盖返回 None。
+
+    刻意只看文件、不看请求级锚点与 MCP header：
+    - `GET /admin/system-time` 用它报告全局兜底开关的状态；
+    - `reference_time.anchor_cache_key` 的 inherit 分支用它做响应缓存键。
+    要看"当前上下文真正生效的锚点"请用 `effective_override()`。
+    """
     return _read_file_dt()
 
 
 def is_active() -> bool:
-    return _read_file_dt() is not None
+    """当前上下文是否有生效的时间锚点（请求级 → MCP header → 全局文件）。
+
+    走 `effective_override()`，与 `now()` 同一优先级链——否则在请求级锚点生效时
+    会错误返回 False。要判断**全局兜底开关**的状态请用 `get_override()`。
+    """
+    override = effective_override()
+    return override is not None and override is not _REAL
 
 
 def override_date_str() -> str:

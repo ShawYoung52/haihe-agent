@@ -158,3 +158,31 @@ def test_invalid_request_override_raises(sim_file):
     with pytest.raises(ValueError):
         time_source.set_request_override("昨天下午")
 
+
+def test_is_active_follows_request_anchor(sim_file):
+    """is_active() 必须与 now() 走同一条优先级链，否则请求级锚点会被判成"未生效"。"""
+    assert time_source.is_active() is False
+    token = time_source.set_request_override("2026-03-05T08:30:00+08:00")
+    try:
+        assert time_source.is_active() is True
+    finally:
+        time_source.reset_request_override(token)
+    assert time_source.is_active() is False
+
+    # 显式"真实时间"不算生效中的锚点。
+    token = time_source.set_request_override("real")
+    try:
+        assert time_source.is_active() is False
+    finally:
+        time_source.reset_request_override(token)
+
+
+def test_get_override_stays_file_only(sim_file):
+    """get_override() 只看全局兜底文件——GET /admin/system-time 与响应缓存键都靠它。"""
+    token = time_source.set_request_override("2026-03-05T08:30:00+08:00")
+    try:
+        assert time_source.get_override() is None, "请求级锚点不该出现在全局兜底查询里"
+        assert time_source.effective_override() is not None
+    finally:
+        time_source.reset_request_override(token)
+
