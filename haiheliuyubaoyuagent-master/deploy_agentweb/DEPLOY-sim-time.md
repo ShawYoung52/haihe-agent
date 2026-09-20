@@ -123,34 +123,42 @@
 
 **不带就完全不受影响**——因此旧客户端行为与改造前逐字一致。
 
-## 三之三、前端待办（按客户端隔离的前提）
+## 三之三、网页端（AgentWeb）已实现请求级锚定
 
-后端**两个入口都已支持**请求级锚点。但要让"谁设的时间只对谁生效"真正成立，
-**前端必须逐请求把锚点带上**——否则 `POST /admin/system-time` 的新式调用只是回显，
-锚点没有落到任何请求上，表现为"设了时间不生效"。
+2026-09-20 起 `sim-time-agentweb.js` **已按请求级锚定改写**，三步都在本文件里：
 
-| 入口 | 状态 | 要做的 |
-|---|---|---|
-| HTTP `/api/v1/qa/ask`（天河小程序） | 后端就绪 | 提问时带上 `metadata.reference_time` / `metadata.time_mode` |
-| 网页聊天（WebSocket） | 后端就绪 | 重建的 bundle 在 user_message 的 `metadata` 里带上同款字段 |
+1. 锚点存 `localStorage["haihe_reference_time"]`（ISO 串 = 锚定；`"real"` = 强制真实时间）；
+2. 用 `WebSocket.prototype.send` 钩子把锚点塞进 `client_message` 帧的 `metadata`
+   （Chainlit 服务端 `Message.from_dict` 会透传 metadata 到 `on_message`）；
+3. 面板**不再**调旧式 `{"datetime":...}`，改调无状态 `metadata` 契约；
+   "恢复"还会让服务端清掉可能遗留的**全局**覆盖文件。
 
-**建议的 WebSocket 侧约定**（前端改动最小，三步缺一不可）：
+**为什么钩 WebSocket 而不是改 bundle**：`assets/index-*.js` 是打包产物，前端同事重建后整体覆盖；
+本文件是"重建后必须回拷"的两个自定义 JS 之一，改动能活下来。钩在协议层（socket.io 帧），
+**bundle 怎么重建都不影响本机制**（只要事件名仍是 `client_message`）。
 
-1. 本仓库的 `sim-time-agentweb.js` 面板把当前锚点写进 `localStorage`
-   （建议 key：`haihe_reference_time`，值为 ISO 串；"恢复"时**删除该 key**，或写 `"real"`）。
-2. 前端同事重建 bundle 时，在发送 user_message 的 `metadata` 里读该 key 一并带上
-   `{location, time_mode, reference_time}`。
-3. 面板**停止**调旧式 `POST /admin/system-time {"datetime": ...}`，改调新式
-   `{"metadata": {"time_mode": "fixed", "reference_time": ...}}`（无状态回显）。
+### 部署与验证
 
-> **第 3 步是关键**：只要面板还在写全局覆盖文件，**其它客户端**（天河小程序调
-> `/qa/ask` 不带 metadata 时走 `inherit`）就仍会被一起改时间——前两步只解决了
-> "自己这边生效"，没解决"影响别人"。
+- 拷 `sim-time-agentweb.js` → `webapps/AgentWeb/`（与 `img-zoom-agentweb.js` 同位置），
+  `index.html` 的 `<head>` 引用；**无需重启 Tomcat**，但**浏览器可能缓存旧版 → 让用户强刷**。
+- ⚠️ 前端同事每次重建后务必把仓库里这两个自定义 JS 原样回拷（旧版 sim-time 会退回全局行为）。
+- 控制台应看到 `[SIM_TIME_AW] WebSocket 锚点注入钩子已安装`；设锚点后首次提问出现
+  `[SIM_TIME_AW] 锚点已随请求下发`。现场排查：控制台执行 `__haiheSimTime.selfTest()`。
+- 断言（单浏览器）：设置 → 本机提问按锚定日期；**另一个浏览器/天河小程序不受影响**
+  （这是本次要修的核心）。
+- 若将来 Chainlit 改掉 `client_message` 事件名，注入会**静默失效**（退化为不发锚点、
+  回落真实时间）——不会报错也不会污染别的帧；用上面两条控制台日志确认。
 
-在 1–3 全部落地之前：**AgentWeb 网页版仍走旧式全局兜底**，即仍然"一人改时间
-全员受影响"——因为浏览器端还没有渠道把锚点逐请求送出来，且面板仍在写共享文件。
-**HTTP 入口（天河小程序）不受此限**，已可完全按请求隔离（它只要逐请求带锚点即可，
-不依赖本次前端改动）。
+### 测试
+
+`chainlitexam/tests/test_sim_time_agentweb.js`（26 项，Node 直跑，无依赖）：
+
+```bash
+node chainlitexam/tests/test_sim_time_agentweb.js   # 期望末行 ALL PASS
+```
+
+覆盖：未设锚点原样放行（逐字不变）、注入后原有字段保留、`real` 哨兵、8 类不该碰的帧
+一律原样放行、前端自带锚点不覆盖、**带 ack id 的帧前缀不丢**、localStorage 抛异常不影响发送。
 
 ## 四、验证（端到端）
 

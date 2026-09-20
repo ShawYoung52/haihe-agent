@@ -198,11 +198,16 @@ This project uses the superpowers plugin for disciplined development:
 - **`is_active()` 跟随优先级链，`get_override()` 只看全局文件**：后者是
   `GET /admin/system-time` 与 `anchor_cache_key` 的 inherit 分支依赖的"全局兜底值"，
   刻意不掺请求级锚点——别把两者合并。
-- **前端待办（按客户端隔离的前提，三步缺一不可）**：① 面板把锚点写进 `localStorage`；
-  ② 重建的 bundle 在 user_message metadata 里带上 `{location, time_mode, reference_time}`；
-  ③ **面板停止调旧式 `{"datetime"}`**。**第 ③ 步是关键**——只要还在写全局文件，其它客户端
-  （天河小程序不带 metadata 时走 inherit）就仍被一起改时间。在 1–3 落地前，
-  **AgentWeb 网页版仍是全局行为**；HTTP 入口（天河小程序）不受此限、已完全按请求隔离。
+- **网页端（AgentWeb）已实现请求级锚定**（`chainlitexam/AgentWeb/sim-time-agentweb.js`）：
+  ① 锚点存 `localStorage["haihe_reference_time"]`（ISO = 锚定 / `"real"` = 强制真实时间）；
+  ② 用 **`WebSocket.prototype.send` 钩子**把锚点塞进 `client_message` 帧的 `metadata`
+  （服务端 `Message.from_dict` 透传到 `on_message`）；③ 面板不再调旧式 `{"datetime"}`
+  写全局文件，改调无状态 `metadata` 契约，"恢复"还会让服务端清掉遗留的全局文件。
+  **钩在 socket.io 协议层而不是改 bundle**——bundle 重建后会整体覆盖，本文件是
+  "重建后必须回拷"的自定义 JS 之一；bundle 怎么重建都不影响本机制（只要事件名仍是
+  `client_message`，改名则注入**静默失效**、退化为不发锚点，不会污染别的帧）。
+  测试 `chainlitexam/tests/test_sim_time_agentweb.js`（Node 直跑，26 项，含"带 ack id
+  的帧前缀不能丢"与"8 类不该碰的帧原样放行"）。现场排查 `__haiheSimTime.selfTest()`。
 - **测试**：`tests/test_time_source.py`、`test_reference_time.py`、
   `test_mcp_reference_time_header.py`、`test_system_time_api.py`、
   `test_orchestrator_runtime_slots.py`、`test_anchor_aware_cache_keys.py`（MCP 侧），
