@@ -14,6 +14,7 @@ import httpx
 
 from utils.tool_result import _extract_self_report, _unwrap_tool_result
 from utils import time_source
+from utils import reference_time as reference_time_util
 
 try:
     from timing_logger import TimingLogger
@@ -621,8 +622,22 @@ def _qa_quick_questions(request: Request, role: str | None = None):
 
 
 class SetSystemTimeRequest(BaseModel):
-    datetime: str = Field(..., min_length=8, max_length=32)  # "YYYY-MM-DD[ HH:MM[:SS]]" 或 ISO
+    """系统时间设置请求。两种契约并存：
+
+    - **旧式**：给 `datetime` → 写**全局**覆盖文件。这是进程级开关，一人改时间
+      全员受影响，只留给服务端 curl 手工验收用，不要给前端用。
+    - **新式**（前端契约）：给 `metadata.time_mode` / `metadata.reference_time`
+      → **无状态**。锚点由客户端逐请求携带（见 `utils/reference_time.py`），
+      服务端不落任何跨用户状态。顶层同名字段等价可用。
+
+    两个字段都缺 = 回到真实时间（并顺手清掉可能遗留的全局覆盖文件）。
+    """
+
+    datetime: str | None = Field(None, max_length=32, description='"YYYY-MM-DD[ HH:MM[:SS]]" 或 ISO')
     note: str | None = Field(None, max_length=200)
+    metadata: dict | None = Field(None, description="前端契约：{location, time_mode, reference_time}")
+    time_mode: str | None = Field(None, max_length=32, description='"fixed" 锚定 / "real" 真实时间')
+    reference_time: str | None = Field(None, max_length=64, description="锚定时刻（ISO 或日期）")
 
 
 def _after_system_time_changed() -> None:
@@ -634,12 +649,48 @@ def _after_system_time_changed() -> None:
 @api_sub_app.post("/admin/system-time", tags=["系统时间"])
 def _set_system_time(req: SetSystemTimeRequest):
     try:
-        data = time_source.set_override_from_text(req.datetime, note=req.note)
-    except ValueError as e:
+        kind, value = reference_time_util.resolve_reference_time(
+            req.metadata,
+            top_level={"reference_time": req.reference_time, "time_mode": req.time_mode},
+        )
+    except reference_time_util.InvalidReferenceTime as e:
         raise HTTPException(400, qa_http_api._scrub(str(e)))
+
+    # 旧式：显式 datetime → 写全局覆盖文件，行为与本次改动前逐字一致。
+    if req.datetime:
+        try:
+            data = time_source.set_override_from_text(req.datetime, note=req.note)
+        except ValueError as e:
+            raise HTTPException(400, qa_http_api._scrub(str(e)))
+        except Exception as e:
+            logging.getLogger("chain_gzt").error("set_system_time: %s", type(e).__name__)
+            raise HTTPException(500, f"internal: {type(e).__name__}")
+        _after_system_time_changed()
+        return {"code": 200, "data": data, "message": "success"}
+
+    if kind == "fixed":
+        # 新式锚定：无状态回显。客户端据此更新自己的面板状态，后续逐请求带
+        # reference_time，服务端不留任何跨用户状态。
+        return {
+            "code": 200,
+            "data": {
+                "active": True,
+                "mode": "per_request",
+                "override_datetime": value.isoformat(),
+                "display": value.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            "message": "success",
+        }
+
+    # real / inherit：回到真实时间，并顺手清掉可能遗留的全局覆盖文件。
+    # 这一步是"改回去了天河小程序还是旧日期"的直接解药：旧文件跨服务重启存活，
+    # 不清就会一直把整个机器锚在过去。
+    try:
+        data = time_source.clear_override()
     except Exception as e:
-        logging.getLogger("chain_gzt").error("set_system_time: %s", type(e).__name__)
+        logging.getLogger("chain_gzt").error("clear_system_time: %s", type(e).__name__)
         raise HTTPException(500, f"internal: {type(e).__name__}")
+    data["mode"] = "per_request"
     _after_system_time_changed()
     return {"code": 200, "data": data, "message": "success"}
 
