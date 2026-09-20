@@ -4260,34 +4260,38 @@ def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
 # ===============================
 @cl.on_message
 async def on_message(message: cl.Message):
-    planner_chain = cl.user_session.get("planner_chain")
-    answer_chain = cl.user_session.get("answer_chain")
-    thinking_chain = cl.user_session.get("thinking_chain")
-    messages = cl.user_session.get("messages")
-    tools = cl.user_session.get("tools")
-
-    # 兜底：恢复线程或服务热重载后，若运行时对象缺失则即时重建，避免“可看历史但无法继续聊”。
-    if planner_chain is None or answer_chain is None or thinking_chain is None or tools is None:
-        await _init_runtime_session(messages_seed=messages if isinstance(messages, list) else [])
-        planner_chain = cl.user_session.get("planner_chain")
-        answer_chain = cl.user_session.get("answer_chain")
-        thinking_chain = cl.user_session.get("thinking_chain")
-        tools = cl.user_session.get("tools")
-        messages = cl.user_session.get("messages")
-
-    if not isinstance(messages, list):
-        messages = []
-        cl.user_session.set("messages", messages)
-
-    callbacks = _build_orchestrator_callbacks()
-    callbacks["tool_candidate_index"] = cl.user_session.get("tool_candidate_index")
-    callbacks["active_tool_router"] = cl.user_session.get("active_tool_router")
-    await process_message(
-        message=message,
-        planner_chain=planner_chain,
-        answer_chain=answer_chain,
-        thinking_chain=thinking_chain,
-        tools=tools,
-        messages=messages,
-        callbacks=callbacks,
+    # 请求级锚定时间：AgentWeb 面板把 time_mode/reference_time 挂进 user_message 的
+    # metadata（Chainlit 本来就透传 metadata，原先只放了 location）。没带锚点时
+    # resolve 返回 inherit，行为与本次改动前一致。
+    anchor_kind, anchor_value = reference_time_util.resolve_reference_time(
+        getattr(message, "metadata", None)
     )
+    day = reference_time_util.resolve_day(
+        anchor_kind, anchor_value, fallback_day=time_source.override_date_str()
+    )
+
+    with reference_time_util.request_anchor(anchor_kind, anchor_value):
+        # 按本请求的日期取运行时槽位。不能再用 cl.user_session 里钉死的 chain——
+        # 那是会话开始那一刻的日期，同一会话内切换锚点会失效。
+        runtime = await _get_orchestrator_runtime(day)
+
+        messages = cl.user_session.get("messages")
+        if not isinstance(messages, list):
+            # 兜底：恢复线程或服务热重载后会话里没有消息列表（顺带确保数据表就绪）。
+            await _init_runtime_session(messages_seed=[])
+            messages = cl.user_session.get("messages")
+
+        callbacks = _build_orchestrator_callbacks()
+        # 用本槽位 runtime 自带的索引/router：router 的 full_chain 里烤着该日期的
+        # prompt 前缀，跨日期复用会串味。
+        callbacks["tool_candidate_index"] = runtime.get("tool_candidate_index")
+        callbacks["active_tool_router"] = runtime.get("active_tool_router")
+        await process_message(
+            message=message,
+            planner_chain=runtime["planner_chain"],
+            answer_chain=runtime["answer_chain"],
+            thinking_chain=runtime["thinking_chain"],
+            tools=runtime["tools"],
+            messages=messages,
+            callbacks=callbacks,
+        )

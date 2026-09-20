@@ -40,6 +40,22 @@ def test_prompt_date_prefix_weekday_is_correct():
     assert "星期日" in chain_gzt._prompt_date_prefix("2026-07-12")
 
 
+def test_ws_on_message_uses_request_day_runtime():
+    """WS 入口必须按请求锚点取运行时槽位，而不是用 cl.user_session 里钉死的 chain。
+
+    会话级 chain 是会话开始那一刻的日期，同一会话内切换锚点会失效——
+    这正是"改了时间但回答还是旧日期"的一类成因。
+    """
+    import inspect
+
+    src = inspect.getsource(chain_gzt.on_message)
+    assert "resolve_reference_time" in src, "WS 入口没解析 message.metadata 锚点"
+    assert "request_anchor" in src, "WS 入口没把锚点落到 time_source"
+    assert "_get_orchestrator_runtime(day)" in src, "WS 入口没按请求日期取运行时"
+    assert 'cl.user_session.get("planner_chain")' not in src, \
+        "会话级钉死的 chain 会让同会话内切换锚点失效"
+
+
 def test_cache_key_varies_by_day():
     assert chain_gzt._orchestrator_runtime_cache_key("2026-07-10")[0] == "2026-07-10"
     assert chain_gzt._orchestrator_runtime_cache_key("2026-07-11")[0] == "2026-07-11"
@@ -52,14 +68,22 @@ def test_cache_key_varies_by_day():
 
 @pytest.fixture()
 def _offline_llm(monkeypatch):
-    """不碰内网：ChatOpenAI 构造本身不发请求，给个占位 key 即可。
+    """用**真实 Runnable** 的假 LLM 替掉 ChatOpenAI，测试不碰内网。
 
-    刻意不 stub `_build_chat_llm` 返回假对象——`planner_template | llm.bind_tools(...)`
-    要求真的是 Runnable，假对象会让这层测试测不到真实接线。
+    不能返回裸假对象：`planner_template | llm.bind_tools(...)` 要求真的是 Runnable。
+    也不能依赖真实 ChatOpenAI——全量跑时别的测试文件会把假 langchain_openai 装进
+    sys.modules（见 tests/test_execution_mode.py），那个假类不接受构造参数。
     """
-    for role in ("PLANNER", "ANSWER"):
-        monkeypatch.setenv(f"{role}_API_KEY", "EMPTY")
-        monkeypatch.setenv(f"{role}_API_BASE", "http://127.0.0.1:9/v1")
+    from langchain_core.runnables import RunnableLambda
+
+    class _FakeLLM(RunnableLambda):
+        def __init__(self, **kwargs):  # _build_chat_llm 会传 model/temperature/...
+            super().__init__(lambda payload: payload)
+
+        def bind_tools(self, tools):
+            return self
+
+    monkeypatch.setattr(chain_gzt, "ChatOpenAI", _FakeLLM)
 
 
 def _stub_load(monkeypatch, counter):
