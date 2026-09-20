@@ -52,6 +52,8 @@ def _serve() -> None:
 
 
 async def _probe() -> str:
+    # 刻意照抄 mcp_loader._inject_reference_time 的注入方式，而不是 import 它：
+    # 探针要在服务器上独立跑，不能依赖 chainlitexam 包（也不带它的重依赖）。
     async def inject(request, handler):
         headers = {**(request.headers or {}), REFERENCE_TIME_HEADER: PROBE_VALUE}
         return await handler(request.override(headers=headers))

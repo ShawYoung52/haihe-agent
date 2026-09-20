@@ -647,6 +647,21 @@ class SetSystemTimeRequest(BaseModel):
     reference_time: str | None = Field(None, max_length=64, description="锚定时刻（ISO 或日期）")
 
 
+def _per_request_time_data(dt: datetime | None) -> dict:
+    """`/admin/system-time` 的"不落服务端状态"回显数据。
+
+    `fixed`（回显本次请求的锚点）与 `inherit`（回显可能残留的全局兜底）走同一套键：
+    前端面板按 `active`/`override_datetime`/`display` 刷新显示，两处键不一致会让面板
+    在两个分支之间切换时读到缺键。
+    """
+    return {
+        "active": dt is not None,
+        "mode": "per_request",
+        "override_datetime": dt.isoformat() if dt else None,
+        "display": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else None,
+    }
+
+
 def _after_system_time_changed() -> None:
     """切换系统时间后清理受影响的缓存。"""
     qa_http_api.runtime.clear_response_cache()
@@ -680,16 +695,7 @@ def _set_system_time(req: SetSystemTimeRequest):
     if kind == "fixed":
         # 新式锚定：无状态回显。客户端据此更新自己的面板状态，后续逐请求带
         # reference_time，服务端不留任何跨用户状态。
-        return {
-            "code": 200,
-            "data": {
-                "active": True,
-                "mode": "per_request",
-                "override_datetime": value.isoformat(),
-                "display": value.strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            "message": "success",
-        }
+        return {"code": 200, "data": _per_request_time_data(value), "message": "success"}
 
     if kind == "real":
         # 只有**显式**要求真实时间才清全局文件——这是"改回去了天河小程序还是旧日期"
@@ -706,15 +712,9 @@ def _set_system_time(req: SetSystemTimeRequest):
     # kind == "inherit"：既没给 datetime 也没给锚点 → **不改任何状态**，只回显当前
     # 全局兜底状态（旧行为是 422）。刻意不"顺手清文件"：探测性 POST（健康检查、
     # 漏改的旧客户端）会把 curl 验收期间设好的全局锚点静默清掉。
-    override = time_source.get_override()
     return {
         "code": 200,
-        "data": {
-            "active": override is not None,
-            "mode": "per_request",
-            "override_datetime": override.isoformat() if override else None,
-            "display": override.strftime("%Y-%m-%d %H:%M:%S") if override else None,
-        },
+        "data": _per_request_time_data(time_source.get_override()),
         "message": "success",
     }
 
@@ -2881,8 +2881,7 @@ async def _build_orchestrator_runtime(day: str | None = None, *, mcp_tools=None)
     传入时复用已加载的 MCP 工具表——分槽缓存下这层是跨日期共享的，避免为每个日期
     重连一次内网 MCP。
     """
-    if day is None:
-        day = time_source.override_date_str()
+    day = day or time_source.override_date_str()
     planner_llm = _build_chat_llm("PLANNER")
     answer_llm = _build_chat_llm("ANSWER")
 

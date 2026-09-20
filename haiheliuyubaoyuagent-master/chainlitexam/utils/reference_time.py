@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import contextlib
-import re
 from datetime import datetime, timedelta, timezone
 
 from utils import time_source
@@ -30,20 +29,6 @@ _CN_TZ = timezone(timedelta(hours=8))
 
 # time_mode 的"回到真实时间"取值（前端可能用任一写法）。
 _REAL_MODES = frozenset({"real", "dynamic", "live"})
-
-_STRPTIME_FORMATS = (
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d %H:%M",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M",
-    "%Y/%m/%d %H:%M:%S",
-    "%Y/%m/%d %H:%M",
-    "%Y-%m-%d",
-    "%Y/%m/%d",
-)
-
-# 仅日期形式（不带时分）。前端面板的输入框就是这种写法。
-_DATE_ONLY_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
 
 
 class InvalidReferenceTime(ValueError):
@@ -65,26 +50,22 @@ def _pick(metadata, top_level, key):
 
 
 def _parse(text) -> datetime:
+    """解析锚点文本为 aware datetime；不可解析抛 `InvalidReferenceTime`。
+
+    "哪些写法算合法"与"仅日期取真实时分"的口径都由 `time_source` 提供（两条入口
+    HTTP/WS 才不会对同一个字符串给出不同时刻）。时区口径留在本函数：无时区的按
+    北京时解释（前端"2026-07-10 15:00"这类写法），**带偏移的保留原偏移**——与
+    `time_source` 那份（归一到 +08:00）刻意不同，改动前就是如此。
+    """
     s = str(text).strip()
-    dt = None
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00").replace("z", "+00:00"))
-    except ValueError:
-        for fmt in _STRPTIME_FORMATS:
-            try:
-                dt = datetime.strptime(s, fmt)
-                break
-            except ValueError:
-                continue
+    dt = time_source.try_parse_datetime(s)
     if dt is None:
         raise InvalidReferenceTime(f"无法解析的 reference_time：{s!r}")
-    if _DATE_ONLY_RE.match(s):
-        # 仅日期时时分取**真实当前时刻**，与 time_source.set_override_from_text 同口径。
-        # 不能落 00:00：那样"现在"=当天凌晨，"今天下午有雨吗 / 14时实况"会被判到未来、
-        # 实况与时段类工具直接取不到数据。显式带了 00:00 的（如 ISO 串）不受影响。
-        real = datetime.now(_CN_TZ)
-        dt = dt.replace(hour=real.hour, minute=real.minute, second=real.second)
-    # 无时区的按北京时解释（与前端"2026-07-10 15:00"这类写法一致）。
+    if time_source.is_date_only(s):
+        # 仅日期时时分取**真实当前时刻**（不能落 00:00：那样"现在"=当天凌晨，
+        # "今天下午有雨吗 / 14时实况"会被判到未来、实况与时段类工具取不到数据）。
+        # 显式带了 00:00 的（如 ISO 串）不是"仅日期"，不受影响。
+        dt = time_source.use_real_time_of_day(dt)
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=_CN_TZ)
 
 

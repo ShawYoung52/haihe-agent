@@ -44,6 +44,9 @@ __all__ = [
     "reset_request_override",
     "request_override_header_value",
     "effective_override",
+    "try_parse_datetime",
+    "is_date_only",
+    "use_real_time_of_day",
 ]
 
 # 中国时区（无夏令时，固定 +08:00 即可，等价于 Asia/Shanghai）。
@@ -89,7 +92,7 @@ def _read_file_dt() -> datetime | None:
     try:
         raw = path.read_text(encoding="utf-8")
         obj = json.loads(raw)
-        val = _parse_iso(obj.get("override_datetime"))
+        val = _parse_cn_datetime(obj.get("override_datetime"))
     except Exception:
         val = None
     with _LOCK:
@@ -97,8 +100,16 @@ def _read_file_dt() -> datetime | None:
     return val
 
 
-def _parse_iso(text) -> datetime | None:
-    """解析 ISO/常见格式为 aware(+08:00) datetime；失败返回 None。"""
+def try_parse_datetime(text) -> datetime | None:
+    """按 ISO/常见格式解析成 datetime；失败返回 None。**不做时区处理**。
+
+    无时区的原样 naive 返回，带偏移的保留原偏移——时区口径由调用方决定：本模块
+    内部一律走 `_parse_cn_datetime` 归一到北京时；`utils/reference_time.py` 保留
+    输入自带的偏移（那是它改动前的口径，不能顺手改）。
+
+    这是"什么写法算合法"的唯一定义：覆盖文件、MCP header 与请求锚点三条入口共用，
+    否则同一个字符串在不同入口会得到不同结果。
+    """
     if not isinstance(text, str):
         return None
     s = text.strip()
@@ -107,13 +118,20 @@ def _parse_iso(text) -> datetime | None:
     dt = _try_fromisoformat(s)
     if dt is None:
         dt = _try_patterns(s)
+    return dt
+
+
+def _parse_cn_datetime(text) -> datetime | None:
+    """`try_parse_datetime` + 归一到北京时；失败返回 None。
+
+    覆盖文件与 MCP header 的口径：无时区按北京时解释，带偏移换算过来。
+    """
+    dt = try_parse_datetime(text)
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_CN_TZ)
-    else:
-        dt = dt.astimezone(_CN_TZ)
-    return dt
+        return dt.replace(tzinfo=_CN_TZ)
+    return dt.astimezone(_CN_TZ)
 
 
 def _try_fromisoformat(s: str) -> datetime | None:
@@ -146,6 +164,23 @@ def _try_patterns(s: str) -> datetime | None:
 
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
+
+
+def is_date_only(text) -> bool:
+    """是否为"仅日期"写法（"2026-07-10"/"2026/07/10"，不带时分）。"""
+    return bool(isinstance(text, str) and _DATE_ONLY_RE.match(text.strip()))
+
+
+def use_real_time_of_day(dt: datetime) -> datetime:
+    """把仅日期锚点的时分秒换成**真实当前时刻**（不落 00:00）。
+
+    落 00:00 会让"现在"=当天凌晨，"今天下午有雨吗 / 14时实况"被判到未来、
+    实况与时段类工具直接取不到数据。`set_override_from_text` 与
+    `utils/reference_time.py` 共用本函数，两条入口必须得到同一时刻。
+    """
+    real = datetime.now(_CN_TZ)
+    return dt.replace(hour=real.hour, minute=real.minute, second=real.second, microsecond=0)
+
 
 # ---------------------------------------------------------------------------
 # 请求级锚点：把"现在"从进程级标量改成请求级值。
@@ -192,7 +227,7 @@ def _coerce_request_value(value):
         return value
     if isinstance(value, str) and value.strip().lower() == _REAL_TEXT:
         return _REAL
-    dt = value if isinstance(value, datetime) else _parse_iso(value)
+    dt = value if isinstance(value, datetime) else _parse_cn_datetime(value)
     if dt is None:
         raise ValueError(f"无法解析的 reference_time：{value!r}")
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=_CN_TZ)
@@ -253,7 +288,7 @@ def _header_override():
         return None
     if isinstance(raw, str) and raw.strip().lower() == _REAL_TEXT:
         return _REAL
-    return _parse_iso(raw)
+    return _parse_cn_datetime(raw)
 
 
 def effective_override():
@@ -320,16 +355,13 @@ def set_override_from_text(text, note=None) -> dict:
         raise ValueError("datetime 不能为空")
     s = text.strip()
 
-    date_only = bool(_DATE_ONLY_RE.match(s))
-    dt = _parse_iso(s)
+    date_only = is_date_only(s)
+    dt = _parse_cn_datetime(s)
     if dt is None:
         raise ValueError(f"无法解析的时间格式：{s!r}（支持 YYYY-MM-DD[ HH:MM[:SS]] 或 ISO）")
 
     if date_only:
-        # 仅日期：时分取真实当前时刻（不取 00:00，否则"现在"=当天凌晨，
-        # "今天下午/14时"会被判到未来而无法取实况）。
-        real = datetime.now(_CN_TZ)
-        dt = dt.replace(hour=real.hour, minute=real.minute, second=real.second, microsecond=0)
+        dt = use_real_time_of_day(dt)
     else:
         dt = dt.replace(microsecond=0)
 
