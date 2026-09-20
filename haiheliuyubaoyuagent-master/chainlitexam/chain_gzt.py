@@ -758,12 +758,12 @@ async def _warmup_qa():
         print(f"[QA-API] warmup failed (will lazy-load): {type(e).__name__}")
 
 
-async def _build_qa_runtime() -> dict:
-    """给 qa_http_api 注入运行时（进程级构造一次）。"""
+async def _build_qa_runtime(day: str) -> dict:
+    """给 qa_http_api 注入运行时（按日期分槽，见 `_get_orchestrator_runtime`）。"""
     await _ensure_chainlit_tables()
     # HTTP 与网页会话复用同一份无会话状态的 chain/tools；复制 dict 后再注入
     # HTTP callbacks，避免污染共享缓存对象。
-    runtime = dict(await _get_orchestrator_runtime())
+    runtime = dict(await _get_orchestrator_runtime(day))
     runtime["callbacks"] = _build_orchestrator_callbacks(execution_mode="http")
     runtime["callbacks"]["tool_candidate_index"] = runtime.get("tool_candidate_index")
     runtime["callbacks"]["active_tool_router"] = runtime.get("active_tool_router")
@@ -2832,21 +2832,39 @@ def _select_system_prompts() -> tuple[str, str]:
     return planner_prompt, answer_prompt
 
 
-async def _build_orchestrator_runtime() -> dict:
+_WEEKDAY_NAMES = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+def _prompt_date_prefix(day: str) -> str:
+    """构造【当前日期：…】前缀。`day` 是 "%Y-%m-%d"。
+
+    抽成纯函数是为了可单测：这段文本原本烤死在共享 runtime 里（进程级一个日期），
+    改成按请求日期渲染之后，它是"请求级锚点能否生效"的关键一环。
+    """
+    day_dt = datetime.strptime(day, "%Y-%m-%d")
+    return (
+        f"【当前日期：{day_dt.strftime('%Y年%m月%d日')}（{_WEEKDAY_NAMES[day_dt.weekday()]}）】"
+        "请基于这个当前日期来理解用户的相对时间表述（如今天、明天、周末等）。\n\n"
+    )
+
+
+async def _build_orchestrator_runtime(day: str | None = None, *, mcp_tools=None) -> dict:
     """构造 planner / answer / thinking chain 与工具表。
 
     不碰 `cl.user_session`，因此可被网页会话与 HTTP 问答接口共用。
+
+    `day` 决定【当前日期】前缀（None → 走统一时间源的"今天"）；`mcp_tools` 由调用方
+    传入时复用已加载的 MCP 工具表——分槽缓存下这层是跨日期共享的，避免为每个日期
+    重连一次内网 MCP。
     """
+    if day is None:
+        day = time_source.override_date_str()
     planner_llm = _build_chat_llm("PLANNER")
     answer_llm = _build_chat_llm("ANSWER")
 
-    tools = await load_sse_tools()
+    tools = list(mcp_tools) if mcp_tools is not None else await load_sse_tools()
     tools = tools + build_external_skill_tools() + build_rain_analysis_tools()
-    weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    # 走统一时间源：切换系统时间激活时，【当前日期】锚定到指定日期。
-    today_str = time_source.now().strftime("%Y年%m月%d日")
-    weekday_str = weekday_map[time_source.now().weekday()]
-    prompt_prefix = f"【当前日期：{today_str}（{weekday_str}）】请基于这个当前日期来理解用户的相对时间表述（如今天、明天、周末等）。\n\n"
+    prompt_prefix = _prompt_date_prefix(day)
     planner_prompt, answer_prompt = _select_system_prompts()
 
     planner_template = ChatPromptTemplate.from_messages([
@@ -2908,13 +2926,13 @@ _RUNTIME_CONFIG_ENV_KEYS = (
 )
 
 
-def _orchestrator_runtime_cache_key():
-    """缓存键包含本地日期与关键配置，跨日重建日期前缀和工具绑定。
+def _orchestrator_runtime_cache_key(day: str | None = None):
+    """缓存键包含生效日期与关键配置。
 
-    日期取统一时间源：切换系统时间激活时，覆盖日期变化 → 键变化 → runtime 自动重建
-    【当前日期】前缀（无需重启服务）。
+    日期取请求级锚点解析结果（None → 统一时间源的"今天"）：不同用户带着不同锚点
+    并发提问时各占一个槽位，互不覆盖；日期变化即自动重建该槽位的【当前日期】前缀。
     """
-    day = time_source.override_date_str()
+    day = day or time_source.override_date_str()
     config_values = tuple((name, os.environ.get(name, "")) for name in _RUNTIME_CONFIG_ENV_KEYS)
     return day, config_values
 
@@ -2927,7 +2945,7 @@ def _clear_orchestrator_runtime_cache() -> None:
 
 
 def _orchestrator_runtime_state() -> dict:
-    """返回当前事件循环独享的 runtime、cache key 和初始化锁。"""
+    """返回当前事件循环独享的运行时槽位表、共享 MCP 工具表与初始化锁。"""
     loop = asyncio.get_running_loop()
     with _ORCHESTRATOR_RUNTIME_GENERATION_LOCK:
         generation = _ORCHESTRATOR_RUNTIME_GENERATION
@@ -2935,30 +2953,50 @@ def _orchestrator_runtime_state() -> dict:
     if state is None or state.get("generation") != generation:
         state = {
             "generation": generation,
-            "runtime": None,
-            "cache_key": None,
+            # cache_key(day, config) -> runtime。按日期分槽：不同锚点各占一槽。
+            "runtimes": {},
+            # 跨日期共享：MCP 工具表只加载一次（列工具要走内网，是这里最贵的一步）。
+            "mcp_tools": None,
             "lock": asyncio.Lock(),
         }
         setattr(loop, _ORCHESTRATOR_RUNTIME_STATE_ATTR, state)
     return state
 
 
-async def _get_orchestrator_runtime() -> dict:
-    """取当前事件循环共享运行时；同 loop、同日、同配置只初始化一次。"""
+def _evict_runtime_slots(state: dict) -> None:
+    """日期槽位超限时按插入顺序淘汰最老的（dict 保序）。"""
+    limit = _env_int_optional("ORCHESTRATOR_RUNTIME_MAX_DAYS") or 4
+    if limit < 1:
+        limit = 1
+    runtimes = state["runtimes"]
+    while len(runtimes) > limit:
+        runtimes.pop(next(iter(runtimes)))
+
+
+async def _get_orchestrator_runtime(day: str | None = None) -> dict:
+    """取某日期槽位的运行时；同 loop、同日、同配置只初始化一次。
+
+    跨日期共享 `state["mcp_tools"]`：只重建便宜的 prompt/chain/router，不重连 MCP。
+    """
     if not _env_bool("CACHE_ORCHESTRATOR_RUNTIME", True):
-        return await _build_orchestrator_runtime()
+        return await _build_orchestrator_runtime(day)
 
     state = _orchestrator_runtime_state()
-    key = _orchestrator_runtime_cache_key()
-    if state["runtime"] is not None and state["cache_key"] == key:
-        return state["runtime"]
+    key = _orchestrator_runtime_cache_key(day)
+    cached = state["runtimes"].get(key)
+    if cached is not None:
+        return cached
 
     async with state["lock"]:
-        key = _orchestrator_runtime_cache_key()
-        if state["runtime"] is None or state["cache_key"] != key:
-            state["runtime"] = await _build_orchestrator_runtime()
-            state["cache_key"] = key
-        return state["runtime"]
+        cached = state["runtimes"].get(key)
+        if cached is not None:
+            return cached
+        if state["mcp_tools"] is None:
+            state["mcp_tools"] = await load_sse_tools()
+        runtime = await _build_orchestrator_runtime(key[0], mcp_tools=state["mcp_tools"])
+        state["runtimes"][key] = runtime
+        _evict_runtime_slots(state)
+        return runtime
 
 
 async def _init_runtime_session(messages_seed=None):
