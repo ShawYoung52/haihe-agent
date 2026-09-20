@@ -32,19 +32,32 @@
 > 必须**逐字一致**（拷完 `diff` 一下）。
 
 ### chainlitexam（8003 进程）— 改动的文件
-- `chain_gzt.py`：`【当前日期】`前缀 today_str/weekday → `time_source.now()`；`_orchestrator_runtime_cache_key` 日键 → `time_source.override_date_str()`；新增 3 个 REST 端点 + `_after_system_time_changed()`（清 `qa_http_api._response_cache` + bump orchestrator runtime generation）。
-- `qa_http_api.py`：`_runtime_epoch()` → `time_source.override_date_str()`；新增 `clear_response_cache()`。
-- `message_orchestrator.py`：THINKING 提示 `current_time` → `time_source.now()`。
-- `tools/warning_workflow.py`：`current_time` → `time_source.now()`。
-- `tools/decision_weather_core.py`：`_decision_now_bjt()` → `time_source.now(+08:00)`。
+- `utils/time_source.py`：新增请求级锚点（ContextVar + `set_request_override` /
+  `reset_request_override` / `request_override_header_value` / `effective_override`）
+  与 MCP header 读取；`now()` 优先级改为 **请求 → header → 文件 → 真实**。
+- `utils/reference_time.py`（**新增**）：请求锚点解析纯函数（fixed/real/inherit）+ `request_anchor`。
+- `mcp_loader.py`：`_inject_reference_time` interceptor（请求级锚点 → `x-haihe-reference-time` header）。
+- `chain_gzt.py`：`SetSystemTimeRequest` 三态契约 + `_set_system_time` 分支；
+  `_prompt_date_prefix(day)`；`_build_orchestrator_runtime(day, mcp_tools=)` /
+  `_orchestrator_runtime_cache_key(day)` / `_orchestrator_runtime_state`（日期槽位表 + 共享
+  `mcp_tools`）/ `_evict_runtime_slots` / `_get_orchestrator_runtime(day)` / `_build_qa_runtime(day)`；
+  `QAAskRequest` 三个可选字段 + 透传；`on_message` 按 `message.metadata` 锚点取槽位。
+- `qa_http_api.py`：`_runtime_epoch(day)`；新增 `_response_cache_key(...)`（键含时间维度 `t`）；
+  `QARuntime._runtimes` 按日期分槽 + 上限 `QA_API_RUNTIME_MAX_SLOTS`；
+  `ask(metadata=, reference_time=, time_mode=)`；`_run_once(anchor=)` 用 `request_anchor`
+  包住 `process_message`。
+- `message_orchestrator.py` / `tools/warning_workflow.py` / `tools/decision_weather_core.py`：
+  沿用统一时间源，**本次未改**——自动获得按请求生效的能力。
 
 ### haihe-weather-analyzer-mcp（MCP 进程）— 改动的文件
-- `rolling_forecast_service.py`：全部 9 处 `datetime.now(TIANJIN_TIMEZONE)` → `time_source.now(...)`（含主注入点 `now = now or ...`）。
-- `current_weather_observation_service.py`：2 处默认"现在"。
-- `tools.py`：`get_server_time`、水位"今日零点"、面雨量默认窗口。
-- `haihe_mcp_tools.py`：风力整点、降水实况长图默认窗口、应急时间段默认窗口。
-- `custom_tools/safe_emergency_response_tool.py`：应急默认当前北京时整点。
-- `custom_tools/` 其余默认"现在"锚点：`composite_longimg_tool.py`、`basin_drawing_tool.py`、`rainfall_describe_tool.py`、`hhweb_product_tool.py`、`poi_nearest_observation_tool.py`、`historical_same_period_rainfall_tool.py`、`last_year_max_daily_rainfall_tool.py`、`last_month_areal_rainfall_tool.py`、`year_to_date_areal_rainfall_tool.py`、`risk_warning_tool.py`、`forecast_evaluate_tool.py`。
+- `time_source.py`：与 chainlitexam 那份**逐字一致**（即上面那份 + header 读取）。
+- 其余 17 个 `time_source.now()` 调用点（`rolling_forecast_service.py`、
+  `current_weather_observation_service.py`、`tools.py`、`haihe_mcp_tools.py`、
+  `custom_tools/*` 等）：**本次未改**——自动获得按请求生效的能力。
+- `probe_reference_time_header.py`（**新增**）：header 投递探针，改完必跑。
+
+**新增环境变量**（可选，都有默认值）：`ORCHESTRATOR_RUNTIME_MAX_DAYS`（默认 4）、
+`QA_API_RUNTIME_MAX_SLOTS`（默认 8）——两个进程各自的日期槽位上限。
 
 > 服务器无 git，整文件拷贝覆盖即可（每个文件里的其他功能改动一并带过去）。
 
@@ -110,21 +123,63 @@
 
 **不带就完全不受影响**——因此旧客户端行为与改造前逐字一致。
 
----
+## 三之三、前端待办（按客户端隔离的前提）
 
-## 四、验证（端到端，6 个测试问题全部按 7月10日 回答）
+后端**两个入口都已支持**请求级锚点。但要让"谁设的时间只对谁生效"真正成立，
+**前端必须逐请求把锚点带上**——否则 `POST /admin/system-time` 的新式调用只是回显，
+锚点没有落到任何请求上，表现为"设了时间不生效"。
+
+| 入口 | 状态 | 要做的 |
+|---|---|---|
+| HTTP `/api/v1/qa/ask`（天河小程序） | 后端就绪 | 提问时带上 `metadata.reference_time` / `metadata.time_mode` |
+| 网页聊天（WebSocket） | 后端就绪 | 重建的 bundle 在 user_message 的 `metadata` 里带上同款字段 |
+
+**建议的 WebSocket 侧约定**（前端改动最小）：
+
+1. 本仓库的 `sim-time-agentweb.js` 面板把当前锚点写进 `localStorage`
+   （建议 key：`haihe_reference_time`，值为 ISO 串；"恢复"时**删除该 key**，或写 `"real"`）。
+2. 前端同事重建 bundle 时，在发送 user_message 的 `metadata` 里读该 key 一并带上
+   `{location, time_mode, reference_time}`。
+
+在 bundle 改好之前：**AgentWeb 网页版仍走旧式全局兜底**（`{"datetime"}` 写共享文件），
+即仍然"一人改时间全员受影响"——因为浏览器端还没有渠道把锚点逐请求送出来。
+**HTTP 入口（天河小程序）不受此限**，已可完全按请求隔离。
+
+## 四、验证（端到端）
+
+### 4.1 请求级锚点（新，推荐）
+
+1. `POST /api/v1/qa/ask`，body 带
+   `{"question":"今天下午天津港附近有雨吗","metadata":{"time_mode":"fixed","reference_time":"2026-07-10T15:00:00+08:00"}}`
+   → 断言按 7/10 下午回答。
+2. 同一问题**不带** metadata → 按真实日期回答（证明没串味）。
+3. **并发**两个不同 `reference_time` 的请求 → 各自按各自日期回答（这是本次要修的核心）。
+4. body 带 `{"metadata":{"time_mode":"real"}}` → 即使遗留了全局覆盖文件也按真实时间回答。
+5. 用 `GET /api/v1/admin/system-time` 确认 `active:false`（新式调用不写全局文件）。
+6. 非法 `reference_time`（如 `"昨天下午"`）→ 400。
+
+### 4.2 旧式全局兜底（仅服务端 curl 验收）
 
 1. `GET /api/v1/admin/system-time` → `active:false`。
 2. `POST /api/v1/admin/system-time {"datetime":"2026-07-10 15:00"}` → `active:true`。
-3. 逐问经 `POST /api/v1/qa/ask` 断言日期口径：
+3. 逐问经 `POST /api/v1/qa/ask`（**不带 metadata**）断言日期口径：
    - ① 未来三天天津港附近天气 → 7/11–13
    - ② 今天下午天津港附近有雨吗 → 7/10 下午
    - ③ 本周末适合去泰达航母主题公园游玩吗 → 7/11(六)–7/12(日)
    - ④ 明天适合去蓟州游玩吗 → 7/11
    - ⑤ 下周一津泰达实验学校附近天气 → 7/13
-   - ⑥ 生成7月10日下午14时的实况和预报 → 7/10 14:00（14时前=实况、后=预报；长图类工具按 7/10 14 时整点）
-4. 每步 `GET /api/v1/admin/system-time` 确认状态；同问题在覆盖前后不串味（`_response_cache` 已清）。
-5. AgentWeb 面板实测：设置 → 状态变"模拟中：2026-07-10 15:00" → 发问按 7/10 → 点"恢复" → 回"真实时间"。
+   - ⑥ 生成7月10日下午14时的实况和预报 → 7/10 14:00
+4. **恢复**：`POST /api/v1/admin/system-time {}`（空 body 也回真实时间并清文件）
+   或 `{"metadata":{"time_mode":"real"}}` → `GET` 回 `active:false`，
+   再问同一问题按真实日期回答。
+
+### 4.3 跨进程 header 投递（改完必跑）
+
+```bash
+cd haihe-weather-analyzer-mcp && <venv>/python.exe probe_reference_time_header.py
+```
+期望末行 `[PROBE] RESULT=OK`。这条验证的是"请求级锚点能到 MCP 工具"这个硬假设，
+**不通过就不要上生产**（降级方案见 spec「风险 1」）。
 
 ---
 
