@@ -655,15 +655,9 @@ def _after_system_time_changed() -> None:
 
 @api_sub_app.post("/admin/system-time", tags=["系统时间"])
 def _set_system_time(req: SetSystemTimeRequest):
-    try:
-        kind, value = reference_time_util.resolve_reference_time(
-            req.metadata,
-            top_level={"reference_time": req.reference_time, "time_mode": req.time_mode},
-        )
-    except reference_time_util.InvalidReferenceTime as e:
-        raise HTTPException(400, qa_http_api._scrub(str(e)))
-
-    # 旧式：显式 datetime → 写全局覆盖文件，行为与本次改动前逐字一致。
+    # 旧式**优先**：显式给了 datetime 就写全局覆盖文件，行为与本次改动前逐字一致。
+    # 必须先于新式解析——否则 {"datetime": ..., "metadata": {"time_mode": "fixed"}}
+    # 这类混搭会被新式解析的 400 挡掉，合法 datetime 完全不生效。
     if req.datetime:
         try:
             data = time_source.set_override_from_text(req.datetime, note=req.note)
@@ -674,6 +668,14 @@ def _set_system_time(req: SetSystemTimeRequest):
             raise HTTPException(500, f"internal: {type(e).__name__}")
         _after_system_time_changed()
         return {"code": 200, "data": data, "message": "success"}
+
+    try:
+        kind, value = reference_time_util.resolve_reference_time(
+            req.metadata,
+            top_level={"reference_time": req.reference_time, "time_mode": req.time_mode},
+        )
+    except reference_time_util.InvalidReferenceTime as e:
+        raise HTTPException(400, qa_http_api._scrub(str(e)))
 
     if kind == "fixed":
         # 新式锚定：无状态回显。客户端据此更新自己的面板状态，后续逐请求带
@@ -689,17 +691,32 @@ def _set_system_time(req: SetSystemTimeRequest):
             "message": "success",
         }
 
-    # real / inherit：回到真实时间，并顺手清掉可能遗留的全局覆盖文件。
-    # 这一步是"改回去了天河小程序还是旧日期"的直接解药：旧文件跨服务重启存活，
-    # 不清就会一直把整个机器锚在过去。
-    try:
-        data = time_source.clear_override()
-    except Exception as e:
-        logging.getLogger("chain_gzt").error("clear_system_time: %s", type(e).__name__)
-        raise HTTPException(500, f"internal: {type(e).__name__}")
-    data["mode"] = "per_request"
-    _after_system_time_changed()
-    return {"code": 200, "data": data, "message": "success"}
+    if kind == "real":
+        # 只有**显式**要求真实时间才清全局文件——这是"改回去了天河小程序还是旧日期"
+        # 的直接解药：旧文件跨服务重启存活，不清就会一直把整个机器锚在过去。
+        try:
+            data = time_source.clear_override()
+        except Exception as e:
+            logging.getLogger("chain_gzt").error("clear_system_time: %s", type(e).__name__)
+            raise HTTPException(500, f"internal: {type(e).__name__}")
+        _after_system_time_changed()
+        data["mode"] = "per_request"
+        return {"code": 200, "data": data, "message": "success"}
+
+    # kind == "inherit"：既没给 datetime 也没给锚点 → **不改任何状态**，只回显当前
+    # 全局兜底状态（旧行为是 422）。刻意不"顺手清文件"：探测性 POST（健康检查、
+    # 漏改的旧客户端）会把 curl 验收期间设好的全局锚点静默清掉。
+    override = time_source.get_override()
+    return {
+        "code": 200,
+        "data": {
+            "active": override is not None,
+            "mode": "per_request",
+            "override_datetime": override.isoformat() if override else None,
+            "display": override.strftime("%Y-%m-%d %H:%M:%S") if override else None,
+        },
+        "message": "success",
+    }
 
 
 @api_sub_app.post("/admin/system-time/clear", tags=["系统时间"])
@@ -2971,8 +2988,15 @@ def _orchestrator_runtime_state() -> dict:
 
 
 def _evict_runtime_slots(state: dict) -> None:
-    """日期槽位超限时按插入顺序淘汰最老的（dict 保序）。"""
-    limit = _env_int_optional("ORCHESTRATOR_RUNTIME_MAX_DAYS") or 4
+    """日期槽位超限时按插入顺序淘汰最老的（dict 保序）。
+
+    `ORCHESTRATOR_RUNTIME_MAX_DAYS` 设 0/负数一律钳到 1（与 qa_http_api 的
+    `QA_API_RUNTIME_MAX_SLOTS` 同口径）。用 `or 4` 会把显式的 0 悄悄变成 4，
+    既不是"只留一个"也不是"禁用"。
+    """
+    limit = _env_int_optional("ORCHESTRATOR_RUNTIME_MAX_DAYS")
+    if limit is None:
+        limit = 4
     if limit < 1:
         limit = 1
     runtimes = state["runtimes"]
@@ -4258,14 +4282,28 @@ def _build_orchestrator_callbacks(execution_mode: str = "chainlit") -> dict:
 # ===============================
 # 2. 接收用户消息并流式回复
 # ===============================
+def _resolve_ws_anchor(message) -> tuple[str, object]:
+    """解析 WS 入站消息的锚点；非法/异常一律降级为"没带锚点"（回落全局 → 真实时间）。
+
+    不能让异常穿出去：那会让整条消息**不被回答**（Chainlit socket 只发一条
+    ErrorMessage），而 HTTP 入口对同样的输入是 400 带可读原因。用户宁可拿到
+    真实时间的回答，也好过石沉大海。
+    """
+    try:
+        return reference_time_util.resolve_reference_time(getattr(message, "metadata", None))
+    except Exception as exc:
+        logging.getLogger("chain_gzt").warning(
+            "on_message 锚点解析失败（%s），按真实时间回答", type(exc).__name__
+        )
+        return ("inherit", None)
+
+
 @cl.on_message
 async def on_message(message: cl.Message):
     # 请求级锚定时间：AgentWeb 面板把 time_mode/reference_time 挂进 user_message 的
     # metadata（Chainlit 本来就透传 metadata，原先只放了 location）。没带锚点时
     # resolve 返回 inherit，行为与本次改动前一致。
-    anchor_kind, anchor_value = reference_time_util.resolve_reference_time(
-        getattr(message, "metadata", None)
-    )
+    anchor_kind, anchor_value = _resolve_ws_anchor(message)
     day = reference_time_util.resolve_day(
         anchor_kind, anchor_value, fallback_day=time_source.override_date_str()
     )

@@ -36,11 +36,26 @@ def sim_file(tmp_path, monkeypatch):
 
 
 def _resolve(req: SetSystemTimeRequest):
-    """镜像 chain_gzt._set_system_time 的分支判定。"""
+    """镜像 chain_gzt._set_system_time 的锚点解析。"""
     return reference_time.resolve_reference_time(
         req.metadata,
         top_level={"reference_time": req.reference_time, "time_mode": req.time_mode},
     )
+
+
+def _decide(req: SetSystemTimeRequest) -> str:
+    """镜像 chain_gzt._set_system_time 的**分支顺序**。
+
+    legacy（写全局文件）/ fixed（无状态回显）/ real（清全局文件）/ noop（不动任何状态）。
+    """
+    if req.datetime:
+        return "legacy"
+    kind, _ = _resolve(req)
+    if kind == "fixed":
+        return "fixed"
+    if kind == "real":
+        return "real"
+    return "noop"
 
 
 def test_legacy_datetime_still_writes_global_file(sim_file):
@@ -94,13 +109,48 @@ def test_new_metadata_real_clears_legacy_file(sim_file):
     assert time_source.get_override() is None
 
 
-def test_bare_metadata_means_off(sim_file):
-    """不带任何锚点信息的调用 = 回到真实时间（并清掉遗留文件）。"""
+def test_bare_metadata_has_no_side_effect(sim_file):
+    """不带任何锚点信息的调用**不动任何状态**（旧行为是 422，绝不能变成"清文件"）。
+
+    否则探测性 POST（健康检查、漏改的旧客户端）会把 curl 验收期间设好的
+    全局锚点静默清掉——一个纯粹的 GET 式探测不该有副作用。
+    """
     time_source.set_override_from_text("2026-07-10 15:00:00")
     req = SetSystemTimeRequest(metadata={"location": "http://x/y"})
-    assert _resolve(req) == ("inherit", None)
-    time_source.clear_override()
-    assert time_source.get_override() is None
+    assert _decide(req) == "noop", "空锚点必须是无副作用的回显"
+    # noop 分支不调 clear_override：全局锚点原样保留
+    assert time_source.get_override() is not None
+
+
+def test_empty_body_is_noop(sim_file):
+    time_source.set_override_from_text("2026-07-10 15:00:00")
+    assert _decide(SetSystemTimeRequest()) == "noop"
+    assert time_source.get_override() is not None
+
+
+def test_legacy_datetime_wins_over_new_style_anchor():
+    """混搭 body：合法 datetime 必须生效，不能被新式解析的 400 挡掉。"""
+    # {"datetime": ..., "metadata": {"time_mode": "fixed"}} —— fixed 缺 reference_time
+    # 对新式解析是 IllegalReferenceTime，但旧式分支先返回，所以不该 400。
+    req = SetSystemTimeRequest(datetime="2026-07-10 15:00:00",
+                               metadata={"time_mode": "fixed"})
+    assert _decide(req) == "legacy"
+
+    req2 = SetSystemTimeRequest(datetime="2026-07-10 15:00:00", time_mode="real")
+    assert _decide(req2) == "legacy", "旧式优先：带 datetime 就不走 real 清文件分支"
+
+
+def test_datetime_branch_is_checked_before_anchor_parsing():
+    """静态锁：旧式 `if req.datetime` 必须排在 resolve_reference_time 之前。
+
+    顺序写反时 `{"datetime": 合法值, "metadata": {"time_mode": "fixed"}}` 会被
+    400 挡掉，而没有任何动态用例能覆盖到——只能靠源码顺序断言。
+    """
+    src = (Path(__file__).resolve().parents[1] / "chain_gzt.py").read_text(encoding="utf-8")
+    body = src.split("def _set_system_time(req: SetSystemTimeRequest):", 1)[1]
+    body = body.split("\n\n\n", 1)[0]
+    assert body.index("if req.datetime:") < body.index("resolve_reference_time"), \
+        "旧式 datetime 分支必须排在新式锚点解析之前"
 
 
 def test_top_level_equivalent_to_metadata():

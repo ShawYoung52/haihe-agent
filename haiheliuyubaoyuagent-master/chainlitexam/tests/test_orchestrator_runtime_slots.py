@@ -49,11 +49,33 @@ def test_ws_on_message_uses_request_day_runtime():
     import inspect
 
     src = inspect.getsource(chain_gzt.on_message)
-    assert "resolve_reference_time" in src, "WS 入口没解析 message.metadata 锚点"
+    assert "resolve_reference_time" in src or "_resolve_ws_anchor" in src, \
+        "WS 入口没解析 message.metadata 锚点"
     assert "request_anchor" in src, "WS 入口没把锚点落到 time_source"
     assert "_get_orchestrator_runtime(day)" in src, "WS 入口没按请求日期取运行时"
     assert 'cl.user_session.get("planner_chain")' not in src, \
         "会话级钉死的 chain 会让同会话内切换锚点失效"
+
+
+def test_ws_anchor_resolution_never_raises():
+    """非法锚点不能让整条消息不被回答。
+
+    HTTP 入口对同样的输入是 400 带可读原因；WS 侧没有"返回错误"的渠道
+    （异常穿出 on_message 只会变成一条 ErrorMessage、问题永远不被回答），
+    所以必须降级为"没带锚点"。
+    """
+    from types import SimpleNamespace
+
+    assert chain_gzt._resolve_ws_anchor(
+        SimpleNamespace(metadata={"time_mode": "fixed"})) == ("inherit", None)
+    assert chain_gzt._resolve_ws_anchor(
+        SimpleNamespace(metadata={"reference_time": "昨天下午"})) == ("inherit", None)
+    assert chain_gzt._resolve_ws_anchor(SimpleNamespace(metadata=None)) == ("inherit", None)
+    assert chain_gzt._resolve_ws_anchor(SimpleNamespace()) == ("inherit", None)
+
+    kind, _ = chain_gzt._resolve_ws_anchor(
+        SimpleNamespace(metadata={"reference_time": "2026-07-10T15:00:00+08:00"}))
+    assert kind == "fixed", "合法锚点不能被降级逻辑吃掉"
 
 
 def test_cache_key_varies_by_day():
@@ -148,3 +170,30 @@ def test_generation_bump_clears_all_slots(monkeypatch, _offline_llm):
 
     asyncio.run(main())
     assert calls["n"] == 2, "generation 变化后 MCP 工具表应重新加载"
+
+
+def test_slot_limit_zero_clamps_to_one(monkeypatch, _offline_llm):
+    """ORCHESTRATOR_RUNTIME_MAX_DAYS=0 必须钳到 1，不能被 `or 4` 悄悄变成 4。"""
+    calls = {"n": 0}
+    _stub_load(monkeypatch, calls)
+    monkeypatch.setenv("ORCHESTRATOR_RUNTIME_MAX_DAYS", "0")
+
+    async def main():
+        for day in ("2026-07-10", "2026-07-11"):
+            await chain_gzt._get_orchestrator_runtime(day)
+        return chain_gzt._orchestrator_runtime_state()["runtimes"]
+
+    runtimes = asyncio.run(main())
+    assert len(runtimes) == 1, f"0 应钳到 1，实际留了 {len(runtimes)} 个槽"
+    assert list(runtimes)[0][0] == "2026-07-11", "应保留最近使用的槽位"
+
+
+def test_slot_limit_negative_clamps_to_one(monkeypatch, _offline_llm):
+    _stub_load(monkeypatch, {"n": 0})
+    monkeypatch.setenv("ORCHESTRATOR_RUNTIME_MAX_DAYS", "-3")
+
+    async def main():
+        await chain_gzt._get_orchestrator_runtime("2026-07-10")
+        return chain_gzt._orchestrator_runtime_state()["runtimes"]
+
+    assert len(asyncio.run(main())) == 1

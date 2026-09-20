@@ -722,8 +722,10 @@ class QARuntime:
     def clear_response_cache(self) -> None:
         """清空单轮响应缓存。
 
-        切换系统时间时调用：响应缓存键只含 {question, include_reasoning, include_gis}，
-        不含时间；不清理的话，覆盖前后问同一个问题会返回陈旧答案。
+        切换**全局兜底**时间锚点时调用（`_after_system_time_changed`）。
+        注意：缓存键**已含时间维度**（见 `_response_cache_key` 的 `t`），所以请求级
+        锚点本来就不会串味；这里清的是"全局兜底文件被改"这一条路径的残留。
+        **不要**因此把键里的时间维度删掉——那会直接回归"恢复后仍返回陈旧答案"。
         """
         self._response_cache.clear()
 
