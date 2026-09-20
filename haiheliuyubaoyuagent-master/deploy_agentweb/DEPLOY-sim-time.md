@@ -134,16 +134,23 @@
 | HTTP `/api/v1/qa/ask`（天河小程序） | 后端就绪 | 提问时带上 `metadata.reference_time` / `metadata.time_mode` |
 | 网页聊天（WebSocket） | 后端就绪 | 重建的 bundle 在 user_message 的 `metadata` 里带上同款字段 |
 
-**建议的 WebSocket 侧约定**（前端改动最小）：
+**建议的 WebSocket 侧约定**（前端改动最小，三步缺一不可）：
 
 1. 本仓库的 `sim-time-agentweb.js` 面板把当前锚点写进 `localStorage`
    （建议 key：`haihe_reference_time`，值为 ISO 串；"恢复"时**删除该 key**，或写 `"real"`）。
 2. 前端同事重建 bundle 时，在发送 user_message 的 `metadata` 里读该 key 一并带上
    `{location, time_mode, reference_time}`。
+3. 面板**停止**调旧式 `POST /admin/system-time {"datetime": ...}`，改调新式
+   `{"metadata": {"time_mode": "fixed", "reference_time": ...}}`（无状态回显）。
 
-在 bundle 改好之前：**AgentWeb 网页版仍走旧式全局兜底**（`{"datetime"}` 写共享文件），
-即仍然"一人改时间全员受影响"——因为浏览器端还没有渠道把锚点逐请求送出来。
-**HTTP 入口（天河小程序）不受此限**，已可完全按请求隔离。
+> **第 3 步是关键**：只要面板还在写全局覆盖文件，**其它客户端**（天河小程序调
+> `/qa/ask` 不带 metadata 时走 `inherit`）就仍会被一起改时间——前两步只解决了
+> "自己这边生效"，没解决"影响别人"。
+
+在 1–3 全部落地之前：**AgentWeb 网页版仍走旧式全局兜底**，即仍然"一人改时间
+全员受影响"——因为浏览器端还没有渠道把锚点逐请求送出来，且面板仍在写共享文件。
+**HTTP 入口（天河小程序）不受此限**，已可完全按请求隔离（它只要逐请求带锚点即可，
+不依赖本次前端改动）。
 
 ## 四、验证（端到端）
 
