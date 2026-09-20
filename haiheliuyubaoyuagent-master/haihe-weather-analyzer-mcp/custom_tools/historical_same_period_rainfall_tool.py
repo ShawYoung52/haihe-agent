@@ -233,13 +233,32 @@ def _query_impl(reference_start_time: Optional[str], reference_end_time: Optiona
     }
 
 
+def _hsp_cache_key(reference_start_time=None, reference_end_time=None, years=10) -> str:
+    """缓存键含**实际生效的参考窗口**。
+
+    入参常常是 None（planner 不传窗口），实际窗口由 `_default_reference_window()`
+    按 `time_source.now()` 现算——请求级锚点下逐请求不同。只用入参做键会让不同锚点的
+    请求共用 `None|None|10`，拿到对方日期的 10 年同期统计（含
+    `reference_time_range_readable`）。解析口径与 `_query_impl` 保持一致。
+    """
+    try:
+        safe_years = max(1, min(int(years or 10), 30))
+    except Exception:
+        safe_years = 10
+    ref_start = _parse_time(reference_start_time)
+    ref_end = _parse_time(reference_end_time)
+    if not ref_start or not ref_end:
+        ref_start, ref_end = _default_reference_window()
+    if ref_end < ref_start:
+        ref_start, ref_end = ref_end, ref_start
+    return f"{ref_start:%Y%m%d%H%M%S}|{ref_end:%Y%m%d%H%M%S}|{safe_years}"
+
+
 def register_historical_same_period_rainfall_tool(mcp: FastMCP) -> None:
     # 历史同期数据静态（默认窗口按当日，TTL 管新鲜度），600s 内同参命中。
     _decorator, _hsp_cache, _hsp_lock = make_ttl_cache(
         int(os.getenv("HISTORICAL_SAME_PERIOD_CACHE_TTL", "600")),
-        lambda reference_start_time=None, reference_end_time=None, years=10: (
-            f"{reference_start_time}|{reference_end_time}|{years}"
-        ),
+        _hsp_cache_key,
     )
 
     @mcp.tool()

@@ -84,11 +84,22 @@ def _to_zone9_rows(raw: list[dict], rain_field: str) -> list[dict]:
     return _aggregate_fine_rows_to_zone9(fine_rows)
 
 
+def _ytd_cache_key(zone_type: str = "9") -> str:
+    """缓存键含**实际生效的窗口**（年初 ~ 锚定的"现在"）。
+
+    只含年初起点是不够的：请求级锚点下"现在"逐请求不同，同一年内不同锚点的请求
+    会共用同一个键（`9|20260101000000`），直接拿到对方窗口的 payload——
+    连 `time_range_readable` 都写着对方的日期。
+    """
+    start_s, end_s, _ = _year_to_date_range()
+    return f"{zone_type}|{start_s}|{end_s}"
+
+
 def register_year_to_date_areal_rainfall_tool(mcp: FastMCP) -> None:
-    # 窗口截至当前时刻，数据小时级更新：短 TTL 120s（键含年初起点，TTL 管新鲜度）。
+    # 窗口截至当前时刻，数据小时级更新：短 TTL 120s（键含完整窗口，TTL 管新鲜度）。
     _decorator, _ytd_cache, _ytd_lock = make_ttl_cache(
         int(os.getenv("YEAR_TO_DATE_AREAL_CACHE_TTL", "120")),
-        lambda zone_type="9": f"{zone_type}|{_year_to_date_range()[0]}",
+        _ytd_cache_key,
     )
 
     @mcp.tool()
