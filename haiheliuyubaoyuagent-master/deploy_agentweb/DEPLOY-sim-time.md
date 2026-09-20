@@ -1,10 +1,20 @@
-# 切换系统时间功能 — 部署说明（2026-08-21）
+# 切换系统时间功能 — 部署说明
 
-在智能体加一个**修改系统时间**的功能：把全局"现在"锚定到任意指定的 年-月-日 时:分（如 `2026-07-10 15:00`），使"今天/明天/未来三天/本周末/今天下午/14时"以及工具取数的默认时间全部按该日期回答。**不是模拟**——是全局切换"现在"。带"恢复真实时间"按钮。
+把智能体的"现在"锚定到任意指定的 年-月-日 时:分（如 `2026-07-10 15:00`），使
+"今天/明天/未来三天/本周末/今天下午/14时"以及工具取数的默认时间全部按该日期回答。
+带"恢复真实时间"按钮。
+
+> **2026-09-20 起改为「请求级锚定」**：锚点由调用方**逐请求携带**，只影响带了锚点的
+> 那个请求，服务端**不落任何跨用户状态**。此前是"全局切换"——一人切时间、所有用户
+> （含天河小程序调 `/api/v1/qa/ask` 的回答）一起变，且恢复没生效就会一直锚在过去。
+> 设计见 `docs/superpowers/specs/2026-09-20-per-request-reference-time-design.md`。
 
 - 入口：AgentWeb 注入独立 JS 面板（同滚轮看图器部署路径，免源码、免重新打包、免重启 Tomcat）。
 - 后端：调 8003 的 `/api/v1/admin/system-time`（与 `/qa/ask` 同机同端口不同服务）。
-- 穿透进程边界：Chainlit（8003）与 MCP（SSE 3333）是**两个独立进程**，共享一个 JSON 文件作为单一事实源，两包各放一份内容一致的薄模块 `time_source.py`。
+- 穿透进程边界：Chainlit（8003）与 MCP（SSE 3333）是**两个独立进程**。请求级锚点走
+  **MCP header**（`x-haihe-reference-time`，由 chainlitexam 的 tool_interceptor 注入、
+  fastmcp `get_http_headers()` 读回）；另有一份共享 JSON 文件作为**全局兜底**，
+  只供服务端 curl 验收，**不要给前端用**。
 
 ---
 
@@ -14,8 +24,12 @@
 | 源（本仓库） | 目标（服务器） |
 |---|---|
 | `chainlitexam/utils/time_source.py` | `.../chainlitexam/utils/time_source.py` |
+| `chainlitexam/utils/reference_time.py` | `.../chainlitexam/utils/reference_time.py` |
 | `haihe-weather-analyzer-mcp/time_source.py` | `.../haihe-weather-analyzer-mcp/time_source.py` |
 | `chainlitexam/AgentWeb/sim-time-agentweb.js` | `.../webapps/AgentWeb/sim-time-agentweb.js`（webapp 根级，2026-08-21 用户确认放根级，无需 public/ 子目录） |
+
+> `chainlitexam/utils/time_source.py` 与 `haihe-weather-analyzer-mcp/time_source.py`
+> 必须**逐字一致**（拷完 `diff` 一下）。
 
 ### chainlitexam（8003 进程）— 改动的文件
 - `chain_gzt.py`：`【当前日期】`前缀 today_str/weekday → `time_source.now()`；`_orchestrator_runtime_cache_key` 日键 → `time_source.override_date_str()`；新增 3 个 REST 端点 + `_after_system_time_changed()`（清 `qa_http_api._response_cache` + bump orchestrator runtime generation）。
@@ -57,13 +71,44 @@
 
 ## 三、REST 接口
 
-| 方法/路径 | body | 说明 |
-|---|---|---|
-| `POST /api/v1/admin/system-time` | `{"datetime":"2026-07-10 15:00","note":"..."}` | 设置锚定时间。支持 `YYYY-MM-DD[ HH:MM[:SS]]` / ISO；仅日期（如 `2026-07-10`）时分取设置那一刻的真实时刻 |
-| `POST /api/v1/admin/system-time/clear` | `{}` | 恢复真实时间（删共享文件） |
-| `GET /api/v1/admin/system-time` | — | 返回 `{active, override_datetime, real_now}`，面板据此常显"模拟中" |
+### `POST /api/v1/admin/system-time`（三种 body）
+
+| body | 行为 |
+|---|---|
+| `{"datetime":"2026-07-10 15:00","note":"..."}` | **旧式**：写**全局**覆盖文件。进程级开关，一人改全员受影响。**只用于服务端 curl 手工验收**。仅日期（如 `2026-07-10`）时时分取设置那一刻的真实时刻 |
+| `{"metadata":{"time_mode":"fixed","reference_time":"2026-07-10T15:00:00+08:00"}}` | **新式**：**无状态**，只校验 + 回显 `{active:true, mode:"per_request", override_datetime, display}`，**不写文件**。锚点由客户端后续逐请求携带 |
+| `{"metadata":{"time_mode":"real"}}` | 回 `{active:false}`，**并清掉遗留的全局覆盖文件**（修"改回去了还是旧日期"） |
+
+顶层同名字段等价可用（`{"reference_time":"..."}` / `{"time_mode":"real"}`）。
+两个字段都不给 = 回到真实时间（并清文件）。`reference_time` 非法 → 400。
+
+### 其它
+
+| 方法/路径 | 说明 |
+|---|---|
+| `POST /api/v1/admin/system-time/clear` | 恢复真实时间（删共享文件） |
+| `GET /api/v1/admin/system-time` | 返回 `{active, override_datetime, real_now}`——`active` 指**全局兜底开关**，不是请求级锚点 |
 
 鉴权按 `/qa/ask` 网络层模型（部署时网络层限制，不加管理员校验）。
+
+## 三之二、前端契约（请求级锚点）
+
+锚点逐请求携带，**两个入口同款字段**：
+
+- **HTTP 问答**：`POST /api/v1/qa/ask` body 里带
+  `{"metadata": {"time_mode": "fixed", "reference_time": "2026-07-10T15:00:00+08:00"}}`
+  （或顶层 `reference_time` / `time_mode`）。
+- **网页聊天（WebSocket）**：把同样字段挂进 user_message 的 `metadata`
+  （Chainlit 本来就透传 `metadata`，原先只放了 `location`）。
+
+语义：
+
+- `time_mode: "fixed"` + `reference_time` → 本次请求按该时刻回答。
+- `time_mode: "real"`（另接受 `dynamic`/`live`）→ 本次请求强制真实时间，
+  **压过**遗留的全局覆盖文件。
+- 都不给 → 回落全局兜底文件 → 真实时间。
+
+**不带就完全不受影响**——因此旧客户端行为与改造前逐字一致。
 
 ---
 
@@ -86,7 +131,9 @@
 ## 五、风险与已知缺口
 
 1. **滚动预报后端历史起报周期归档深度（最大现实风险）**：覆盖到过去日期问"未来N天"，需要该日 08/20 起报周期数据；若后端只留最近周期不归档 → 返回空/报错。**先用 ⑥ 之类实测确认**；若不归档，降级口径 = 过去日期的"未来N天"提示无预报数据、仅实况/历史可答（实况类 MUSIC 历史有归档）。
-2. **忘记恢复（footgun）**：覆盖文件跨服务重启存活，忘 clear 会一直按 7/10 回答 → 面板常显"模拟中"提醒 + `GET` 状态接口兜底。
+2. **忘记恢复（footgun）**：**请求级锚点不受影响**——请求结束即失效，不需要任何"恢复"。
+   只有旧式全局兜底仍会跨服务重启存活，忘 clear 就一直按 7/10 回答；因此全局兜底
+   **只留给服务端 curl 验收**，前端路径一律走请求级。
 3. **明确不改（记录发生时刻，非"现在"语义）**：审计/日志时间戳（`generated_at`/`EVT-` 事件码/队列/`rest_api.py` 等）。已知缺口（不在本期范围）：预警正文报告时间、应急网格起报时次选择（`rolling_forecast_grid.py`）、fast path（`ENABLE_FAST_PATHS=false` 默认关闭）。
 
 ## 六、回滚

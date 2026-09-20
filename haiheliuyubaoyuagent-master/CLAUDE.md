@@ -157,6 +157,44 @@ This project uses the superpowers plugin for disciplined development:
 - **对接文档**：`docs/问答接口对接文档.md`
 - **测试**：`chainlitexam/tests/test_qa_http_api.py`（71 条），全部用假 chain，不依赖内网。全量跑时部分测试因 `tests/stubs.py` 的假 `chainlit.Step` 被跳过（已知现象）。
 
+## 系统时间锚定 — 请求级（2026-09-20）
+
+把"现在"锚定到指定时刻（如 `2026-07-10 15:00`）的能力，**已从进程级全局标量改为请求级值**。
+设计 `docs/superpowers/specs/2026-09-20-per-request-reference-time-design.md`，
+实施计划 `docs/superpowers/plans/2026-09-20-per-request-reference-time.md`，
+部署说明 `deploy_agentweb/DEPLOY-sim-time.md`。
+
+- **优先级链**：请求 ContextVar → MCP header → 全局覆盖文件 → 真实时间。实现在
+  `chainlitexam/utils/time_source.py` / `haihe-weather-analyzer-mcp/time_source.py`
+  （**两份必须逐字一致**，有测试锁）。既有 20+ 个模块的 `time_source.now()` 调用点**一行未改**。
+- **请求解析**：`chainlitexam/utils/reference_time.py` 纯函数 `resolve_reference_time()`
+  归一三态 —— `fixed`（本次按该时刻）/ `real`（强制真实时间，**压过**遗留全局文件）/
+  `inherit`（没带锚点 → 回落全局文件）。`request_anchor()` 是落 ContextVar 的 contextmanager
+  （异常路径也复位）。入口同时认 `metadata.reference_time` 与顶层同名字段。
+- **两个入口都接线**：HTTP `/api/v1/qa/ask`（`QARuntime.ask` → `_run_once` 包 `request_anchor`）；
+  Chainlit WS `on_message` 读 `cl.Message.metadata`。**`_REAL` 哨兵必需**——没它
+  "我要真实时间"压不过遗留的全局文件，就是"改回去了还是旧日期"那条 bug。
+- **跨进程**：`chainlitexam/mcp_loader.py` 的 `_inject_reference_time` interceptor 把请求级
+  锚点放进 `x-haihe-reference-time` header（**只在有请求级锚点时注入**，没带就一字节不加，
+  旧行为逐字不变）。MCP 侧靠 `fastmcp.server.dependencies.get_http_headers()` 读回。
+  可行依据：langchain-mcp-adapters 0.3.2 **每次工具调用新建 SSE session**，header 作用在
+  httpx client 层、`GET /sse` 与 `POST /messages/` 都带。**已本机实测**（`probe_reference_time_header.py` → `RESULT=OK`）。
+- **运行时按日期分槽**：`_get_orchestrator_runtime(day)` 按 `(day, config)` 取槽位（LRU 上限
+  `ORCHESTRATOR_RUNTIME_MAX_DAYS` 默认 4）；`state["mcp_tools"]` **跨日期共享只加载一次**——
+  分槽不能退化成"每个日期重连一次内网"。`_build_qa_runtime(day)` / `QARuntime._get_runtime(day)`
+  同口径。WS 入口**不再用** `cl.user_session` 里钉死的 chain（那是会话开始那刻的日期）。
+- **缓存隔离**：`qa_http_api._response_cache_key(...)` 的键含时间维度 `t`
+  （响应缓存原先不含时间，只靠"切换时清缓存"兜底，恢复没生效就持续返回陈旧答案）。
+- **`POST /api/v1/admin/system-time` 三种 body**：旧式 `{"datetime"}` 写全局覆盖文件
+  （**只用于服务端 curl 验收，不要给前端用**）；`metadata.time_mode="fixed"` + `reference_time`
+  **无状态回显**、不写文件；`time_mode="real"` 回真实时间**并清掉遗留的全局文件**。
+- **测试**：`tests/test_time_source.py`、`test_reference_time.py`、
+  `test_mcp_reference_time_header.py`、`test_system_time_api.py`、
+  `test_orchestrator_runtime_slots.py`，以及 `test_qa_http_api.py` / `test_http_perf_opt.py` 的增量。
+  ⚠️ `tests/test_execution_mode.py` 等文件会在 import 期把**假** `langchain_openai` /
+  `langchain_mcp_adapters` 装进 `sys.modules` 且不清理——新测试不要依赖真实 LLM 类或
+  `langchain_mcp_adapters.*` 子模块的模块级 import，否则**全量跑会炸、单跑却过**。
+
 ## 近期功能（2026-08-05~06 批次）
 
 - **Prompt 拆分**：`WEATHER_ASSISTANT_PROMPT` 拆为 `PLANNER_SYSTEM_PROMPT`（~355行，只含工具选择/参数规则/停止条件）和 `METEO_ANSWER_SYSTEM_PROMPT`（~145行，只含气象表达/格式/结论结构）。为保持既有问答格式契约，默认继续使用旧 PROMPT；仅在显式设置 `ENABLE_NEW_PLANNER_PROMPT=true`/`ENABLE_NEW_ANSWER_PROMPT=true` 时启用对应拆分版，旧 PROMPT 保留不删。
