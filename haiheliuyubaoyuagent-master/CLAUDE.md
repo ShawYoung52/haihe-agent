@@ -185,12 +185,28 @@ This project uses the superpowers plugin for disciplined development:
   同口径。WS 入口**不再用** `cl.user_session` 里钉死的 chain（那是会话开始那刻的日期）。
 - **缓存隔离**：`qa_http_api._response_cache_key(...)` 的键含时间维度 `t`
   （响应缓存原先不含时间，只靠"切换时清缓存"兜底，恢复没生效就持续返回陈旧答案）。
-- **`POST /api/v1/admin/system-time` 三种 body**：旧式 `{"datetime"}` 写全局覆盖文件
-  （**只用于服务端 curl 验收，不要给前端用**）；`metadata.time_mode="fixed"` + `reference_time`
-  **无状态回显**、不写文件；`time_mode="real"` 回真实时间**并清掉遗留的全局文件**。
+- **`POST /api/v1/admin/system-time` 三种 body（branch 顺序有讲究）**：**旧式 `{"datetime"}`
+  分支必须先判**（混搭 body 里的合法 datetime 不能被新式解析的 400 挡掉，有源码顺序断言）；
+  `metadata.time_mode="fixed"` + `reference_time` **无状态回显**、不写文件；`time_mode="real"`
+  回真实时间**并清掉遗留的全局文件**；**两者都没有 → 无副作用的回显**（旧行为是 422，
+  刻意不"顺手清文件"，否则探测性 POST 会清掉 curl 验收设的全局锚点）。
+- **MCP 侧"锚点感知缓存键"陷阱**：请求级锚点打破了"`time_source.now()` 是进程级常量"这个
+  隐含前提。凡是**窗口末端由 `now()` 现算、但缓存键只用入参或粗时间维度**的缓存都会串味。
+  已修：`year_to_date_areal_rainfall_tool`（键原先只含年初起点）、
+  `historical_same_period_rainfall_tool`（键原先恒为 `None|None|10`）。**新增/改动任何
+  MCP 缓存时，键必须包含实际生效窗口的完整推导结果**。测试 `tests/test_anchor_aware_cache_keys.py`。
+- **`is_active()` 跟随优先级链，`get_override()` 只看全局文件**：后者是
+  `GET /admin/system-time` 与 `anchor_cache_key` 的 inherit 分支依赖的"全局兜底值"，
+  刻意不掺请求级锚点——别把两者合并。
+- **前端待办（按客户端隔离的前提，三步缺一不可）**：① 面板把锚点写进 `localStorage`；
+  ② 重建的 bundle 在 user_message metadata 里带上 `{location, time_mode, reference_time}`；
+  ③ **面板停止调旧式 `{"datetime"}`**。**第 ③ 步是关键**——只要还在写全局文件，其它客户端
+  （天河小程序不带 metadata 时走 inherit）就仍被一起改时间。在 1–3 落地前，
+  **AgentWeb 网页版仍是全局行为**；HTTP 入口（天河小程序）不受此限、已完全按请求隔离。
 - **测试**：`tests/test_time_source.py`、`test_reference_time.py`、
   `test_mcp_reference_time_header.py`、`test_system_time_api.py`、
-  `test_orchestrator_runtime_slots.py`，以及 `test_qa_http_api.py` / `test_http_perf_opt.py` 的增量。
+  `test_orchestrator_runtime_slots.py`、`test_anchor_aware_cache_keys.py`（MCP 侧），
+  以及 `test_qa_http_api.py` / `test_http_perf_opt.py` 的增量。
   ⚠️ `tests/test_execution_mode.py` 等文件会在 import 期把**假** `langchain_openai` /
   `langchain_mcp_adapters` 装进 `sys.modules` 且不清理——新测试不要依赖真实 LLM 类或
   `langchain_mcp_adapters.*` 子模块的模块级 import，否则**全量跑会炸、单跑却过**。
