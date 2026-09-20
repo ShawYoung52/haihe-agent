@@ -966,3 +966,58 @@ def test_concurrent_anchors_do_not_cross_contaminate():
     assert a == datetime(2026, 3, 5, 8, 30, 0)
     assert b == datetime(2026, 9, 9, 20, 0, 0)
 
+
+def test_run_once_applies_anchor_to_orchestrator(monkeypatch):
+    """端到端接线：锚点必须真的在 process_message 执行期间生效，且事后复位。
+
+    这是整个改动的目的所在——锚点要能到编排器（进而到 prompt 前缀与工具取数），
+    而不只是"设了个 ContextVar"。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    import message_orchestrator
+
+    from utils import time_source
+
+    seen = {}
+
+    async def fake_process_message(**kwargs):
+        seen["during"] = time_source.now()
+        return None
+
+    # _run_once 内部才 import process_message，所以打模块属性而非 qa_http_api 上的名字。
+    monkeypatch.setattr(message_orchestrator, "process_message", fake_process_message)
+
+    runtime = {
+        "planner_chain": None, "answer_chain": None, "thinking_chain": None,
+        "tools": [], "callbacks": {},
+    }
+    anchor = ("fixed", datetime(2026, 7, 10, 15, 0, tzinfo=timezone(timedelta(hours=8))))
+    asyncio.run(qa.QARuntime()._run_once("测试问题", str(uuid.uuid4()), runtime, True, True, anchor=anchor))
+
+    assert seen["during"] == datetime(2026, 7, 10, 15, 0, 0), "锚点没到编排器"
+    assert time_source.request_override_header_value() is None, "锚点必须在请求结束后复位"
+
+
+def test_run_once_without_anchor_leaves_time_unset(monkeypatch):
+    """inherit 锚点不能设置任何东西——旧客户端行为必须逐字不变。"""
+    import message_orchestrator
+
+    from utils import time_source
+
+    seen = {}
+
+    async def fake_process_message(**kwargs):
+        seen["header"] = time_source.request_override_header_value()
+        return None
+
+    monkeypatch.setattr(message_orchestrator, "process_message", fake_process_message)
+
+    runtime = {
+        "planner_chain": None, "answer_chain": None, "thinking_chain": None,
+        "tools": [], "callbacks": {},
+    }
+    asyncio.run(qa.QARuntime()._run_once("测试问题", str(uuid.uuid4()), runtime, True, True))
+
+    assert seen["header"] is None
+
