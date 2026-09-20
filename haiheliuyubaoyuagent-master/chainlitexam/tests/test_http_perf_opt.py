@@ -320,3 +320,21 @@ async def test_http_runtime_keeps_one_slot_per_day(monkeypatch):
     # 回到第一个日期必须命中已有槽位，而不是再建一次。
     assert await runtime._get_runtime("2026-07-10") is first
     assert len(builds) == 2
+
+
+@pytest.mark.asyncio
+async def test_http_runtime_slots_are_capped(monkeypatch):
+    """槽位键来自**客户端可控**的 reference_time，必须设上限防慢性内存泄漏。"""
+    monkeypatch.setattr(qa_http_api, "RUNTIME_SLOT_LIMIT", 3)
+
+    async def factory(requested_day):
+        return {"day": requested_day}
+
+    runtime = qa_http_api.QARuntime()
+    runtime.configure(factory)
+
+    for day in range(3, 9):  # 6 个不同日期，槽位上限 3
+        await runtime._get_runtime(f"2026-07-{day:02d}")
+
+    assert len(runtime._runtimes) == 3
+    assert list(runtime._runtimes) == ["2026-07-06", "2026-07-07", "2026-07-08"]

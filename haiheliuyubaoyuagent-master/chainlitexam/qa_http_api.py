@@ -98,6 +98,10 @@ RESPONSE_CACHE_TTL_SECONDS = _env_int("QA_API_RESPONSE_CACHE_TTL", 300, minimum=
 RESPONSE_CACHE_MAX_SIZE = _env_int("QA_API_RESPONSE_CACHE_MAX_SIZE", 200)
 MAX_HISTORY_TURNS = _env_int("QA_API_MAX_HISTORY_TURNS", 10)
 MAX_QUESTION_LENGTH = 2000
+# 运行时日期槽位上限。槽位键是**客户端可控**的 reference_time 推出来的日期——
+# 不设上限的话，反复换日期的请求会一直往 _runtimes 里堆（每条是一次浅拷贝的
+# runtime + 一份 chain 引用），是慢性内存泄漏。与 chain_gzt 侧同口径。
+RUNTIME_SLOT_LIMIT = _env_int("QA_API_RUNTIME_MAX_SLOTS", 8)
 
 EMPTY_ANSWER_FALLBACK = "当前查询未能获得有效结果，请换个问法或稍后重试。"
 
@@ -696,6 +700,10 @@ class QARuntime:
             except BaseException:
                 self._runtimes.pop(epoch, None)  # 允许后续请求重试
                 raise
+            # 超出槽位上限时淘汰最老的（dict 保序）。刚插入的 epoch 在最末，
+            # 只要上限 ≥1 就不会把自己淘汰掉。
+            while len(self._runtimes) > RUNTIME_SLOT_LIMIT:
+                self._runtimes.pop(next(iter(self._runtimes)))
         return self._runtimes[epoch]
 
     def _maybe_prune_response_cache(self) -> None:
