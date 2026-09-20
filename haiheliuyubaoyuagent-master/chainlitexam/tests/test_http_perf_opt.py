@@ -232,13 +232,13 @@ async def test_orchestrator_runtime_cache_reuses_same_day_and_rebuilds_next_day(
     builds = []
     cache_key = ["2026-08-21|config-a"]
 
-    async def fake_build():
+    async def fake_build(day=None, *, mcp_tools=None):
         runtime = {"build": len(builds) + 1}
         builds.append(runtime)
         return runtime
 
     monkeypatch.setattr(chain_gzt, "_build_orchestrator_runtime", fake_build)
-    monkeypatch.setattr(chain_gzt, "_orchestrator_runtime_cache_key", lambda: cache_key[0])
+    monkeypatch.setattr(chain_gzt, "_orchestrator_runtime_cache_key", lambda day=None: cache_key[0])
     chain_gzt._clear_orchestrator_runtime_cache()
 
     first = await chain_gzt._get_orchestrator_runtime()
@@ -256,7 +256,7 @@ def test_orchestrator_runtime_cache_isolated_between_event_loops(monkeypatch):
     """不同事件循环不得共享可能绑定 loop 的 LLM/MCP runtime 或 asyncio.Lock。"""
     builds = []
 
-    async def fake_build():
+    async def fake_build(day=None, *, mcp_tools=None):
         runtime = {"build": len(builds) + 1}
         builds.append(runtime)
         return runtime
@@ -265,7 +265,7 @@ def test_orchestrator_runtime_cache_isolated_between_event_loops(monkeypatch):
     monkeypatch.setattr(
         chain_gzt,
         "_orchestrator_runtime_cache_key",
-        lambda: "2026-08-21|config-a",
+        lambda day=None: "2026-08-21|config-a",
     )
     chain_gzt._clear_orchestrator_runtime_cache()
 
@@ -282,18 +282,41 @@ async def test_http_runtime_refreshes_on_new_day(monkeypatch):
     day = ["2026-08-21"]
     builds = []
 
-    async def factory():
-        runtime = {"build": len(builds) + 1}
+    async def factory(requested_day):
+        runtime = {"build": len(builds) + 1, "day": requested_day}
         builds.append(runtime)
         return runtime
 
-    monkeypatch.setattr(qa_http_api, "_runtime_epoch", lambda: day[0], raising=False)
+    monkeypatch.setattr(qa_http_api, "_runtime_epoch", lambda d=None: day[0], raising=False)
     runtime = qa_http_api.QARuntime()
     runtime.configure(factory)
 
-    first = await runtime._get_runtime()
-    assert await runtime._get_runtime() is first
+    first = await runtime._get_runtime("2026-08-21")
+    assert await runtime._get_runtime("2026-08-21") is first
     day[0] = "2026-08-22"
-    second = await runtime._get_runtime()
+    second = await runtime._get_runtime("2026-08-21")
     assert second is not first
+    assert len(builds) == 2
+
+
+@pytest.mark.asyncio
+async def test_http_runtime_keeps_one_slot_per_day(monkeypatch):
+    """两个日期各占一槽，互不覆盖（请求级锚点的关键：并发不同锚点不能互相踢掉）。"""
+    builds = []
+
+    async def factory(requested_day):
+        runtime = {"build": len(builds) + 1, "day": requested_day}
+        builds.append(runtime)
+        return runtime
+
+    runtime = qa_http_api.QARuntime()
+    runtime.configure(factory)
+
+    first = await runtime._get_runtime("2026-07-10")
+    second = await runtime._get_runtime("2026-07-11")
+    assert first is not second
+    assert first["day"] == "2026-07-10"
+    assert second["day"] == "2026-07-11"
+    # 回到第一个日期必须命中已有槽位，而不是再建一次。
+    assert await runtime._get_runtime("2026-07-10") is first
     assert len(builds) == 2

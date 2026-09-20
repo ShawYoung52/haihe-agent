@@ -740,7 +740,7 @@ async def test_single_turn_response_cache_hits_same_question(monkeypatch):
     """单轮相同问题第二次命中缓存，不重复跑完整问答。"""
     rt = qa.QARuntime()
 
-    async def factory():
+    async def factory(day):
         return {"planner_chain": None, "answer_chain": None, "thinking_chain": None, "tools": [], "callbacks": {}}
 
     rt.configure(factory)
@@ -762,7 +762,7 @@ async def test_single_turn_response_cache_distinct_questions_do_not_share(monkey
     """不同问题不互相命中缓存。"""
     rt = qa.QARuntime()
 
-    async def factory():
+    async def factory(day):
         return {"planner_chain": None, "answer_chain": None, "thinking_chain": None, "tools": [], "callbacks": {}}
 
     rt.configure(factory)
@@ -783,7 +783,7 @@ async def test_multi_turn_requests_are_not_cached(monkeypatch):
     """多轮请求（带 conversation_id）不缓存，保证上下文正确。"""
     rt = qa.QARuntime()
 
-    async def factory():
+    async def factory(day):
         return {"planner_chain": None, "answer_chain": None, "thinking_chain": None, "tools": [], "callbacks": {}}
 
     rt.configure(factory)
@@ -905,3 +905,64 @@ def test_no_qa_persist_blocked_global():
 def test_no_data_layer_filter_function():
     import qa_http_api
     assert not hasattr(qa_http_api, "_ensure_data_layer_filter")
+
+
+# ---------------------------------------------------------------- 请求级锚定时间
+
+
+def test_runtime_epoch_accepts_explicit_day():
+    """epoch 可按请求日期给定；不给时仍回落统一时间源（既有行为不变）。"""
+    from utils import time_source
+
+    assert qa._runtime_epoch("2026-07-10") == "2026-07-10"
+    assert qa._runtime_epoch() == time_source.override_date_str()
+
+
+def test_response_cache_key_varies_by_anchor():
+    """响应缓存键必须带时间维度。
+
+    否则两个用户带着不同锚点问同一句话会互相命中——旧实现只靠"切换时清缓存"
+    兜底，一旦恢复没生效就持续返回陈旧答案（本次要修的缺陷之一）。
+    """
+    base = qa._response_cache_key("天津天气", include_reasoning=True, include_gis=True, anchor=None)
+    fixed = qa._response_cache_key(
+        "天津天气", include_reasoning=True, include_gis=True,
+        anchor="2026-07-10T15:00:00+08:00",
+    )
+    real = qa._response_cache_key("天津天气", include_reasoning=True, include_gis=True, anchor="real")
+    assert len({base, fixed, real}) == 3
+    # 同一锚点必须稳定命中。
+    assert fixed == qa._response_cache_key(
+        "天津天气", include_reasoning=True, include_gis=True,
+        anchor="2026-07-10T15:00:00+08:00",
+    )
+    # 开关仍然参与键。
+    assert fixed != qa._response_cache_key(
+        "天津天气", include_reasoning=False, include_gis=True,
+        anchor="2026-07-10T15:00:00+08:00",
+    )
+
+
+def test_concurrent_anchors_do_not_cross_contaminate():
+    """两个不同锚点的请求并发跑，各自的"现在"互不污染。"""
+    from datetime import datetime
+
+    from utils import reference_time, time_source
+
+    async def one(iso):
+        kind, value = reference_time.resolve_reference_time({"reference_time": iso})
+        with reference_time.request_anchor(kind, value):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return time_source.now()
+
+    async def main():
+        return await asyncio.gather(
+            one("2026-03-05T08:30:00+08:00"),
+            one("2026-09-09T20:00:00+08:00"),
+        )
+
+    a, b = asyncio.run(main())
+    assert a == datetime(2026, 3, 5, 8, 30, 0)
+    assert b == datetime(2026, 9, 9, 20, 0, 0)
+

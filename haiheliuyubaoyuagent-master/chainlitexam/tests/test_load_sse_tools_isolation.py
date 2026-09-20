@@ -45,8 +45,10 @@ class _FlakyMCPClient:
     隔离实现每个 server 一个 client：.133 那个抛、本机 3333 那个正常返回。
     """
 
-    def __init__(self, servers):
+    def __init__(self, servers, tool_interceptors=None):
         self.servers = servers
+        # 请求级锚点靠 interceptor 注入 header，必须真的挂上（挂不上 header 永远不注入）。
+        assert tool_interceptors, "MultiServerMCPClient 必须挂 tool_interceptors"
 
     async def get_tools(self):
         for name, cfg in self.servers.items():
@@ -73,8 +75,9 @@ async def test_load_sse_tools_loads_all_when_both_up(monkeypatch):
     import mcp_loader
 
     class _AllUp:
-        def __init__(self, servers):
+        def __init__(self, servers, tool_interceptors=None):
             self.servers = servers
+            assert tool_interceptors, "MultiServerMCPClient 必须挂 tool_interceptors"
 
         async def get_tools(self):
             return [SimpleNamespace(name=f"{n}_tool") for n in self.servers]

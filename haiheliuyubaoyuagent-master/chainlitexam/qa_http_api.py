@@ -34,19 +34,36 @@ from chainlit.emitter import BaseChainlitEmitter
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from utils import time_source
+from utils import reference_time as reference_time_util
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- 配置
 
 
-def _runtime_epoch() -> str:
-    """HTTP 运行时失效周期；日期变化时刷新带当前日期的 system prompt。
+def _runtime_epoch(day: str | None = None) -> str:
+    """HTTP 运行时失效周期；按日期区分，日期变化时刷新带当前日期的 system prompt。
 
-    走统一时间源：切换系统时间激活时，锚定日期变化 → epoch 变化 → HTTP QARuntime
-    自动重建（无需重启服务）。
+    `day` 是请求级锚点解析出的日期（`utils.reference_time.resolve_day`）。不传时
+    回落统一时间源，等价于既有行为；调用方带着不同锚点时会各占一个槽位，互不覆盖。
     """
-    return time_source.override_date_str()
+    return day or time_source.override_date_str()
+
+
+def _response_cache_key(
+    question: str, *, include_reasoning: bool, include_gis: bool, anchor
+) -> str:
+    """单轮响应缓存键。
+
+    `anchor` 是本请求生效的锚点（`utils.reference_time.anchor_cache_key`：ISO / "real"
+    / 全局文件当前值 / None）。**必须进键**：否则两个用户带着不同锚点问同一句话会互相
+    命中，一旦"恢复"没生效就会持续返回陈旧答案。
+    """
+    return json.dumps(
+        {"q": question, "r": include_reasoning, "g": include_gis, "t": anchor},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -633,53 +650,53 @@ class QARuntime:
 
     def __init__(self):
         self._factory = None
-        self._runtime: dict[str, Any] | None = None
-        self._runtime_epoch: str | None = None
+        # 按日期分槽的运行时缓存：epoch(day) -> runtime。不同锚点的请求各占一槽，
+        # 互不覆盖（原先只存单个 runtime + 单个 epoch，日期一变就整体重建）。
+        self._runtimes: dict[str, dict[str, Any]] = {}
         self._init_lock = asyncio.Lock()
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
         self.store: ConversationStore = InMemoryConversationStore()
-        # 单轮问答响应缓存：相同问题 + 相同开关在 TTL 内直接返回上次结果，
-        # 避免每次都走完整 planner + 工具 + LLM。多轮请求（带 conversation_id）
+        # 单轮问答响应缓存：相同问题 + 相同开关 + 相同时间锚点在 TTL 内直接返回上次
+        # 结果，避免每次都走完整 planner + 工具 + LLM。多轮请求（带 conversation_id）
         # 不缓存，保证上下文正确。默认 TTL 5 分钟。
         self._response_cache: dict[str, tuple[float, dict]] = {}
 
     def configure(self, runtime_factory) -> None:
-        """由 chain_gzt 注入：一个 async 工厂，返回
-        {"planner_chain", "answer_chain", "thinking_chain", "tools", "callbacks"}。
+        """由 chain_gzt 注入：一个 async 工厂 `f(day) -> runtime dict`，
+        返回 {"planner_chain", "answer_chain", "thinking_chain", "tools", "callbacks"}。
         """
         self._factory = runtime_factory
-        self._runtime = None
-        self._runtime_epoch = None
+        self._runtimes = {}
 
     @property
     def configured(self) -> bool:
         return self._factory is not None
 
-    async def _get_runtime(self) -> dict[str, Any]:
-        """取（并首次构造）运行时。
+    async def _get_runtime(self, day: str) -> dict[str, Any]:
+        """取（并首次构造）该日期槽位的运行时。
 
         工厂里含 `load_sse_tools()`，要连内网 MCP —— 内网抖动时可能长时间挂住，
         所以必须自带超时；否则「180s 超时」形同虚设，所有请求无限期等待。
-        失败后清空缓存，让下一个请求可以重试。
+        失败后清空该槽位，让下一个请求可以重试。
         """
-        current_epoch = _runtime_epoch()
-        if self._runtime is not None and self._runtime_epoch == current_epoch:
-            return self._runtime
+        epoch = _runtime_epoch(day)
+        cached = self._runtimes.get(epoch)
+        if cached is not None:
+            return cached
         if self._factory is None:
             raise QANotConfigured("问答运行时未初始化")
         async with self._init_lock:
-            current_epoch = _runtime_epoch()
-            if self._runtime is None or self._runtime_epoch != current_epoch:
-                try:
-                    self._runtime = await asyncio.wait_for(
-                        self._factory(), timeout=TIMEOUT_SECONDS
-                    )
-                    self._runtime_epoch = current_epoch
-                except BaseException:
-                    self._runtime = None  # 允许后续请求重试
-                    self._runtime_epoch = None
-                    raise
-        return self._runtime
+            cached = self._runtimes.get(epoch)
+            if cached is not None:
+                return cached
+            try:
+                self._runtimes[epoch] = await asyncio.wait_for(
+                    self._factory(day), timeout=TIMEOUT_SECONDS
+                )
+            except BaseException:
+                self._runtimes.pop(epoch, None)  # 允许后续请求重试
+                raise
+        return self._runtimes[epoch]
 
     def _maybe_prune_response_cache(self) -> None:
         """单轮响应缓存超限时修剪过期条目（防无界增长）。
@@ -709,17 +726,35 @@ class QARuntime:
         conversation_id: str | None = None,
         include_reasoning: bool = True,
         include_gis: bool = True,
+        metadata: dict | None = None,
+        reference_time: str | None = None,
+        time_mode: str | None = None,
     ) -> dict[str, Any]:
         """执行一次问答。
 
+        `metadata` / `reference_time` / `time_mode` 是请求级锚定时间（切换系统时间功能）：
+        只有带了锚点的这个请求按锚定时间回答，**服务端不落任何跨用户状态**。三者都缺
+        时回落全局覆盖文件（旧式 curl 验收路径），都没有则是真实时间。
+
         返回 {answer, conversation_id, images, gis, reasoning, elapsed_seconds}。
-        超时抛 asyncio.TimeoutError，未配置抛 QANotConfigured。
+        超时抛 asyncio.TimeoutError，未配置抛 QANotConfigured，
+        `reference_time` 非法抛 `reference_time_util.InvalidReferenceTime`（入口转 400）。
         """
         text = (question or "").strip()
         if not text:
             raise ValueError("question 不能为空")
         if len(text) > MAX_QUESTION_LENGTH:
             raise ValueError(f"question 超长（上限 {MAX_QUESTION_LENGTH} 字）")
+
+        # 请求级锚定时间：解析出三态，后面用于取运行时槽位、响应缓存键、工具取数。
+        anchor_kind, anchor_value = reference_time_util.resolve_reference_time(
+            metadata,
+            top_level={"reference_time": reference_time, "time_mode": time_mode},
+        )
+        day = reference_time_util.resolve_day(
+            anchor_kind, anchor_value, fallback_day=time_source.override_date_str()
+        )
+        anchor_key = reference_time_util.anchor_cache_key(anchor_kind, anchor_value)
 
         cid = (conversation_id or "").strip()
         if cid and not _UUID_RE.match(cid):
@@ -728,12 +763,14 @@ class QARuntime:
         cid = cid or str(uuid.uuid4())
 
         # 单轮请求（无 conversation_id）命中缓存则直接返回，省掉完整问答流程。
-        # 多轮请求不缓存（上下文不同）。缓存 key 含开关，排除开关差异。
+        # 多轮请求不缓存（上下文不同）。缓存 key 含开关 **与时间锚点**，两者不同都不命中。
         response_cache_key = None
         if not conversation_id:
-            response_cache_key = json.dumps(
-                {"q": text, "r": include_reasoning, "g": include_gis},
-                sort_keys=True, ensure_ascii=False,
+            response_cache_key = _response_cache_key(
+                text,
+                include_reasoning=include_reasoning,
+                include_gis=include_gis,
+                anchor=anchor_key,
             )
             hit = self._response_cache.get(response_cache_key)
             if hit and (time.time() - hit[0]) < RESPONSE_CACHE_TTL_SECONDS:
@@ -751,7 +788,7 @@ class QARuntime:
                 cached["conversation_id"] = cid  # 单轮每次应返回新会话 id
                 return cached
 
-        runtime = await self._get_runtime()
+        runtime = await self._get_runtime(day)
         # 同一 conversation_id 串行，避免「读历史→问答→写历史」的读改写竞态
         # （并发两个请求会让后写的覆盖先写的，丢掉一整轮对话；已实测复现）
         async with self.store.lock_for(cid):
@@ -763,6 +800,7 @@ class QARuntime:
                 result = await asyncio.wait_for(
                     self._run_once(
                         text, cid, runtime, include_reasoning, include_gis,
+                        anchor=(anchor_kind, anchor_value),
                         http_queue_wait_ms=sem_wait_ms,
                     ),
                     timeout=TIMEOUT_SECONDS,
@@ -779,6 +817,7 @@ class QARuntime:
         runtime: dict[str, Any],
         include_reasoning: bool,
         include_gis: bool,
+        anchor: tuple[str, Any] = ("inherit", None),
         http_queue_wait_ms: float = 0.0,
     ) -> dict[str, Any]:
         import chainlit as cl
@@ -808,17 +847,20 @@ class QARuntime:
 
         pq_started = time.time()
         try:
-            # HTTP 模式跳过 chainlit data-layer 落库（见 _suppress_chainlit_data_layer）。
-            with _suppress_chainlit_data_layer():
-                await process_message(
-                    message=cl.Message(content=question),
-                    planner_chain=runtime["planner_chain"],
-                    answer_chain=runtime["answer_chain"],
-                    thinking_chain=runtime["thinking_chain"],
-                    tools=runtime["tools"],
-                    messages=history,
-                    callbacks=runtime["callbacks"],
-                )
+            # 请求级锚点：只在本次请求的 Task 内生效（ContextVar 天然隔离），请求结束
+            # 即消失——这正是"不再影响其他用户、其他客户端"的实现处。
+            with reference_time_util.request_anchor(*anchor):
+                # HTTP 模式跳过 chainlit data-layer 落库（见 _suppress_chainlit_data_layer）。
+                with _suppress_chainlit_data_layer():
+                    await process_message(
+                        message=cl.Message(content=question),
+                        planner_chain=runtime["planner_chain"],
+                        answer_chain=runtime["answer_chain"],
+                        thinking_chain=runtime["thinking_chain"],
+                        tools=runtime["tools"],
+                        messages=history,
+                        callbacks=runtime["callbacks"],
+                    )
         finally:
             # 即使超时被取消，也要落盘本轮历史——否则用户下一轮上下文断裂。
             # shield 防止 save 自身被同一个 CancelledError 打断。

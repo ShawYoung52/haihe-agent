@@ -550,6 +550,11 @@ class QAAskRequest(BaseModel):
     conversation_id: str | None = Field(None)
     include_reasoning: bool = Field(True)
     include_gis: bool = Field(True)
+    # 请求级锚定时间（切换系统时间功能）。metadata 与顶层两种放法都认，
+    # 只影响本次请求，不落任何服务端状态。非法值由 ValueError → 400 兜住。
+    metadata: dict | None = Field(None, description="前端契约：{location, time_mode, reference_time}")
+    reference_time: str | None = Field(None, max_length=64)
+    time_mode: str | None = Field(None, max_length=32)
 
 
 @api_sub_app.post("/qa/ask", tags=["问答"])
@@ -560,7 +565,9 @@ async def _qa_ask(req: QAAskRequest):
     try:
         data = await qa_http_api.runtime.ask(
             req.question, conversation_id=req.conversation_id,
-            include_reasoning=req.include_reasoning, include_gis=req.include_gis)
+            include_reasoning=req.include_reasoning, include_gis=req.include_gis,
+            metadata=req.metadata, reference_time=req.reference_time,
+            time_mode=req.time_mode)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except asyncio.TimeoutError:
@@ -748,7 +755,7 @@ async def _warmup_qa():
         qa_http_api.runtime.configure(_build_qa_runtime)
     try:
         print("[QA-API] warming up...")
-        runtime = await qa_http_api.runtime._get_runtime()
+        runtime = await qa_http_api.runtime._get_runtime(time_source.override_date_str())
         if os.environ.get("ENABLE_LLM_WARMUP", "false").strip().lower() in ("1", "true", "yes"):
             await _llm_warmup(runtime)
             print("[QA-API] ready (with LLM warmup)")
@@ -2978,11 +2985,12 @@ async def _get_orchestrator_runtime(day: str | None = None) -> dict:
 
     跨日期共享 `state["mcp_tools"]`：只重建便宜的 prompt/chain/router，不重连 MCP。
     """
+    resolved_day = day or time_source.override_date_str()
     if not _env_bool("CACHE_ORCHESTRATOR_RUNTIME", True):
-        return await _build_orchestrator_runtime(day)
+        return await _build_orchestrator_runtime(resolved_day)
 
     state = _orchestrator_runtime_state()
-    key = _orchestrator_runtime_cache_key(day)
+    key = _orchestrator_runtime_cache_key(resolved_day)
     cached = state["runtimes"].get(key)
     if cached is not None:
         return cached
@@ -2993,7 +3001,7 @@ async def _get_orchestrator_runtime(day: str | None = None) -> dict:
             return cached
         if state["mcp_tools"] is None:
             state["mcp_tools"] = await load_sse_tools()
-        runtime = await _build_orchestrator_runtime(key[0], mcp_tools=state["mcp_tools"])
+        runtime = await _build_orchestrator_runtime(resolved_day, mcp_tools=state["mcp_tools"])
         state["runtimes"][key] = runtime
         _evict_runtime_slots(state)
         return runtime
