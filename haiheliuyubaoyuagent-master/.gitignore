@@ -46,3 +46,6 @@ Thumbs.db
 
 # 运维一次性产物（含账号密码哈希，绝不入库）
 scripts/create_district_users.sql
+
+# EC AIFS 迁移操作手册（含 NAS 明文账号密码，绝不入库）
+docs/ops/ec-aifs-nas-migration.md

@@ -6,10 +6,10 @@ import asyncpg
 
 
 async def main() -> None:
-    host = os.getenv("CHAINLIT_DB_HOST", "211.157.132.19")
-    port = int(os.getenv("CHAINLIT_DB_PORT", "48091"))
+    host = os.getenv("CHAINLIT_DB_HOST", "10.226.107.130")
+    port = int(os.getenv("CHAINLIT_DB_PORT", "15432"))
     user = os.getenv("CHAINLIT_DB_USER", "postgres")
-    password = os.getenv("CHAINLIT_DB_PASSWORD", "postgres")
+    password = os.getenv("CHAINLIT_DB_PASSWORD", "K7v!Q2m#X9r@T4p")
     db_name = os.getenv("CHAINLIT_DB_NAME", "tjznt")
 
     sql_path = Path(__file__).resolve().parents[1] / "sql" / "chainlit_minimal_schema_patch.sql"

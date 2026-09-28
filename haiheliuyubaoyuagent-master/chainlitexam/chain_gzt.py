@@ -92,10 +92,10 @@ def _get_river_plot_pg_pool():
             minconn=1,
             maxconn=int(os.getenv("RIVER_PLOT_PG_POOL_MAXCONN", "5")),
             host=os.getenv("DB_HOST", "10.226.107.130"),
-            port=int(os.getenv("DB_PORT", "5432")),
+            port=int(os.getenv("DB_PORT", "15432")),
             dbname=os.getenv("DB_NAME", "postgres"),
             user=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", "postgres"),
+            password=os.getenv("DB_PASSWORD", "K7v!Q2m#X9r@T4p"),
             connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
         )
         print("[RiverPlot] PostgreSQL 连接池已创建")
@@ -142,15 +142,15 @@ plt.rcParams['axes.unicode_minus'] = False
 _AUTH_TABLES_READY = False
 _CHAINLIT_TABLES_READY = False
 
-# 默认指向外网调试库 211.157.132.19:48091（同时有 hhly / tjznt 两个库）。
-# 切回内网时改回 10.226.107.130:5432，或通过环境变量覆盖：
-#   set CHAINLIT_DB_HOST=10.226.107.130
-#   set CHAINLIT_DB_PORT=5432
+# 默认指向内网库 10.226.107.130:15432（同时有 hhly / tjznt 两个库）。
+# 切回外网调试库时改回 211.157.132.19:48091，或通过环境变量覆盖：
+#   set CHAINLIT_DB_HOST=211.157.132.19
+#   set CHAINLIT_DB_PORT=48091
 CHAINLIT_DB_HOST = os.getenv("CHAINLIT_DB_HOST", "10.226.107.130").strip()
-CHAINLIT_DB_PORT = os.getenv("CHAINLIT_DB_PORT", "5432").strip()
+CHAINLIT_DB_PORT = os.getenv("CHAINLIT_DB_PORT", "15432").strip()
 CHAINLIT_DB_NAME = os.getenv("CHAINLIT_DB_NAME", "tjznt").strip()
 CHAINLIT_DB_USER = os.getenv("CHAINLIT_DB_USER", "postgres").strip()
-CHAINLIT_DB_PASSWORD = os.getenv("CHAINLIT_DB_PASSWORD", "postgres")
+CHAINLIT_DB_PASSWORD = os.getenv("CHAINLIT_DB_PASSWORD", "K7v!Q2m#X9r@T4p")
 CHAINLIT_DB_SCHEMA = os.getenv("CHAINLIT_DB_SCHEMA", "public").strip()
 CHAINLIT_DB_SSLMODE = os.getenv("CHAINLIT_DB_SSLMODE", "disable").strip().lower()
 CHAINLIT_AUTH_SECRET = os.getenv("CHAINLIT_AUTH_SECRET", "chainlit-local-dev-secret-change-me")

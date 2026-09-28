@@ -838,7 +838,7 @@ def test_release_chainlit_session_is_safe_on_unknown_id():
     [
         ("连接 10.226.188.156:8000 失败", "10.226"),
         (r"文件 D:\PythonProject\haihe\secret.py 不存在", "D:\\"),
-        ("postgresql+asyncpg://u:p@10.226.107.130:5432/db 超时", "postgresql"),
+        ("postgresql+asyncpg://u:p@10.226.107.130:15432/db 超时", "postgresql"),
         ("/home/user/data/x.nc 读取失败", "/home/"),
         ("/var/log/app.log 权限不足", "/var/"),
     ],
