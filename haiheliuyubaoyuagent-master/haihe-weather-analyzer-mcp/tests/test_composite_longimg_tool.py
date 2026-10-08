@@ -668,3 +668,36 @@ class TestHhwebLongimgCore:
         assert r["render_warning"] == "", "参数错误不应带截图降级警告"
         assert "tj" in r["message"]
 
+
+class TestCompositeEndToEndUrl:
+    """经真实 hhweb_product_tool（仅 mock 截图）验证 product-image-new URL 接线（2026-09-29 新格式）。"""
+
+    def _run(self, monkeypatch, **kwargs):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "hhweb_product_tool",
+            Path(clt.__file__).resolve().parent / "hhweb_product_tool.py",
+        )
+        hpt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hpt)
+        monkeypatch.setattr(hpt, "_try_screenshot", lambda url: None)
+        monkeypatch.setattr(clt, "_load_hhweb_product_tool", lambda: hpt)
+        return clt.generate_haihe_composite_longimg_core(**kwargs)
+
+    def test_url_is_product_image_new(self, monkeypatch):
+        r = self._run(monkeypatch, endTime="2026-09-22 10:00:00")
+        assert r["status"] == "ok"
+        assert "/hhweb/#/product-image-new/" in r["url"]
+        assert "forcastTime=2026-09-22%2008:00:00" in r["url"]
+        assert "areaId=1" in r["url"]
+        assert "areaCodes=ALL" in r["url"]
+
+    def test_area_jjj_maps_to_area_id_4(self, monkeypatch):
+        r = self._run(monkeypatch, endTime="2026-09-22 10:00:00", area="jjj")
+        assert "areaId=4" in r["url"]
+
+    def test_area_zone_name_maps_to_code(self, monkeypatch):
+        r = self._run(monkeypatch, endTime="2026-09-22 10:00:00", area="北三河")
+        assert "areaId=1" in r["url"]
+        assert "areaCodes=6" in r["url"]
+

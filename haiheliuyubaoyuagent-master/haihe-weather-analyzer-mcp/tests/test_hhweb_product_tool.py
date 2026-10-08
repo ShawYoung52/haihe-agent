@@ -26,7 +26,7 @@ _spec.loader.exec_module(hpt)
 class TestBuildProductUrl:
     def test_basic_format(self):
         url = hpt.build_product_url("2025-07-27 10:00:00")
-        assert url.startswith(hpt.HHWEB_PRODUCT_BASE + "/hhweb/#/product-image/")
+        assert url.startswith(hpt.HHWEB_PRODUCT_BASE + "/hhweb/#/product-image-new/")
         assert "type=radar,rain,rain-forcast" in url
         assert "time=2025-07-27%2010:00:00" in url
 
@@ -47,25 +47,82 @@ class TestBuildProductUrl:
         url = hpt.build_product_url("2025-07-27 10:00:00", types="radar,rain")
         assert "type=radar,rain&" in url
 
-    def test_area_appended_when_tj(self):
+    def test_area_tj_maps_to_area_id_5_all(self):
         url = hpt.build_product_url("2025-07-27 10:00:00", area="tj")
-        assert "&area=tj" in url
+        assert "&areaId=5" in url
+        assert "&areaCodes=ALL" in url
+        assert "area=tj" not in url
 
-    def test_area_appended_when_jjj(self):
+    def test_area_jjj_maps_to_area_id_4_all(self):
         url = hpt.build_product_url("2025-07-27 10:00:00", area="jjj")
-        assert "&area=jjj" in url
+        assert "&areaId=4" in url
+        assert "&areaCodes=ALL" in url
 
     def test_area_case_insensitive(self):
         url = hpt.build_product_url("2025-07-27 10:00:00", area="  JJJ ")
-        assert "&area=jjj" in url
+        assert "&areaId=4" in url
 
-    def test_area_omitted_when_empty(self):
+    def test_area_empty_defaults_to_area_id_1_all(self):
         url = hpt.build_product_url("2025-07-27 10:00:00", area="")
-        assert "area=" not in url
+        assert "&areaId=1" in url
+        assert "&areaCodes=ALL" in url
 
     def test_area_invalid_raises(self):
         with pytest.raises(ValueError):
             hpt.build_product_url("2025-07-27 10:00:00", area="beijing")
+
+    def test_area_name_maps_to_zone_code(self):
+        """分区名（北三河）→ areaId=1 & areaCodes=6（9分区静态表）。"""
+        url = hpt.build_product_url("2025-07-27 10:00:00", area="北三河")
+        assert "&areaId=1" in url
+        assert "&areaCodes=6" in url
+
+    def test_forcast_time_aligned_to_cycle(self):
+        """forcastTime 自动取 time 的最近 08/20 起报时次（未显式给出时）。"""
+        url = hpt.build_product_url("2025-07-27 10:00:00")
+        assert "&forcastTime=2025-07-27%2008:00:00" in url
+
+    def test_forcast_time_before_8_uses_yesterday_20(self):
+        url = hpt.build_product_url("2025-07-27 05:00:00")
+        assert "&forcastTime=2025-07-26%2020:00:00" in url
+
+    def test_forcast_time_after_20_uses_today_20(self):
+        url = hpt.build_product_url("2025-07-27 21:00:00")
+        assert "&forcastTime=2025-07-27%2020:00:00" in url
+
+    def test_forcast_time_explicit_kept(self):
+        url = hpt.build_product_url("2025-07-27 10:00:00", forcast_time="2025-07-27 08:00:00")
+        assert "&forcastTime=2025-07-27%2008:00:00" in url
+
+    def test_forcast_time_explicit_invalid_format_ignored(self):
+        """格式错误的 forcastTime 忽略，回落自动推导。"""
+        url = hpt.build_product_url("2025-07-27 10:00:00", forcast_time="bad")
+        assert "&forcastTime=2025-07-27%2008:00:00" in url
+
+    def test_area_codes_validated_against_static_table(self):
+        """显式 area_id/area_codes：areaCodes 必须属于该 areaId 的静态表，否则报错。"""
+        url = hpt.build_product_url(
+            "2025-07-27 10:00:00", area_id=1, area_codes="6,7,8"
+        )
+        assert "&areaId=1" in url
+        assert "&areaCodes=6,7,8" in url
+
+    def test_area_codes_unknown_code_raises(self):
+        with pytest.raises(ValueError):
+            hpt.build_product_url("2025-07-27 10:00:00", area_id=1, area_codes="6,999")
+
+    def test_area_codes_all_normalized(self):
+        url = hpt.build_product_url("2025-07-27 10:00:00", area_id=1, area_codes="")
+        assert "&areaCodes=ALL" in url
+
+    def test_duplicate_type_kept_first_only(self):
+        """type 出图块顺序：重复类型只保留第一次。"""
+        url = hpt.build_product_url("2025-07-27 10:00:00", types="radar,rain,radar")
+        assert "type=radar,rain&" in url
+
+    def test_unknown_type_raises(self):
+        with pytest.raises(ValueError):
+            hpt.build_product_url("2025-07-27 10:00:00", types="radar,foo")
 
 
 class TestCore:
@@ -103,20 +160,29 @@ class TestCore:
     def test_area_passthrough(self):
         r = hpt.get_haihe_product_longimg_core(
             time="2025-07-27 10:00:00", area="jjj", screenshot=False)
-        assert "&area=jjj" in r["url"]
+        assert "&areaId=4" in r["url"]
         assert r["area"] == "jjj"
 
-    def test_area_default_empty(self):
+    def test_area_default_maps_to_area_id_1(self):
         r = hpt.get_haihe_product_longimg_core(time="2025-07-27 10:00:00", screenshot=False)
-        assert "area=" not in r["url"]
-        assert r["area"] == ""
+        assert "&areaId=1" in r["url"]
+        assert "&areaCodes=ALL" in r["url"]
 
     def test_area_invalid_returns_error(self):
         r = hpt.get_haihe_product_longimg_core(
             time="2025-07-27 10:00:00", area="beijing", screenshot=False)
         assert r["status"] == "error"
         assert r["url"] == ""
-        assert "tj" in r["message"] and "jjj" in r["message"]
+
+    def test_forcast_time_in_result(self):
+        r = hpt.get_haihe_product_longimg_core(time="2025-07-27 10:00:00", screenshot=False)
+        assert r["forcastTime"] == "2025-07-27 08:00:00"
+        assert "&forcastTime=2025-07-27%2008:00:00" in r["url"]
+
+    def test_forcast_time_explicit_passthrough(self):
+        r = hpt.get_haihe_product_longimg_core(
+            time="2025-07-27 10:00:00", forcastTime="2025-07-27 08:00:00", screenshot=False)
+        assert r["forcastTime"] == "2025-07-27 08:00:00"
 
 
 class _FakeLocator:

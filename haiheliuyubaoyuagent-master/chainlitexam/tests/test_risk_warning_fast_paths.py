@@ -64,10 +64,10 @@ class TestFormat:
         out = _format(types.SimpleNamespace(), data, "有没有地质灾害风险？", "geologic")
         assert "**本次风险等级统计**" in out
         assert "冀州区" in out and "蓟州区" in out
-        assert "257 个" in out  # 隐患点总数
-        assert "**防范建议（按风险等级）**" in out
+        assert "257 个乡镇" in out  # 风险乡镇数（新 risk-lists 清单口径）
+        assert "**叫应与防范建议**" in out
         assert "一级" in out and "四级" in out
-        # 有逐级建议时不再输出旧的笼统"**建议**"
+        # 有叫应建议时不再输出旧的笼统"**建议**"
         assert "**建议**：" not in out
 
     def test_format_without_level_data_keeps_generic_advice(self):
@@ -86,11 +86,11 @@ class TestFormat:
         out = _format(types.SimpleNamespace(), data, "山区有没有滑坡风险？", "geologic")
         assert "**建议**：" in out
         assert "**本次风险等级统计**" not in out
-        assert "**防范建议（按风险等级）**" not in out
+        assert "**叫应与防范建议**" not in out
 
     def test_format_level_advice_suppressed_when_no_risk_records(self):
-        # 2026-08-21 gating：本次无风险记录（county_risk_summary 空）时，
-        # 即便 level_advice 存在也不刷四级文案——"本次无风险"的回答不该带防范建议。
+        # gating：本次无风险记录（county_risk_summary 空）时，
+        # 即便 level_advice 存在也不刷叫应文案——"本次无风险"的回答不该带防范建议。
         data = {
             "status": "ok",
             "risk_kind": "geologic",
@@ -112,11 +112,11 @@ class TestFormat:
         }
         out = _format(types.SimpleNamespace(), data, "有没有地质灾害风险？", "geologic")
         assert "当前未发现明显地质灾害风险" in out
-        # 隐患点总数作为背景上下文仍可展示（"冀州 257 个，但本次无风险"）
-        assert "257 个" in out
-        # 无风险 → 不刷逐级统计/逐级防范建议，回退笼统建议
+        # 风险乡镇数作为背景上下文仍可展示（"冀州 257 个乡镇有隐患记录，但本次无风险"）
+        assert "257 个乡镇" in out
+        # 无风险 → 不刷逐级统计/叫应建议，回退笼统建议
         assert "**本次风险等级统计**" not in out
-        assert "**防范建议（按风险等级）**" not in out
+        assert "**叫应与防范建议**" not in out
         assert "**建议**：" in out
 
     def test_format_records_uses_normalized_level(self):

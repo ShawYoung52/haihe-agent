@@ -149,7 +149,7 @@ class TestCoreTimeOfDayHourlyMode:
 
     def _run(self, monkeypatch, weather="小雨"):
         monkeypatch.setattr(rfs.requests, "get", _fake_get_for("117.45_40.05", weather))
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: None)
         rfs._rolling_forecast_cache.clear()
         return rfs.query_rolling_forecast_core(
             user_query="今天下午和今天晚上蓟州的天气怎么样", now=NOW
@@ -202,7 +202,7 @@ class TestTimeOfDaySummaryAggregation:
             return Resp()
 
         monkeypatch.setattr(rfs.requests, "get", fake_get)
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: None)
         rfs._rolling_forecast_cache.clear()
         return rfs.query_rolling_forecast_core(user_query=query, now=NOW)
 
@@ -303,7 +303,7 @@ class TestTimeOfDaySummaryAggregation:
     def test_future_n_hours_still_hourly(self, monkeypatch):
         """"未来6小时"这类逐小时问法不受影响，仍产 hourly_summary。"""
         monkeypatch.setattr(rfs.requests, "get", _fake_get_for("117.45_40.05", "小雨"))
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: None)
         rfs._rolling_forecast_cache.clear()
         result = rfs.query_rolling_forecast_core(user_query="蓟州未来6小时天气怎么样", now=NOW)
         assert result.get("hourly_summary"), "逐小时问法仍应产 hourly_summary"
@@ -341,7 +341,7 @@ class TestRiskFcstTimesFromWindowRegression:
     def test_future_three_days_core_passes_cycles_to_risk_query(self, monkeypatch):
         captured = {}
 
-        def fake_hazards(lon, lat, risk_fcst_times=None):
+        def fake_hazards(lon, lat, risk_fcst_times=None, *, region="", **kwargs):
             captured["risk_fcst_times"] = risk_fcst_times
             return {
                 "total_found": 1,
@@ -370,7 +370,7 @@ class TestCoreRiskForecastTimes:
     def _capture(self, monkeypatch, user_query):
         captured = {}
 
-        def fake_hazards(lon, lat, risk_fcst_times=None):
+        def fake_hazards(lon, lat, risk_fcst_times=None, *, region="", **kwargs):
             captured["risk_fcst_times"] = risk_fcst_times
             return {
                 "total_found": 1, "radius_km": 25.0,
@@ -417,7 +417,7 @@ class TestQueryRegionHazardsRiskLevels:
         captured = {}
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: self._hazards_ok())
 
-        def fake_levels(lon, lat, radius, fcst_times=None):
+        def fake_levels(lon, lat, radius, fcst_times=None, *, region="", **kwargs):
             called["n"] += 1
             captured["fcst_times"] = fcst_times
             return {"dzzh": {"label": "地质灾害风险", "kind": "geologic", "levels": {"三级": 2}, "total": 2}}
@@ -562,7 +562,7 @@ class TestSummarizeTodWind:
                 }}}
 
         monkeypatch.setattr(rfs.requests, "get", lambda *a, **k: Resp())
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: None)
         rfs._rolling_forecast_cache.clear()
         result = rfs.query_rolling_forecast_core(user_query="今天下午蓟州天气怎么样", now=NOW)
         row = result["time_of_day_summary"][0]

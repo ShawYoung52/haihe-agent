@@ -370,6 +370,27 @@ class TestRegionHazardTableRiskLevels:
 
         assert "| 山洪 | 0 处 | 二级 1 处 |" in section
 
+    def test_levels_column_hidden_when_no_coverage(self):
+        """外埠区域（唐山等）：risk_levels == "no_coverage" 哨兵 → 整列隐藏
+        （风险清单接口仅覆盖天津，显示"本次无风险"会误报，显示"不可用"又不实）。
+        2026-09-29 新 risk-lists 接口口径：非天津区域渲染层隐藏"本次风险等级"列。"""
+        payload = self._with_levels("no_coverage", available=True)
+        bundle = rfr.build_rolling_forecast_bundle("唐山天气怎么样", payload)
+        section = bundle["code_section"]
+        assert "本次风险等级" not in section
+        assert "| 地质灾害 | 2 处 |" in section
+        assert "| 山洪 | 1 处 |" in section
+        # 哨兵值本身绝不出现在用户可见文本
+        assert "no_coverage" not in section
+
+    def test_levels_column_hidden_when_no_coverage_levels_but_rows_render(self):
+        """no_coverage 下表结构退回旧版列（灾害类型/隐患点数量/风险研判/防范建议）。"""
+        payload = self._with_levels("no_coverage", available=True)
+        section = rfr.build_rolling_forecast_bundle("唐山天气怎么样", payload)["code_section"]
+        assert "灾害类型" in section
+        assert "风险研判" in section
+        assert "防范建议" in section
+
 
 def _rain_only_daily():
     """外埠城市（唐山等）滚动预报只回降水格点 TP1H，文字要素全空（2026-08-19 探针实锤）。"""

@@ -756,6 +756,10 @@ _LEVEL_SEVERITY_ORDER = ("一级", "二级", "三级", "四级")
 # 内部保留该状态用于诊断；按用户业务口径，最终回答与无风险记录统一显示“本次无风险”。
 # None 仍表示真实接口失败，显示“接口暂不可用”。
 _RISK_LEVELS_NO_DATA = "no_data"
+# 风险清单接口仅覆盖天津：非天津区域（唐山等外埠）的哨兵（与 MCP 侧
+# risk_warning_tool.RISK_LEVELS_NO_COVERAGE 同值）——整列隐藏"本次风险等级"，
+# 既不能报"本次无风险"（清单没有该区域数据，不是无风险），也不能报"接口暂不可用"（不实）。
+_RISK_LEVELS_NO_COVERAGE = "no_coverage"
 
 
 def _format_risk_level_counts(levels: dict) -> str:
@@ -812,6 +816,9 @@ def _region_hazard_table(region_hazards: list[dict]) -> str:
             continue
         risk_levels = entry.get("risk_levels")
         show_levels = "risk_levels_available" in entry
+        if risk_levels == _RISK_LEVELS_NO_COVERAGE:
+            # 风险清单接口仅覆盖天津：外埠区域隐藏"本次风险等级"列（2026-09-29 新接口口径）。
+            show_levels = False
         categories = {
             item.get("key"): item
             for item in (entry.get("categories") or [])

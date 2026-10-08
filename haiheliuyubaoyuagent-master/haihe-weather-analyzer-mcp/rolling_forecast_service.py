@@ -213,13 +213,15 @@ def _load_region_risk_level_queryer() -> Any:
 
 
 def _query_region_risk_levels(
-    lon: float, lat: float, fcst_times: list[str] | None = None, *, include_coverage: bool = False
+    lon: float, lat: float, fcst_times: list[str] | None = None, *, include_coverage: bool = False,
+    region: str = "",
 ) -> dict | None:
-    """查询区域代表点半径内各灾种风险等级分布（风险接口 level，一~四级）。
+    """查询区域各灾种风险等级分布（天津灾害风险清单接口，一~四级）。
 
-    返回 {hazard_key: {...}} / {}（可达无风险）/ None（接口失败）。任何异常静默降级
-    返回 None——风险等级是增强，绝不阻断天气回答。fcst_times：跨日窗口（如"未来三天"）
-    传各日 08:00 起报时次列表，逐日调用并把等级统计合并；None=单次最近起报时次。
+    返回 {hazard_key: {...}} / {}（可达无风险）/ "no_coverage"（区域不在天津，清单
+    无覆盖）/ None（接口失败）。任何异常静默降级返回 None——风险等级是增强，绝不
+    阻断天气回答。region 为所问区域名（"蓟州"按区县过滤；非天津返回 no_coverage；
+    空=全市口径）。fcst_times 仅作缓存键兼容（清单按 start_time 取 24h 起报窗口）。
     """
     global _region_risk_level_queryer
     try:
@@ -227,7 +229,8 @@ def _query_region_risk_levels(
             _region_risk_level_queryer = _load_region_risk_level_queryer()
         options = {"include_coverage": True} if include_coverage else {}
         return _region_risk_level_queryer(
-            float(lon), float(lat), REGION_HAZARD_RADIUS_KM, fcst_times, **options
+            float(lon), float(lat), REGION_HAZARD_RADIUS_KM, fcst_times,
+            region=region, **options
         )
     except Exception as exc:
         print(f"[region_risk_levels] query failed: {exc}", flush=True)
@@ -330,14 +333,15 @@ def _query_region_hazards(
     lat: float,
     risk_fcst_times: list[str] | None = None,
     *, include_risk_coverage: bool = False,
+    region: str = "",
 ) -> dict:
     """查询区域代表点周边的灾害隐患，归一化为 {total_found, radius_km, categories}。
 
     只保留有数据的静态隐患类型（status=="ok" 且 count>0）；静态查询
     失败时仍返回结构化降级状态，不阻断独立的实时风险等级。categories 不带
     records 明细（区域级只报种类与数量，避免 payload 膨胀）。
-    ``risk_fcst_times`` 非空时按目标日逐日查询并合并风险等级；为空时使用最近
-    起报时次并在无资料时回退前一周期。
+    region 为所问区域名：天津区域（含别名）按区县过滤风险清单，非天津区域
+    风险等级返回 no_coverage 哨兵（渲染层隐藏"本次风险等级"列）。
     """
     global _region_hazard_queryer
     payload: dict = {}
@@ -374,7 +378,7 @@ def _query_region_hazards(
         })
     # 区域天气#8：叠加目标窗口的风险等级；接口失败只影响增强列，不阻断天气回答。
     risk_levels = _query_region_risk_levels(
-        lon, lat, risk_fcst_times, include_coverage=include_risk_coverage
+        lon, lat, risk_fcst_times, include_coverage=include_risk_coverage, region=region
     )
     return {
         "total_found": total_found,
@@ -483,6 +487,12 @@ def _normalize_region_risk(
         result["coverage"] = coverage
     if risk_levels_available is not True:
         result["unavailable_reason"] = "risk_service_unavailable"
+        return result
+    if risk_levels == "no_coverage":
+        # 风险清单接口仅覆盖天津：外埠区域没有清单数据——绝不可报"本次无风险"（误报），
+        # 也不是接口坏/数据异常。渲染层对该哨兵隐藏"本次风险等级"列。
+        result["unavailable_reason"] = "risk_no_coverage"
+        result["status_text"] = "风险清单仅覆盖天津"
         return result
     if not isinstance(risk_levels, dict):
         result["unavailable_reason"] = "malformed_risk_payload"
@@ -655,7 +665,7 @@ def query_region_weather_risks_core(
             lon_text, lat_text = _region_or_city_coord(name).split("_", 1)
             options = {"include_risk_coverage": True} if risk_fcst_times else {}
             hazards = _query_region_hazards(
-                float(lon_text), float(lat_text), risk_fcst_times, **options
+                float(lon_text), float(lat_text), risk_fcst_times, region=name, **options
             )
         except Exception:
             hazards = None
@@ -2499,7 +2509,7 @@ def query_rolling_forecast_core(
     elif region_names and include_region_hazards:
         region_hazards = []
         for name, lon_t, lat_t in zip(region_names, lons, lats):
-            hazards = _query_region_hazards(lon_t, lat_t, risk_fcst_times)
+            hazards = _query_region_hazards(lon_t, lat_t, risk_fcst_times, region=name)
             if hazards:
                 region_hazards.append(
                     {

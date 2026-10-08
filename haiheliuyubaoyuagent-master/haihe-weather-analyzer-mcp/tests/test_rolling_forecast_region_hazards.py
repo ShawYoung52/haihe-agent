@@ -58,7 +58,7 @@ def _stub_risk_levels(monkeypatch):
     """区域风险等级走真实风险接口（HTTP）。测试默认 stub 为 None（接口降级，
     risk_levels_available=False），避免真发 HTTP/触发 custom_tools 重依赖；
     验证等级附着与渲染的用例再单独 monkeypatch 成有数据的返回。"""
-    monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: None)
+    monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None, *, region="", **kwargs: None)
 
 
 def _risk_levels_ok():
@@ -156,7 +156,7 @@ class TestQueryRegionHazardsRiskLevels:
     def test_attaches_risk_levels(self, monkeypatch):
         """风险接口可达 → risk_levels 附进结果，risk_levels_available=True。"""
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: _risk_levels_ok())
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None, *, region="", **kwargs: _risk_levels_ok())
         result = rfs._query_region_hazards(117.45, 40.05)
         assert result["risk_levels_available"] is True
         assert result["risk_levels"]["dzzh"]["levels"] == {"一级": 1, "三级": 2}
@@ -165,7 +165,7 @@ class TestQueryRegionHazardsRiskLevels:
     def test_no_risk_levels_marks_unavailable(self, monkeypatch):
         """风险接口全挂（返回 None）→ risk_levels_available=False，隐患点表照常。"""
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: None)
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None, *, region="", **kwargs: None)
         result = rfs._query_region_hazards(117.45, 40.05)
         assert result["risk_levels_available"] is False
         assert result["risk_levels"] is None
@@ -174,7 +174,7 @@ class TestQueryRegionHazardsRiskLevels:
     def test_reachable_no_risk_marks_available_empty(self, monkeypatch):
         """接口可达但本次无风险（返回 {}）→ available=True、risk_levels={}（渲染"本次无风险"）。"""
         monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius: _hazards_ok())
-        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None: {})
+        monkeypatch.setattr(rfs, "_region_risk_level_queryer", lambda lon, lat, radius, fcst_times=None, *, region="", **kwargs: {})
         result = rfs._query_region_hazards(117.45, 40.05)
         assert result["risk_levels_available"] is True
         assert result["risk_levels"] == {}
@@ -193,9 +193,9 @@ class TestQueryRegionHazardsRiskLevels:
     def test_hazards_unavailable_still_queries_risk_levels(self, monkeypatch):
         """静态隐患点表查询失败不得阻断实时风险等级。"""
         calls = {"n": 0}
-        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius, fcst_times=None: None)
+        monkeypatch.setattr(rfs, "_region_hazard_queryer", lambda lon, lat, radius, fcst_times=None, *, region="", **kwargs: None)
 
-        def counting(lon, lat, radius, fcst_times=None):
+        def counting(lon, lat, radius, fcst_times=None, *, region="", **kwargs):
             calls["n"] += 1
             return _risk_levels_ok()
         monkeypatch.setattr(rfs, "_region_risk_level_queryer", counting)
@@ -210,7 +210,7 @@ class TestCoreAttachesRegionHazards:
     def _run(self, monkeypatch, user_query="蓟州天气怎么样", **core_kwargs):
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: _hazards_ok())
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: _hazards_ok())
         return rfs.query_rolling_forecast_core(user_query=user_query, now=NOW, **core_kwargs)
 
     def test_region_mode_attaches_hazards(self, monkeypatch):
@@ -264,7 +264,7 @@ class TestCoreAttachesRegionHazards:
 
     def test_hazards_failure_degrades_weather_unchanged(self, monkeypatch):
         """隐患查询全失败（返回 None）不阻断天气回答，也不出现 region_hazards 字段。"""
-        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True: None)
+        monkeypatch.setattr(rfs, "_query_region_hazards", lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: None)
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
         result = rfs.query_rolling_forecast_core(user_query="蓟州天气怎么样", now=NOW)
@@ -277,7 +277,7 @@ class TestCoreAttachesRegionHazards:
         captured = []
         monkeypatch.setattr(
             rfs, "_query_region_hazards",
-            lambda lon, lat, attach_risk_levels=True: captured.append((float(lon), float(lat))) or _hazards_ok(),
+            lambda lon, lat, attach_risk_levels=True, *, region="", **kwargs: captured.append((float(lon), float(lat))) or _hazards_ok(),
         )
         monkeypatch.setattr(rfs.requests, "get", _fake_request)
         rfs._rolling_forecast_cache.clear()
@@ -297,7 +297,7 @@ class TestRiskLevelsForecastTimes:
         """“未来三天”传三个逐日起报时次，不能跳过风险接口。"""
         captured = {}
 
-        def fake_hazards(lon, lat, risk_fcst_times=None):
+        def fake_hazards(lon, lat, risk_fcst_times=None, *, region="", **kwargs):
             captured["risk_fcst_times"] = risk_fcst_times
             return {
                 "total_found": 1, "radius_km": 25.0,
@@ -316,7 +316,7 @@ class TestRiskLevelsForecastTimes:
         """普通“蓟州天气”没有明确日历窗口，沿用默认周期及前一周期回退。"""
         captured = {}
 
-        def fake_hazards(lon, lat, risk_fcst_times=None):
+        def fake_hazards(lon, lat, risk_fcst_times=None, *, region="", **kwargs):
             captured["risk_fcst_times"] = risk_fcst_times
             return {
                 "total_found": 1, "radius_km": 25.0,
@@ -339,7 +339,7 @@ class TestPointRiskWindow:
     """
 
     def _run(self, monkeypatch, user_query, capture):
-        def fake_levels(lon, lat, fcst_times=None):
+        def fake_levels(lon, lat, fcst_times=None, *, region="", **kwargs):
             capture["fcst_times"] = fcst_times
             return {}
 

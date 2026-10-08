@@ -1325,7 +1325,7 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
         """
         生成海河流域 14所 降水专题**组合长图**（hhweb 拼网址网页版，天河做法）。
 
-        拼 hhweb product-image 网址（雷达 + 降水实况 + 降水预报，与示范图完全一致：
+        拼 hhweb product-image-new 网址（雷达 + 降水实况 + 降水预报，与示范图完全一致：
         白底地图、模板标题），本机有浏览器时直接截图出长图（PNG，base64 由前端自动
         展示），无浏览器时降级返回网址供内网浏览器打开。只出图、不返回数值，不能
         用于回答 "下了多少雨 / 天气怎么样 / 面雨量多少" 等数值查询。
@@ -1343,7 +1343,7 @@ def register_composite_longimg_tool(mcp: FastMCP) -> None:
             interval: 间隔(小时)，网页版忽略，默认 24
             range: 分区，网页版忽略，默认 "9"
             type: 站点类型，网页版忽略，默认 "0"
-            area: 区域，可选，"tj"（天津）或 "jjj"（京津冀）；用户要"京津冀长图"时传 "jjj"，默认不拼（天津）
+            area: 区域，可选："tj"（天津）/"jjj"（京津冀）/9分区名（北三河、滦河等）；默认 9分区全流域（areaId=1&areaCodes=ALL）
         """
         return generate_haihe_composite_longimg_core(
             beginTime=beginTime,

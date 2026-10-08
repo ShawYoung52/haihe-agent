@@ -25,7 +25,7 @@ def test_region_risk_answer_contract_requires_weather_first_core_conclusion(rout
     assert "【核心结论】" in section
     assert "天气预报" in section
     assert "实际有风险的灾害类型" in section
-    assert "天津市气象台滚动预报、海河流域风险预警" in section
+    assert "天津市气象台滚动预报、天津灾害风险清单" in section
 
 
 def test_default_answer_prompt_requires_region_weather_risk_core_conclusion():
@@ -33,7 +33,7 @@ def test_default_answer_prompt_requires_region_weather_risk_core_conclusion():
     assert "weather_forecast" in prompt
     assert "实际有风险的灾害类型" in prompt
     assert "随后再分别输出地质灾害、山洪、中小河流三类详情" in prompt
-    assert "天津市气象台滚动预报、海河流域风险预警" in prompt
+    assert "天津市气象台滚动预报、天津灾害风险清单" in prompt
 
 
 def test_prompts_limit_unified_river_tool_to_supported_time_windows(routing_prompt):
